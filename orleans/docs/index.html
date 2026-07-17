@@ -215,6 +215,8 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <div class="navgap"></div>
   <a href="#tables">Materialized tables</a>
   <a href="#tables-search" class="sub">Row search</a>
+  <a href="#tables-history" class="sub">Row history</a>
+  <a href="#tables-metadata" class="sub">Tags &amp; metadata</a>
   <a href="#rbac">Roles &amp; permissions</a>
   <a href="#api">REST API</a>
   <a href="#grpc">gRPC &amp; typed clients</a>
@@ -389,6 +391,20 @@ cd web &amp;&amp; bun install &amp;&amp; bun run build &amp;&amp; cd ..
 <tr><td><b>Fuzzy</b></td><td>Trigram similarity with edit-distance ranking — typo-tolerant, results ranked by closeness.</td><td>Human input: <code>gogle</code> finds <code>GOOG</code>.</td></tr>
 </tbody></table></div>
 <p>The index updates incrementally with each delta, so results are always current. Search from the table page (results replace the live grid until cleared) or via <code>GET /api/tables/{id}/search?q=…</code>. Toggling the index or switching modes reindexes the table automatically.</p>
+
+<h3 id="tables-history">Row history</h3>
+<p>Opt-in per table: keep the <b>version trail of each row</b> as its aggregates evolve. Enable it next to the search config (Editors), pick a retention mode, then click any row in the live grid to open its timeline — versions newest-first with changed fields highlighted, plus a retraction count.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Mode</th><th>Keeps, per row key</th></tr></thead>
+<tbody>
+<tr><td><b>All</b></td><td>Every version (safety-capped).</td></tr>
+<tr><td><b>LastN</b> / <b>FirstN</b></td><td>The most recent N / the first N versions.</td></tr>
+<tr><td><b>MinBy</b> / <b>MaxBy</b> <i>(field)</i></td><td>The version with the extreme value of a numeric column, plus the current version — e.g. <code>MaxBy(avg_price)</code> remembers each symbol's peak.</td></tr>
+</tbody></table></div>
+<p>An optional time window prunes versions older than the configured duration. History is fed by the table's own delta stream (the delta stream <i>is</i> the event log), so it never slows the table itself. API: <code>POST /api/tables/{id}/history/lookup</code> with <code>{row}</code> → versions; <code>GET /api/tables/{id}/history/stats</code>. Changing history config or the table's SQL resets the trail.</p>
+
+<h3 id="tables-metadata">Tags &amp; metadata</h3>
+<p>Sources, pipelines, and tables carry free-form <b>tags</b> and <b>key-value metadata</b> (owner, desk, environment…), editable on each detail page (Editors). Tags show as badges in the lists and are click-to-filter on the pipelines and tables pages.</p>
 </section>
 
 <section id="rbac">
@@ -429,7 +445,10 @@ cd web &amp;&amp; bun install &amp;&amp; bun run build &amp;&amp; cd ..
 <tr><td><code>/api/tables/{id}/rows?limit=&amp;offset=</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Consolidated snapshot rows + sequence number</td></tr>
 <tr><td><code>/api/tables/{id}/search?q=&amp;limit=</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Index search → <code>{rows, mode, enabled, total}</code>; 400 if disabled</td></tr>
 <tr><td><code>/api/tables/{id}/metrics</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Row count, delta counters, rebuilding flag</td></tr>
+<tr><td><code>/api/tables/{id}/history/lookup</code></td><td class="pill mut">POST</td><td><span class="pill viewer">V</span></td><td><code>{row}</code> → that row's version trail — see <a href="#tables-history">Row history</a></td></tr>
+<tr><td><code>/api/tables/{id}/history/stats</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>History mode, tracked key count, total versions</td></tr>
 <tr><td><code>/api/{sources|pipelines|tables}/{key}/proto</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Self-contained <code>.proto</code> for the entity (by id or name) — see <a href="#grpc-codegen">Typed client codegen</a></td></tr>
+<tr><td><code>/api/meta/grpc</code> · <code>/api/meta/protos/static</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>gRPC surface catalog + static proto texts (powers the console's API Explorer)</td></tr>
 <tr><td><code>/api/users[…]</code></td><td class="pill mut">GET·POST·PUT·DELETE</td><td><span class="pill admin">A</span></td><td>User management (self-deletion rejected)</td></tr>
 </tbody></table></div>
 </section>
@@ -452,6 +471,7 @@ message DynamicFrame { string entity_key = 1; bytes payload = 2; int64 seq = 3; 
 <p><code>payload</code> holds the entity's own typed message bytes — <code>{Entity}Event</code> (row + seq + ts_ms) for sources and pipelines, <code>{Entity}Delta</code> (row + weight + seq) for tables, where negative weights are Z-set retractions. The schema is snapshotted when the subscription opens; re-subscribe after editing an entity's schema.</p>
 
 <h3 id="grpc-codegen">Typed client codegen</h3>
+<p>The console's <b>API Explorer</b> (sidebar → API Explorer) is the visual front door to all of this: browse every service and entity, read its generated proto definition, copy connect snippets, and watch a live decoded sample — the same rows the gRPC stream carries.</p>
 <p>The endgame: a compile-time-typed client library for any entity, generated in one command. Each entity exposes a <b>self-contained <code>.proto</code></b> (its messages + the <code>DynamicStreamService</code> contract) at <code>GET /api/sources/{name}/proto</code>, <code>/api/pipelines/{id}/proto</code>, <code>/api/tables/{id}/proto</code> (names work too). The bundled CLI turns it into a ready-built .NET library:</p>
 <pre><code>./tools/generate-client.sh table positions --user viewer --pass 'viewer123!'
 # → downloads positions.proto, scaffolds a csproj (Google.Protobuf + Grpc.Net.Client + Grpc.Tools),
