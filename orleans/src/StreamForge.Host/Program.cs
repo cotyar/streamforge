@@ -5,6 +5,7 @@ using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 using Orleans;
 using Orleans.Hosting;
+using Scalar.AspNetCore;
 using StreamForge.Abstractions;
 using StreamForge.Host.Api;
 using StreamForge.Host.Auth;
@@ -91,6 +92,31 @@ builder.Services
         options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter());
     });
 
+builder.Services.AddOpenApi(options =>
+{
+    options.AddDocumentTransformer((document, _, _) =>
+    {
+        document.Info.Title = "StreamForge API";
+        document.Info.Description =
+            "Streaming-SQL platform on Microsoft Orleans. Authenticate via POST /api/auth/login, " +
+            "then use the returned JWT as a Bearer token.";
+        document.Components ??= new Microsoft.OpenApi.OpenApiComponents();
+        document.Components.SecuritySchemes ??= new Dictionary<string, Microsoft.OpenApi.IOpenApiSecurityScheme>();
+        document.Components.SecuritySchemes["Bearer"] = new Microsoft.OpenApi.OpenApiSecurityScheme
+        {
+            Type = Microsoft.OpenApi.SecuritySchemeType.Http,
+            Scheme = "bearer",
+            BearerFormat = "JWT",
+        };
+        document.Security ??= new List<Microsoft.OpenApi.OpenApiSecurityRequirement>();
+        document.Security.Add(new Microsoft.OpenApi.OpenApiSecurityRequirement
+        {
+            [new Microsoft.OpenApi.OpenApiSecuritySchemeReference("Bearer", document)] = [],
+        });
+        return Task.CompletedTask;
+    });
+});
+
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddHostedService<GeneratorSupervisorService>();
 builder.Services.AddHostedService<StreamBridgeService>();
@@ -100,6 +126,13 @@ var app = builder.Build();
 app.UseCors(SpaCorsPolicy);
 app.UseAuthentication();
 app.UseAuthorization();
+
+app.MapOpenApi();
+app.MapScalarApiReference(options =>
+{
+    options.Title = "StreamForge API";
+    options.Theme = ScalarTheme.Kepler;
+});
 
 app.MapAuthEndpoints();
 app.MapSourcesEndpoints();
