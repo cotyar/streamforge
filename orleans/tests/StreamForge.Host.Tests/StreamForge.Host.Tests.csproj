@@ -11,9 +11,11 @@
     <PackageReference Include="xunit" Version="2.9.*" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.*" />
     <PackageReference Include="Google.Protobuf" Version="3.31.1" />
+    <PackageReference Include="Microsoft.Orleans.TestingHost" Version="10.2.1" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\StreamForge.Abstractions\StreamForge.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\StreamForge.Engine\StreamForge.Engine.csproj" />
     <ProjectReference Include="..\..\src\StreamForge.Host\StreamForge.Host.csproj" />
   </ItemGroup>
 </Project>

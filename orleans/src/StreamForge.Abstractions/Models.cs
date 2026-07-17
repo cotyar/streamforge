@@ -24,6 +24,10 @@ public sealed class SourceDefinition
     [Id(3)] public string GeneratorProfile { get; set; } = "generic";
     [Id(4)] public double EventsPerSecond { get; set; } = 5;
     [Id(5)] public bool Enabled { get; set; } = true;
+    /// <summary>User-editable free-form labels — see Feature A (metadata) in TableDefinition's doc comment.</summary>
+    [Id(6)] public List<string> Tags { get; set; } = [];
+    /// <summary>User-editable free-form key-value annotations.</summary>
+    [Id(7)] public Dictionary<string, string> Metadata { get; set; } = [];
 }
 
 [GenerateSerializer]
@@ -41,6 +45,10 @@ public sealed class PipelineDefinition
     [Id(6)] public string CreatedBy { get; set; } = "";
     [Id(7)] public long CreatedAtMs { get; set; }
     [Id(8)] public long UpdatedAtMs { get; set; }
+    /// <summary>User-editable free-form labels — see Feature A (metadata) in TableDefinition's doc comment.</summary>
+    [Id(9)] public List<string> Tags { get; set; } = [];
+    /// <summary>User-editable free-form key-value annotations.</summary>
+    [Id(10)] public Dictionary<string, string> Metadata { get; set; } = [];
 }
 
 /// <summary>One emitted result row. Values are primitives only (string/double/long/bool/null).</summary>
@@ -81,6 +89,14 @@ public sealed class LifecycleEvent
 [GenerateSerializer]
 public enum TableSearchMode { Exact, Fuzzy }
 
+/// <summary>Per-key retention policy for opt-in ROW HISTORY (see TableDefinition.HistoryEnabled and
+/// StreamForge.Host.Grains.TableHistoryGrain). All: keep every version up to an internal safety cap.
+/// LastN/FirstN: keep the most-recent/earliest N versions (ring buffer / stop-appending respectively).
+/// MinBy/MaxBy: keep only the version with the min/max value of HistoryByField, plus the always-current
+/// latest version (2 entries max).</summary>
+[GenerateSerializer]
+public enum TableHistoryMode { All, LastN, FirstN, MinBy, MaxBy }
+
 /// <summary>A persistent materialized TABLE: a SELECT over streams and/or other tables, without windows
 /// (running aggregates instead of windowed ones). Its name is unique across sources+tables and enters the
 /// SQL namespace, so other tables can FROM/JOIN it directly.</summary>
@@ -107,6 +123,29 @@ public sealed class TableDefinition
     [Id(12)] public bool SearchEnabled { get; set; }
     /// <summary>Exact (token/prefix/substring) or Fuzzy (trigram-similarity, typo-tolerant) search.</summary>
     [Id(13)] public TableSearchMode SearchMode { get; set; } = TableSearchMode.Exact;
+
+    // ------------------------------------------------------------------
+    // Feature B: opt-in per-row-identity version history. See TableHistoryGrain.
+    // ------------------------------------------------------------------
+
+    /// <summary>Whether a TableHistoryGrain records per-row-identity version history for this table.</summary>
+    [Id(14)] public bool HistoryEnabled { get; set; }
+    [Id(15)] public TableHistoryMode HistoryMode { get; set; } = TableHistoryMode.All;
+    /// <summary>Version cap for LastN/FirstN modes.</summary>
+    [Id(16)] public int HistoryLimit { get; set; } = 10;
+    /// <summary>Output field (numeric or timestamp) MinBy/MaxBy ranks on. Required (and validated against
+    /// OutputFields) when HistoryMode is MinBy or MaxBy.</summary>
+    [Id(17)] public string? HistoryByField { get; set; }
+    /// <summary>Retention time window in ms; versions older than (now - window) are pruned on append and
+    /// on read. 0 = unbounded.</summary>
+    [Id(18)] public long HistoryWindowMs { get; set; }
+
+    // ------------------------------------------------------------------
+    // Feature A: user-editable metadata. See SourceDefinition's doc comment for the same fields there.
+    // ------------------------------------------------------------------
+
+    [Id(19)] public List<string> Tags { get; set; } = [];
+    [Id(20)] public Dictionary<string, string> Metadata { get; set; } = [];
 }
 
 /// <summary>Serializable mirror of StreamForge.Engine's TableDelta, for Orleans/SignalR transport: one Z-set
@@ -139,6 +178,53 @@ public sealed class TableMetrics
     /// <summary>True immediately after a restart-resume, until this table has rebuilt its state from live
     /// traffic — see TableGrain's rehydration-limitation comment.</summary>
     [Id(6)] public bool Rebuilding { get; set; }
+}
+
+// ============================================================================
+// Row history (Feature B) — see StreamForge.Host.Grains.TableHistoryGrain.
+// ============================================================================
+
+/// <summary>One recorded ASSERTION version of a row-history entry: the row's content at a point in time,
+/// plus a per-table monotonic sequence number (assigned from every delta the history grain observes,
+/// assertion or retraction, so gaps between consecutive Seq values indicate retractions happened
+/// in-between) for stable ordering.</summary>
+[GenerateSerializer]
+public sealed record HistoryVersion(
+    [property: Id(0)] Dictionary<string, object?> Row,
+    [property: Id(1)] long TsMs,
+    [property: Id(2)] long Seq);
+
+/// <summary>Retention state for one row identity (see TableHistoryGrain / TableGroupKeyExtractor for how
+/// the identity key is derived). Versions holds the retained ASSERTION history per the table's configured
+/// HistoryMode; RetractionCount counts every retraction (weight &lt;= 0 delta) ever observed for this key —
+/// retractions are not themselves stored as versions.</summary>
+[GenerateSerializer]
+public sealed class RowHistoryEntry
+{
+    [Id(0)] public List<HistoryVersion> Versions { get; set; } = [];
+    [Id(1)] public long RetractionCount { get; set; }
+}
+
+/// <summary>Result of ITableHistoryGrain.GetHistoryAsync for one row identity.</summary>
+[GenerateSerializer]
+public sealed class TableHistoryQueryResult
+{
+    [Id(0)] public List<HistoryVersion> Versions { get; set; } = [];
+    [Id(1)] public long RetractionCount { get; set; }
+    [Id(2)] public TableHistoryMode Mode { get; set; }
+    [Id(3)] public int TotalVersions { get; set; }
+    /// <summary>False when the key has never been observed (as opposed to observed-but-empty).</summary>
+    [Id(4)] public bool KeyFound { get; set; }
+}
+
+/// <summary>Result of ITableHistoryGrain.GetStatsAsync.</summary>
+[GenerateSerializer]
+public sealed class TableHistoryStats
+{
+    [Id(0)] public bool Enabled { get; set; }
+    [Id(1)] public TableHistoryMode Mode { get; set; }
+    [Id(2)] public int KeyCount { get; set; }
+    [Id(3)] public long TotalVersions { get; set; }
 }
 
 [GenerateSerializer]

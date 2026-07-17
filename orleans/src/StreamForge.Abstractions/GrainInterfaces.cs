@@ -77,6 +77,39 @@ public interface ITableGrain : IGrainWithStringKey
     Task<List<TableRowDto>> SearchAsync(string query, int limit);
 }
 
+/// <summary>Key = table name. One activation per table with row history ever configured. Subscribes to
+/// that table's delta stream (StreamConstants.TableDeltaNamespace, table name) and maintains per-row-
+/// identity version history per the table's configured retention mode. See
+/// StreamForge.Host.Grains.TableHistoryGrain's class comment for the full design: identity-key derivation,
+/// retention semantics, and why this is a plain state grain fed by the delta stream rather than a
+/// JournaledGrain.</summary>
+public interface ITableHistoryGrain : IGrainWithStringKey
+{
+    /// <summary>(Re)configures history collection from the table's current definition — applies
+    /// HistoryEnabled/HistoryMode/HistoryLimit/HistoryByField/HistoryWindowMs, re-derives the row-identity
+    /// column mapping from the table's SQL, and subscribes to (or, if HistoryEnabled is now false,
+    /// unsubscribes from) the table's delta stream. Always clears previously accumulated history. Call on
+    /// table create and on any history-config or SQL change (mirrors TableGrain's own SQL/search-config
+    /// restart semantics).</summary>
+    Task ResetAsync(TableDefinition def);
+
+    /// <summary>Disables history collection, unsubscribes, and clears all state — call on table delete.</summary>
+    Task DisableAsync();
+
+    /// <summary>Re-subscribes to the delta stream (and keeps the grain alive) WITHOUT clearing previously
+    /// accumulated history — unlike ResetAsync. Call on silo/table resume (RegistryGrain.
+    /// EnsureInitializedAsync) so history survives a restart the same way the persisted Entries dictionary
+    /// already does; a no-op when def.HistoryEnabled is false.</summary>
+    Task ResumeAsync(TableDefinition def);
+
+    /// <summary>Version history for one row identity key (as produced by TableGroupKeyExtractor +
+    /// RowKeyCodec — see the /api/tables/{id}/rows response's historyKeys). limit &lt;= 0 means "all
+    /// retained versions". KeyFound is false when the key has never been observed.</summary>
+    Task<TableHistoryQueryResult> GetHistoryAsync(string key, int limit);
+
+    Task<TableHistoryStats> GetStatsAsync();
+}
+
 /// <summary>Singleton (key = StreamConstants.UsersKey).</summary>
 public interface IUserStoreGrain : IGrainWithStringKey
 {

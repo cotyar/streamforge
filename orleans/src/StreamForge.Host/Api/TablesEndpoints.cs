@@ -3,6 +3,7 @@ using System.Text;
 using Orleans;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
+using StreamForge.Host.Grains;
 using StreamForge.Host.Grpc.Dynamic;
 
 namespace StreamForge.Host.Api;
@@ -40,6 +41,13 @@ public static class TablesEndpoints
                     CreatedBy = principal.Identity?.Name ?? "",
                     SearchEnabled = req.SearchEnabled,
                     SearchMode = req.SearchMode,
+                    HistoryEnabled = req.HistoryEnabled,
+                    HistoryMode = req.HistoryMode,
+                    HistoryLimit = req.HistoryLimit,
+                    HistoryByField = req.HistoryByField,
+                    HistoryWindowMs = req.HistoryWindowMs,
+                    Tags = req.Tags ?? [],
+                    Metadata = req.Metadata ?? [],
                 };
                 var created = await Registry(client).CreateTableAsync(def);
                 return Results.Created($"/api/tables/{created.Id}", created);
@@ -64,6 +72,13 @@ public static class TablesEndpoints
             existing.Sql = req.Sql;
             existing.SearchEnabled = req.SearchEnabled;
             existing.SearchMode = req.SearchMode;
+            existing.HistoryEnabled = req.HistoryEnabled;
+            existing.HistoryMode = req.HistoryMode;
+            existing.HistoryLimit = req.HistoryLimit;
+            existing.HistoryByField = req.HistoryByField;
+            existing.HistoryWindowMs = req.HistoryWindowMs;
+            existing.Tags = req.Tags ?? existing.Tags;
+            existing.Metadata = req.Metadata ?? existing.Metadata;
 
             try
             {
@@ -202,6 +217,47 @@ public static class TablesEndpoints
                 ? []
                 : await client.GetGrain<ITableGrain>(def.Name).SearchAsync(query, limit ?? 100);
             return Results.Ok(new TableSearchResponse(rows, def.SearchMode.ToString(), def.SearchEnabled, rows.Count));
+        }).RequireAuthorization("Viewer");
+
+        // Row history (Feature B). POST (not GET) because the lookup key is the row's own content — an
+        // arbitrary-shaped object, awkward to round-trip through a query string — not a resource
+        // identifier; mirrors this API's existing "/validate" precedent for a read-only POST-with-body.
+        // The server derives the row-identity key from req.Row via TableGroupKeyExtractor/RowKeyCodec, the
+        // same way TableHistoryGrain derives it from live deltas, so the client never needs to know the
+        // table's GROUP BY identity columns or the key encoding.
+        group.MapPost("/{id}/history/lookup", async (string id, HistoryLookupRequest req, int? limit, IClusterClient client) =>
+        {
+            var def = await Registry(client).GetTableAsync(id);
+            if (def is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (!def.HistoryEnabled)
+            {
+                return Results.BadRequest(new ErrorResponse("Row history is not enabled for this table."));
+            }
+
+            var identityColumns = TableGroupKeyExtractor.ExtractIdentityColumns(def.Sql);
+            var key = RowKeyCodec.EncodeIdentity(req.Row, identityColumns);
+            var result = await client.GetGrain<ITableHistoryGrain>(def.Name).GetHistoryAsync(key, limit ?? 0);
+            return Results.Ok(result);
+        }).RequireAuthorization("Viewer");
+
+        group.MapGet("/{id}/history/stats", async (string id, IClusterClient client) =>
+        {
+            var def = await Registry(client).GetTableAsync(id);
+            if (def is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (!def.HistoryEnabled)
+            {
+                return Results.BadRequest(new ErrorResponse("Row history is not enabled for this table."));
+            }
+
+            return Results.Ok(await client.GetGrain<ITableHistoryGrain>(def.Name).GetStatsAsync());
         }).RequireAuthorization("Viewer");
     }
 

@@ -136,6 +136,22 @@ public sealed class RegistryGrain(
         {
             await state.WriteStateAsync();
         }
+
+        // Re-subscribe history grains for every table with HistoryEnabled — independent of the table's own
+        // Running status (history just won't see new deltas until/unless the table is running). Unlike the
+        // table-resume loop above, this uses ResumeAsync (not ResetAsync) so previously accumulated history
+        // survives a silo restart.
+        foreach (var table in state.State.Tables.Where(t => t.HistoryEnabled))
+        {
+            try
+            {
+                await GrainFactory.GetGrain<ITableHistoryGrain>(table.Name).ResumeAsync(table);
+            }
+            catch
+            {
+                // best-effort — a stale/misconfigured history grain shouldn't block boot.
+            }
+        }
     }
 
     public Task<List<SourceDefinition>> GetSourcesAsync() => Task.FromResult(state.State.Sources.ToList());
@@ -215,6 +231,8 @@ public sealed class RegistryGrain(
         existing.Name = def.Name;
         existing.Description = def.Description;
         existing.Sql = def.Sql;
+        existing.Tags = def.Tags;
+        existing.Metadata = def.Metadata;
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         if (sqlChanged && wasRunning)
@@ -331,11 +349,18 @@ public sealed class RegistryGrain(
         def.CreatedAtMs = now;
         def.UpdatedAtMs = now;
 
-        CompileAndStoreTableSchema(def);
+        var compileResult = CompileTableSql(def.Sql, excludeTableId: def.Id);
+        ValidateHistoryConfig(def, compileResult);
+        ApplyCompileResult(def, compileResult);
 
         state.State.Tables.Add(def);
         await state.WriteStateAsync();
         await PublishLifecycleAsync(def.Name, "table-created", def.Status);
+
+        // Configures (and, if HistoryEnabled, subscribes) the history grain up front — independent of
+        // whether the table itself is Running, exactly like SearchEnabled's index is built incrementally
+        // once the table starts producing deltas.
+        await GrainFactory.GetGrain<ITableHistoryGrain>(def.Name).ResetAsync(def);
         return def;
     }
 
@@ -352,8 +377,20 @@ public sealed class RegistryGrain(
             ValidateUniqueTableName(def.Name, excludeTableId: existing.Id);
         }
 
+        // Compile + validate against the *prospective* SQL/history config before mutating `existing` at
+        // all, so a rejected update (bad name, bad historyByField) never leaves partially-applied state
+        // behind in the in-memory list entry.
+        var compileResult = CompileTableSql(def.Sql, excludeTableId: existing.Id);
+        ValidateHistoryConfig(def, compileResult);
+
         var sqlChanged = existing.Sql != def.Sql;
         var searchChanged = existing.SearchEnabled != def.SearchEnabled || existing.SearchMode != def.SearchMode;
+        var historyConfigChanged =
+            existing.HistoryEnabled != def.HistoryEnabled ||
+            existing.HistoryMode != def.HistoryMode ||
+            existing.HistoryLimit != def.HistoryLimit ||
+            existing.HistoryByField != def.HistoryByField ||
+            existing.HistoryWindowMs != def.HistoryWindowMs;
         var wasRunning = existing.Status == PipelineStatus.Running;
 
         existing.Name = def.Name;
@@ -361,9 +398,16 @@ public sealed class RegistryGrain(
         existing.Sql = def.Sql;
         existing.SearchEnabled = def.SearchEnabled;
         existing.SearchMode = def.SearchMode;
+        existing.HistoryEnabled = def.HistoryEnabled;
+        existing.HistoryMode = def.HistoryMode;
+        existing.HistoryLimit = def.HistoryLimit;
+        existing.HistoryByField = def.HistoryByField;
+        existing.HistoryWindowMs = def.HistoryWindowMs;
+        existing.Tags = def.Tags;
+        existing.Metadata = def.Metadata;
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        CompileAndStoreTableSchema(existing);
+        ApplyCompileResult(existing, compileResult);
 
         // A running table's grain only picks up SQL/search config changes on (re)StartAsync — mirror the
         // SQL-changed restart below for search config too, so toggling SearchEnabled/SearchMode on a
@@ -383,6 +427,14 @@ public sealed class RegistryGrain(
                 existing.Status = PipelineStatus.Failed;
                 existing.Error = ex.Message;
             }
+        }
+
+        // History config or the SQL it was derived from changed — the row-identity mapping and/or
+        // retention policy is now stale, so reset (not resume) the history grain, exactly like a
+        // SQL/search-config change restarts the table's own grain above.
+        if (sqlChanged || historyConfigChanged)
+        {
+            await GrainFactory.GetGrain<ITableHistoryGrain>(existing.Name).ResetAsync(existing);
         }
 
         await state.WriteStateAsync();
@@ -410,6 +462,15 @@ public sealed class RegistryGrain(
             {
                 // best-effort
             }
+        }
+
+        try
+        {
+            await GrainFactory.GetGrain<ITableHistoryGrain>(existing.Name).DisableAsync();
+        }
+        catch
+        {
+            // best-effort
         }
 
         state.State.Tables.Remove(existing);
@@ -505,13 +566,20 @@ public sealed class RegistryGrain(
         }
     }
 
-    /// <summary>Compile-check for diagnostics — draft-friendly like pipelines: never blocks create/update.
-    /// Stores OutputFields/StreamInputs/TableInputs when the SQL compiles; leaves them empty otherwise.</summary>
-    private void CompileAndStoreTableSchema(TableDefinition def)
+    /// <summary>Compile-check for diagnostics — draft-friendly like pipelines: never blocks create/update
+    /// on its own (see ValidateHistoryConfig for the one thing that DOES block: an invalid MinBy/MaxBy
+    /// historyByField). Pure — does not mutate <paramref name="def"/>; pair with ApplyCompileResult.</summary>
+    private TableCompileResult CompileTableSql(string sql, string? excludeTableId)
     {
         var streamSchemas = BuildStreamSchemas();
-        var tableSchemas = BuildTableSchemas(excludeTableId: def.Id);
-        var result = SqlCompiler.CompileTable(def.Sql, streamSchemas, tableSchemas);
+        var tableSchemas = BuildTableSchemas(excludeTableId);
+        return SqlCompiler.CompileTable(sql, streamSchemas, tableSchemas);
+    }
+
+    /// <summary>Stores OutputFields/StreamInputs/TableInputs from a compile result when it compiles; leaves
+    /// them empty otherwise.</summary>
+    private static void ApplyCompileResult(TableDefinition def, TableCompileResult result)
+    {
         if (result.Ok && result.OutputSchema is not null)
         {
             def.OutputFields = result.OutputSchema.Fields.Select(kv => new FieldDef(kv.Key, MapFieldType(kv.Value))).ToList();
@@ -523,6 +591,35 @@ public sealed class RegistryGrain(
             def.OutputFields = [];
             def.StreamInputs = [];
             def.TableInputs = [];
+        }
+    }
+
+    /// <summary>The one history-config check that actually blocks create/update (409-style, like
+    /// ValidateUniqueTableName): MinBy/MaxBy needs a historyByField that is one of this table's compiled
+    /// output columns and numeric/timestamp-kinded — a MinBy/MaxBy history with no comparable value to
+    /// rank on can never produce a sensible "extreme" version. A table with no GROUP BY identity (and thus
+    /// no derivable per-row identity beyond the whole row) is explicitly NOT rejected here — see
+    /// TableGroupKeyExtractor/RowKeyCodec for that documented whole-row fallback.</summary>
+    private static void ValidateHistoryConfig(TableDefinition def, TableCompileResult compileResult)
+    {
+        if (!def.HistoryEnabled || def.HistoryMode is not (TableHistoryMode.MinBy or TableHistoryMode.MaxBy))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(def.HistoryByField))
+        {
+            throw new InvalidOperationException($"History mode {def.HistoryMode} requires historyByField to be set.");
+        }
+
+        if (compileResult.OutputSchema is null || !compileResult.OutputSchema.Fields.TryGetValue(def.HistoryByField, out var kind))
+        {
+            throw new InvalidOperationException($"historyByField '{def.HistoryByField}' is not one of this table's output fields.");
+        }
+
+        if (kind is not (FieldKind.Double or FieldKind.Long or FieldKind.Timestamp))
+        {
+            throw new InvalidOperationException($"historyByField '{def.HistoryByField}' must be numeric or timestamp (found {kind}).");
         }
     }
 

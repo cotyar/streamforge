@@ -42,6 +42,8 @@ public static class PipelinesEndpoints
                 Description = req.Description,
                 Sql = req.Sql,
                 CreatedBy = principal.Identity?.Name ?? "",
+                Tags = req.Tags ?? [],
+                Metadata = req.Metadata ?? [],
             };
             var created = await registry.CreatePipelineAsync(def);
             return Results.Created($"/api/pipelines/{created.Id}", created);
@@ -59,6 +61,8 @@ public static class PipelinesEndpoints
             existing.Name = req.Name;
             existing.Description = req.Description;
             existing.Sql = req.Sql;
+            existing.Tags = req.Tags ?? existing.Tags;
+            existing.Metadata = req.Metadata ?? existing.Metadata;
             var updated = await registry.UpdatePipelineAsync(existing);
             return updated is null ? Results.NotFound() : Results.Ok(updated);
         }).RequireAuthorization("Editor");
