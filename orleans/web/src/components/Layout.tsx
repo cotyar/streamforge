@@ -95,6 +95,21 @@ function Layout() {
               Users
             </NavLink>
           )}
+
+          <div className="mt-4 border-t border-sidebar-border pt-3">
+            <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+              Resources
+            </div>
+            <a
+              href="/docs"
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+            >
+              <BookOpen className="size-5" />
+              Documentation
+            </a>
+          </div>
         </nav>
 
         {user && (
@@ -109,11 +124,6 @@ function Layout() {
                   {user.role}
                 </Badge>
               </div>
-              <Button variant="ghost" size="icon-sm" asChild title="Documentation">
-                <a href="/docs" target="_blank" rel="noreferrer" aria-label="Open documentation">
-                  <BookOpen />
-                </a>
-              </Button>
               <ThemeToggle />
               <Button variant="ghost" size="icon-sm" onClick={logout} title="Log out">
                 <LogOut />
