@@ -4,10 +4,12 @@ import { ChevronRight, Database, Pencil, Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { sourcesApi } from '../api/sources'
 import type { CreateSourceRequest } from '../api/sources'
-import type { FieldDef, FieldType, SourceDefinition } from '../api/types'
+import type { FieldDef, FieldType, Metadata, SourceDefinition, Tags } from '../api/types'
 import { useSourceTape } from '../hooks/useSourceTape'
 import { Topbar } from '../components/Topbar'
 import { RoleGate } from '../components/RoleGate'
+import { MetadataEditor } from '../components/MetadataEditor'
+import { TagList } from '../components/TagList'
 import { cn } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -175,6 +177,8 @@ interface SourceFormState {
   eventsPerSecond: number
   enabled: boolean
   fields: FieldDef[]
+  tags: Tags
+  metadata: Metadata
 }
 
 function toFormState(s?: SourceDefinition): SourceFormState {
@@ -185,6 +189,8 @@ function toFormState(s?: SourceDefinition): SourceFormState {
     eventsPerSecond: s?.eventsPerSecond ?? 5,
     enabled: s?.enabled ?? true,
     fields: s?.fields ?? [{ name: '', type: 'String' }],
+    tags: s?.tags ?? [],
+    metadata: s?.metadata ?? {},
   }
 }
 
@@ -221,6 +227,8 @@ function SourceModal({
           generatorProfile: form.generatorProfile,
           eventsPerSecond: form.eventsPerSecond,
           enabled: form.enabled,
+          tags: form.tags,
+          metadata: form.metadata,
         })
       } else {
         const body: CreateSourceRequest = {
@@ -230,6 +238,8 @@ function SourceModal({
           generatorProfile: form.generatorProfile,
           eventsPerSecond: form.eventsPerSecond,
           enabled: form.enabled,
+          tags: form.tags,
+          metadata: form.metadata,
         }
         await sourcesApi.create(body)
       }
@@ -334,6 +344,12 @@ function SourceModal({
               </p>
             </Field>
           </FieldGroup>
+
+          <MetadataEditor
+            initialTags={form.tags}
+            initialMetadata={form.metadata}
+            onChange={(tags, metadata) => setForm((f) => ({ ...f, tags, metadata }))}
+          />
 
           {error && (
             <Alert variant="destructive">
@@ -443,6 +459,7 @@ export function SourcesPage() {
                     </div>
                     <Badge variant="outline">{s.generatorProfile}</Badge>
                   </div>
+                  <TagList tags={s.tags} className="mt-1" />
                 </CardHeader>
                 <CardContent className="flex flex-col gap-3">
                   <div className="flex items-center justify-between text-xs text-muted-foreground">

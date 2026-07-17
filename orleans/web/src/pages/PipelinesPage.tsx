@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Pencil, Eye, Play, Plus, Square, Trash2, Workflow } from 'lucide-react'
 import { toast } from 'sonner'
@@ -8,8 +8,10 @@ import { extractSourcesFromSql } from '../lib/sqlSources'
 import { Topbar } from '../components/Topbar'
 import { StatusBadge } from '../components/StatusBadge'
 import { RoleGate } from '../components/RoleGate'
+import { TagList } from '../components/TagList'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
@@ -38,6 +40,7 @@ export function PipelinesPage() {
   const [pipelines, setPipelines] = useState<PipelineDefinition[] | null>(null)
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set())
   const [pendingDelete, setPendingDelete] = useState<PipelineDefinition | null>(null)
+  const [activeTags, setActiveTags] = useState<Set<string>>(new Set())
 
   const load = useCallback(() => {
     pipelinesApi.list().then(setPipelines).catch(() => setPipelines([]))
@@ -46,6 +49,25 @@ export function PipelinesPage() {
   useEffect(() => {
     load()
   }, [load])
+
+  const allTags = useMemo(
+    () => Array.from(new Set((pipelines ?? []).flatMap((p) => p.tags))).sort(),
+    [pipelines],
+  )
+
+  const visiblePipelines = useMemo(() => {
+    if (!pipelines || activeTags.size === 0) return pipelines
+    return pipelines.filter((p) => Array.from(activeTags).every((t) => p.tags.includes(t)))
+  }, [pipelines, activeTags])
+
+  function toggleTag(t: string) {
+    setActiveTags((prev) => {
+      const next = new Set(prev)
+      if (next.has(t)) next.delete(t)
+      else next.add(t)
+      return next
+    })
+  }
 
   function withBusy(id: string, fn: () => Promise<unknown>) {
     setBusyIds((prev) => new Set(prev).add(id))
@@ -121,20 +143,49 @@ export function PipelinesPage() {
             </EmptyContent>
           </Empty>
         ) : (
-          <Card className="overflow-hidden py-0">
-            <Table>
-              <TableHeader>
-                <TableRow className="hover:bg-transparent">
-                  <TableHead>Name</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Sources</TableHead>
-                  <TableHead>Description</TableHead>
-                  <TableHead>Updated</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {pipelines.map((p) => {
+          <>
+            {allTags.length > 0 && (
+              <div className="mb-4 flex flex-wrap items-center gap-1.5">
+                <span className="text-xs text-muted-foreground">Filter by tag:</span>
+                {allTags.map((t) => (
+                  <Badge
+                    key={t}
+                    variant={activeTags.has(t) ? 'default' : 'secondary'}
+                    className="cursor-pointer select-none"
+                    onClick={() => toggleTag(t)}
+                  >
+                    {t}
+                  </Badge>
+                ))}
+                {activeTags.size > 0 && (
+                  <Button variant="ghost" size="sm" onClick={() => setActiveTags(new Set())}>
+                    Clear
+                  </Button>
+                )}
+              </div>
+            )}
+
+            {visiblePipelines && visiblePipelines.length === 0 ? (
+              <Empty className="border border-dashed">
+                <EmptyHeader>
+                  <EmptyDescription>No pipelines match the selected tags.</EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            ) : (
+              <Card className="overflow-hidden py-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead>Name</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Sources</TableHead>
+                      <TableHead>Description</TableHead>
+                      <TableHead>Updated</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(visiblePipelines ?? []).map((p) => {
                   const busy = busyIds.has(p.id)
                   const sources = extractSourcesFromSql(p.sql)
                   return (
@@ -143,6 +194,7 @@ export function PipelinesPage() {
                         <Link to={`/pipelines/${p.id}`} className="font-medium text-foreground hover:text-primary">
                           {p.name}
                         </Link>
+                        <TagList tags={p.tags} className="mt-1" />
                         {p.error && <p className="mt-0.5 max-w-xs truncate text-xs text-destructive">{p.error}</p>}
                       </TableCell>
                       <TableCell>
@@ -194,10 +246,12 @@ export function PipelinesPage() {
                       </TableCell>
                     </TableRow>
                   )
-                })}
-              </TableBody>
-            </Table>
-          </Card>
+                    })}
+                  </TableBody>
+                </Table>
+              </Card>
+            )}
+          </>
         )}
       </div>
 

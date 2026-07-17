@@ -1,6 +1,12 @@
 import { api } from './client'
 import type {
+  Metadata,
+  ResultRow,
+  Tags,
   TableDefinition,
+  TableHistoryMode,
+  TableHistoryResponse,
+  TableHistoryStats,
   TableMetrics,
   TableRowsResponse,
   TableSearchMode,
@@ -14,15 +20,16 @@ export interface CreateTableRequest {
   sql: string
   searchEnabled?: boolean
   searchMode?: TableSearchMode
+  historyEnabled?: boolean
+  historyMode?: TableHistoryMode
+  historyLimit?: number
+  historyByField?: string | null
+  historyWindowMs?: number
+  tags?: Tags
+  metadata?: Metadata
 }
 
-export interface UpdateTableRequest {
-  name: string
-  description: string
-  sql: string
-  searchEnabled?: boolean
-  searchMode?: TableSearchMode
-}
+export type UpdateTableRequest = CreateTableRequest
 
 export interface TableValidateRequest {
   sql: string
@@ -43,4 +50,9 @@ export const tablesApi = {
   metrics: (id: string) => api.get<TableMetrics>(`/api/tables/${encodeURIComponent(id)}/metrics`),
   search: (id: string, q: string, limit = 100) =>
     api.get<TableSearchResponse>(`/api/tables/${encodeURIComponent(id)}/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+  // Feature B: row history. historyLookup hands the server the exact row object the caller already
+  // has — the server derives the row-identity key from it (see TablesEndpoints/TableGroupKeyExtractor).
+  historyLookup: (id: string, row: ResultRow, limit = 0) =>
+    api.post<TableHistoryResponse>(`/api/tables/${encodeURIComponent(id)}/history/lookup?limit=${limit}`, { row }),
+  historyStats: (id: string) => api.get<TableHistoryStats>(`/api/tables/${encodeURIComponent(id)}/history/stats`),
 }

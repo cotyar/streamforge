@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Pencil, Eye, Play, Plus, Search, Square, Trash2, Table2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -7,6 +7,7 @@ import type { TableDefinition, TableMetrics } from '../api/types'
 import { Topbar } from '../components/Topbar'
 import { StatusBadge } from '../components/StatusBadge'
 import { RoleGate } from '../components/RoleGate'
+import { TagList } from '../components/TagList'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -40,6 +41,7 @@ export function TablesPage() {
   const [metrics, setMetrics] = useState<Record<string, TableMetrics>>({})
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set())
   const [pendingDelete, setPendingDelete] = useState<TableDefinition | null>(null)
+  const [activeTags, setActiveTags] = useState<Set<string>>(new Set())
 
   const load = useCallback(() => {
     tablesApi.list().then(setTables).catch(() => setTables([]))
@@ -48,6 +50,22 @@ export function TablesPage() {
   useEffect(() => {
     load()
   }, [load])
+
+  const allTags = useMemo(() => Array.from(new Set((tables ?? []).flatMap((t) => t.tags))).sort(), [tables])
+
+  const visibleTables = useMemo(() => {
+    if (!tables || activeTags.size === 0) return tables
+    return tables.filter((t) => Array.from(activeTags).every((tag) => t.tags.includes(tag)))
+  }, [tables, activeTags])
+
+  function toggleTag(t: string) {
+    setActiveTags((prev) => {
+      const next = new Set(prev)
+      if (next.has(t)) next.delete(t)
+      else next.add(t)
+      return next
+    })
+  }
 
   // Row counts + rebuilding state come from /metrics, fetched lazily (after the list itself
   // renders) so a slow metrics call never blocks the initial table listing.
@@ -148,6 +166,35 @@ export function TablesPage() {
             </EmptyContent>
           </Empty>
         ) : (
+          <>
+            {allTags.length > 0 && (
+              <div className="mb-4 flex flex-wrap items-center gap-1.5">
+                <span className="text-xs text-muted-foreground">Filter by tag:</span>
+                {allTags.map((t) => (
+                  <Badge
+                    key={t}
+                    variant={activeTags.has(t) ? 'default' : 'secondary'}
+                    className="cursor-pointer select-none"
+                    onClick={() => toggleTag(t)}
+                  >
+                    {t}
+                  </Badge>
+                ))}
+                {activeTags.size > 0 && (
+                  <Button variant="ghost" size="sm" onClick={() => setActiveTags(new Set())}>
+                    Clear
+                  </Button>
+                )}
+              </div>
+            )}
+
+            {visibleTables && visibleTables.length === 0 ? (
+              <Empty className="border border-dashed">
+                <EmptyHeader>
+                  <EmptyDescription>No tables match the selected tags.</EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            ) : (
           <Card className="overflow-hidden py-0">
             <Table>
               <TableHeader>
@@ -162,7 +209,7 @@ export function TablesPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {tables.map((t) => {
+                {(visibleTables ?? []).map((t) => {
                   const busy = busyIds.has(t.id)
                   const m = metrics[t.id]
                   const inputs = [...t.streamInputs, ...t.tableInputs]
@@ -186,6 +233,7 @@ export function TablesPage() {
                             </TooltipProvider>
                           )}
                         </div>
+                        <TagList tags={t.tags} className="mt-1" />
                         {t.error && <p className="mt-0.5 max-w-xs truncate text-xs text-destructive">{t.error}</p>}
                       </TableCell>
                       <TableCell>
@@ -259,6 +307,8 @@ export function TablesPage() {
               </TableBody>
             </Table>
           </Card>
+            )}
+          </>
         )}
       </div>
 

@@ -15,6 +15,12 @@ export interface FieldDef {
   children?: FieldDef[]
 }
 
+// ============================================================================
+// Feature A: user-editable metadata (tags + key-values), additive on sources/pipelines/tables.
+// ============================================================================
+export type Tags = string[]
+export type Metadata = Record<string, string>
+
 export interface SourceDefinition {
   name: string
   description: string
@@ -22,6 +28,8 @@ export interface SourceDefinition {
   generatorProfile: 'trades' | 'quotes' | 'orders' | 'generic'
   eventsPerSecond: number
   enabled: boolean
+  tags: Tags
+  metadata: Metadata
 }
 
 export interface PipelineDefinition {
@@ -34,6 +42,8 @@ export interface PipelineDefinition {
   createdBy: string
   createdAtMs: number
   updatedAtMs: number
+  tags: Tags
+  metadata: Metadata
 }
 
 export interface JsonObject {
@@ -132,6 +142,10 @@ export type TableStatus = PipelineStatus
 // via update triggers a backend restart of that table's pipeline.
 export type TableSearchMode = 'Exact' | 'Fuzzy'
 
+// Feature B: opt-in per-table ROW HISTORY retention mode — see TableHistoryStats/TableHistoryResponse
+// below and TableDetailPage's history config card.
+export type TableHistoryMode = 'All' | 'LastN' | 'FirstN' | 'MinBy' | 'MaxBy'
+
 export interface TableDefinition {
   id: string
   name: string
@@ -147,6 +161,13 @@ export interface TableDefinition {
   tableInputs: string[]
   searchEnabled: boolean
   searchMode: TableSearchMode
+  historyEnabled: boolean
+  historyMode: TableHistoryMode
+  historyLimit: number
+  historyByField: string | null
+  historyWindowMs: number
+  tags: Tags
+  metadata: Metadata
 }
 
 export interface TableRowDto {
@@ -199,4 +220,36 @@ export interface TableValidateResponse {
 // (tableName, deltas, seq) — the backend-wide (name, payload, seq) convention.
 export interface TableHubEvents {
   tableDelta: (tableName: string, deltas: TableRowDto[], seq: number) => void
+}
+
+// ============================================================================
+// Feature B: row history. One recorded ASSERTION version of a row-identity's history — see
+// TableHistoryGrain (backend) for the retention semantics per historyMode.
+// ============================================================================
+
+export interface HistoryVersion {
+  row: ResultRow
+  tsMs: number
+  seq: number
+}
+
+// POST /api/tables/{id}/history/lookup?limit= — body: { row }, the exact row object the client
+// already has (from the live grid or a search result); the server derives the row-identity key from
+// it. A 400 means the table's historyEnabled is false. keyFound is false when this exact row identity
+// has never been observed (as opposed to observed-but-empty, which can't happen — every observation
+// is either a version or a retraction bump).
+export interface TableHistoryResponse {
+  versions: HistoryVersion[]
+  retractionCount: number
+  mode: TableHistoryMode
+  totalVersions: number
+  keyFound: boolean
+}
+
+// GET /api/tables/{id}/history/stats
+export interface TableHistoryStats {
+  enabled: boolean
+  mode: TableHistoryMode
+  keyCount: number
+  totalVersions: number
 }

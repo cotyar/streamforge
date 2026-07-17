@@ -1,17 +1,15 @@
 import { api } from './client'
-import type { PipelineDefinition, ResultEnvelope, ValidateResponse } from './types'
+import type { Metadata, PipelineDefinition, ResultEnvelope, Tags, ValidateResponse } from './types'
 
 export interface CreatePipelineRequest {
   name: string
   description: string
   sql: string
+  tags?: Tags
+  metadata?: Metadata
 }
 
-export interface UpdatePipelineRequest {
-  name: string
-  description: string
-  sql: string
-}
+export type UpdatePipelineRequest = CreatePipelineRequest
 
 export interface ValidateRequest {
   sql: string

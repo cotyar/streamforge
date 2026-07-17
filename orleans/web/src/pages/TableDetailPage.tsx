@@ -3,15 +3,19 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { Check, CircleAlert, Play, Search, Trash2, TriangleAlert, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { tablesApi } from '../api/tables'
+import type { UpdateTableRequest } from '../api/tables'
 import { sourcesApi } from '../api/sources'
 import { ApiError } from '../api/client'
 import type {
   FieldDef,
+  Metadata,
   ResultRow,
   RowValue,
   SourceDefinition,
   SqlDiagnostic,
+  Tags,
   TableDefinition,
+  TableHistoryMode,
   TableOutputField,
   TableSearchMode,
   TableSearchResponse,
@@ -23,6 +27,8 @@ import { Topbar } from '../components/Topbar'
 import { StatusBadge } from '../components/StatusBadge'
 import { SqlEditor } from '../components/SqlEditor'
 import { RoleGate } from '../components/RoleGate'
+import { MetadataEditor } from '../components/MetadataEditor'
+import { RowHistorySheet } from '../components/RowHistorySheet'
 import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -31,6 +37,7 @@ import { Field, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/components/ui/input-group'
 import { Switch } from '@/components/ui/switch'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -88,11 +95,16 @@ function RowsTable({
   rows,
   flashKeys,
   emptyMessage,
+  onRowClick,
 }: {
   outputFields: FieldDef[]
   rows: DisplayRow[]
   flashKeys?: Set<string>
   emptyMessage: string
+  /** When set, rows are clickable — used to open the row-history sheet (see RowHistorySheet /
+   * SearchAndView). Absent (undefined) whenever the table's historyEnabled is false, so plain
+   * tables never show a misleading pointer cursor. */
+  onRowClick?: (row: ResultRow) => void
 }) {
   const displayRows = rows.slice(0, 500)
   const showWeightColumn = rows.some((r) => r.weight > 1)
@@ -118,7 +130,11 @@ function RowsTable({
             </TableHeader>
             <TableBody className="font-mono">
               {displayRows.map((r) => (
-                <TableRow key={r.key} className={cn(flashKeys?.has(r.key) && 'sf-row-flash')}>
+                <TableRow
+                  key={r.key}
+                  className={cn(flashKeys?.has(r.key) && 'sf-row-flash', onRowClick && 'cursor-pointer hover:bg-muted/40')}
+                  onClick={onRowClick ? () => onRowClick(r.row) : undefined}
+                >
                   {outputFields.map((f) => {
                     const v: RowValue | undefined = r.row[f.name]
                     const json = v !== undefined && isJsonValue(v)
@@ -147,7 +163,7 @@ function RowsTable({
 }
 
 /** Live materialized-view grid: sorted by the first output column, plus the live/metrics header. */
-function MaterializedView({ table }: { table: TableDefinition }) {
+function MaterializedView({ table, onRowClick }: { table: TableDefinition; onRowClick?: (row: ResultRow) => void }) {
   const { rows, live, flashKeys } = useTableRows(table.id, table.name)
   const { metrics, deltasInPerSec } = useTableMetrics(table.id)
 
@@ -197,7 +213,13 @@ function MaterializedView({ table }: { table: TableDefinition }) {
         </p>
       )}
 
-      <RowsTable outputFields={table.outputFields} rows={sortedRows} flashKeys={flashKeys} emptyMessage="Waiting for rows…" />
+      <RowsTable
+        outputFields={table.outputFields}
+        rows={sortedRows}
+        flashKeys={flashKeys}
+        emptyMessage="Waiting for rows…"
+        onRowClick={onRowClick}
+      />
     </div>
   )
 }
@@ -248,6 +270,27 @@ function SearchAndView({
     setConfigMode(table.searchMode)
   }, [table.searchEnabled, table.searchMode])
 
+  // History config draft — same resync-on-fresh-definition pattern as the search draft above.
+  const [historyDraftEnabled, setHistoryDraftEnabled] = useState(table.historyEnabled)
+  const [historyDraftMode, setHistoryDraftMode] = useState<TableHistoryMode>(table.historyMode)
+  const [historyDraftLimit, setHistoryDraftLimit] = useState(table.historyLimit)
+  const [historyDraftByField, setHistoryDraftByField] = useState<string | null>(table.historyByField)
+  const [historyDraftWindowMs, setHistoryDraftWindowMs] = useState(table.historyWindowMs)
+  const [historyApplying, setHistoryApplying] = useState(false)
+  const [historyRow, setHistoryRow] = useState<ResultRow | null>(null)
+
+  useEffect(() => {
+    setHistoryDraftEnabled(table.historyEnabled)
+    setHistoryDraftMode(table.historyMode)
+    setHistoryDraftLimit(table.historyLimit)
+    setHistoryDraftByField(table.historyByField)
+    setHistoryDraftWindowMs(table.historyWindowMs)
+  }, [table.historyEnabled, table.historyMode, table.historyLimit, table.historyByField, table.historyWindowMs])
+
+  const numericOrTimestampFields = table.outputFields.filter(
+    (f) => f.type === 'Double' || f.type === 'Long' || f.type === 'Timestamp',
+  )
+
   useEffect(() => {
     if (!debouncedQuery) {
       setSearchResult(null)
@@ -291,18 +334,36 @@ function SearchAndView({
     // query is active must re-query immediately, since the same text can match differently.
   }, [debouncedQuery, table.id, table.searchEnabled, table.searchMode])
 
+  // The PUT endpoint replaces the whole table definition (see UpdateTableRequest's doc comment in
+  // ../api/tables), so every quick-toggle here — search config, history config — must resend the
+  // table's *entire* current config, not just the field being changed. Sending a partial body would
+  // silently reset every omitted field to its request-DTO default (e.g. flipping this table's
+  // history back off the moment someone toggles search), which is exactly the class of bug this
+  // helper exists to prevent.
+  function fullUpdateBody(overrides: Partial<UpdateTableRequest>): UpdateTableRequest {
+    return {
+      name: table.name,
+      description: table.description,
+      sql: table.sql,
+      searchEnabled: table.searchEnabled,
+      searchMode: table.searchMode,
+      historyEnabled: table.historyEnabled,
+      historyMode: table.historyMode,
+      historyLimit: table.historyLimit,
+      historyByField: table.historyByField,
+      historyWindowMs: table.historyWindowMs,
+      tags: table.tags,
+      metadata: table.metadata,
+      ...overrides,
+    }
+  }
+
   async function applyConfig(nextEnabled: boolean, nextMode: TableSearchMode) {
     setConfigEnabled(nextEnabled)
     setConfigMode(nextMode)
     setReindexing(true)
     try {
-      const saved = await tablesApi.update(table.id, {
-        name: table.name,
-        description: table.description,
-        sql: table.sql,
-        searchEnabled: nextEnabled,
-        searchMode: nextMode,
-      })
+      const saved = await tablesApi.update(table.id, fullUpdateBody({ searchEnabled: nextEnabled, searchMode: nextMode }))
       onTableChange(saved)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to update search settings.')
@@ -310,6 +371,49 @@ function SearchAndView({
       setConfigMode(table.searchMode)
     } finally {
       setReindexing(false)
+    }
+  }
+
+  async function applyHistoryConfig(overrides: {
+    historyEnabled?: boolean
+    historyMode?: TableHistoryMode
+    historyLimit?: number
+    historyByField?: string | null
+    historyWindowMs?: number
+  }) {
+    const nextEnabled = overrides.historyEnabled ?? historyDraftEnabled
+    const nextMode = overrides.historyMode ?? historyDraftMode
+    const nextLimit = overrides.historyLimit ?? historyDraftLimit
+    const nextByField = 'historyByField' in overrides ? (overrides.historyByField ?? null) : historyDraftByField
+    const nextWindowMs = overrides.historyWindowMs ?? historyDraftWindowMs
+
+    setHistoryDraftEnabled(nextEnabled)
+    setHistoryDraftMode(nextMode)
+    setHistoryDraftLimit(nextLimit)
+    setHistoryDraftByField(nextByField)
+    setHistoryDraftWindowMs(nextWindowMs)
+    setHistoryApplying(true)
+    try {
+      const saved = await tablesApi.update(
+        table.id,
+        fullUpdateBody({
+          historyEnabled: nextEnabled,
+          historyMode: nextMode,
+          historyLimit: nextLimit,
+          historyByField: nextByField,
+          historyWindowMs: nextWindowMs,
+        }),
+      )
+      onTableChange(saved)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update history settings.')
+      setHistoryDraftEnabled(table.historyEnabled)
+      setHistoryDraftMode(table.historyMode)
+      setHistoryDraftLimit(table.historyLimit)
+      setHistoryDraftByField(table.historyByField)
+      setHistoryDraftWindowMs(table.historyWindowMs)
+    } finally {
+      setHistoryApplying(false)
     }
   }
 
@@ -402,6 +506,121 @@ function SearchAndView({
         </CardContent>
       </Card>
 
+      <Card>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row history</h3>
+            {table.historyEnabled && <Badge variant="outline">{table.historyMode}</Badge>}
+          </div>
+
+          {!canEdit && !table.historyEnabled && (
+            <span className="text-xs text-muted-foreground">Row history is not enabled for this table.</span>
+          )}
+
+          <RoleGate min="Editor">
+            <div className="flex flex-col gap-2 border-t border-border pt-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <label htmlFor="tbl-history-enabled" className="flex items-center gap-2 text-sm text-foreground">
+                  <Switch
+                    id="tbl-history-enabled"
+                    checked={historyDraftEnabled}
+                    disabled={historyApplying}
+                    onCheckedChange={(checked) => void applyHistoryConfig({ historyEnabled: checked })}
+                  />
+                  Enabled
+                </label>
+
+                <Select
+                  value={historyDraftMode}
+                  disabled={!historyDraftEnabled || historyApplying}
+                  onValueChange={(v) => void applyHistoryConfig({ historyMode: v as TableHistoryMode })}
+                >
+                  <SelectTrigger className="w-32" aria-label="History mode">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="All">All</SelectItem>
+                      <SelectItem value="LastN">Last N</SelectItem>
+                      <SelectItem value="FirstN">First N</SelectItem>
+                      <SelectItem value="MinBy">Min by</SelectItem>
+                      <SelectItem value="MaxBy">Max by</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+
+                {(historyDraftMode === 'LastN' || historyDraftMode === 'FirstN') && (
+                  <Input
+                    type="number"
+                    min={1}
+                    aria-label="History version limit"
+                    className="w-20"
+                    value={historyDraftLimit}
+                    disabled={!historyDraftEnabled || historyApplying}
+                    onChange={(e) => setHistoryDraftLimit(Number(e.target.value) || 1)}
+                    onBlur={() => void applyHistoryConfig({ historyLimit: historyDraftLimit })}
+                  />
+                )}
+
+                {(historyDraftMode === 'MinBy' || historyDraftMode === 'MaxBy') && (
+                  <Select
+                    value={historyDraftByField ?? undefined}
+                    disabled={!historyDraftEnabled || historyApplying || numericOrTimestampFields.length === 0}
+                    onValueChange={(v) => void applyHistoryConfig({ historyByField: v })}
+                  >
+                    <SelectTrigger className="w-36" aria-label="History extremum field">
+                      <SelectValue placeholder="Field…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {numericOrTimestampFields.map((f) => (
+                          <SelectItem key={f.name} value={f.name}>
+                            {f.name}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                )}
+
+                <Field orientation="horizontal" className="items-center gap-1.5">
+                  <FieldLabel htmlFor="tbl-history-window" className="text-xs font-normal text-muted-foreground">
+                    Window (ms)
+                  </FieldLabel>
+                  <Input
+                    id="tbl-history-window"
+                    type="number"
+                    min={0}
+                    step={1000}
+                    className="w-28"
+                    value={historyDraftWindowMs}
+                    disabled={!historyDraftEnabled || historyApplying}
+                    onChange={(e) => setHistoryDraftWindowMs(Number(e.target.value) || 0)}
+                    onBlur={() => void applyHistoryConfig({ historyWindowMs: historyDraftWindowMs })}
+                  />
+                </Field>
+
+                {historyApplying && (
+                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Spinner className="size-3.5" /> Applying…
+                  </span>
+                )}
+              </div>
+
+              <p className="text-[11px] text-muted-foreground">
+                {historyDraftMode === 'All' && 'Retains every assertion version per row identity.'}
+                {(historyDraftMode === 'LastN' || historyDraftMode === 'FirstN') &&
+                  `Retains the ${historyDraftMode === 'LastN' ? 'most' : 'least'} recent ${historyDraftLimit} version${historyDraftLimit === 1 ? '' : 's'} per row identity.`}
+                {(historyDraftMode === 'MinBy' || historyDraftMode === 'MaxBy') &&
+                  `Retains the ${historyDraftMode === 'MinBy' ? 'minimum' : 'maximum'} and latest version per row identity, by ${historyDraftByField ?? 'the selected field'}.`}
+                {' Window 0 = unbounded.'}
+                {historyDraftEnabled && ' Applying resets the accumulated history.'}
+              </p>
+            </div>
+          </RoleGate>
+        </CardContent>
+      </Card>
+
       {isSearching ? (
         searchNotEnabled ? (
           <Empty className="border border-dashed">
@@ -418,11 +637,19 @@ function SearchAndView({
             outputFields={table.outputFields}
             rows={searchRows}
             emptyMessage={searching ? 'Searching…' : 'No matches.'}
+            onRowClick={table.historyEnabled ? setHistoryRow : undefined}
           />
         )
       ) : (
-        <MaterializedView table={table} />
+        <MaterializedView table={table} onRowClick={table.historyEnabled ? setHistoryRow : undefined} />
       )}
+
+      <RowHistorySheet
+        open={historyRow !== null}
+        onOpenChange={(open) => !open && setHistoryRow(null)}
+        tableId={table.id}
+        row={historyRow}
+      />
     </div>
   )
 }
@@ -441,6 +668,8 @@ export function TableDetailPage() {
   const [sql, setSql] = useState('')
   const [searchEnabled, setSearchEnabled] = useState(false)
   const [searchMode, setSearchMode] = useState<TableSearchMode>('Exact')
+  const [tags, setTags] = useState<Tags>([])
+  const [metadata, setMetadata] = useState<Metadata>({})
 
   const [diagnostics, setDiagnostics] = useState<SqlDiagnostic[] | null>(null)
   const [planSummary, setPlanSummary] = useState<string | null>(null)
@@ -492,6 +721,8 @@ export function TableDetailPage() {
         generatorProfile: 'generic',
         eventsPerSecond: 0,
         enabled: true,
+        tags: [],
+        metadata: {},
       }))
     return [...sources, ...pseudo]
   }, [sources, otherTables, id])
@@ -504,6 +735,8 @@ export function TableDetailPage() {
       setSql('')
       setSearchEnabled(false)
       setSearchMode('Exact')
+      setTags([])
+      setMetadata({})
       setLoading(false)
       return
     }
@@ -515,6 +748,8 @@ export function TableDetailPage() {
         setName(t.name)
         setDescription(t.description)
         setSql(t.sql)
+        setTags(t.tags)
+        setMetadata(t.metadata)
       })
       .finally(() => setLoading(false))
   }, [id, isNew])
@@ -576,11 +811,28 @@ export function TableDetailPage() {
     }
     setSaving(true)
     try {
+      // History config isn't editable from this form (see the right-panel "Row history" card, which
+      // applies its own changes immediately) — carry the currently-persisted values through so a
+      // plain Save never resets them back to the request DTO's defaults (history-off).
+      const body = {
+        name: name.trim(),
+        description,
+        sql,
+        searchEnabled,
+        searchMode,
+        historyEnabled: table?.historyEnabled ?? false,
+        historyMode: table?.historyMode ?? ('All' as TableHistoryMode),
+        historyLimit: table?.historyLimit ?? 10,
+        historyByField: table?.historyByField ?? null,
+        historyWindowMs: table?.historyWindowMs ?? 0,
+        tags,
+        metadata,
+      }
       let saved: TableDefinition
       if (isNew) {
-        saved = await tablesApi.create({ name: name.trim(), description, sql, searchEnabled, searchMode })
+        saved = await tablesApi.create(body)
       } else {
-        saved = await tablesApi.update(id!, { name: name.trim(), description, sql, searchEnabled, searchMode })
+        saved = await tablesApi.update(id!, body)
       }
       if (startAfter && saved.status !== 'Running') {
         saved = await tablesApi.start(saved.id)
@@ -679,6 +931,17 @@ export function TableDetailPage() {
               </RoleGate>
             </CardContent>
           </Card>
+
+          <MetadataEditor
+            key={table?.id ?? 'new'}
+            initialTags={tags}
+            initialMetadata={metadata}
+            onChange={(t, m) => {
+              setTags(t)
+              setMetadata(m)
+            }}
+            readOnly={!canEdit}
+          />
 
           <SqlEditor value={sql} onChange={setSql} diagnostics={diagnostics ?? []} readOnly={!canEdit} sources={editorSources} />
 

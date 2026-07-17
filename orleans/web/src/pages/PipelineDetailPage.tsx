@@ -4,7 +4,7 @@ import { Check, CircleAlert, Play, Trash2, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import { pipelinesApi } from '../api/pipelines'
 import { sourcesApi } from '../api/sources'
-import type { PipelineDefinition, SourceDefinition, SqlDiagnostic } from '../api/types'
+import type { Metadata, PipelineDefinition, SourceDefinition, SqlDiagnostic, Tags } from '../api/types'
 import { useAuth } from '../api/auth'
 import { usePipelineResults } from '../hooks/usePipelineResults'
 import { useMetricsStream } from '../hooks/useMetricsStream'
@@ -16,6 +16,7 @@ import { ResultsTable } from '../components/ResultsTable'
 import { MetricsBar } from '../components/MetricsBar'
 import { LiveChart } from '../components/LiveChart'
 import { RoleGate } from '../components/RoleGate'
+import { MetadataEditor } from '../components/MetadataEditor'
 import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -56,6 +57,8 @@ export function PipelineDetailPage() {
   const [sql, setSql] = useState('')
   const [mode, setMode] = useState<Mode>('sql')
   const [builderState, setBuilderState] = useState<BuilderState>(emptyBuilderState())
+  const [tags, setTags] = useState<Tags>([])
+  const [metadata, setMetadata] = useState<Metadata>({})
 
   const [diagnostics, setDiagnostics] = useState<SqlDiagnostic[] | null>(null)
   const [planSummary, setPlanSummary] = useState<string | null>(null)
@@ -89,6 +92,8 @@ export function PipelineDetailPage() {
       setDescription('')
       setSql('')
       setBuilderState(emptyBuilderState())
+      setTags([])
+      setMetadata({})
       setLoading(false)
       return
     }
@@ -100,6 +105,8 @@ export function PipelineDetailPage() {
         setName(p.name)
         setDescription(p.description)
         setSql(p.sql)
+        setTags(p.tags)
+        setMetadata(p.metadata)
       })
       .finally(() => setLoading(false))
   }, [id, isNew])
@@ -142,11 +149,12 @@ export function PipelineDetailPage() {
     }
     setSaving(true)
     try {
+      const body = { name: name.trim(), description, sql: effectiveSql, tags, metadata }
       let saved: PipelineDefinition
       if (isNew) {
-        saved = await pipelinesApi.create({ name: name.trim(), description, sql: effectiveSql })
+        saved = await pipelinesApi.create(body)
       } else {
-        saved = await pipelinesApi.update(id!, { name: name.trim(), description, sql: effectiveSql })
+        saved = await pipelinesApi.update(id!, body)
       }
       if (startAfter && saved.status !== 'Running') {
         saved = await pipelinesApi.start(saved.id)
@@ -221,6 +229,17 @@ export function PipelineDetailPage() {
               </Field>
             </CardContent>
           </Card>
+
+          <MetadataEditor
+            key={pipeline?.id ?? 'new'}
+            initialTags={tags}
+            initialMetadata={metadata}
+            onChange={(t, m) => {
+              setTags(t)
+              setMetadata(m)
+            }}
+            readOnly={!canEdit}
+          />
 
           <Tabs
             value={mode}

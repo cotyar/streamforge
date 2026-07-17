@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { FieldDef, SourceDefinition } from './types'
+import type { FieldDef, Metadata, SourceDefinition, Tags } from './types'
 
 export interface CreateSourceRequest {
   name: string
@@ -8,6 +8,8 @@ export interface CreateSourceRequest {
   generatorProfile: SourceDefinition['generatorProfile']
   eventsPerSecond: number
   enabled: boolean
+  tags?: Tags
+  metadata?: Metadata
 }
 
 // The Host's PUT /api/sources/{name} replaces the whole SourceDefinition (name is fixed by the

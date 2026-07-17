@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using StreamForge.Abstractions;
 
 namespace StreamForge.Host.Grains;
@@ -245,6 +246,17 @@ public static class RowKeyCodec
         return string.Join("", ordered.Select(kv => $"{kv.Key}{EncodeValue(kv.Value)}"));
     }
 
+    // BUGFIX (found live via the web UI's row-history sheet, POST /api/tables/{id}/history/lookup):
+    // a request-bound `Dictionary<string, object?>` (HistoryLookupRequest.Row) deserializes its values
+    // as boxed System.Text.Json.JsonElement — System.Text.Json's default behavior for an untyped
+    // `object` property, since Program.cs registers no ObjectToInferredTypesConverter — NOT as the
+    // plain string/long/double/bool the live delta path stores when TableHistoryGrain derives the same
+    // key from a table row already living in memory. Every one of those JsonElement values used to fall
+    // through to the `_ => $"?:{v}"` case below, so a client-submitted lookup key never matched the key
+    // recorded from live deltas: GetHistoryAsync came back keyFound=false for every row, even though
+    // GetStatsAsync showed the history WAS being retained (keyCount/totalVersions > 0). Unwrapping the
+    // JsonElement into the same primitive shape the live path uses fixes it for both call sites without
+    // touching global JSON options (which could affect unrelated Dictionary<string, object?> endpoints).
     private static string EncodeValue(object? v) => v switch
     {
         null => "N",
@@ -254,8 +266,27 @@ public static class RowKeyCodec
         string s => $"S:{s}",
         bool b => $"B:{b}",
         Dictionary<string, object?> dict => $"J:{{{EncodeIdentity(dict, null)}}}",
+        JsonElement je => EncodeValue(FromJsonElement(je)),
         System.Collections.IEnumerable list => $"A:[{string.Join(",", list.Cast<object?>().Select(EncodeValue))}]",
         _ => $"?:{v}",
+    };
+
+    /// <summary>Unwraps a JsonElement into the plain CLR value EncodeValue's other cases expect. Numbers
+    /// prefer Int64 when the value is whole (matching how the live path stores an aggregate COUNT/SUM as
+    /// long) and fall back to double otherwise — a residual ambiguity for a whole-valued Double output
+    /// column (e.g. a "high" price that happens to land on an exact integer) is possible but out of scope
+    /// here: identity columns in this dialect are overwhelmingly GROUP BY keys (strings/longs), and a
+    /// false mismatch on a non-identity field is harmless since only identity columns feed EncodeIdentity.</summary>
+    private static object? FromJsonElement(JsonElement je) => je.ValueKind switch
+    {
+        JsonValueKind.Null or JsonValueKind.Undefined => null,
+        JsonValueKind.String => je.GetString(),
+        JsonValueKind.True => true,
+        JsonValueKind.False => false,
+        JsonValueKind.Number => je.TryGetInt64(out var l) ? l : je.GetDouble(),
+        JsonValueKind.Object => je.EnumerateObject().ToDictionary(p => p.Name, p => FromJsonElement(p.Value)),
+        JsonValueKind.Array => je.EnumerateArray().Select(FromJsonElement).ToList(),
+        _ => je.ToString(),
     };
 }
 
