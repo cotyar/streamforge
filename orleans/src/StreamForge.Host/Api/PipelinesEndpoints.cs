@@ -1,7 +1,9 @@
 using System.Security.Claims;
+using System.Text;
 using Orleans;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
+using StreamForge.Host.Grpc.Dynamic;
 
 namespace StreamForge.Host.Api;
 
@@ -89,6 +91,36 @@ public static class PipelinesEndpoints
                 result.PlanSummary,
                 result.SourceNames.ToList()));
         }).RequireAuthorization("Editor");
+
+        // Downloadable, self-contained .proto for this pipeline: PipelineDefinition doesn't persist an
+        // output schema (unlike TableDefinition), so its SQL is recompiled here to get one. 409 with
+        // compile diagnostics if the SQL doesn't currently compile.
+        group.MapGet("/{id}/proto", async (string id, IClusterClient client) =>
+        {
+            var registry = Registry(client);
+            var def = await registry.GetPipelineAsync(id);
+            if (def is null)
+            {
+                return Results.NotFound();
+            }
+
+            var schemas = await BuildSchemasAsync(registry);
+            var result = SqlCompiler.Compile(def.Sql, schemas);
+            if (!result.Ok || result.OutputSchema is null)
+            {
+                var message = string.Join("; ", result.Diagnostics.Select(d => $"{d.Line}:{d.Column} {d.Message}"));
+                return Results.Conflict(new ErrorResponse(
+                    string.IsNullOrEmpty(message) ? "Pipeline SQL does not currently compile." : message));
+            }
+
+            var fields = EntitySchemas.FromOutputSchema(result.OutputSchema);
+            var numbersJson = await registry.EnsureFieldNumbersAsync(EntitySchemas.PipelineKey(def.Id), fields);
+            var numbers = EntitySchemas.ParseMap(numbersJson);
+            var schema = DescriptorFactory.Generate(def.Name, fields, numbers);
+            var protoText = ProtoFileBuilder.Build("pipeline", def.Name, schema);
+
+            return Results.File(Encoding.UTF8.GetBytes(protoText), "text/plain; charset=utf-8", schema.FileProto.Name);
+        }).RequireAuthorization("Viewer");
 
         group.MapGet("/{id}/results", async (string id, int? limit, IClusterClient client) =>
             Results.Ok(await client.GetGrain<IPipelineGrain>(id).GetRecentResultsAsync(limit ?? 100))

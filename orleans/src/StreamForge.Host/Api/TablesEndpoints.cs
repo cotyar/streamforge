@@ -1,7 +1,9 @@
 using System.Security.Claims;
+using System.Text;
 using Orleans;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
+using StreamForge.Host.Grpc.Dynamic;
 
 namespace StreamForge.Host.Api;
 
@@ -152,6 +154,33 @@ public static class TablesEndpoints
             }
 
             return Results.Ok(await client.GetGrain<ITableGrain>(def.Name).GetMetricsAsync());
+        }).RequireAuthorization("Viewer");
+
+        // Downloadable, self-contained .proto for this table: DescriptorFactory's schema (built from
+        // the already-compiled TableDefinition.OutputFields, no recompilation needed) plus the
+        // DynamicStreamService streaming contract. 409 if the table has never successfully compiled
+        // (no OutputFields to describe), mirroring the pipeline endpoint's compile-failure behavior.
+        group.MapGet("/{id}/proto", async (string id, IClusterClient client) =>
+        {
+            var registry = Registry(client);
+            var def = await registry.GetTableAsync(id);
+            if (def is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (def.OutputFields.Count == 0)
+            {
+                return Results.Conflict(new ErrorResponse(
+                    def.Error ?? "Table has no compiled output schema yet — start/re-save the table to compile its SQL."));
+            }
+
+            var numbersJson = await registry.EnsureFieldNumbersAsync(EntitySchemas.TableKey(def.Id), def.OutputFields);
+            var numbers = EntitySchemas.ParseMap(numbersJson);
+            var schema = DescriptorFactory.Generate(def.Name, def.OutputFields, numbers);
+            var protoText = ProtoFileBuilder.Build("table", def.Name, schema);
+
+            return Results.File(Encoding.UTF8.GetBytes(protoText), "text/plain; charset=utf-8", schema.FileProto.Name);
         }).RequireAuthorization("Viewer");
 
         group.MapGet("/{id}/search", async (string id, string? q, int? limit, IClusterClient client) =>
