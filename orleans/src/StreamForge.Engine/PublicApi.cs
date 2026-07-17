@@ -39,6 +39,9 @@ public sealed class CompileResult
     public string? PlanSummary { get; init; }
     /// <summary>Source stream names the query subscribes to. Empty when !Ok.</summary>
     public IReadOnlyList<string> SourceNames { get; init; } = [];
+    /// <summary>Column names + kinds of the pipeline's output row, derived from the projection —
+    /// mirrors TableCompileResult.OutputSchema. Null when !Ok.</summary>
+    public SourceSchema? OutputSchema { get; init; }
     /// <summary>Executable plan; null when !Ok. Call CreateExecutor() per running pipeline.</summary>
     public PipelinePlan? Plan { get; init; }
 }

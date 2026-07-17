@@ -52,6 +52,7 @@ public static class Planner
             Diagnostics = diagnostics,
             PlanSummary = compiled.PlanSummary,
             SourceNames = compiled.SourceNames,
+            OutputSchema = compiled.OutputSchema,
             Plan = plan,
         };
     }
@@ -100,9 +101,37 @@ public static class Planner
             Bindings = bindings,
             HasAggregates = aggregateNodes.Count > 0,
             PlanSummary = BuildPlanSummary(q, sources, joins, output, bindings),
+            OutputSchema = BuildOutputSchema(output, sources, v.ExprKinds),
             SourceNames = sourceNames,
             SourceLabel = sourceLabel,
         };
+    }
+
+    /// <summary>Derives the pipeline's output row schema (column name → kind) from the projection —
+    /// mirrors TablePlanner.BuildOutputSchema so pipelines and tables expose the same shape.</summary>
+    private static SourceSchema BuildOutputSchema(List<OutputItem> output, List<CompiledSource> sources, Dictionary<Expr, FieldKind> exprKinds)
+    {
+        var fields = new Dictionary<string, FieldKind>();
+        foreach (var item in output)
+        {
+            FieldKind kind;
+            if (item.Expression is QualifiedIdentifier qid && sources.Any(s => s.Alias == qid.Qualifier))
+            {
+                // Star-expansion synthetic node: not part of the validated AST, so exprKinds won't have it.
+                var src = sources.First(s => s.Alias == qid.Qualifier);
+                kind = src.Schema.Fields.TryGetValue(qid.Name, out var k) ? k : FieldKind.String;
+            }
+            else if (exprKinds.TryGetValue(item.Expression, out var k))
+            {
+                kind = k;
+            }
+            else
+            {
+                kind = FieldKind.String;
+            }
+            fields[item.Name] = kind;
+        }
+        return new SourceSchema("(pipeline)", fields);
     }
 
     private static List<OutputItem> BuildOutput(SelectQuery q, List<CompiledSource> sources, Dictionary<Expr, (string Alias, string Field)> bindings)

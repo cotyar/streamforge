@@ -46,6 +46,7 @@ internal sealed class CompiledPlan
     public required Dictionary<Expr, (string Alias, string Field)> Bindings { get; init; }
     public required bool HasAggregates { get; init; }
     public required string PlanSummary { get; init; }
+    public required SourceSchema OutputSchema { get; init; }
     public required List<string> SourceNames { get; init; }
     public required string SourceLabel { get; init; } // comma-joined source names, used as output _source
 }
