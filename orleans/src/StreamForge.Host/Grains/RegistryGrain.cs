@@ -6,6 +6,7 @@ using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
 using StreamForge.Host.Generators;
+using StreamForge.Host.Grpc.Dynamic;
 
 namespace StreamForge.Host.Grains;
 
@@ -14,6 +15,10 @@ public sealed class RegistryState
     public List<SourceDefinition> Sources { get; set; } = [];
     public List<PipelineDefinition> Pipelines { get; set; } = [];
     public List<TableDefinition> Tables { get; set; } = [];
+
+    /// <summary>entityKey ("source:{name}" / "pipeline:{id}" / "table:{id}") → FieldNumberMap JSON.
+    /// See IRegistryGrain.EnsureFieldNumbersAsync.</summary>
+    public Dictionary<string, string> FieldNumberMaps { get; set; } = [];
 }
 
 /// <summary>Singleton grain (key = StreamConstants.RegistryKey). Catalog of sources + pipelines; orchestrates start/stop.
@@ -680,6 +685,22 @@ public sealed class RegistryGrain(
                 "JOIN trades t WITHIN 10 SECONDS ON e.payload -> 'order' ->> 'symbol' = t.symbol",
                 PipelineStatus.Stopped),
         ];
+    }
+
+    public async Task<string> EnsureFieldNumbersAsync(string entityKey, List<FieldDef> fields)
+    {
+        var existingJson = state.State.FieldNumberMaps.GetValueOrDefault(entityKey);
+        var existing = existingJson is null
+            ? null
+            : System.Text.Json.JsonSerializer.Deserialize<FieldNumberMap>(existingJson);
+        var updatedJson = System.Text.Json.JsonSerializer.Serialize(FieldNumberMap.Assign(fields, existing));
+        if (updatedJson != existingJson)
+        {
+            state.State.FieldNumberMaps[entityKey] = updatedJson;
+            await state.WriteStateAsync();
+        }
+
+        return updatedJson;
     }
 
     private async Task PublishLifecycleAsync(string pipelineId, string kind, PipelineStatus status)

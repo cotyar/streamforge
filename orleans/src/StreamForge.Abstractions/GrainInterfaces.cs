@@ -31,6 +31,14 @@ public interface IRegistryGrain : IGrainWithStringKey
     /// Failed + Error otherwise). Stopping throws InvalidOperationException (409-style) if a Running table
     /// depends on this one. Returns updated definition, null if not found.</summary>
     Task<TableDefinition?> SetTableStatusAsync(string id, PipelineStatus status);
+
+    /// <summary>Returns the persisted field-number map (JSON) for a dynamic-protobuf entity
+    /// ("source:{name}" / "pipeline:{id}" / "table:{id}"), first evolving it against the supplied
+    /// current schema: existing fields keep their numbers, new fields get fresh ones, removed fields'
+    /// numbers are reserved forever (never reused). Persists on change. This is the single source of
+    /// truth for proto field numbering — gRPC reflection descriptors and downloadable .proto files
+    /// must both obtain numbers here so generated clients stay compatible across schema edits.</summary>
+    Task<string> EnsureFieldNumbersAsync(string entityKey, List<FieldDef> fields);
 }
 
 /// <summary>Key = pipeline id. One activation per running pipeline.</summary>
