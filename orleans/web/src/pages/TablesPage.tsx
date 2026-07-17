@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Pencil, Eye, Play, Plus, Square, Trash2, Table2 } from 'lucide-react'
+import { Pencil, Eye, Play, Plus, Search, Square, Trash2, Table2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { tablesApi } from '../api/tables'
 import type { TableDefinition, TableMetrics } from '../api/types'
@@ -13,6 +13,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -168,9 +169,23 @@ export function TablesPage() {
                   return (
                     <TableRow key={t.id}>
                       <TableCell>
-                        <Link to={`/tables/${t.id}`} className="font-medium text-foreground hover:text-primary">
-                          {t.name}
-                        </Link>
+                        <div className="flex items-center gap-1.5">
+                          <Link to={`/tables/${t.id}`} className="font-medium text-foreground hover:text-primary">
+                            {t.name}
+                          </Link>
+                          {t.searchEnabled && (
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Badge variant="outline" className="gap-1 px-1.5 text-muted-foreground">
+                                    <Search className="size-3" />
+                                  </Badge>
+                                </TooltipTrigger>
+                                <TooltipContent side="top">Search enabled — {t.searchMode}</TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          )}
+                        </div>
                         {t.error && <p className="mt-0.5 max-w-xs truncate text-xs text-destructive">{t.error}</p>}
                       </TableCell>
                       <TableCell>

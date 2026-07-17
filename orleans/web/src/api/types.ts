@@ -128,6 +128,10 @@ export interface HubEvents {
 
 export type TableStatus = PipelineStatus
 
+// Per-table reverse (inverted) search index. Exact/Fuzzy chosen per table; toggling either field
+// via update triggers a backend restart of that table's pipeline.
+export type TableSearchMode = 'Exact' | 'Fuzzy'
+
 export interface TableDefinition {
   id: string
   name: string
@@ -141,6 +145,8 @@ export interface TableDefinition {
   outputFields: FieldDef[]
   streamInputs: string[]
   tableInputs: string[]
+  searchEnabled: boolean
+  searchMode: TableSearchMode
 }
 
 export interface TableRowDto {
@@ -152,6 +158,15 @@ export interface TableRowsResponse {
   rows: TableRowDto[]
   totalRows: number
   seq: number
+}
+
+// GET /api/tables/{id}/search?q=&limit= — empty q returns rows: []. A 400 means the table's
+// searchEnabled is false (see error.message: "Search is not enabled for this table.").
+export interface TableSearchResponse {
+  rows: TableRowDto[]
+  mode: TableSearchMode
+  enabled: boolean
+  total: number
 }
 
 export interface TableMetrics {

@@ -1,16 +1,27 @@
 import { api } from './client'
-import type { TableDefinition, TableMetrics, TableRowsResponse, TableValidateResponse } from './types'
+import type {
+  TableDefinition,
+  TableMetrics,
+  TableRowsResponse,
+  TableSearchMode,
+  TableSearchResponse,
+  TableValidateResponse,
+} from './types'
 
 export interface CreateTableRequest {
   name: string
   description: string
   sql: string
+  searchEnabled?: boolean
+  searchMode?: TableSearchMode
 }
 
 export interface UpdateTableRequest {
   name: string
   description: string
   sql: string
+  searchEnabled?: boolean
+  searchMode?: TableSearchMode
 }
 
 export interface TableValidateRequest {
@@ -30,4 +41,6 @@ export const tablesApi = {
   rows: (id: string, limit = 500, offset = 0) =>
     api.get<TableRowsResponse>(`/api/tables/${encodeURIComponent(id)}/rows?limit=${limit}&offset=${offset}`),
   metrics: (id: string) => api.get<TableMetrics>(`/api/tables/${encodeURIComponent(id)}/metrics`),
+  search: (id: string, q: string, limit = 100) =>
+    api.get<TableSearchResponse>(`/api/tables/${encodeURIComponent(id)}/search?q=${encodeURIComponent(q)}&limit=${limit}`),
 }

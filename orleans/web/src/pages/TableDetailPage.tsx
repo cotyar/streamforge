@@ -1,10 +1,21 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Check, CircleAlert, Play, Trash2, TriangleAlert } from 'lucide-react'
+import { Check, CircleAlert, Play, Search, Trash2, TriangleAlert, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { tablesApi } from '../api/tables'
 import { sourcesApi } from '../api/sources'
-import type { RowValue, SourceDefinition, SqlDiagnostic, TableDefinition, TableOutputField } from '../api/types'
+import { ApiError } from '../api/client'
+import type {
+  FieldDef,
+  ResultRow,
+  RowValue,
+  SourceDefinition,
+  SqlDiagnostic,
+  TableDefinition,
+  TableOutputField,
+  TableSearchMode,
+  TableSearchResponse,
+} from '../api/types'
 import { useAuth } from '../api/auth'
 import { useTableRows } from '../hooks/useTableRows'
 import { useTableMetrics } from '../hooks/useTableMetrics'
@@ -18,6 +29,10 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Field, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/components/ui/input-group'
+import { Switch } from '@/components/ui/switch'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
@@ -59,9 +74,79 @@ function Stat({ label, value }: { label: string; value: string }) {
   )
 }
 
-/** Live materialized-view grid: sorted by the first output column, mono numerics, sf-flash on rows
- * touched by the latest delta batch, and a weight column that only appears when some row's weight
- * is above 1 (rare — only visible mid-transition or on malformed dedupe). */
+interface DisplayRow {
+  key: string
+  row: ResultRow
+  weight: number
+}
+
+/** Row grid shared by the live materialized view and search results: mono numerics, sf-flash on
+ * rows touched by the latest delta batch (live view only), and a weight column that only appears
+ * when some row's weight is above 1 (rare — only visible mid-transition or on malformed dedupe). */
+function RowsTable({
+  outputFields,
+  rows,
+  flashKeys,
+  emptyMessage,
+}: {
+  outputFields: FieldDef[]
+  rows: DisplayRow[]
+  flashKeys?: Set<string>
+  emptyMessage: string
+}) {
+  const displayRows = rows.slice(0, 500)
+  const showWeightColumn = rows.some((r) => r.weight > 1)
+
+  return (
+    <Card className="min-h-[16rem] flex-1 overflow-hidden py-0">
+      {displayRows.length === 0 ? (
+        <p className="px-4 py-10 text-center text-sm text-muted-foreground">{emptyMessage}</p>
+      ) : (
+        <div className="max-h-[28rem] overflow-auto">
+          <Table className="min-w-max text-xs">
+            <TableHeader className="sticky top-0 z-10 bg-card">
+              <TableRow className="hover:bg-transparent">
+                {outputFields.map((f) => (
+                  <TableHead key={f.name} className="uppercase tracking-wide text-muted-foreground">
+                    {f.name}
+                  </TableHead>
+                ))}
+                {showWeightColumn && (
+                  <TableHead className="text-right uppercase tracking-wide text-muted-foreground">Weight</TableHead>
+                )}
+              </TableRow>
+            </TableHeader>
+            <TableBody className="font-mono">
+              {displayRows.map((r) => (
+                <TableRow key={r.key} className={cn(flashKeys?.has(r.key) && 'sf-row-flash')}>
+                  {outputFields.map((f) => {
+                    const v: RowValue | undefined = r.row[f.name]
+                    const json = v !== undefined && isJsonValue(v)
+                    return (
+                      <TableCell
+                        key={f.name}
+                        title={json ? formatCell(v) : undefined}
+                        className={cn(
+                          typeof v === 'number' ? 'text-right text-foreground' : 'text-foreground/80',
+                          json && 'max-w-56 truncate font-mono',
+                        )}
+                      >
+                        {formatCell(v)}
+                      </TableCell>
+                    )
+                  })}
+                  {showWeightColumn && <TableCell className="text-right text-foreground">{r.weight}</TableCell>}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+/** Live materialized-view grid: sorted by the first output column, plus the live/metrics header. */
 function MaterializedView({ table }: { table: TableDefinition }) {
   const { rows, live, flashKeys } = useTableRows(table.id, table.name)
   const { metrics, deltasInPerSec } = useTableMetrics(table.id)
@@ -77,9 +162,6 @@ function MaterializedView({ table }: { table: TableDefinition }) {
       return String(av ?? '').localeCompare(String(bv ?? ''))
     })
   }, [rows, table.outputFields])
-
-  const displayRows = sortedRows.slice(0, 500)
-  const showWeightColumn = sortedRows.some((r) => r.weight > 1)
 
   return (
     <div className="flex flex-col gap-3">
@@ -115,51 +197,232 @@ function MaterializedView({ table }: { table: TableDefinition }) {
         </p>
       )}
 
-      <Card className="min-h-[16rem] flex-1 overflow-hidden py-0">
-        {displayRows.length === 0 ? (
-          <p className="px-4 py-10 text-center text-sm text-muted-foreground">Waiting for rows…</p>
-        ) : (
-          <div className="max-h-[28rem] overflow-auto">
-            <Table className="min-w-max text-xs">
-              <TableHeader className="sticky top-0 z-10 bg-card">
-                <TableRow className="hover:bg-transparent">
-                  {table.outputFields.map((f) => (
-                    <TableHead key={f.name} className="uppercase tracking-wide text-muted-foreground">
-                      {f.name}
-                    </TableHead>
-                  ))}
-                  {showWeightColumn && (
-                    <TableHead className="text-right uppercase tracking-wide text-muted-foreground">Weight</TableHead>
-                  )}
-                </TableRow>
-              </TableHeader>
-              <TableBody className="font-mono">
-                {displayRows.map((r) => (
-                  <TableRow key={r.key} className={cn(flashKeys.has(r.key) && 'sf-row-flash')}>
-                    {table.outputFields.map((f) => {
-                      const v: RowValue | undefined = r.row[f.name]
-                      const json = v !== undefined && isJsonValue(v)
-                      return (
-                        <TableCell
-                          key={f.name}
-                          title={json ? formatCell(v) : undefined}
-                          className={cn(
-                            typeof v === 'number' ? 'text-right text-foreground' : 'text-foreground/80',
-                            json && 'max-w-56 truncate font-mono',
-                          )}
-                        >
-                          {formatCell(v)}
-                        </TableCell>
-                      )
-                    })}
-                    {showWeightColumn && <TableCell className="text-right text-foreground">{r.weight}</TableCell>}
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+      <RowsTable outputFields={table.outputFields} rows={sortedRows} flashKeys={flashKeys} emptyMessage="Waiting for rows…" />
+    </div>
+  )
+}
+
+/** Debounces a fast-changing value (keystrokes) so effects depending on it don't fire on every one. */
+function useDebounced<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delayMs)
+    return () => clearTimeout(timer)
+  }, [value, delayMs])
+  return debounced
+}
+
+const SEARCH_MODE_HINT: Record<TableSearchMode, string> = {
+  Exact: 'Exact — matches full field values',
+  Fuzzy: 'Fuzzy — typo-tolerant matching',
+}
+
+/** Search box above the materialized view: swaps the grid to search results while a query is
+ * active, and (for Editors) exposes the per-table search-index config that the backend restarts
+ * the table's pipeline to apply. */
+function SearchAndView({
+  table,
+  canEdit,
+  onTableChange,
+}: {
+  table: TableDefinition
+  canEdit: boolean
+  onTableChange: (t: TableDefinition) => void
+}) {
+  const [query, setQuery] = useState('')
+  const debouncedQuery = useDebounced(query.trim(), 250)
+  const isSearching = query.trim().length > 0
+
+  const [searchResult, setSearchResult] = useState<TableSearchResponse | null>(null)
+  const [searching, setSearching] = useState(false)
+  const [searchNotEnabled, setSearchNotEnabled] = useState(false)
+
+  // Config draft mirrors the persisted table so a failed update reverts cleanly; resynced whenever
+  // a fresh table definition arrives (initial load, or after a successful config change elsewhere).
+  const [configEnabled, setConfigEnabled] = useState(table.searchEnabled)
+  const [configMode, setConfigMode] = useState<TableSearchMode>(table.searchMode)
+  const [reindexing, setReindexing] = useState(false)
+
+  useEffect(() => {
+    setConfigEnabled(table.searchEnabled)
+    setConfigMode(table.searchMode)
+  }, [table.searchEnabled, table.searchMode])
+
+  useEffect(() => {
+    if (!debouncedQuery) {
+      setSearchResult(null)
+      setSearchNotEnabled(false)
+      setSearching(false)
+      return
+    }
+    if (!table.searchEnabled) {
+      setSearchResult(null)
+      setSearchNotEnabled(true)
+      setSearching(false)
+      return
+    }
+    let cancelled = false
+    setSearching(true)
+    setSearchNotEnabled(false)
+    tablesApi
+      .search(table.id, debouncedQuery, 100)
+      .then((res) => {
+        if (cancelled) return
+        setSearchResult(res)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        // "Search is not enabled" is an expected state (e.g. a race with the toggle below), not a
+        // real failure — surface it inline instead of a scary toast.
+        if (err instanceof ApiError && err.status === 400) {
+          setSearchResult(null)
+          setSearchNotEnabled(true)
+        } else {
+          toast.error(err instanceof Error ? err.message : 'Search failed.')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSearching(false)
+      })
+    return () => {
+      cancelled = true
+    }
+    // Re-runs on table.searchMode too (not just searchEnabled): switching Exact/Fuzzy while a
+    // query is active must re-query immediately, since the same text can match differently.
+  }, [debouncedQuery, table.id, table.searchEnabled, table.searchMode])
+
+  async function applyConfig(nextEnabled: boolean, nextMode: TableSearchMode) {
+    setConfigEnabled(nextEnabled)
+    setConfigMode(nextMode)
+    setReindexing(true)
+    try {
+      const saved = await tablesApi.update(table.id, {
+        name: table.name,
+        description: table.description,
+        sql: table.sql,
+        searchEnabled: nextEnabled,
+        searchMode: nextMode,
+      })
+      onTableChange(saved)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update search settings.')
+      setConfigEnabled(table.searchEnabled)
+      setConfigMode(table.searchMode)
+    } finally {
+      setReindexing(false)
+    }
+  }
+
+  const searchRows = useMemo<DisplayRow[]>(
+    () => (searchResult?.rows ?? []).map((r, i) => ({ key: String(i), row: r.row, weight: r.weight })),
+    [searchResult],
+  )
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Card>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <InputGroup className="max-w-sm">
+              <InputGroupAddon>
+                <Search className="size-4" />
+              </InputGroupAddon>
+              <InputGroupInput
+                id="tbl-search"
+                aria-label="Search rows"
+                placeholder="Search rows…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              {query && (
+                <InputGroupAddon align="inline-end">
+                  <InputGroupButton type="button" aria-label="Clear search" onClick={() => setQuery('')}>
+                    <X />
+                  </InputGroupButton>
+                </InputGroupAddon>
+              )}
+            </InputGroup>
+
+            {table.searchEnabled ? (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge variant="outline">{table.searchMode}</Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">{SEARCH_MODE_HINT[table.searchMode]}</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            ) : (
+              !canEdit && <span className="text-xs text-muted-foreground">Search is not enabled for this table.</span>
+            )}
+
+            {isSearching && !searchNotEnabled && (
+              <span className="text-xs text-muted-foreground" aria-live="polite">
+                {searching
+                  ? 'Searching…'
+                  : searchResult
+                    ? `${searchResult.total.toLocaleString()} match${searchResult.total === 1 ? '' : 'es'}`
+                    : null}
+              </span>
+            )}
           </div>
-        )}
+
+          <RoleGate min="Editor">
+            <div className="flex flex-wrap items-center gap-3 border-t border-border pt-3">
+              <label htmlFor="tbl-search-enabled" className="flex items-center gap-2 text-sm text-foreground">
+                <Switch
+                  id="tbl-search-enabled"
+                  checked={configEnabled}
+                  disabled={reindexing}
+                  onCheckedChange={(checked) => void applyConfig(checked, configMode)}
+                />
+                Search index
+              </label>
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                size="sm"
+                value={configMode}
+                disabled={!configEnabled || reindexing}
+                onValueChange={(v) => v && void applyConfig(configEnabled, v as TableSearchMode)}
+                aria-label="Search mode"
+              >
+                <ToggleGroupItem value="Exact">Exact</ToggleGroupItem>
+                <ToggleGroupItem value="Fuzzy">Fuzzy</ToggleGroupItem>
+              </ToggleGroup>
+              {reindexing ? (
+                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Spinner className="size-3.5" /> Reindexing…
+                </span>
+              ) : (
+                !configEnabled && <span className="text-xs text-muted-foreground">Typo-tolerant fuzzy matching available.</span>
+              )}
+            </div>
+          </RoleGate>
+        </CardContent>
       </Card>
+
+      {isSearching ? (
+        searchNotEnabled ? (
+          <Empty className="border border-dashed">
+            <EmptyHeader>
+              <EmptyDescription>
+                {canEdit
+                  ? "Search is not enabled for this table. Turn on the search index above, then search again."
+                  : 'Search is not enabled for this table.'}
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : (
+          <RowsTable
+            outputFields={table.outputFields}
+            rows={searchRows}
+            emptyMessage={searching ? 'Searching…' : 'No matches.'}
+          />
+        )
+      ) : (
+        <MaterializedView table={table} />
+      )}
     </div>
   )
 }
@@ -176,6 +439,8 @@ export function TableDetailPage() {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [sql, setSql] = useState('')
+  const [searchEnabled, setSearchEnabled] = useState(false)
+  const [searchMode, setSearchMode] = useState<TableSearchMode>('Exact')
 
   const [diagnostics, setDiagnostics] = useState<SqlDiagnostic[] | null>(null)
   const [planSummary, setPlanSummary] = useState<string | null>(null)
@@ -237,6 +502,8 @@ export function TableDetailPage() {
       setName('')
       setDescription('')
       setSql('')
+      setSearchEnabled(false)
+      setSearchMode('Exact')
       setLoading(false)
       return
     }
@@ -251,6 +518,16 @@ export function TableDetailPage() {
       })
       .finally(() => setLoading(false))
   }, [id, isNew])
+
+  // Keep the left-form search draft in sync with whatever the backend last confirmed — including
+  // updates made via the right panel's quick toggle (SearchAndView calls setTable directly, not
+  // through handleSave), so a subsequent Save never silently reverts a change made there.
+  useEffect(() => {
+    if (table) {
+      setSearchEnabled(table.searchEnabled)
+      setSearchMode(table.searchMode)
+    }
+  }, [table])
 
   useEffect(() => {
     if (!sql.trim()) {
@@ -301,9 +578,9 @@ export function TableDetailPage() {
     try {
       let saved: TableDefinition
       if (isNew) {
-        saved = await tablesApi.create({ name: name.trim(), description, sql })
+        saved = await tablesApi.create({ name: name.trim(), description, sql, searchEnabled, searchMode })
       } else {
-        saved = await tablesApi.update(id!, { name: name.trim(), description, sql })
+        saved = await tablesApi.update(id!, { name: name.trim(), description, sql, searchEnabled, searchMode })
       }
       if (startAfter && saved.status !== 'Running') {
         saved = await tablesApi.start(saved.id)
@@ -374,6 +651,32 @@ export function TableDetailPage() {
                   placeholder="Running buy-side volume per symbol"
                 />
               </Field>
+
+              <RoleGate min="Editor">
+                <div className="flex flex-wrap items-center gap-3 sm:col-span-2">
+                  <label htmlFor="tbl-form-search-enabled" className="flex items-center gap-2 text-sm text-foreground">
+                    <Switch
+                      id="tbl-form-search-enabled"
+                      checked={searchEnabled}
+                      onCheckedChange={setSearchEnabled}
+                    />
+                    Search index
+                  </label>
+                  <ToggleGroup
+                    type="single"
+                    variant="outline"
+                    size="sm"
+                    value={searchMode}
+                    disabled={!searchEnabled}
+                    onValueChange={(v) => v && setSearchMode(v as TableSearchMode)}
+                    aria-label="Search mode"
+                  >
+                    <ToggleGroupItem value="Exact">Exact</ToggleGroupItem>
+                    <ToggleGroupItem value="Fuzzy">Fuzzy</ToggleGroupItem>
+                  </ToggleGroup>
+                  <span className="text-xs text-muted-foreground">Applied on Save{isNew ? '' : ' (restarts the table)'}.</span>
+                </div>
+              </RoleGate>
             </CardContent>
           </Card>
 
@@ -497,7 +800,7 @@ export function TableDetailPage() {
               </EmptyHeader>
             </Empty>
           ) : (
-            <MaterializedView table={table} />
+            <SearchAndView table={table} canEdit={canEdit} onTableChange={setTable} />
           )}
         </div>
       </div>
