@@ -217,6 +217,9 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#tables-search" class="sub">Row search</a>
   <a href="#rbac">Roles &amp; permissions</a>
   <a href="#api">REST API</a>
+  <a href="#grpc">gRPC &amp; typed clients</a>
+  <a href="#grpc-reflection" class="sub">Dynamic reflection</a>
+  <a href="#grpc-codegen" class="sub">Typed client codegen</a>
   <a href="#realtime">Realtime events</a>
   <a href="#architecture">Architecture</a>
   <a href="#limits">Limitations</a>
@@ -403,7 +406,7 @@ cd web &amp;&amp; bun install &amp;&amp; bun run build &amp;&amp; cd ..
 
 <section id="api">
 <h2>REST API</h2>
-<p>All endpoints are JSON under <code>http://localhost:5199</code>, authenticated with <code>Authorization: Bearer &lt;token&gt;</code> from login. Roles: <span class="pill viewer">V</span> Viewer+ · <span class="pill editor">E</span> Editor+ · <span class="pill admin">A</span> Admin.</p>
+<p>All endpoints are JSON under <code>http://localhost:5199</code>, authenticated with <code>Authorization: Bearer &lt;token&gt;</code> from login. Roles: <span class="pill viewer">V</span> Viewer+ · <span class="pill editor">E</span> Editor+ · <span class="pill admin">A</span> Admin. An interactive OpenAPI reference (Scalar) lives at <code>/scalar</code> — authenticate there with the same Bearer token.</p>
 <pre><code>curl -s -X POST localhost:5199/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"editor","password":"editor123!"}'   # → { token, username, displayName, role }</code></pre>
@@ -426,8 +429,39 @@ cd web &amp;&amp; bun install &amp;&amp; bun run build &amp;&amp; cd ..
 <tr><td><code>/api/tables/{id}/rows?limit=&amp;offset=</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Consolidated snapshot rows + sequence number</td></tr>
 <tr><td><code>/api/tables/{id}/search?q=&amp;limit=</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Index search → <code>{rows, mode, enabled, total}</code>; 400 if disabled</td></tr>
 <tr><td><code>/api/tables/{id}/metrics</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Row count, delta counters, rebuilding flag</td></tr>
+<tr><td><code>/api/{sources|pipelines|tables}/{key}/proto</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Self-contained <code>.proto</code> for the entity (by id or name) — see <a href="#grpc-codegen">Typed client codegen</a></td></tr>
 <tr><td><code>/api/users[…]</code></td><td class="pill mut">GET·POST·PUT·DELETE</td><td><span class="pill admin">A</span></td><td>User management (self-deletion rejected)</td></tr>
 </tbody></table></div>
+</section>
+
+<section id="grpc">
+<h2>gRPC &amp; typed clients</h2>
+<p>Alongside REST, StreamForge serves a full gRPC surface on <code>http://localhost:5299</code> (cleartext HTTP/2). Authentication is the same JWT, passed as gRPC metadata: <code>Authorization: Bearer &lt;token&gt;</code>. The static control plane (package <code>streamforge.v1</code>) mirrors the REST API — <code>SourceService</code>, <code>PipelineService</code>, <code>TableService</code> with CRUD, lifecycle, and validate, plus <code>StreamService</code> whose server-streaming <code>SubscribeSource</code> / <code>SubscribePipeline</code> / <code>SubscribeTable</code> carry rows as <code>google.protobuf.Struct</code>. REST status semantics map onto gRPC codes: 400 → <code>InvalidArgument</code>, 404 → <code>NotFound</code>, 409 → <code>FailedPrecondition</code>, and role failures → <code>Unauthenticated</code> / <code>PermissionDenied</code>.</p>
+
+<h3 id="grpc-reflection">Dynamic reflection</h3>
+<p>The server implements gRPC reflection (<code>grpc.reflection.v1alpha</code>) <b>from the live catalog</b>: every source, every table, and every pipeline whose SQL currently compiles is published as a real protobuf message type in package <code>streamforge.dynamic.v1</code> — e.g. table <code>positions</code> becomes messages <code>Positions</code>, <code>PositionsEvent</code>, <code>PositionsDelta</code>. Tools like <code>grpcurl</code>, Postman, or Kreya discover them with zero setup:</p>
+<pre><code>grpcurl -plaintext localhost:5299 list
+grpcurl -plaintext localhost:5299 describe streamforge.dynamic.v1.Positions</code></pre>
+<p>Schema mapping: <code>String→string</code>, <code>Double→double</code>, <code>Long→int64</code>, <code>Bool→bool</code>, <code>Timestamp→int64</code> (epoch millis), JSON fields with declared children → nested messages, schemaless JSON → <code>google.protobuf.Struct</code>. <b>Field numbers are stable</b>: the registry persists a per-entity numbering map, so editing a schema keeps existing numbers, gives new fields fresh ones, and marks removed fields' numbers <code>reserved</code> forever — previously generated clients keep working after schema edits.</p>
+<p>Runtime-created entities are streamable without restarting anything via the generic typed stream (Viewer+):</p>
+<pre><code>service DynamicStreamService {
+  rpc SubscribeEntity(EntitySubscribeRequest) returns (stream DynamicFrame);
+}
+message EntitySubscribeRequest { string entity_key = 1; }  // "source:{name}" | "pipeline:{id}" | "table:{id-or-name}"
+message DynamicFrame { string entity_key = 1; bytes payload = 2; int64 seq = 3; }</code></pre>
+<p><code>payload</code> holds the entity's own typed message bytes — <code>{Entity}Event</code> (row + seq + ts_ms) for sources and pipelines, <code>{Entity}Delta</code> (row + weight + seq) for tables, where negative weights are Z-set retractions. The schema is snapshotted when the subscription opens; re-subscribe after editing an entity's schema.</p>
+
+<h3 id="grpc-codegen">Typed client codegen</h3>
+<p>The endgame: a compile-time-typed client library for any entity, generated in one command. Each entity exposes a <b>self-contained <code>.proto</code></b> (its messages + the <code>DynamicStreamService</code> contract) at <code>GET /api/sources/{name}/proto</code>, <code>/api/pipelines/{id}/proto</code>, <code>/api/tables/{id}/proto</code> (names work too). The bundled CLI turns it into a ready-built .NET library:</p>
+<pre><code>./tools/generate-client.sh table positions --user viewer --pass 'viewer123!'
+# → downloads positions.proto, scaffolds a csproj (Google.Protobuf + Grpc.Net.Client + Grpc.Tools),
+#   generates a StreamForgeClient wrapper, and builds it.</code></pre>
+<p>The generated wrapper gives you login plus a typed <code>IAsyncEnumerable</code> subscription:</p>
+<pre><code>var jwt = await StreamForgeClient.LoginAsync("http://localhost:5199", "viewer", "viewer123!");
+await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5299", jwt))
+    Console.WriteLine($"{delta.Row.Symbol}  avg={delta.Row.AvgPrice}  w={delta.Weight}");
+// PositionsDelta — a real generated protobuf type; renames/typos are compile errors.</code></pre>
+<p>Because field numbers come from the same persisted registry map as reflection, a client generated today still decodes streams correctly after columns are added — new fields simply appear as unknown fields until you regenerate. For other languages, feed the downloaded <code>.proto</code> to <code>protoc</code> (Go, Python, TypeScript, Java…) — the file is standard proto3 with no custom options.</p>
 </section>
 
 <section id="realtime">
