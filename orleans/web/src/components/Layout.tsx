@@ -1,5 +1,5 @@
 import { NavLink, Navigate, Outlet } from 'react-router-dom'
-import { LayoutDashboard, LogOut, Moon, Sun, Users as UsersIconLucide, Workflow, Database, Table2 } from 'lucide-react'
+import { BookOpen, LayoutDashboard, LogOut, Moon, Sun, Users as UsersIconLucide, Workflow, Database, Table2 } from 'lucide-react'
 import { useAuth } from '../api/auth'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/lib/theme'
@@ -109,6 +109,11 @@ function Layout() {
                   {user.role}
                 </Badge>
               </div>
+              <Button variant="ghost" size="icon-sm" asChild title="Documentation">
+                <a href="/docs" target="_blank" rel="noreferrer" aria-label="Open documentation">
+                  <BookOpen />
+                </a>
+              </Button>
               <ThemeToggle />
               <Button variant="ghost" size="icon-sm" onClick={logout} title="Log out">
                 <LogOut />

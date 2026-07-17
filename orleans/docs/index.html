@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StreamForge Documentation</title>
+<style>
+/* ===== Tokens — same palette as the StreamForge console (the client brand) ===== */
+:root {
+  --bg: #f7f9f8; --panel: #ffffff; --ink: #14231c; --muted: #55665d;
+  --brand: #008755; --brand-deep: #007348; --brand-tint: #39a87b;
+  --border: #dce5e0; --code-bg: #eef3f0; --amber: #8a5a00; --red: #c6453c;
+  --kbd-bg: #e1eee6; --shadow: 0 1px 3px rgba(20, 35, 28, 0.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a0f0d; --panel: #10161a; --ink: #e7ece9; --muted: #93a39c;
+    --brand: #39a87b; --brand-deep: #6abb97; --brand-tint: #39a87b;
+    --border: rgba(255,255,255,0.09); --code-bg: #121a17; --amber: #e6a93c; --red: #e4574d;
+    --kbd-bg: #1b2a22; --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0a0f0d; --panel: #10161a; --ink: #e7ece9; --muted: #93a39c;
+  --brand: #39a87b; --brand-deep: #6abb97; --brand-tint: #39a87b;
+  --border: rgba(255,255,255,0.09); --code-bg: #121a17; --amber: #e6a93c; --red: #e4574d;
+  --kbd-bg: #1b2a22; --shadow: none;
+}
+:root[data-theme="light"] {
+  --bg: #f7f9f8; --panel: #ffffff; --ink: #14231c; --muted: #55665d;
+  --brand: #008755; --brand-deep: #007348; --brand-tint: #39a87b;
+  --border: #dce5e0; --code-bg: #eef3f0; --amber: #8a5a00; --red: #c6453c;
+  --kbd-bg: #e1eee6; --shadow: 0 1px 3px rgba(20, 35, 28, 0.06);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.6 'IBM Plex Sans', -apple-system, 'Segoe UI', system-ui, sans-serif;
+}
+code, pre, kbd, .mono { font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ===== Shell: fixed sidebar + content ===== */
+.shell { display: flex; min-height: 100vh; }
+nav.side {
+  position: sticky; top: 0; align-self: flex-start; height: 100vh; overflow-y: auto;
+  width: 250px; flex-shrink: 0; padding: 24px 14px; border-right: 1px solid var(--border);
+  background: var(--panel); display: flex; flex-direction: column; gap: 4px;
+}
+.wordmark { padding: 0 10px 14px; }
+.wordmark .co { font-size: 10px; font-weight: 600; letter-spacing: 0.18em; color: var(--muted); }
+.wordmark .prod { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+.wordmark .prod b { color: var(--brand); }
+.wordmark .doc-tag { font-size: 11px; color: var(--muted); margin-top: 2px; }
+#navfilter {
+  margin: 0 6px 10px; padding: 7px 10px; font: inherit; font-size: 13px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--ink); width: calc(100% - 12px);
+}
+#navfilter:focus { outline: 2px solid var(--brand); outline-offset: 1px; }
+nav.side a {
+  display: block; padding: 6px 10px; border-radius: 8px; color: var(--muted);
+  text-decoration: none; font-size: 13.5px; font-weight: 500;
+}
+nav.side a:hover { color: var(--ink); background: var(--code-bg); }
+nav.side a.active { color: var(--brand-deep); background: var(--kbd-bg); }
+nav.side a.sub { padding-left: 24px; font-weight: 400; font-size: 13px; }
+nav.side .navgap { height: 8px; }
+.side-foot { margin-top: auto; padding: 12px 10px 0; display: flex; align-items: center; gap: 8px; }
+#themebtn {
+  font: inherit; font-size: 12.5px; padding: 6px 12px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--panel); color: var(--ink);
+}
+#themebtn:hover { background: var(--code-bg); }
+#themebtn:focus-visible { outline: 2px solid var(--brand); }
+
+main { flex: 1; min-width: 0; padding: 48px clamp(24px, 6vw, 96px) 96px; }
+.content { max-width: 860px; }
+
+/* ===== Typography ===== */
+h1 { font-size: 34px; line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 8px; text-wrap: balance; }
+.lede { font-size: 17.5px; color: var(--muted); max-width: 62ch; margin: 0 0 12px; }
+h2 {
+  font-size: 23px; letter-spacing: -0.01em; margin: 64px 0 12px; padding-top: 20px;
+  border-top: 1px solid var(--border); text-wrap: balance;
+}
+section:first-of-type h2 { border-top: none; margin-top: 28px; padding-top: 0; }
+h3 { font-size: 16.5px; margin: 28px 0 8px; }
+p, li { max-width: 70ch; }
+p { margin: 10px 0; }
+a { color: var(--brand-deep); }
+.eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--brand); margin: 0 0 4px; }
+
+/* ===== Blocks ===== */
+pre {
+  position: relative; background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.55; margin: 12px 0;
+}
+code { font-size: 0.92em; }
+p code, li code, td code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
+pre code { background: none; border: none; padding: 0; }
+.copybtn {
+  position: absolute; top: 8px; right: 8px; font: 11.5px/1 'IBM Plex Sans', sans-serif;
+  padding: 5px 9px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--muted); cursor: pointer; opacity: 0; transition: opacity 120ms;
+}
+pre:hover .copybtn, .copybtn:focus-visible { opacity: 1; }
+.copybtn:hover { color: var(--brand-deep); }
+.sql-k { color: var(--brand-deep); font-weight: 600; }
+.sql-s { color: var(--amber); }
+
+table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+th { text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+th, td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+td:first-child code { white-space: nowrap; }
+.tablewrap { overflow-x: auto; }
+tbody tr:hover { background: var(--code-bg); }
+td.num, .tabular { font-variant-numeric: tabular-nums; }
+
+.pill {
+  display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 9px;
+  border-radius: 999px; border: 1px solid var(--border); white-space: nowrap;
+}
+.pill.viewer { color: var(--muted); }
+.pill.editor { color: var(--brand-deep); border-color: var(--brand); }
+.pill.admin { color: #fff; background: var(--brand); border-color: var(--brand); }
+:root[data-theme="dark"] .pill.admin, .dark .pill.admin { color: #0a0f0d; }
+.pill.get { color: var(--brand-deep); }
+.pill.mut { color: var(--amber); }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 16px 0; }
+.card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px 18px; box-shadow: var(--shadow);
+}
+.card h4 { margin: 0 0 6px; font-size: 15px; }
+.card h4 span { color: var(--brand); }
+.card p { font-size: 13.5px; color: var(--muted); margin: 0; }
+
+.callout {
+  border: 1px solid var(--border); border-left: 3px solid var(--brand);
+  background: var(--panel); border-radius: 10px; padding: 12px 16px; margin: 14px 0; font-size: 14.5px;
+}
+.callout.warn { border-left-color: var(--amber); }
+.callout b:first-child { color: var(--brand-deep); }
+.callout.warn b:first-child { color: var(--amber); }
+
+details {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+  padding: 0 16px; margin: 10px 0;
+}
+details summary { cursor: pointer; font-weight: 600; font-size: 14.5px; padding: 12px 0; list-style-position: inside; }
+details summary:hover { color: var(--brand-deep); }
+details[open] { padding-bottom: 10px; }
+
+kbd {
+  background: var(--kbd-bg); border: 1px solid var(--border); border-bottom-width: 2px;
+  border-radius: 5px; padding: 1px 6px; font-size: 12px;
+}
+
+/* ===== Architecture diagram (pure HTML/CSS) ===== */
+.arch { display: flex; flex-direction: column; gap: 10px; margin: 18px 0; font-size: 13px; }
+.arch-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.arch-box {
+  flex: 1; min-width: 150px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 14px; box-shadow: var(--shadow);
+}
+.arch-box.brand { border-color: var(--brand); }
+.arch-box b { display: block; font-size: 13.5px; }
+.arch-box span { color: var(--muted); font-size: 12px; }
+.arch-flow { text-align: center; color: var(--brand); font-size: 15px; line-height: 1; }
+
+mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0 2px; }
+
+@media (max-width: 760px) {
+  nav.side { display: none; }
+  main { padding: 28px 20px 64px; }
+}
+</style>
+</head>
+<body>
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('sf.theme'); /* shared with the StreamForge console */
+    if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
+  } catch (e) { /* default: follow OS */ }
+})();
+</script>
+
+<div class="shell">
+<nav class="side" aria-label="Documentation">
+  <div class="wordmark">
+    <div class="co">CORPORATE</div>
+    <div class="prod">Stream<b>Forge</b></div>
+    <div class="doc-tag">User documentation</div>
+  </div>
+  <input id="navfilter" type="search" placeholder="Filter sections…" aria-label="Filter documentation sections">
+  <a href="#overview">Overview</a>
+  <a href="#quickstart">Quick start</a>
+  <a href="#concepts">Core concepts</a>
+  <div class="navgap"></div>
+  <a href="#console">Using the console</a>
+  <a href="#console-pipelines" class="sub">Pipelines &amp; SQL editor</a>
+  <a href="#console-tables" class="sub">Tables &amp; search</a>
+  <a href="#console-sources" class="sub">Sources</a>
+  <a href="#console-users" class="sub">Users &amp; themes</a>
+  <div class="navgap"></div>
+  <a href="#sql">Streaming SQL reference</a>
+  <a href="#sql-joins" class="sub">Joins</a>
+  <a href="#sql-windows" class="sub">Windows &amp; EMIT</a>
+  <a href="#sql-json" class="sub">JSON operators</a>
+  <a href="#sql-functions" class="sub">Functions &amp; expressions</a>
+  <div class="navgap"></div>
+  <a href="#tables">Materialized tables</a>
+  <a href="#tables-search" class="sub">Row search</a>
+  <a href="#rbac">Roles &amp; permissions</a>
+  <a href="#api">REST API</a>
+  <a href="#realtime">Realtime events</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#limits">Limitations</a>
+  <div class="side-foot">
+    <button id="themebtn" type="button">Toggle theme</button>
+  </div>
+</nav>
+
+<main><div class="content">
+
+<p class="eyebrow">Enterprise streaming platform</p>
+<h1>StreamForge Documentation</h1>
+<p class="lede">Define streaming pipelines and persistent materialized tables in SQL, watch them run live, and manage everything from a role-gated console — all on Microsoft Orleans, with zero external infrastructure.</p>
+
+<section id="overview">
+<h2>Overview</h2>
+<p>StreamForge is a streaming platform foundation built on <b>Microsoft Orleans 10</b> (.NET 10). Synthetic market-data generators publish events onto Orleans streams; you declare what to compute over those streams in a SQL-like dialect, and StreamForge runs it continuously:</p>
+<div class="cards">
+  <div class="card"><h4><span>Pipelines</span> — continuous queries</h4><p>Windowed streaming queries: joins across streams, temporal windows, filters, projections. Results stream to your browser in real time.</p></div>
+  <div class="card"><h4><span>Tables</span> — materialized views</h4><p>Persistent, incrementally-maintained tables (DBSP-style Z-sets): running aggregates that update in place, table-over-table chaining, optional fuzzy search.</p></div>
+  <div class="card"><h4><span>Sources</span> — event generators</h4><p>Schema-declared synthetic streams (trades, quotes, orders, nested-JSON app events) with per-source rate control and a live tape.</p></div>
+  <div class="card"><h4><span>Console</span> — the UI</h4><p>SQL editor with as-you-type validation and autocomplete, a visual query builder, live charts and grids, light/dark themes, and role-based access control.</p></div>
+</div>
+<div class="arch">
+  <div class="arch-row">
+    <div class="arch-box brand"><b>Browser console</b><span>React 19 · REST + JWT · SignalR live updates</span></div>
+  </div>
+  <div class="arch-flow">▲ ▼</div>
+  <div class="arch-row">
+    <div class="arch-box"><b>ASP.NET Core API + hub</b><span>minimal APIs · RBAC policies · stream bridge</span></div>
+  </div>
+  <div class="arch-flow">▲ ▼</div>
+  <div class="arch-row">
+    <div class="arch-box"><b>Generator grains</b><span>trades · quotes · orders · app_events</span></div>
+    <div class="arch-box brand"><b>Pipeline grains</b><span>compile SQL → subscribe → window/join → emit</span></div>
+    <div class="arch-box brand"><b>Table grains</b><span>Z-set deltas → consolidated snapshot → search index</span></div>
+  </div>
+  <div class="arch-row">
+    <div class="arch-box"><b>Orleans silo (same process)</b><span>memory streams · JSON-file persistence · resume on restart</span></div>
+  </div>
+</div>
+</section>
+
+<section id="quickstart">
+<h2>Quick start</h2>
+<pre><code># prerequisites: .NET 10 SDK (~/.dotnet), Bun / Node 22+
+cd ~/work/crates-foundation/orleans
+cd web &amp;&amp; bun install &amp;&amp; bun run build &amp;&amp; cd ..
+~/.dotnet/dotnet run --project src/StreamForge.Host     # http://localhost:5199</code></pre>
+<p>Open <a href="http://localhost:5199">http://localhost:5199</a> and sign in:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>User</th><th>Password</th><th>Role</th><th>Can do</th></tr></thead>
+<tbody>
+<tr><td><code>admin</code></td><td><code>admin123!</code></td><td><span class="pill admin">Admin</span></td><td>Everything, including user management</td></tr>
+<tr><td><code>editor</code></td><td><code>editor123!</code></td><td><span class="pill editor">Editor</span></td><td>Create / edit / start / stop pipelines, tables, sources</td></tr>
+<tr><td><code>viewer</code></td><td><code>viewer123!</code></td><td><span class="pill viewer">Viewer</span></td><td>Read-only: dashboards, live results, search</td></tr>
+</tbody></table></div>
+<p>Frontend development with hot reload: <code>cd web &amp;&amp; bun run dev</code> → <a href="http://localhost:5173">http://localhost:5173</a> (proxies API and websockets to :5199). Engine tests: <code>~/.dotnet/dotnet test tests/StreamForge.Engine.Tests</code> — 196 tests covering the parser, validator, window/join semantics, Z-set algebra, and search index.</p>
+<div class="callout"><b>Everything is seeded.</b> First run creates 4 sources, 5 pipelines (2 running), and 3 tables (1 running, fuzzy search enabled) so the dashboard is alive immediately. Delete <code>src/StreamForge.Host/data/</code> to reset to seeds.</div>
+</section>
+
+<section id="concepts">
+<h2>Core concepts</h2>
+<h3>Sources</h3>
+<p>A source is a named stream with a declared schema (<code>String</code>, <code>Double</code>, <code>Long</code>, <code>Bool</code>, <code>Timestamp</code>, <code>Json</code>) and a synthetic generator profile. <code>Json</code> fields can declare their <b>nested shape</b> — a drill-down schema of sub-fields — which documents the payload, powers editor autocomplete, and drives generation for custom sources. Every event carries reserved fields <code>_ts</code> (epoch ms) and <code>_source</code>.</p>
+<h3>Pipelines</h3>
+<p>A pipeline is a continuous streaming query over sources. It runs as one Orleans grain: events flow in, the query's operator chain (join → filter → window/aggregate → project) runs incrementally, and result rows stream out to the console. Pipelines understand <b>event time</b>: a watermark trails the newest event by 1 second; windows close when the watermark passes them, and later ("late") events are dropped and counted.</p>
+<h3>Tables</h3>
+<p>A table is a <b>persistent materialized view</b> — the current answer to a query, maintained incrementally as data arrives. Unlike pipelines, tables have no windows: aggregates are running totals that update in place. Tables can read other tables, and their state survives restarts. See <a href="#tables">Materialized tables</a>.</p>
+<h3>Everything is an entity</h3>
+<p>Sources, pipelines, tables, and users are all managed the same way: create, edit, delete, start/stop — from the console or the <a href="#api">REST API</a>, gated by <a href="#rbac">roles</a>.</p>
+</section>
+
+<section id="console">
+<h2>Using the console</h2>
+<p>The <b>Dashboard</b> shows live stat tiles (pipelines, tables, sources, total rows/s) and one card per pipeline with in/out rates, a sparkline, and Start/Stop. Click any card to open it.</p>
+
+<h3 id="console-pipelines">Pipelines &amp; the SQL editor</h3>
+<p>A pipeline page has two panes: the definition on the left, live output on the right (results grid with flash-on-arrival, an SVG chart of any numeric column, and a metrics strip).</p>
+<ul>
+<li><b>Validation as you type.</b> The editor calls the real compiler (debounced 500&nbsp;ms) and shows positioned diagnostics — a red squiggle at the exact line:column, with the message below. Valid queries show the compiled plan summary.</li>
+<li><b>Autocomplete.</b> Context-aware: after <code>FROM</code>/<code>JOIN</code> it suggests sources (and tables, where valid); after <code>alias.</code> it suggests that source's columns plus <code>*</code>; in expressions it offers columns (auto-qualified only when ambiguous), functions, aggregates, and keywords. After a <code>Json</code> column it offers <code>-&gt;</code>/<code>-&gt;&gt;</code>, and inside a path string it completes the <b>declared nested keys</b> level by level. <kbd>Ctrl</kbd>+<kbd>Space</kbd> forces the list; <kbd>↑</kbd><kbd>↓</kbd> navigate, <kbd>Enter</kbd>/<kbd>Tab</kbd> accept, <kbd>Esc</kbd> dismisses.</li>
+<li><b>Visual builder.</b> The Builder tab composes the same SQL from dropdowns — sources, join type/key/window, filters, group-by, projections — and round-trips into the editor.</li>
+<li><b>Save &amp; start</b> compiles, persists, and subscribes in one step. Compile failures mark the pipeline <mark>Failed</mark> with the error preserved.</li>
+</ul>
+
+<h3 id="console-tables">Tables &amp; search</h3>
+<p>A table page shows its definition on the left (same editor, table-mode validation, output schema preview) and the <b>live materialized view</b> on the right: rows update in place as deltas arrive — an aggregate row changes rather than appends. Above the grid sits <b>row search</b> (when enabled): type to swap the live view for matched rows, clear (×) to return. Editors control the index inline: an on/off switch and an Exact ↔ Fuzzy mode toggle (changes reindex the table automatically). See <a href="#tables-search">Row search</a>.</p>
+
+<h3 id="console-sources">Sources</h3>
+<p>Each source card shows its schema — <code>Json</code> fields expand into a <b>drill-down tree</b> — its rate, an enable switch, and a horizontally-scrollable <b>live tape</b> of raw events. In the editor, setting a field to <code>Json</code> reveals nested sub-field rows (recursively), so you can declare shapes like <code>payload → user → id/tier</code>. The <code>generic</code> profile generates values matching whatever schema you declare, including nested objects.</p>
+
+<h3 id="console-users">Users &amp; themes</h3>
+<p>Admins manage users on the Users page (create, edit role, reset password; self-deletion is blocked). The <b>theme switch</b> lives at the bottom of the sidebar — light is the default; the choice persists per browser and applies instantly with no flash on reload.</p>
+</section>
+
+<section id="sql">
+<h2>Streaming SQL reference</h2>
+<pre><code><span class="sql-k">SELECT</span> expr [<span class="sql-k">AS</span> alias], … | * | alias.*
+<span class="sql-k">FROM</span> source [alias]
+  [ [<span class="sql-k">INNER</span>|<span class="sql-k">LEFT</span> [<span class="sql-k">OUTER</span>]|<span class="sql-k">RIGHT</span> [<span class="sql-k">OUTER</span>]|<span class="sql-k">FULL</span> [<span class="sql-k">OUTER</span>]] <span class="sql-k">JOIN</span> source [alias] <span class="sql-k">WITHIN</span> dur <span class="sql-k">ON</span> expr
+  | <span class="sql-k">CROSS JOIN</span> source [alias] <span class="sql-k">WITHIN</span> dur ] …
+[<span class="sql-k">WHERE</span> expr]
+[<span class="sql-k">GROUP BY</span> expr, …]
+[<span class="sql-k">WINDOW</span> <span class="sql-k">TUMBLING</span>(<span class="sql-k">SIZE</span> dur) | <span class="sql-k">HOPPING</span>(<span class="sql-k">SIZE</span> dur, <span class="sql-k">ADVANCE BY</span> dur) | <span class="sql-k">SESSION</span>(<span class="sql-k">GAP</span> dur)]
+[<span class="sql-k">EMIT CHANGES</span> | <span class="sql-k">EMIT FINAL</span>]</code></pre>
+<p>Durations: <code>N MILLISECONDS | SECONDS | MINUTES | HOURS</code> (singular accepted). Keywords are case-insensitive; comments start with <code>--</code>. <code>SELECT *</code> and <code>alias.*</code> expand to all columns (alias-prefixed like <code>t_symbol</code> when the query has multiple inputs); stars are not allowed with <code>GROUP BY</code>/aggregates.</p>
+
+<h3 id="sql-joins">Joins</h3>
+<p>Stream joins are <b>interval joins</b> (the Flink/ksqlDB model): each side buffers events for the <code>WITHIN</code> duration, matched on the equi-key from <code>ON</code> (extra conditions become a post-match filter).</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Join</th><th>Behavior</th></tr></thead>
+<tbody>
+<tr><td><code>INNER</code> <i>(default)</i></td><td>Emits a combined row for every match within the window.</td></tr>
+<tr><td><code>LEFT / RIGHT OUTER</code></td><td>Like INNER, plus a NULL-padded row for each unmatched left/right event once the watermark evicts it.</td></tr>
+<tr><td><code>FULL OUTER</code></td><td>NULL-padded rows for unmatched events on both sides.</td></tr>
+<tr><td><code>CROSS</code></td><td>Every pairing of events within the window; no <code>ON</code>. <code>WITHIN</code> is required.</td></tr>
+</tbody></table></div>
+<pre><code><span class="sql-k">SELECT</span> t.symbol, t.price, q.bid, q.ask, t.price - q.bid <span class="sql-k">AS</span> above_bid
+<span class="sql-k">FROM</span> trades t <span class="sql-k">JOIN</span> quotes q <span class="sql-k">WITHIN</span> 5 <span class="sql-k">SECONDS</span> <span class="sql-k">ON</span> t.symbol = q.symbol
+<span class="sql-k">WHERE</span> t.side = <span class="sql-s">'BUY'</span></code></pre>
+
+<h3 id="sql-windows">Windows, aggregates &amp; EMIT</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Window</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>TUMBLING(SIZE 5 SECONDS)</code></td><td>Fixed, non-overlapping buckets.</td></tr>
+<tr><td><code>HOPPING(SIZE 10 SECONDS, ADVANCE BY 2 SECONDS)</code></td><td>Overlapping buckets; each event lands in several.</td></tr>
+<tr><td><code>SESSION(GAP 3 SECONDS)</code></td><td>Per-group activity bursts; a window closes after a quiet gap.</td></tr>
+</tbody></table></div>
+<p>Aggregates (<code>COUNT(*)</code>, <code>COUNT(x)</code>, <code>SUM</code>, <code>AVG</code>, <code>MIN</code>, <code>MAX</code>) require a window in pipelines; non-aggregated select items must appear in <code>GROUP BY</code>. Closed windows add <code>window_start</code>/<code>window_end</code> columns. <b><code>EMIT FINAL</code></b> (default) emits one row per window+group when the watermark closes it; <b><code>EMIT CHANGES</code></b> additionally emits a running update per input event, flagged <code>_final = false</code>.</p>
+<pre><code><span class="sql-k">SELECT</span> symbol, <span class="sql-k">SUM</span>(price * qty) / <span class="sql-k">SUM</span>(qty) <span class="sql-k">AS</span> vwap, <span class="sql-k">COUNT</span>(*) <span class="sql-k">AS</span> trades
+<span class="sql-k">FROM</span> trades <span class="sql-k">GROUP BY</span> symbol <span class="sql-k">WINDOW TUMBLING</span>(<span class="sql-k">SIZE</span> 5 <span class="sql-k">SECONDS</span>)</code></pre>
+
+<h3 id="sql-json">JSON operators</h3>
+<p>Fields typed <code>Json</code> hold nested objects and arrays, accessed with Postgres syntax — <code>-&gt;</code> returns the JSON value (chainable), <code>-&gt;&gt;</code> returns text. Keys are string literals; array indexes are 0-based integers. Missing keys and NULL propagate to NULL. A JSON path works anywhere an expression does — including join keys and <code>GROUP BY</code>:</p>
+<pre><code><span class="sql-k">SELECT</span> e.eventType,
+       e.payload -&gt; <span class="sql-s">'user'</span> -&gt;&gt; <span class="sql-s">'tier'</span>    <span class="sql-k">AS</span> tier,
+       e.payload -&gt; <span class="sql-s">'order'</span> -&gt;&gt; <span class="sql-s">'symbol'</span> <span class="sql-k">AS</span> symbol,
+       t.price
+<span class="sql-k">FROM</span> app_events e <span class="sql-k">JOIN</span> trades t <span class="sql-k">WITHIN</span> 10 <span class="sql-k">SECONDS</span>
+  <span class="sql-k">ON</span> e.payload -&gt; <span class="sql-s">'order'</span> -&gt;&gt; <span class="sql-s">'symbol'</span> = t.symbol</code></pre>
+<div class="callout"><b>Tip:</b> comparing a raw <code>-&gt;</code> result is an error — the validator's message nudges you to finish the path with <code>-&gt;&gt;</code> (text) before comparing.</div>
+
+<h3 id="sql-functions">Functions, expressions &amp; NULL</h3>
+<p>Scalar functions: <code>ABS</code>, <code>ROUND(x[, digits])</code>, <code>UPPER</code>, <code>LOWER</code>, <code>COALESCE(a, b, …)</code>. Full boolean/comparison/arithmetic expressions with SQL three-valued NULL semantics (<code>NULL op x</code> is NULL; <code>WHERE</code> requires true). Numeric type promotion is automatic; division always yields a double.</p>
+<details><summary>Event time, watermarks &amp; late events</summary>
+<p>Every event carries <code>_ts</code>. The watermark advances to <code>max(event&nbsp;time, wall&nbsp;clock) − 1&nbsp;second</code>, ticked every 500&nbsp;ms, so windows close even when a stream goes quiet. An event older than the watermark is <b>dropped</b> and counted (visible as "late events" in pipeline metrics). Join buffers evict once the watermark passes an event's timestamp plus the <code>WITHIN</code> horizon — that eviction is also the moment outer joins emit their NULL-padded rows.</p>
+</details>
+</section>
+
+<section id="tables">
+<h2>Materialized tables</h2>
+<p>A table's SQL is the same dialect with different rules — <b>no windows, no EMIT, no WITHIN</b>. Instead of window buckets, aggregates are <b>running</b> totals per group, and joins are relational (INNER equi-joins over current state). When a group's value changes, the table emits a <i>retraction</i> of the old row and an <i>assertion</i> of the new one — the console applies both, so you see rows update in place. This is Z-set (DBSP-style) incremental view maintenance: correct under updates, not just appends.</p>
+<pre><code><span class="sql-k">SELECT</span> symbol, <span class="sql-k">COUNT</span>(*) <span class="sql-k">AS</span> trades, <span class="sql-k">SUM</span>(qty) <span class="sql-k">AS</span> total_qty,
+       <span class="sql-k">AVG</span>(price) <span class="sql-k">AS</span> avg_price, <span class="sql-k">MIN</span>(price) <span class="sql-k">AS</span> low, <span class="sql-k">MAX</span>(price) <span class="sql-k">AS</span> high
+<span class="sql-k">FROM</span> trades <span class="sql-k">GROUP BY</span> symbol</code></pre>
+<p><b>Tables can read tables.</b> A table may <code>FROM</code>/<code>JOIN</code> another table by name; changes propagate down the chain as deltas (the seeded <code>hot_symbols</code> filters <code>positions</code>). Start order is enforced — a table's inputs must be running first — and stopping or deleting a table that a running table depends on is rejected with a clear error.</p>
+<p><b>Persistence.</b> A table's current rows survive restarts and are served immediately. Operator state (join indexes, aggregate accumulators) is rebuilt from live traffic after a restart — the table shows a <mark>Rebuilding</mark> badge until fresh data flows.</p>
+
+<h3 id="tables-search">Row search</h3>
+<p>Big tables get a per-table <b>reverse search index</b>, toggleable by Editors (inline on the table page). Two modes:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Mode</th><th>Matching</th><th>Use when</th></tr></thead>
+<tbody>
+<tr><td><b>Exact</b></td><td>Token, prefix, and substring matches; multi-word queries must all match.</td><td>You know what you're looking for — IDs, symbols, exact values.</td></tr>
+<tr><td><b>Fuzzy</b></td><td>Trigram similarity with edit-distance ranking — typo-tolerant, results ranked by closeness.</td><td>Human input: <code>gogle</code> finds <code>GOOG</code>.</td></tr>
+</tbody></table></div>
+<p>The index updates incrementally with each delta, so results are always current. Search from the table page (results replace the live grid until cleared) or via <code>GET /api/tables/{id}/search?q=…</code>. Toggling the index or switching modes reindexes the table automatically.</p>
+</section>
+
+<section id="rbac">
+<h2>Roles &amp; permissions</h2>
+<div class="tablewrap"><table>
+<thead><tr><th>Capability</th><th>Viewer</th><th>Editor</th><th>Admin</th></tr></thead>
+<tbody>
+<tr><td>View dashboards, definitions, live results, search</td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td>Create / edit / delete / start / stop pipelines &amp; tables</td><td>—</td><td>✓</td><td>✓</td></tr>
+<tr><td>Manage sources (schema, rate, enable) &amp; search indexes</td><td>—</td><td>✓</td><td>✓</td></tr>
+<tr><td>Manage users</td><td>—</td><td>—</td><td>✓</td></tr>
+</tbody></table></div>
+<p>Roles are enforced server-side by ASP.NET authorization policies on every endpoint and mirrored in the UI — Viewers simply don't see mutating controls. Authentication is JWT (12-hour expiry); passwords are PBKDF2-hashed.</p>
+</section>
+
+<section id="api">
+<h2>REST API</h2>
+<p>All endpoints are JSON under <code>http://localhost:5199</code>, authenticated with <code>Authorization: Bearer &lt;token&gt;</code> from login. Roles: <span class="pill viewer">V</span> Viewer+ · <span class="pill editor">E</span> Editor+ · <span class="pill admin">A</span> Admin.</p>
+<pre><code>curl -s -X POST localhost:5199/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"editor","password":"editor123!"}'   # → { token, username, displayName, role }</code></pre>
+<div class="tablewrap"><table>
+<thead><tr><th>Endpoint</th><th>Method</th><th>Role</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>/api/auth/login</code></td><td class="pill get">POST</td><td>—</td><td>Exchange credentials for a JWT</td></tr>
+<tr><td><code>/api/auth/me</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Current user info</td></tr>
+<tr><td><code>/api/sources</code>, <code>/api/sources/{name}</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>List / fetch sources (schemas include nested JSON children)</td></tr>
+<tr><td><code>/api/sources[…]</code></td><td class="pill mut">POST·PUT·DELETE</td><td><span class="pill editor">E</span></td><td>Create / replace / delete a source (PUT takes the full definition)</td></tr>
+<tr><td><code>/api/pipelines</code>, <code>/{id}</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>List / fetch pipelines</td></tr>
+<tr><td><code>/api/pipelines[…]</code></td><td class="pill mut">POST·PUT·DELETE</td><td><span class="pill editor">E</span></td><td>Create / update / delete</td></tr>
+<tr><td><code>/api/pipelines/{id}/start</code> · <code>/stop</code></td><td class="pill mut">POST</td><td><span class="pill editor">E</span></td><td>Start or stop; compile errors mark the pipeline Failed</td></tr>
+<tr><td><code>/api/pipelines/validate</code></td><td class="pill mut">POST</td><td><span class="pill editor">E</span></td><td><code>{sql}</code> → <code>{ok, diagnostics[line,col], planSummary, sourceNames}</code></td></tr>
+<tr><td><code>/api/pipelines/{id}/results?limit=</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Recent result rows (ring buffer)</td></tr>
+<tr><td><code>/api/pipelines/{id}/metrics</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Rates, totals, late-event count</td></tr>
+<tr><td><code>/api/tables</code>, <code>/{id}</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>List / fetch tables (incl. output schema, inputs, search config)</td></tr>
+<tr><td><code>/api/tables[…]</code> · <code>/{id}/start</code> · <code>/stop</code></td><td class="pill mut">POST·PUT·DELETE</td><td><span class="pill editor">E</span></td><td>CRUD + lifecycle; dependency conflicts return a 409-style error</td></tr>
+<tr><td><code>/api/tables/validate</code></td><td class="pill mut">POST</td><td><span class="pill editor">E</span></td><td><code>{sql}</code> → diagnostics + output schema + stream/table inputs</td></tr>
+<tr><td><code>/api/tables/{id}/rows?limit=&amp;offset=</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Consolidated snapshot rows + sequence number</td></tr>
+<tr><td><code>/api/tables/{id}/search?q=&amp;limit=</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Index search → <code>{rows, mode, enabled, total}</code>; 400 if disabled</td></tr>
+<tr><td><code>/api/tables/{id}/metrics</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Row count, delta counters, rebuilding flag</td></tr>
+<tr><td><code>/api/users[…]</code></td><td class="pill mut">GET·POST·PUT·DELETE</td><td><span class="pill admin">A</span></td><td>User management (self-deletion rejected)</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="realtime">
+<h2>Realtime events</h2>
+<p>The console receives live data over a SignalR hub at <code>/hubs/stream</code> (JWT via <code>access_token</code> query string). Subscriptions are per-entity; the client re-subscribes automatically after reconnects, retrying forever with capped backoff.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Client → server</th><th>Server → client</th><th>Payload</th></tr></thead>
+<tbody>
+<tr><td><code>subscribePipeline(id)</code></td><td><code>pipelineResult</code></td><td><code>(pipelineId, rows[])</code> — result batches</td></tr>
+<tr><td><code>subscribeMetrics()</code></td><td><code>pipelineMetrics</code></td><td>rates &amp; totals, ~every 2 s per running pipeline</td></tr>
+<tr><td>—</td><td><code>pipelineStatus</code></td><td><code>(pipelineId, status)</code> on lifecycle changes</td></tr>
+<tr><td><code>subscribeSource(name)</code></td><td><code>sourceEvent</code></td><td>raw source events (sampled) for the live tape</td></tr>
+<tr><td><code>SubscribeTable(name)</code></td><td><code>tableDelta</code></td><td><code>(tableName, deltas[{row, weight}], seq)</code> — Z-set deltas</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="architecture">
+<h2>Architecture</h2>
+<p>One .NET process co-hosts an Orleans silo and the ASP.NET Core API. Orleans <b>virtual actors</b> (grains) own all state — single-threaded per entity, activated on demand:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Grain</th><th>Key</th><th>Responsibility</th></tr></thead>
+<tbody>
+<tr><td><code>RegistryGrain</code></td><td><code>catalog</code></td><td>Source/pipeline/table catalog, seeding, start/stop orchestration, dependency ordering, resume-on-restart</td></tr>
+<tr><td><code>GeneratorGrain</code></td><td>source name</td><td>Timer-driven synthetic events → <code>sources/{name}</code> stream</td></tr>
+<tr><td><code>PipelineGrain</code></td><td>pipeline id</td><td>Compiles SQL, subscribes to sources, runs the executor, publishes results + metrics, 100-row ring buffer</td></tr>
+<tr><td><code>TableGrain</code></td><td>table name</td><td>Z-set executor, consolidated snapshot (persisted, write-behind), delta stream to downstream tables + UI, search index</td></tr>
+<tr><td><code>UserStoreGrain</code></td><td><code>users</code></td><td>Credential validation, user CRUD</td></tr>
+</tbody></table></div>
+<p>The <b>SQL engine</b> (<code>StreamForge.Engine</code>) is a pure C# library with no Orleans dependency: tokenizer → recursive-descent parser → validator (positioned diagnostics) → planner → interpreted operators. Persistence is a JSON-file grain store (one file per grain state under <code>data/</code>) — debuggable, restart-safe, and swappable for a database provider without touching grain code. The stack is Orleans 10.2.1 on .NET 10; the console is React 19 + Tailwind 4 + shadcn/ui with the the client brand system.</p>
+</section>
+
+<section id="limits">
+<h2>Limitations &amp; design notes</h2>
+<ul>
+<li><b>Single-process demo topology.</b> Localhost clustering and in-memory streams — the Orleans programming model is production-shaped, but multi-silo deployment would swap clustering, stream, and storage providers.</li>
+<li><b>Tables rebuild on restart.</b> Snapshots persist and serve immediately, but operator internals rebuild from live traffic (the <mark>Rebuilding</mark> badge). Full operator-state checkpointing is future work.</li>
+<li><b>Table joins are INNER-only.</b> Incremental outer joins over changing state are a meaningfully harder algebra; deferred deliberately.</li>
+<li><b>Late events are dropped</b>, not retroactively corrected — bounded-lateness semantics, not full differential dataflow.</li>
+<li><b>JSON path keys are literals</b> (<code>-&gt; 'key'</code>, <code>-&gt; 0</code>); computed keys aren't supported.</li>
+</ul>
+</section>
+
+<footer style="margin-top:72px; padding-top:20px; border-top:1px solid var(--border); font-size:13px; color:var(--muted);">
+StreamForge — an Orleans streaming platform demo · the client brand treatment · Served at <code>/docs</code> by the StreamForge host
+</footer>
+
+</div></main>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  /* Theme toggle — shares the console's localStorage key. */
+  var btn = document.getElementById('themebtn');
+  function current() {
+    var explicit = document.documentElement.dataset.theme;
+    if (explicit) return explicit;
+    return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  btn.addEventListener('click', function () {
+    var next = current() === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('sf.theme', next); } catch (e) { /* ignore */ }
+  });
+
+  /* Copy buttons on every code block. */
+  document.querySelectorAll('pre').forEach(function (pre) {
+    var b = document.createElement('button');
+    b.className = 'copybtn'; b.type = 'button'; b.textContent = 'Copy';
+    b.addEventListener('click', function () {
+      navigator.clipboard.writeText(pre.querySelector('code').innerText).then(function () {
+        b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1200);
+      });
+    });
+    pre.appendChild(b);
+  });
+
+  /* Scrollspy: highlight the nav link of the section in view. */
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav.side a[href^="#"]'));
+  var byId = {};
+  links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+  var observed = document.querySelectorAll('section[id], h3[id]');
+  var active = null;
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (!e.isIntersecting) return;
+      var link = byId[e.target.id];
+      if (!link) return;
+      if (active) active.classList.remove('active');
+      link.classList.add('active'); active = link;
+    });
+  }, { rootMargin: '-10% 0px -70% 0px' });
+  observed.forEach(function (el) { io.observe(el); });
+
+  /* Nav filter. */
+  var filter = document.getElementById('navfilter');
+  filter.addEventListener('input', function () {
+    var q = filter.value.trim().toLowerCase();
+    links.forEach(function (a) {
+      a.style.display = !q || a.textContent.toLowerCase().indexOf(q) !== -1 ? '' : 'none';
+    });
+  });
+})();
+</script>
+</body>
+</html>

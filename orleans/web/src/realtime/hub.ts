@@ -70,7 +70,11 @@ function getConnection(): Promise<signalR.HubConnection> {
     .withUrl('/hubs/stream', {
       accessTokenFactory: () => getStoredToken() ?? '',
     })
-    .withAutomaticReconnect()
+    // Retry forever (default gives up after 4 attempts, leaving a stale tab after a server
+    // restart): exponential backoff capped at 15s. onreconnected() re-subscribes everything.
+    .withAutomaticReconnect({
+      nextRetryDelayInMilliseconds: (ctx) => Math.min(15_000, 1000 * 2 ** ctx.previousRetryCount),
+    })
     .build()
 
   registerListeners(conn)

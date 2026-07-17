@@ -108,6 +108,13 @@ app.MapTablesEndpoints();
 app.MapUsersEndpoints();
 app.MapHub<StreamHub>("/hubs/stream");
 
+// Interactive user documentation (docs/index.html), served at /docs.
+var docsFile = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "docs", "index.html"));
+if (File.Exists(docsFile))
+{
+    app.MapGet("/docs", () => Results.File(docsFile, "text/html"));
+}
+
 // Serve the built SPA (web/dist) if present, without swallowing /api or /hubs routes.
 var spaDist = Path.Combine(app.Environment.ContentRootPath, "..", "..", "web", "dist");
 if (Directory.Exists(spaDist))
