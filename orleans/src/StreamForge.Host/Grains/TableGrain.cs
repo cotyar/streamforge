@@ -3,6 +3,7 @@ using Orleans.Runtime;
 using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
+using StreamForge.Host.Search;
 
 namespace StreamForge.Host.Grains;
 
@@ -38,6 +39,7 @@ public sealed class TableGrain(
     private TableDefinition? _def;
     private PipelineStatus _status = PipelineStatus.Stopped;
     private TableExecutor? _executor;
+    private TableSearchIndex? _searchIndex;
     private IGrainTimer? _flushTimer;
     private readonly List<StreamSubscriptionHandle<EventRecord>> _streamSubs = [];
     private readonly List<StreamSubscriptionHandle<List<TableDeltaDto>>> _tableSubs = [];
@@ -87,6 +89,12 @@ public sealed class TableGrain(
             _dirty = true;
         }
 
+        // Either branch above leaves the current row set empty (fresh start, or reset-for-rebuild), so a
+        // freshly built (empty) index is accurate here — it fills back in incrementally as
+        // ApplyAndPublishAsync observes deltas going forward, exactly like state.State.Snapshot does via
+        // FlushAsync (just without the 2s lag, since Snapshot() is an O(1) live dictionary reference).
+        _searchIndex = def.SearchEnabled ? new TableSearchIndex(def.SearchMode) : null;
+
         var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
         foreach (var name in compileResult.StreamInputs.Distinct())
         {
@@ -132,6 +140,7 @@ public sealed class TableGrain(
         }
 
         _executor = null;
+        _searchIndex = null;
         this.DelayDeactivation(TimeSpan.Zero);
     }
 
@@ -167,6 +176,23 @@ public sealed class TableGrain(
     });
 
     public Task<long> GetSeqAsync() => Task.FromResult(state.State.Seq);
+
+    public Task<List<TableRowDto>> SearchAsync(string query, int limit)
+    {
+        if (_searchIndex is null || string.IsNullOrWhiteSpace(query))
+        {
+            return Task.FromResult(new List<TableRowDto>());
+        }
+
+        var snapshot = _executor?.Snapshot();
+        var hits = _searchIndex.Search(query, limit);
+        var rows = hits.Select(h =>
+        {
+            long weight = snapshot is not null && snapshot.TryGetValue(h.RowKey, out var current) ? current.Weight : 1;
+            return new TableRowDto { Row = new Dictionary<string, object?>(h.Row), Weight = weight };
+        }).ToList();
+        return Task.FromResult(rows);
+    }
 
     private async Task OnStreamEventAsync(string source, EventRecord evt)
     {
@@ -208,10 +234,39 @@ public sealed class TableGrain(
         _dirty = true;
         _deltasOut += deltas.Count;
 
+        if (_searchIndex is not null)
+        {
+            ReflectDeltasInSearchIndex(deltas);
+        }
+
         var dtos = deltas.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight }).ToList();
         var stream = this.GetStreamProvider(StreamConstants.ProviderName)
             .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, _def!.Name));
         await stream.OnNextAsync(dtos);
+    }
+
+    /// <summary>Keeps the search index in sync with the consolidated Z-set as deltas land: for each row
+    /// touched by this batch, look its canonical key up in the (already-updated, O(1) live) consolidated
+    /// snapshot — present with weight &gt; 0 means Add/update, absent means the row's weight returned to 0
+    /// (Remove). Only rows actually touched by this batch are re-checked, not the whole table.</summary>
+    private void ReflectDeltasInSearchIndex(IReadOnlyList<TableDelta> deltas)
+    {
+        var snapshot = _executor!.Snapshot();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var delta in deltas)
+        {
+            var key = _executor.CanonicalRowKey(delta.Row);
+            if (!seen.Add(key)) continue; // a batch can touch the same row's key more than once
+
+            if (snapshot.TryGetValue(key, out var current))
+            {
+                _searchIndex!.Add(key, current.Row);
+            }
+            else
+            {
+                _searchIndex!.Remove(key);
+            }
+        }
     }
 
     private async Task FlushAsync()

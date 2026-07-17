@@ -130,10 +130,30 @@ public static class TablePlanner
         for (int i = 0; i < q.Select.Items.Count; i++)
         {
             var item = q.Select.Items[i];
+            if (item.Expression is QualifiedStarExpr qs)
+            {
+                ExpandQualifiedStar(qs, sources, bindings, output);
+                continue;
+            }
             var name = item.Alias ?? DefaultName(item.Expression, i);
             output.Add(new OutputItem { Name = name, Expression = item.Expression });
         }
         return output;
+    }
+
+    /// <summary>Expands `alias.*` into one OutputItem per field of that alias's source schema — table-mode
+    /// mirror of Planner.ExpandQualifiedStar (same alias-prefixing rule as bare `SELECT *`).</summary>
+    private static void ExpandQualifiedStar(QualifiedStarExpr qs, List<CompiledTableSource> sources, Dictionary<Expr, (string Alias, string Field)> bindings, List<OutputItem> output)
+    {
+        var src = sources.First(s => s.Alias == qs.Alias);
+        bool prefixed = sources.Count > 1;
+        foreach (var field in src.Schema.Fields.Keys)
+        {
+            var node = new QualifiedIdentifier(src.Alias, field, qs.Line, qs.Column);
+            bindings[node] = (src.Alias, field);
+            var name = prefixed ? $"{src.Alias}_{field}" : field;
+            output.Add(new OutputItem { Name = name, Expression = node });
+        }
     }
 
     private static string DefaultName(Expr e, int index) => e switch
@@ -249,8 +269,9 @@ public static class TablePlanner
             parts.Add("GROUP BY " + string.Join(", ", q.GroupBy.Select(g => FormatColumnName(g, bindings))));
         }
 
-        int selectCount = q.Select.IsStar ? output.Count : q.Select.Items.Count;
-        parts.Add($"SELECT {selectCount}");
+        // See Planner.BuildPlanSummary's comment: output.Count is accurate for star, qualified-star, and
+        // plain-item cases alike.
+        parts.Add($"SELECT {output.Count}");
 
         return string.Join(" → ", parts);
     }

@@ -108,6 +108,74 @@ public sealed class TableGrainClusterSmokeTest : IAsyncLifetime
         await table.StopAsync();
     }
 
+    [Fact]
+    public async Task TableGrain_WithSearchEnabled_FindsKnownSymbolViaSearchAsync()
+    {
+        var registry = _cluster.GrainFactory.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+        await registry.UpsertSourceAsync(new SourceDefinition
+        {
+            Name = "trades",
+            Description = "test source",
+            GeneratorProfile = "trades",
+            EventsPerSecond = 0,
+            Enabled = false,
+            Fields =
+            [
+                new FieldDef("symbol", FieldType.String),
+                new FieldDef("price", FieldType.Double),
+                new FieldDef("qty", FieldType.Long),
+            ],
+        });
+
+        var tableName = "positions_search_" + Guid.NewGuid().ToString("n")[..8];
+        var def = new TableDefinition
+        {
+            Id = Guid.NewGuid().ToString("n"),
+            Name = tableName,
+            Description = "search smoke test",
+            Sql = "SELECT symbol, COUNT(*) AS trades, SUM(qty) AS total_qty FROM trades GROUP BY symbol",
+            Status = PipelineStatus.Stopped,
+            SearchEnabled = true,
+            SearchMode = TableSearchMode.Fuzzy,
+        };
+
+        var table = _cluster.GrainFactory.GetGrain<ITableGrain>(tableName);
+        await table.StartAsync(def);
+
+        var streamProvider = _cluster.Client.GetStreamProvider(StreamConstants.ProviderName);
+        var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, "trades"));
+
+        await stream.OnNextAsync(new EventRecord
+        {
+            [EventRecord.TimestampField] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            [EventRecord.SourceField] = "trades",
+            ["symbol"] = "AAPL",
+            ["price"] = 100.0,
+            ["qty"] = 10L,
+        });
+
+        // Unlike GetRowsAsync (which reads the write-behind-flushed snapshot, up to 2s stale), the search
+        // index is updated synchronously as deltas land — so a short poll (just waiting for stream
+        // delivery, not the flush timer) suffices.
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        List<TableRowDto> hits = [];
+        while (DateTime.UtcNow < deadline)
+        {
+            hits = await table.SearchAsync("AAPL", 10);
+            if (hits.Count > 0) break;
+            await Task.Delay(100);
+        }
+
+        var hit = Assert.Single(hits);
+        Assert.Equal("AAPL", hit.Row["symbol"]);
+
+        // A fuzzy typo of the symbol should also find it.
+        var fuzzyHits = await table.SearchAsync("AAPLl", 10);
+        Assert.Contains(fuzzyHits, r => Equals(r.Row.GetValueOrDefault("symbol"), "AAPL"));
+
+        await table.StopAsync();
+    }
+
     private static async Task<List<TableRowDto>?> PollUntilRowAppears(ITableGrain table, string symbol, int deadlineSeconds)
     {
         var deadline = DateTime.UtcNow.AddSeconds(deadlineSeconds);

@@ -111,6 +111,25 @@ public class TableValidatorTests
     }
 
     [Fact]
+    public void QualifiedStarResolvesInTableMode()
+    {
+        var positions = Schema("positions", ("symbol", FieldKind.String), ("trades", FieldKind.Long));
+        var sql = "SELECT p.* FROM positions p";
+        var r = CompileTable(sql, [Trades], [positions]);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+        Assert.Contains("symbol", r.OutputSchema!.Fields.Keys);
+        Assert.Contains("trades", r.OutputSchema.Fields.Keys);
+    }
+
+    [Fact]
+    public void QualifiedStarUnknownAliasIsErrorInTableMode()
+    {
+        var r = CompileTable("SELECT z.* FROM trades t", Trades);
+        Assert.False(r.Ok);
+        Assert.Contains(r.Diagnostics, d => d.Message.Contains("Unknown source/alias 'z'"));
+    }
+
+    [Fact]
     public void TableInputResolvesSeparatelyFromStreamInput()
     {
         var positions = Schema("positions", ("symbol", FieldKind.String), ("trades", FieldKind.Long));

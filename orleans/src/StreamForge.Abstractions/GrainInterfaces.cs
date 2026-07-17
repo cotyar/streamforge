@@ -63,6 +63,10 @@ public interface ITableGrain : IGrainWithStringKey
     Task<int> GetRowCountAsync();
     Task<TableMetrics> GetMetricsAsync();
     Task<long> GetSeqAsync();
+    /// <summary>Reverse-index lookup over this table's current rows (see StreamForge.Host.Search.TableSearchIndex).
+    /// Empty query or a table with SearchEnabled=false both yield an empty list — callers that need to tell
+    /// those apart go through the /api/tables/{id}/search endpoint instead, which checks SearchEnabled first.</summary>
+    Task<List<TableRowDto>> SearchAsync(string query, int limit);
 }
 
 /// <summary>Singleton (key = StreamConstants.UsersKey).</summary>

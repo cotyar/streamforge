@@ -36,6 +36,8 @@ public static class TablesEndpoints
                     Description = req.Description,
                     Sql = req.Sql,
                     CreatedBy = principal.Identity?.Name ?? "",
+                    SearchEnabled = req.SearchEnabled,
+                    SearchMode = req.SearchMode,
                 };
                 var created = await Registry(client).CreateTableAsync(def);
                 return Results.Created($"/api/tables/{created.Id}", created);
@@ -58,6 +60,8 @@ public static class TablesEndpoints
             existing.Name = req.Name;
             existing.Description = req.Description;
             existing.Sql = req.Sql;
+            existing.SearchEnabled = req.SearchEnabled;
+            existing.SearchMode = req.SearchMode;
 
             try
             {
@@ -148,6 +152,26 @@ public static class TablesEndpoints
             }
 
             return Results.Ok(await client.GetGrain<ITableGrain>(def.Name).GetMetricsAsync());
+        }).RequireAuthorization("Viewer");
+
+        group.MapGet("/{id}/search", async (string id, string? q, int? limit, IClusterClient client) =>
+        {
+            var def = await Registry(client).GetTableAsync(id);
+            if (def is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (!def.SearchEnabled)
+            {
+                return Results.BadRequest(new ErrorResponse("Search is not enabled for this table."));
+            }
+
+            var query = q ?? "";
+            List<TableRowDto> rows = string.IsNullOrWhiteSpace(query)
+                ? []
+                : await client.GetGrain<ITableGrain>(def.Name).SearchAsync(query, limit ?? 100);
+            return Results.Ok(new TableSearchResponse(rows, def.SearchMode.ToString(), def.SearchEnabled, rows.Count));
         }).RequireAuthorization("Viewer");
     }
 

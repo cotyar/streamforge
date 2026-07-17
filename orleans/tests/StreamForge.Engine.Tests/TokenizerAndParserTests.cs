@@ -264,6 +264,49 @@ public class TokenizerAndParserTests
         Assert.Equal(-5L, results[0]["x"]);
     }
 
+    // ------------------------------------------------------------------
+    // Qualified star `alias.*` in the select list
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void QualifiedStarParses()
+    {
+        var r = Compile("SELECT t.* FROM trades t", Trades);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+    }
+
+    [Fact]
+    public void QualifiedStarAlongsideOtherColumnParses()
+    {
+        var sql = "SELECT t.*, q.bid FROM trades t INNER JOIN quotes q WITHIN 5 SECONDS ON t.symbol = q.symbol";
+        var r = Compile(sql, Trades, Quotes);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+    }
+
+    [Fact]
+    public void QualifiedStarWithAsAliasIsParseError()
+    {
+        var r = Compile("SELECT t.* AS x FROM trades t", Trades);
+        Assert.False(r.Ok);
+        Assert.Contains(r.Diagnostics, d => d.Message.Contains("alias.*"));
+    }
+
+    [Fact]
+    public void QualifiedStarWithImplicitAliasIsParseError()
+    {
+        var r = Compile("SELECT t.* x FROM trades t", Trades);
+        Assert.False(r.Ok);
+        Assert.Contains(r.Diagnostics, d => d.Message.Contains("alias.*"));
+    }
+
+    [Fact]
+    public void OriginalBugQueryCompilesOk()
+    {
+        // The exact query reported as a false validation error before this feature.
+        var r = Compile("SELECT t.* FROM trades t", Trades);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+    }
+
     [Fact]
     public void JsonAccessKeyMustBeStringOrIntegerLiteral()
     {

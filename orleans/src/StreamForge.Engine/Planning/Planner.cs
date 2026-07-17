@@ -128,10 +128,31 @@ public static class Planner
         for (int i = 0; i < q.Select.Items.Count; i++)
         {
             var item = q.Select.Items[i];
+            if (item.Expression is QualifiedStarExpr qs)
+            {
+                ExpandQualifiedStar(qs, sources, bindings, output);
+                continue;
+            }
             var name = item.Alias ?? DefaultName(item.Expression, i);
             output.Add(new OutputItem { Name = name, Expression = item.Expression });
         }
         return output;
+    }
+
+    /// <summary>Expands `alias.*` into one OutputItem per field of that alias's source schema — mirrors
+    /// bare `SELECT *`'s expansion (same alias-prefixing rule: prefixed whenever the query has more than
+    /// one FROM/JOIN source, regardless of how many other select items surround the star).</summary>
+    private static void ExpandQualifiedStar(QualifiedStarExpr qs, List<CompiledSource> sources, Dictionary<Expr, (string Alias, string Field)> bindings, List<OutputItem> output)
+    {
+        var src = sources.First(s => s.Alias == qs.Alias);
+        bool prefixed = sources.Count > 1;
+        foreach (var field in src.Schema.Fields.Keys)
+        {
+            var node = new QualifiedIdentifier(src.Alias, field, qs.Line, qs.Column);
+            bindings[node] = (src.Alias, field);
+            var name = prefixed ? $"{src.Alias}_{field}" : field;
+            output.Add(new OutputItem { Name = name, Expression = node });
+        }
     }
 
     private static string DefaultName(Expr e, int index) => e switch
@@ -247,8 +268,10 @@ public static class Planner
             parts.Add(windowText);
         }
 
-        int selectCount = q.Select.IsStar ? output.Count : q.Select.Items.Count;
-        parts.Add($"SELECT {selectCount}");
+        // output.Count already equals q.Select.Items.Count for the non-star, no-qualified-star case (one
+        // OutputItem per select item) and equals the fully expanded column count for bare `*`/`alias.*` —
+        // using it unconditionally keeps the summary accurate for a mix like `t.*, q.bid`.
+        parts.Add($"SELECT {output.Count}");
 
         return string.Join(" → ", parts);
     }

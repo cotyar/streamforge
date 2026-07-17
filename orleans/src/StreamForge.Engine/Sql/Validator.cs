@@ -223,6 +223,14 @@ internal sealed class Validator
             var groupByList = q.GroupBy ?? [];
             foreach (var item in q.Select.Items)
             {
+                if (item.Expression is QualifiedStarExpr qStar)
+                {
+                    // A qualified star expands to N columns at plan time; validating "every expanded column
+                    // is a grouping column" would require re-resolving the alias's schema here too. Simplest
+                    // correct rule instead: disallow alias.* outright alongside GROUP BY/aggregates.
+                    _diags.Add(new SqlDiagnostic("star is not allowed with GROUP BY/aggregates", qStar.Line, qStar.Column));
+                    continue;
+                }
                 if (ContainsAggregate(item.Expression)) continue;
                 bool matchesGroupBy = groupByList.Any(g => StructurallyEqual(item.Expression, g));
                 if (!matchesGroupBy)
@@ -315,6 +323,9 @@ internal sealed class Validator
                 return;
             case QualifiedIdentifier qid:
                 ResolveQualifiedIdentifier(qid, scope);
+                return;
+            case QualifiedStarExpr qs:
+                ResolveQualifiedStar(qs, scope);
                 return;
             case UnaryExpr u:
                 ResolveExpr(u.Operand, scope, aggDepth);
@@ -458,6 +469,20 @@ internal sealed class Validator
         }
         _bindings[qid] = (alias, field);
         if (schema.Fields.TryGetValue(field, out var kind)) _exprKind[qid] = kind;
+    }
+
+    /// <summary>Resolves `alias.*`'s qualifier against the query's sources — same "unknown alias" shape as
+    /// ResolveQualifiedIdentifier's qualifier check, but there's no single field/kind to record: the
+    /// Planner re-walks the (now-known-valid) alias at plan time to expand it into one output column per
+    /// field of that source's schema.</summary>
+    private void ResolveQualifiedStar(QualifiedStarExpr qs, List<(string Alias, SourceSchema Schema)> scope)
+    {
+        bool found = scope.Any(s => string.Equals(s.Alias, qs.Alias, StringComparison.Ordinal));
+        if (!found)
+        {
+            var available = string.Join(", ", scope.Select(s => s.Alias));
+            _diags.Add(new SqlDiagnostic($"Unknown source/alias '{qs.Alias}' — available: {available}", qs.Line, qs.Column));
+        }
     }
 
     private void RecordColumnKind(Expr node, List<(string Alias, SourceSchema Schema)> scope, (string Alias, string Field) resolved)

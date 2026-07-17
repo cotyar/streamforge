@@ -148,6 +148,25 @@ internal sealed class Parser
 
     private SelectItem ParseSelectItem()
     {
+        // Qualified star `alias.*` — only recognized here (top-level select-item position), not inside
+        // general expressions. Peek three tokens ahead without consuming so a plain `alias.field` (the
+        // common case) falls through to the normal ParseOr() path untouched.
+        if (Current.Kind == TokenKind.Identifier && PeekIsSymbol(1, ".") && PeekIsSymbol(2, "*"))
+        {
+            var aliasTok = Advance(); // alias identifier
+            Advance(); // '.'
+            Advance(); // '*'
+            var qualifiedStar = new QualifiedStarExpr(aliasTok.Text, aliasTok.Line, aliasTok.Column);
+
+            // Postgres rejects `t.* AS x` (and an implicit alias makes just as little sense — a star
+            // expands to many columns, so it can't be renamed to a single identifier).
+            if (Current.IsKeyword("AS") || (Current.Kind == TokenKind.Identifier && !ClauseKeywords.Contains(Current.Text)))
+            {
+                throw Error(Current, "'alias.*' cannot be given an alias");
+            }
+            return new SelectItem(qualifiedStar, null);
+        }
+
         var expr = ParseOr();
         string? alias = null;
         if (MatchKeyword("AS"))
@@ -160,6 +179,16 @@ internal sealed class Parser
         }
         return new SelectItem(expr, alias);
     }
+
+    /// <summary>Looks ahead `offset` tokens from the current position (0 = Current) without consuming,
+    /// clamped to the final token (EndOfInput) so callers never index past the token list.</summary>
+    private Token PeekAt(int offset)
+    {
+        int idx = _pos + offset;
+        return _tokens[idx < _tokens.Count ? idx : _tokens.Count - 1];
+    }
+
+    private bool PeekIsSymbol(int offset, string symbol) => PeekAt(offset).IsSymbol(symbol);
 
     private SourceRef ParseSourceRef()
     {

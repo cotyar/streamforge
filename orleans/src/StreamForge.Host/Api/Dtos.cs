@@ -27,7 +27,9 @@ public sealed record ValidateResponse(bool Ok, IReadOnlyList<SqlDiagnosticDto> D
 
 public sealed record ErrorResponse(string Error);
 
-public sealed record CreateTableRequest(string Name, string Description, string Sql);
+public sealed record CreateTableRequest(string Name, string Description, string Sql, bool SearchEnabled = false, TableSearchMode SearchMode = TableSearchMode.Exact);
+
+public sealed record TableSearchResponse(IReadOnlyList<TableRowDto> Rows, string Mode, bool Enabled, int Total);
 
 public sealed record FieldDefDto(string Name, string Kind);
 

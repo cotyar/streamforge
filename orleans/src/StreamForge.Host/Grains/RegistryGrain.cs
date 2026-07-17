@@ -348,16 +348,22 @@ public sealed class RegistryGrain(
         }
 
         var sqlChanged = existing.Sql != def.Sql;
+        var searchChanged = existing.SearchEnabled != def.SearchEnabled || existing.SearchMode != def.SearchMode;
         var wasRunning = existing.Status == PipelineStatus.Running;
 
         existing.Name = def.Name;
         existing.Description = def.Description;
         existing.Sql = def.Sql;
+        existing.SearchEnabled = def.SearchEnabled;
+        existing.SearchMode = def.SearchMode;
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         CompileAndStoreTableSchema(existing);
 
-        if (sqlChanged && wasRunning)
+        // A running table's grain only picks up SQL/search config changes on (re)StartAsync — mirror the
+        // SQL-changed restart below for search config too, so toggling SearchEnabled/SearchMode on a
+        // Running table takes effect immediately instead of only on the next manual stop/start.
+        if ((sqlChanged || searchChanged) && wasRunning)
         {
             var tableGrain = GrainFactory.GetGrain<ITableGrain>(existing.Name);
             try
@@ -583,7 +589,7 @@ public sealed class RegistryGrain(
     {
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        TableDefinition Make(string name, string description, string sql, PipelineStatus status) => new()
+        TableDefinition Make(string name, string description, string sql, PipelineStatus status, bool searchEnabled = false, TableSearchMode searchMode = TableSearchMode.Exact) => new()
         {
             Id = Guid.NewGuid().ToString("n"),
             Name = name,
@@ -593,6 +599,8 @@ public sealed class RegistryGrain(
             CreatedBy = "system",
             CreatedAtMs = now,
             UpdatedAtMs = now,
+            SearchEnabled = searchEnabled,
+            SearchMode = searchMode,
         };
 
         return
@@ -602,7 +610,9 @@ public sealed class RegistryGrain(
                 "Running per-symbol trade aggregates: count, total quantity, and price stats.",
                 "SELECT symbol, COUNT(*) AS trades, SUM(qty) AS total_qty, AVG(price) AS avg_price, MIN(price) AS low, MAX(price) AS high " +
                 "FROM trades GROUP BY symbol",
-                PipelineStatus.Running),
+                PipelineStatus.Running,
+                searchEnabled: true,
+                searchMode: TableSearchMode.Fuzzy),
             Make(
                 "gold_tier_orders",
                 "Order counts per symbol for gold-tier users, extracted from app_events' nested JSON payload via '->'/'->>'.",

@@ -186,6 +186,66 @@ public class ValidatorTests
     }
 
     // ------------------------------------------------------------------
+    // Qualified star `alias.*` in the select list
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void QualifiedStarResolvesKnownAlias()
+    {
+        var r = Compile("SELECT t.* FROM trades t", Trades);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+    }
+
+    [Fact]
+    public void QualifiedStarUnknownAliasIsError()
+    {
+        var r = Compile("SELECT z.* FROM trades t", Trades);
+        Assert.False(r.Ok);
+        Assert.Contains(r.Diagnostics, d => d.Message.Contains("Unknown source/alias 'z'"));
+    }
+
+    [Fact]
+    public void QualifiedStarWithGroupByIsError()
+    {
+        var sql = "SELECT t.*, COUNT(*) AS cnt FROM trades t GROUP BY t.symbol WINDOW TUMBLING(SIZE 5 SECONDS)";
+        var r = Compile(sql, Trades);
+        Assert.False(r.Ok);
+        Assert.Contains(r.Diagnostics, d => d.Message.Contains("star is not allowed with GROUP BY/aggregates"));
+    }
+
+    [Fact]
+    public void QualifiedStarWithAggregateNoGroupByIsErrorInTableMode()
+    {
+        var sql = "SELECT t.*, COUNT(*) AS cnt FROM trades t";
+        var r = CompileTable(sql, Trades);
+        Assert.False(r.Ok);
+        Assert.Contains(r.Diagnostics, d => d.Message.Contains("star is not allowed with GROUP BY/aggregates"));
+    }
+
+    [Fact]
+    public void QualifiedStarWithJoinExpandsAllTradeColumnsPrefixedPlusExtraColumn()
+    {
+        var sql = "SELECT t.*, q.bid FROM trades t INNER JOIN quotes q WITHIN 5 SECONDS ON t.symbol = q.symbol";
+        var exec = CompileAndCreate(sql, Trades, Quotes);
+        exec.OnEvent("trades", Evt(1000, "trades", ("symbol", "AAPL"), ("price", 100.0), ("qty", 10L), ("active", true)));
+        var results = exec.OnEvent("quotes", Evt(1100, "quotes", ("symbol", "AAPL"), ("bid", 99.0), ("ask", 101.0)));
+
+        Assert.Single(results);
+        var row = results[0];
+        Assert.True(row.ContainsKey("t_symbol"));
+        Assert.True(row.ContainsKey("t_price"));
+        Assert.True(row.ContainsKey("t_qty"));
+        Assert.True(row.ContainsKey("t_active"));
+        // q.bid keeps its ordinary (unqualified) default column name — only the star-expanded t.* columns
+        // are alias-prefixed; a plain select item's default name has always been just the field name.
+        Assert.True(row.ContainsKey("bid"));
+        Assert.False(row.ContainsKey("q_ask")); // only q.bid was projected, not q.*
+        Assert.False(row.ContainsKey("ask"));
+        Assert.Equal("AAPL", row["t_symbol"]);
+        Assert.Equal(99.0, row["bid"]);
+    }
+
+    // ------------------------------------------------------------------
     // JSON access ('->' / '->>') validator rules
     // ------------------------------------------------------------------
 

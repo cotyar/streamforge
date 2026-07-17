@@ -137,4 +137,10 @@ public sealed partial class TableExecutor
     public IReadOnlyList<TableDelta> OnTableDelta(string table, TableDelta delta) => OnTableDeltaCore(table, delta);
 
     public IReadOnlyDictionary<string, (EventRecord Row, long Weight)> Snapshot() => SnapshotCore();
+
+    /// <summary>The canonical identity Snapshot() keys rows by (a deterministic serialization of the row's
+    /// fields) — exposed so callers that react to individual OnStreamEvent/OnTableDelta deltas (e.g. a
+    /// reverse search index kept incrementally in sync) can look a delta's row up in Snapshot() without
+    /// re-deriving the same key by hand.</summary>
+    public string CanonicalRowKey(EventRecord row) => Runtime.JsonText.SerializeCanonicalRow(row);
 }

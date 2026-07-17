@@ -77,6 +77,10 @@ public sealed class LifecycleEvent
     [Id(3)] public long TimestampMs { get; set; }
 }
 
+/// <summary>Per-table reverse-index search strategy — see StreamForge.Host.Search.TableSearchIndex.</summary>
+[GenerateSerializer]
+public enum TableSearchMode { Exact, Fuzzy }
+
 /// <summary>A persistent materialized TABLE: a SELECT over streams and/or other tables, without windows
 /// (running aggregates instead of windowed ones). Its name is unique across sources+tables and enters the
 /// SQL namespace, so other tables can FROM/JOIN it directly.</summary>
@@ -99,6 +103,10 @@ public sealed class TableDefinition
     [Id(10)] public List<string> StreamInputs { get; set; } = [];
     /// <summary>Other table names this table's SQL reads from directly (from the last successful compile).</summary>
     [Id(11)] public List<string> TableInputs { get; set; } = [];
+    /// <summary>Whether a reverse (inverted) search index over this table's rows is maintained.</summary>
+    [Id(12)] public bool SearchEnabled { get; set; }
+    /// <summary>Exact (token/prefix/substring) or Fuzzy (trigram-similarity, typo-tolerant) search.</summary>
+    [Id(13)] public TableSearchMode SearchMode { get; set; } = TableSearchMode.Exact;
 }
 
 /// <summary>Serializable mirror of StreamForge.Engine's TableDelta, for Orleans/SignalR transport: one Z-set

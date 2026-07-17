@@ -47,6 +47,15 @@ internal sealed class QualifiedIdentifier(string qualifier, string name, int lin
 
 internal sealed class StarExpr(int line, int col) : Expr(line, col);
 
+/// <summary>Postgres-style qualified star in a SELECT list: `alias.*` — expands to every column of that
+/// alias's FROM/JOIN input. Only meaningful as a top-level select-item expression (see Parser.ParseSelectItem);
+/// never appears nested inside another expression. `Alias` carries the raw qualifier text; the Validator
+/// resolves it against the query's sources.</summary>
+internal sealed class QualifiedStarExpr(string alias, int line, int col) : Expr(line, col)
+{
+    public string Alias { get; } = alias;
+}
+
 internal sealed class UnaryExpr(string op, Expr operand, int line, int col) : Expr(line, col)
 {
     public string Op { get; } = op;
