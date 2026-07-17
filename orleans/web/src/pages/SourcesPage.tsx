@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Database, Pencil, Plus, Trash2 } from 'lucide-react'
+import { ChevronRight, Database, Pencil, Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { sourcesApi } from '../api/sources'
 import type { CreateSourceRequest } from '../api/sources'
@@ -14,8 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -46,6 +45,7 @@ function formatCell(v: unknown): string {
   if (v === null || v === undefined) return '—'
   if (typeof v === 'number') return Number.isInteger(v) ? v.toString() : v.toFixed(3)
   if (typeof v === 'boolean') return v ? 'true' : 'false'
+  if (typeof v === 'object') return JSON.stringify(v)
   return String(v)
 }
 
@@ -53,12 +53,12 @@ function SourceTape({ name }: { name: string }) {
   const events = useSourceTape(name)
   return (
     <ScrollArea className="h-32 rounded-lg border border-border bg-background">
-      <div className="p-2 font-mono text-[11px] leading-5 text-muted-foreground">
+      <div className="min-w-max p-2 font-mono text-[11px] leading-5 text-muted-foreground">
         {events.length === 0 ? (
           <p className="text-muted-foreground/70">Waiting for live events…</p>
         ) : (
           events.map((row, i) => (
-            <div key={i} className={cn('truncate', i === 0 && 'text-foreground')}>
+            <div key={i} className={cn('whitespace-nowrap', i === 0 && 'text-foreground')}>
               {Object.entries(row)
                 .map(([k, v]) => `${k}=${formatCell(v)}`)
                 .join('  ')}
@@ -66,7 +66,105 @@ function SourceTape({ name }: { name: string }) {
           ))
         )}
       </div>
+      <ScrollBar orientation="horizontal" />
     </ScrollArea>
+  )
+}
+
+/** Recursive field editor: Json fields drill into nested sub-fields (which may themselves be Json). */
+function FieldEditor({
+  fields,
+  onChange,
+  depth = 0,
+}: {
+  fields: FieldDef[]
+  onChange: (fields: FieldDef[]) => void
+  depth?: number
+}) {
+  function update(i: number, patch: Partial<FieldDef>) {
+    onChange(fields.map((f, idx) => (idx === i ? { ...f, ...patch } : f)))
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      {fields.map((f, i) => (
+        <div key={i} className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <Input placeholder="field name" value={f.name} onChange={(e) => update(i, { name: e.target.value })} />
+            <Select
+              value={f.type}
+              onValueChange={(v) => {
+                const type = v as FieldType
+                // Keep children only while the field stays Json.
+                update(i, { type, children: type === 'Json' ? (f.children ?? []) : undefined })
+              }}
+            >
+              <SelectTrigger className="w-28 shrink-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {FIELD_TYPES.map((t) => (
+                    <SelectItem key={t} value={t}>
+                      {t}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="hover:text-destructive"
+              onClick={() => onChange(fields.filter((_, idx) => idx !== i))}
+            >
+              <Trash2 />
+            </Button>
+          </div>
+          {f.type === 'Json' && (
+            <div className="ml-3 flex flex-col gap-2 border-l border-border pl-3">
+              <FieldEditor fields={f.children ?? []} onChange={(children) => update(i, { children })} depth={depth + 1} />
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="self-start text-muted-foreground"
+                onClick={() => update(i, { children: [...(f.children ?? []), { name: '', type: 'String' }] })}
+              >
+                <Plus data-icon="inline-start" /> Add nested field
+              </Button>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** Read-only drill-down view of a source's schema; Json fields expand to reveal their nested shape. */
+function SchemaNode({ field, depth }: { field: FieldDef; depth: number }) {
+  const hasChildren = field.type === 'Json' && !!field.children && field.children.length > 0
+  const [open, setOpen] = useState(depth === 0)
+  return (
+    <>
+      <div
+        className="flex items-center justify-between px-3 py-1.5 text-xs"
+        style={{ paddingLeft: `${12 + depth * 16}px` }}
+      >
+        <span className="flex items-center gap-1 font-mono text-foreground">
+          {hasChildren ? (
+            <button type="button" onClick={() => setOpen((o) => !o)} className="text-muted-foreground">
+              <ChevronRight className={cn('size-3 transition-transform', open && 'rotate-90')} />
+            </button>
+          ) : (
+            <span className="inline-block size-3" />
+          )}
+          {field.name}
+        </span>
+        <span className="text-muted-foreground">{field.type}</span>
+      </div>
+      {hasChildren && open && field.children!.map((c) => <SchemaNode key={c.name} field={c} depth={depth + 1} />)}
+    </>
   )
 }
 
@@ -141,10 +239,6 @@ function SourceModal({
     } finally {
       setSaving(false)
     }
-  }
-
-  function updateField(i: number, patch: Partial<FieldDef>) {
-    setForm((f) => ({ ...f, fields: f.fields.map((fld, idx) => (idx === i ? { ...fld, ...patch } : fld)) }))
   }
 
   return (
@@ -234,36 +328,10 @@ function SourceModal({
                   <Plus data-icon="inline-start" /> Add field
                 </Button>
               </div>
-              <div className="flex flex-col gap-2">
-                {form.fields.map((f, i) => (
-                  <div key={i} className="flex items-center gap-2">
-                    <Input placeholder="field name" value={f.name} onChange={(e) => updateField(i, { name: e.target.value })} />
-                    <Select value={f.type} onValueChange={(v) => updateField(i, { type: v as FieldType })}>
-                      <SelectTrigger className="w-32 shrink-0">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectGroup>
-                          {FIELD_TYPES.map((t) => (
-                            <SelectItem key={t} value={t}>
-                              {t}
-                            </SelectItem>
-                          ))}
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      className="hover:text-destructive"
-                      onClick={() => setForm((f2) => ({ ...f2, fields: f2.fields.filter((_, idx) => idx !== i) }))}
-                    >
-                      <Trash2 />
-                    </Button>
-                  </div>
-                ))}
-              </div>
+              <FieldEditor fields={form.fields} onChange={(fields) => setForm((f) => ({ ...f, fields }))} />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Set a field to <span className="font-mono">Json</span> to drill in and declare its nested shape.
+              </p>
             </Field>
           </FieldGroup>
 
@@ -390,22 +458,15 @@ export function SourcesPage() {
                   </div>
 
                   <div className="overflow-hidden rounded-lg border border-border">
-                    <Table>
-                      <TableHeader>
-                        <TableRow className="hover:bg-transparent">
-                          <TableHead>Field</TableHead>
-                          <TableHead>Type</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {s.fields.map((f) => (
-                          <TableRow key={f.name}>
-                            <TableCell className="font-mono text-foreground">{f.name}</TableCell>
-                            <TableCell className="text-muted-foreground">{f.type}</TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
+                    <div className="flex items-center justify-between border-b border-border px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                      <span>Field</span>
+                      <span>Type</span>
+                    </div>
+                    <div className="flex flex-col py-1">
+                      {s.fields.map((f) => (
+                        <SchemaNode key={f.name} field={f} depth={0} />
+                      ))}
+                    </div>
                   </div>
 
                   <div>

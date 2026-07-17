@@ -46,7 +46,7 @@ public sealed class GeneratorGrain : Grain, IGeneratorGrain
             return;
         }
 
-        var evt = MarketDataProfiles.GenerateEvent(_def.GeneratorProfile, _def.Name);
+        var evt = MarketDataProfiles.GenerateEvent(_def);
         var stream = this.GetStreamProvider(StreamConstants.ProviderName)
             .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, _def.Name));
         await stream.OnNextAsync(evt);

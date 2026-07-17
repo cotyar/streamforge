@@ -37,17 +37,19 @@ public static class MarketDataProfiles
         return tags;
     }
 
-    /// <summary>Generates one synthetic event for the given profile ("trades" | "quotes" | "orders" |
-    /// "json-events" | else generic).</summary>
-    public static EventRecord GenerateEvent(string profile, string sourceName)
+    /// <summary>Generates one synthetic event for the source's profile ("trades" | "quotes" | "orders" |
+    /// "json-events" | else generic). The generic profile synthesizes values from the source's declared
+    /// field schema — including nested objects for <see cref="FieldType.Json"/> fields that declare
+    /// <see cref="FieldDef.Children"/> — so user-defined sources emit data matching their drilled-in shape.</summary>
+    public static EventRecord GenerateEvent(SourceDefinition def)
     {
         var evt = new EventRecord
         {
             [EventRecord.TimestampField] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            [EventRecord.SourceField] = sourceName,
+            [EventRecord.SourceField] = def.Name,
         };
 
-        switch (profile)
+        switch (def.GeneratorProfile)
         {
             case "trades":
             {
@@ -122,14 +124,41 @@ public static class MarketDataProfiles
 
             default: // generic
             {
-                evt["key"] = $"k{Random.Shared.Next(1, 6)}";
-                evt["value"] = Math.Round(Random.Shared.NextDouble() * 100, 4);
+                // Honor the source's declared schema (incl. drilled-in JSON shape); fall back to a
+                // key/value shape when no fields are declared.
+                var fields = def.Fields.Where(f => !string.IsNullOrWhiteSpace(f.Name)).ToList();
+                if (fields.Count == 0)
+                {
+                    evt["key"] = $"k{Random.Shared.Next(1, 6)}";
+                    evt["value"] = Math.Round(Random.Shared.NextDouble() * 100, 4);
+                }
+                else
+                {
+                    foreach (var f in fields)
+                        evt[f.Name] = SynthValue(f);
+                }
                 break;
             }
         }
 
         return evt;
     }
+
+    /// <summary>A random value matching a declared field's type. Json fields with declared children
+    /// become a nested object of those children (recursively); childless Json fields get a small opaque blob.</summary>
+    private static object? SynthValue(FieldDef field) => field.Type switch
+    {
+        FieldType.String => $"{field.Name}-{Random.Shared.Next(1, 1000)}",
+        FieldType.Double => Math.Round(Random.Shared.NextDouble() * 1000, 4),
+        FieldType.Long => Random.Shared.NextInt64(0, 10_000),
+        FieldType.Bool => Random.Shared.NextDouble() < 0.5,
+        FieldType.Timestamp => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        FieldType.Json => field.Children is { Count: > 0 } children
+            ? children.Where(c => !string.IsNullOrWhiteSpace(c.Name))
+                .ToDictionary(c => c.Name, SynthValue)
+            : new Dictionary<string, object?> { ["value"] = Random.Shared.Next(1, 100) },
+        _ => null,
+    };
 
     /// <summary>Default demo sources seeded on first registry initialization.</summary>
     public static List<SourceDefinition> SeedSources() =>
@@ -194,7 +223,22 @@ public static class MarketDataProfiles
             Fields =
             [
                 new FieldDef("eventType", FieldType.String),
-                new FieldDef("payload", FieldType.Json),
+                // Declared nested shape of the payload, matching what the "json-events" profile emits.
+                new FieldDef("payload", FieldType.Json, Children:
+                [
+                    new FieldDef("user", FieldType.Json, Children:
+                    [
+                        new FieldDef("id", FieldType.String),
+                        new FieldDef("tier", FieldType.String),
+                    ]),
+                    new FieldDef("order", FieldType.Json, Children:
+                    [
+                        new FieldDef("symbol", FieldType.String),
+                        new FieldDef("qty", FieldType.Long),
+                        new FieldDef("price", FieldType.Double),
+                    ]),
+                    new FieldDef("tags", FieldType.Json),
+                ]),
             ],
         },
     ];

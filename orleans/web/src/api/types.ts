@@ -11,6 +11,8 @@ export type PipelineStatus = 'Stopped' | 'Running' | 'Failed'
 export interface FieldDef {
   name: string
   type: FieldType
+  /** Declared nested shape of a `Json` field (drill-down schema). Absent for scalar fields. */
+  children?: FieldDef[]
 }
 
 export interface SourceDefinition {

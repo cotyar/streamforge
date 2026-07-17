@@ -3,8 +3,15 @@ namespace StreamForge.Abstractions;
 [GenerateSerializer]
 public enum FieldType { String, Double, Long, Bool, Timestamp, Json }
 
+/// <summary>A source field. <see cref="Children"/> is the declared nested shape of a
+/// <see cref="FieldType.Json"/> field (drill-down schema) — metadata that documents the payload,
+/// drives synthetic generation for the "generic" profile, and feeds editor autocomplete. Null/empty
+/// for scalar fields.</summary>
 [GenerateSerializer]
-public sealed record FieldDef([property: Id(0)] string Name, [property: Id(1)] FieldType Type);
+public sealed record FieldDef(
+    [property: Id(0)] string Name,
+    [property: Id(1)] FieldType Type,
+    [property: Id(2)] List<FieldDef>? Children = null);
 
 /// <summary>A stream source: schema + synthetic generator settings.</summary>
 [GenerateSerializer]
