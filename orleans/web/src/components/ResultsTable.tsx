@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ResultEnvelope, RowValue } from '../api/types'
+import { cn } from '@/lib/utils'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+
+function isJsonValue(v: RowValue): v is Record<string, RowValue> | RowValue[] {
+  return typeof v === 'object' && v !== null
+}
 
 function formatValue(v: RowValue): string {
   if (v === null) return '—'
   if (typeof v === 'number') return Number.isInteger(v) ? v.toLocaleString() : v.toFixed(4)
   if (typeof v === 'boolean') return v ? 'true' : 'false'
+  if (isJsonValue(v)) return JSON.stringify(v)
   return v
 }
 
@@ -38,46 +45,45 @@ export function ResultsTable({ rows }: { rows: ResultEnvelope[] }) {
   }, [rows])
 
   if (rows.length === 0) {
-    return <p className="px-4 py-10 text-center text-sm text-gray-500">Waiting for results…</p>
+    return <p className="px-4 py-10 text-center text-sm text-muted-foreground">Waiting for results…</p>
   }
 
   return (
     <div className="max-h-full overflow-auto">
-      <table className="w-full min-w-max border-collapse text-left text-xs">
-        <thead className="sticky top-0 z-10 bg-[var(--sf-panel)]">
-          <tr>
+      <Table className="min-w-max text-xs">
+        <TableHeader className="sticky top-0 z-10 bg-card">
+          <TableRow className="hover:bg-transparent">
             {columns.map((c) => (
-              <th
-                key={c}
-                className="whitespace-nowrap border-b border-[var(--sf-border)] px-3 py-2 font-medium uppercase tracking-wide text-gray-500"
-              >
+              <TableHead key={c} className="uppercase tracking-wide text-muted-foreground">
                 {c}
-              </th>
+              </TableHead>
             ))}
-          </tr>
-        </thead>
-        <tbody className="font-mono">
+          </TableRow>
+        </TableHeader>
+        <TableBody className="font-mono">
           {rows.map((r) => (
-            <tr
-              key={r.seq}
-              className={`border-b border-[var(--sf-border)]/60 ${flashSeqs.has(r.seq) ? 'animate-[sf-flash_0.9s_ease-out]' : ''}`}
-            >
+            <TableRow key={r.seq} className={cn(flashSeqs.has(r.seq) && 'sf-row-flash')}>
               {columns.map((c) => {
                 const has = c in r.row
                 const v = r.row[c]
+                const json = has && isJsonValue(v)
                 return (
-                  <td
+                  <TableCell
                     key={c}
-                    className={`whitespace-nowrap px-3 py-1.5 ${typeof v === 'number' ? 'text-right text-gray-200' : 'text-gray-300'}`}
+                    title={json ? formatValue(v) : undefined}
+                    className={cn(
+                      typeof v === 'number' ? 'text-right text-foreground' : 'text-foreground/80',
+                      json && 'max-w-56 truncate font-mono',
+                    )}
                   >
                     {has ? formatValue(v) : ''}
-                  </td>
+                  </TableCell>
                 )
               })}
-            </tr>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </div>
   )
 }

@@ -22,6 +22,8 @@ public sealed class StreamBridgeService(
     private readonly Dictionary<string, StreamSubscriptionHandle<List<ResultEnvelope>>> _pipelineSubs = new();
     private readonly Dictionary<string, StreamSubscriptionHandle<EventRecord>> _sourceSubs = new();
     private readonly Dictionary<string, DateTime> _lastSourceSend = new();
+    private readonly Dictionary<string, StreamSubscriptionHandle<List<TableDeltaDto>>> _tableSubs = new();
+    private readonly Dictionary<string, long> _tableSeq = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -45,6 +47,14 @@ public sealed class StreamBridgeService(
             if (pipeline.Status == PipelineStatus.Running)
             {
                 await SubscribeToPipelineOutputAsync(pipeline.Id);
+            }
+        }
+
+        foreach (var table in await registry.GetTablesAsync())
+        {
+            if (table.Status == PipelineStatus.Running)
+            {
+                await SubscribeToTableOutputAsync(table.Name);
             }
         }
 
@@ -73,6 +83,14 @@ public sealed class StreamBridgeService(
 
     private async Task OnLifecycleEventAsync(LifecycleEvent evt, StreamSequenceToken? token)
     {
+        // Table lifecycle events reuse this same stream/type — LifecycleEvent.PipelineId holds the
+        // table's Name (its grain key) in that case, not an Id. Kind is prefixed "table-" to disambiguate.
+        if (evt.Kind.StartsWith("table-", StringComparison.Ordinal))
+        {
+            await OnTableLifecycleEventAsync(evt);
+            return;
+        }
+
         await hub.Clients.Group($"pipeline:{evt.PipelineId}").SendAsync("pipelineStatus", evt.PipelineId, evt.Status);
 
         switch (evt.Kind)
@@ -83,6 +101,23 @@ public sealed class StreamBridgeService(
             case "stopped":
             case "deleted":
                 await UnsubscribeFromPipelineOutputAsync(evt.PipelineId);
+                break;
+        }
+    }
+
+    private async Task OnTableLifecycleEventAsync(LifecycleEvent evt)
+    {
+        var tableName = evt.PipelineId;
+        await hub.Clients.Group($"table:{tableName}").SendAsync("tableStatus", tableName, evt.Status);
+
+        switch (evt.Kind)
+        {
+            case "table-started":
+                await SubscribeToTableOutputAsync(tableName);
+                break;
+            case "table-stopped":
+            case "table-deleted":
+                await UnsubscribeFromTableOutputAsync(tableName);
                 break;
         }
     }
@@ -149,5 +184,41 @@ public sealed class StreamBridgeService(
         });
 
         _sourceSubs[name] = handle;
+    }
+
+    private async Task SubscribeToTableOutputAsync(string tableName)
+    {
+        if (_tableSubs.ContainsKey(tableName))
+        {
+            return;
+        }
+
+        var stream = client.GetStreamProvider(StreamConstants.ProviderName)
+            .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, tableName));
+
+        var handle = await stream.SubscribeAsync(async (deltas, _) =>
+        {
+            var seq = _tableSeq[tableName] = _tableSeq.GetValueOrDefault(tableName) + 1;
+            await hub.Clients.Group($"table:{tableName}").SendAsync("tableDelta", tableName, deltas, seq);
+        });
+
+        _tableSubs[tableName] = handle;
+    }
+
+    private async Task UnsubscribeFromTableOutputAsync(string tableName)
+    {
+        if (!_tableSubs.Remove(tableName, out var handle))
+        {
+            return;
+        }
+
+        try
+        {
+            await handle.UnsubscribeAsync();
+        }
+        catch
+        {
+            // best-effort
+        }
     }
 }

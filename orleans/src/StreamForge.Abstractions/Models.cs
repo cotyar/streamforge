@@ -1,7 +1,7 @@
 namespace StreamForge.Abstractions;
 
 [GenerateSerializer]
-public enum FieldType { String, Double, Long, Bool, Timestamp }
+public enum FieldType { String, Double, Long, Bool, Timestamp, Json }
 
 [GenerateSerializer]
 public sealed record FieldDef([property: Id(0)] string Name, [property: Id(1)] FieldType Type);
@@ -68,6 +68,62 @@ public sealed class LifecycleEvent
     [Id(1)] public string Kind { get; set; } = "";
     [Id(2)] public PipelineStatus Status { get; set; }
     [Id(3)] public long TimestampMs { get; set; }
+}
+
+/// <summary>A persistent materialized TABLE: a SELECT over streams and/or other tables, without windows
+/// (running aggregates instead of windowed ones). Its name is unique across sources+tables and enters the
+/// SQL namespace, so other tables can FROM/JOIN it directly.</summary>
+[GenerateSerializer]
+public sealed class TableDefinition
+{
+    [Id(0)] public string Id { get; set; } = "";
+    [Id(1)] public string Name { get; set; } = "";
+    [Id(2)] public string Description { get; set; } = "";
+    [Id(3)] public string Sql { get; set; } = "";
+    [Id(4)] public PipelineStatus Status { get; set; } = PipelineStatus.Stopped;
+    [Id(5)] public string? Error { get; set; }
+    [Id(6)] public string CreatedBy { get; set; } = "";
+    [Id(7)] public long CreatedAtMs { get; set; }
+    [Id(8)] public long UpdatedAtMs { get; set; }
+    /// <summary>Output row schema (name + kind) from the last successful compile — used to validate
+    /// downstream tables that FROM/JOIN this one, independent of whether this table is currently Running.</summary>
+    [Id(9)] public List<FieldDef> OutputFields { get; set; } = [];
+    /// <summary>Stream source names this table's SQL reads from directly (from the last successful compile).</summary>
+    [Id(10)] public List<string> StreamInputs { get; set; } = [];
+    /// <summary>Other table names this table's SQL reads from directly (from the last successful compile).</summary>
+    [Id(11)] public List<string> TableInputs { get; set; } = [];
+}
+
+/// <summary>Serializable mirror of StreamForge.Engine's TableDelta, for Orleans/SignalR transport: one Z-set
+/// delta — a row entering (+1) or leaving (-1) a table's output.</summary>
+[GenerateSerializer]
+public sealed class TableDeltaDto
+{
+    [Id(0)] public Dictionary<string, object?> Row { get; set; } = [];
+    [Id(1)] public long Weight { get; set; }
+}
+
+/// <summary>One row of a table's current consolidated Z-set snapshot (weight is always &gt; 0 in a
+/// consolidated snapshot, but the DTO carries it through as-is for transport symmetry with TableDeltaDto).</summary>
+[GenerateSerializer]
+public sealed class TableRowDto
+{
+    [Id(0)] public Dictionary<string, object?> Row { get; set; } = [];
+    [Id(1)] public long Weight { get; set; }
+}
+
+[GenerateSerializer]
+public sealed class TableMetrics
+{
+    [Id(0)] public string TableId { get; set; } = "";
+    [Id(1)] public PipelineStatus Status { get; set; }
+    [Id(2)] public long RowCount { get; set; }
+    [Id(3)] public long DeltasIn { get; set; }
+    [Id(4)] public long DeltasOut { get; set; }
+    [Id(5)] public long LastUpdateMs { get; set; }
+    /// <summary>True immediately after a restart-resume, until this table has rebuilt its state from live
+    /// traffic — see TableGrain's rehydration-limitation comment.</summary>
+    [Id(6)] public bool Rebuilding { get; set; }
 }
 
 [GenerateSerializer]

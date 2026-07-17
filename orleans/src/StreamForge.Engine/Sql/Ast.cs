@@ -60,6 +60,21 @@ internal sealed class BinaryExpr(string op, Expr left, Expr right, int line, int
     public Expr Right { get; } = right;
 }
 
+/// <summary>Postgres-style JSON access: `left -> key` (object field / array element, returns the JSON
+/// value) or `left ->> key` (same access, returns TEXT). Binds tighter than arithmetic/comparison — see
+/// Parser.ParsePostfix. `Key` is always a literal (StringLiteral for `-> 'k'`, NumberLiteral with
+/// LongValue for `-> N`); the grammar restricts the right operand to literals (Postgres itself allows
+/// arbitrary expressions there, but this dialect does not).</summary>
+internal sealed class JsonAccessExpr(Expr left, bool returnText, Expr key, int line, int col) : Expr(line, col)
+{
+    public Expr Left { get; } = left;
+
+    /// <summary>false = `->` (returns dict/list/primitive or NULL), true = `->>` (returns TEXT or NULL).</summary>
+    public bool ReturnText { get; } = returnText;
+
+    public Expr Key { get; } = key;
+}
+
 internal sealed class FunctionCallExpr(string name, List<Expr> args, int line, int col) : Expr(line, col)
 {
     public string Name { get; } = name;
@@ -147,7 +162,9 @@ internal sealed class SelectQuery(
     int? emitLine,
     int? emitColumn,
     int? groupByLine,
-    int? groupByColumn)
+    int? groupByColumn,
+    int? windowLine = null,
+    int? windowColumn = null)
 {
     public SelectClause Select { get; } = select;
     public FromClause From { get; } = from;
@@ -159,4 +176,6 @@ internal sealed class SelectQuery(
     public int? EmitColumn { get; } = emitColumn;
     public int? GroupByLine { get; } = groupByLine;
     public int? GroupByColumn { get; } = groupByColumn;
+    public int? WindowLine { get; } = windowLine;
+    public int? WindowColumn { get; } = windowColumn;
 }

@@ -45,4 +45,30 @@ public class ExecutorUnwindowedTests
         Assert.Equal("AAPL", results[0]["symbol"]);
         Assert.Equal(5.0, results[0]["abs"]);
     }
+
+    [Fact]
+    public void WhereFiltersOnJsonArrowArrowExtractedValue()
+    {
+        var exec = CompileAndCreate(
+            "SELECT eventType, payload -> 'order' ->> 'symbol' AS symbol FROM events WHERE payload -> 'user' ->> 'tier' = 'gold'",
+            Events);
+
+        var gold = new Dictionary<string, object?>
+        {
+            ["user"] = new Dictionary<string, object?> { ["tier"] = "gold" },
+            ["order"] = new Dictionary<string, object?> { ["symbol"] = "AAPL" },
+        };
+        var silver = new Dictionary<string, object?>
+        {
+            ["user"] = new Dictionary<string, object?> { ["tier"] = "silver" },
+            ["order"] = new Dictionary<string, object?> { ["symbol"] = "MSFT" },
+        };
+
+        var passing = exec.OnEvent("events", Evt(1000, "events", ("eventType", "order.placed"), ("payload", gold)));
+        Assert.Single(passing);
+        Assert.Equal("AAPL", passing[0]["symbol"]);
+
+        var filtered = exec.OnEvent("events", Evt(2000, "events", ("eventType", "order.placed"), ("payload", silver)));
+        Assert.Empty(filtered);
+    }
 }

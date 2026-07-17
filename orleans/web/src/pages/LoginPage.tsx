@@ -3,6 +3,12 @@ import type { FormEvent } from 'react'
 import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../api/auth'
 import { ApiError } from '../api/client'
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Spinner } from '@/components/ui/spinner'
 
 const DEMO_CREDS = [
   { user: 'admin', pass: 'admin123!', role: 'Admin' },
@@ -39,78 +45,75 @@ export function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[var(--sf-bg)] px-4">
+    <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm">
-        <div className="mb-8 flex flex-col items-center gap-3">
-          <div className="h-11 w-11 rounded-xl bg-gradient-to-br from-sky-400 to-violet-500" />
-          <h1 className="text-2xl font-bold tracking-tight text-white">
-            Stream<span className="text-[var(--sf-accent)]">Forge</span>
+        <div className="mb-8 flex flex-col items-center gap-1 text-center">
+          <span className="text-xs font-semibold tracking-widest text-muted-foreground">CORPORATE</span>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">
+            Stream<span className="text-primary">Forge</span>
           </h1>
-          <p className="text-sm text-gray-500">Streaming SQL, live from your event fabric.</p>
+          <p className="mt-1 text-sm text-muted-foreground">Streaming SQL, live from your event fabric.</p>
         </div>
 
-        <form
-          onSubmit={handleSubmit}
-          className="flex flex-col gap-4 rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)] p-6 shadow-xl shadow-black/20"
-        >
-          <div>
-            <label htmlFor="username" className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
-              Username
-            </label>
-            <input
-              id="username"
-              autoComplete="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="w-full rounded-lg border border-[var(--sf-border)] bg-[var(--sf-bg)] px-3 py-2 text-sm text-gray-100 outline-none transition-colors focus:border-[var(--sf-accent)] focus:ring-1 focus:ring-[var(--sf-accent)]"
-              placeholder="admin"
-              required
-            />
-          </div>
-          <div>
-            <label htmlFor="password" className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
-              Password
-            </label>
-            <input
-              id="password"
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-lg border border-[var(--sf-border)] bg-[var(--sf-bg)] px-3 py-2 text-sm text-gray-100 outline-none transition-colors focus:border-[var(--sf-accent)] focus:ring-1 focus:ring-[var(--sf-accent)]"
-              placeholder="••••••••"
-              required
-            />
-          </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>Sign in</CardTitle>
+            <CardDescription>Enter your StreamForge credentials to continue.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleSubmit}>
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="username">Username</FieldLabel>
+                  <Input
+                    id="username"
+                    autoComplete="username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="admin"
+                    required
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="password">Password</FieldLabel>
+                  <Input
+                    id="password"
+                    type="password"
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    required
+                  />
+                </Field>
 
-          {error && (
-            <p className="rounded-md border border-[var(--sf-bad)]/30 bg-[var(--sf-bad)]/10 px-3 py-2 text-sm text-[var(--sf-bad)]">
-              {error}
-            </p>
-          )}
+                {error && (
+                  <Alert variant="destructive">
+                    <AlertDescription>{error}</AlertDescription>
+                  </Alert>
+                )}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="mt-1 rounded-lg bg-gradient-to-r from-sky-400 to-violet-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {submitting ? 'Signing in…' : 'Sign in'}
-          </button>
-        </form>
-
-        <div className="mt-5 rounded-lg border border-[var(--sf-border)] bg-[var(--sf-panel)]/50 p-3.5 text-xs text-gray-500">
-          <p className="mb-1.5 font-medium text-gray-400">Demo credentials</p>
-          <ul className="space-y-1 font-mono">
-            {DEMO_CREDS.map((c) => (
-              <li key={c.user} className="flex justify-between">
-                <span>
-                  {c.user} / {c.pass}
-                </span>
-                <span className="text-gray-600">{c.role}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
+                <Button type="submit" disabled={submitting} className="w-full">
+                  {submitting && <Spinner data-icon="inline-start" />}
+                  {submitting ? 'Signing in…' : 'Sign in'}
+                </Button>
+              </FieldGroup>
+            </form>
+          </CardContent>
+          <CardFooter className="flex-col items-start gap-2">
+            <p className="text-xs font-medium text-muted-foreground">Demo credentials</p>
+            <ul className="flex w-full flex-col gap-1 font-mono text-xs text-muted-foreground">
+              {DEMO_CREDS.map((c) => (
+                <li key={c.user} className="flex justify-between">
+                  <span>
+                    {c.user} / {c.pass}
+                  </span>
+                  <span className="text-muted-foreground/70">{c.role}</span>
+                </li>
+              ))}
+            </ul>
+          </CardFooter>
+        </Card>
       </div>
     </div>
   )

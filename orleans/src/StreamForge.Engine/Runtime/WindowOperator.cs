@@ -165,6 +165,7 @@ internal sealed class WindowOperator(CompiledPlan plan)
             double d => $"D:{d}",
             string s => $"S:{s}",
             bool b => $"B:{b}",
+            Dictionary<string, object?> or List<object?> => $"J:{JsonText.Serialize(v)}",
             _ => "?",
         }));
     }

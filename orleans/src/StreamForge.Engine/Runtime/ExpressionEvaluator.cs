@@ -29,6 +29,7 @@ internal static class ExpressionEvaluator
         BinaryExpr b => EvalBinary(b, ctx),
         FunctionCallExpr f => EvalFunction(f, ctx),
         AggregateCallExpr agg => ctx.Aggregates?.Invoke(agg),
+        JsonAccessExpr j => EvalJsonAccess(j, ctx),
         _ => null,
     };
 
@@ -146,6 +147,43 @@ internal static class ExpressionEvaluator
         if (!sameKind) return null;
         return pred(SqlValues.Compare(l, r));
     }
+
+    // ------------------------------------------------------------------
+    // Postgres JSON access: '->' (object field / array element, returns the JSON node) and
+    // '->>' (same access, returns TEXT). NULL propagates: NULL -> anything = NULL.
+    // ------------------------------------------------------------------
+
+    private static object? EvalJsonAccess(JsonAccessExpr j, EvalContext ctx)
+    {
+        var left = Eval(j.Left, ctx);
+        var node = AccessJsonNode(left, j.Key);
+        return j.ReturnText ? StringifyJson(node) : node;
+    }
+
+    /// <summary>`left -> key`: object field access for a string key (NULL if `left` isn't a dict or the key
+    /// is missing), 0-based array element for an integer key (NULL if `left` isn't a list or the index is
+    /// out of range). A JSON `null` stored at the key and a missing key are indistinguishable here — both
+    /// already collapse to the CLR `null` this dialect uses to represent JSON null.</summary>
+    private static object? AccessJsonNode(object? left, Expr key) => key switch
+    {
+        StringLiteral sl => left is Dictionary<string, object?> dict && dict.TryGetValue(sl.Value, out var v) ? v : null,
+        NumberLiteral { LongValue: { } idx } => left is List<object?> list && idx >= 0 && idx < list.Count ? list[(int)idx] : null,
+        _ => null,
+    };
+
+    /// <summary>`->>` stringification: primitives render as text (bools as "true"/"false", numbers
+    /// invariant-culture, longs without a decimal point since they never go through double formatting);
+    /// dict/list nodes render as compact JSON text; a missing/NULL node stays NULL.</summary>
+    private static object? StringifyJson(object? node) => node switch
+    {
+        null => null,
+        string s => s,
+        bool b => b ? "true" : "false",
+        long l => l.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        double d => d.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        Dictionary<string, object?> or List<object?> => JsonText.Serialize(node),
+        _ => node.ToString(),
+    };
 
     private static object? EvalFunction(FunctionCallExpr f, EvalContext ctx)
     {

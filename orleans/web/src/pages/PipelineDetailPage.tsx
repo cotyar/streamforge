@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import { Check, CircleAlert, Play, Trash2, TriangleAlert } from 'lucide-react'
+import { toast } from 'sonner'
 import { pipelinesApi } from '../api/pipelines'
-import type { PipelineDefinition, SqlDiagnostic } from '../api/types'
+import { sourcesApi } from '../api/sources'
+import type { PipelineDefinition, SourceDefinition, SqlDiagnostic } from '../api/types'
 import { useAuth } from '../api/auth'
 import { usePipelineResults } from '../hooks/usePipelineResults'
 import { useMetricsStream } from '../hooks/useMetricsStream'
@@ -13,8 +16,26 @@ import { ResultsTable } from '../components/ResultsTable'
 import { MetricsBar } from '../components/MetricsBar'
 import { LiveChart } from '../components/LiveChart'
 import { RoleGate } from '../components/RoleGate'
-import { Skeleton } from '../components/Skeleton'
-import { CheckIcon, ErrorIcon, PlayIcon, TrashIcon, WarnIcon } from '../components/icons'
+import { cn } from '@/lib/utils'
+import { Card, CardContent } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Field, FieldLabel } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Spinner } from '@/components/ui/spinner'
+import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import type { BuilderState } from '../builder/types'
 import { emptyBuilderState } from '../builder/types'
 import { builderStateToSql } from '../builder/sqlgen'
@@ -42,6 +63,24 @@ export function PipelineDetailPage() {
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [sources, setSources] = useState<SourceDefinition[]>([])
+
+  // Shared with the visual Builder tab and the SQL editor's autocomplete — fetched once here so
+  // both consumers see the same list without duplicating the request.
+  useEffect(() => {
+    let cancelled = false
+    sourcesApi
+      .list()
+      .then((list) => {
+        if (!cancelled) setSources(list)
+      })
+      .catch(() => {
+        if (!cancelled) setSources([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     if (isNew) {
@@ -115,7 +154,7 @@ export function PipelineDetailPage() {
       setPipeline(saved)
       if (isNew) navigate(`/pipelines/${saved.id}`, { replace: true })
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Failed to save pipeline.')
+      toast.error(err instanceof Error ? err.message : 'Failed to save pipeline.')
     } finally {
       setSaving(false)
     }
@@ -128,7 +167,7 @@ export function PipelineDetailPage() {
       await pipelinesApi.remove(pipeline.id)
       navigate('/pipelines', { replace: true })
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Failed to delete pipeline.')
+      toast.error(err instanceof Error ? err.message : 'Failed to delete pipeline.')
       setSaving(false)
     }
   }
@@ -158,121 +197,112 @@ export function PipelineDetailPage() {
       <div className="grid grid-cols-1 gap-6 p-8 xl:grid-cols-2">
         {/* LEFT */}
         <div className="flex flex-col gap-4">
-          <div className="rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)] p-5">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-gray-500">Name</label>
-                <input
+          <Card>
+            <CardContent className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field>
+                <FieldLabel htmlFor="pl-name">Name</FieldLabel>
+                <Input
+                  id="pl-name"
                   value={name}
                   disabled={!canEdit}
                   onChange={(e) => setName(e.target.value)}
-                  className="w-full rounded-md border border-[var(--sf-border)] bg-[var(--sf-bg)] px-3 py-2 text-sm text-gray-100 outline-none focus:border-[var(--sf-accent)] disabled:opacity-60"
                   placeholder="vwap-by-symbol"
                 />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-gray-500">Description</label>
-                <input
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="pl-description">Description</FieldLabel>
+                <Input
+                  id="pl-description"
                   value={description}
                   disabled={!canEdit}
                   onChange={(e) => setDescription(e.target.value)}
-                  className="w-full rounded-md border border-[var(--sf-border)] bg-[var(--sf-bg)] px-3 py-2 text-sm text-gray-100 outline-none focus:border-[var(--sf-accent)] disabled:opacity-60"
                   placeholder="Volume-weighted average price per symbol"
                 />
-              </div>
-            </div>
-          </div>
+              </Field>
+            </CardContent>
+          </Card>
 
-          <div className="flex w-fit gap-1 rounded-lg border border-[var(--sf-border)] bg-[var(--sf-panel)] p-1">
-            <button
-              onClick={switchToSql}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                mode === 'sql' ? 'bg-[var(--sf-accent)]/15 text-[var(--sf-accent)]' : 'text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              SQL
-            </button>
-            <button
-              onClick={() => setMode('builder')}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                mode === 'builder' ? 'bg-[var(--sf-accent)]/15 text-[var(--sf-accent)]' : 'text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              Builder
-            </button>
-          </div>
+          <Tabs
+            value={mode}
+            onValueChange={(v) => {
+              if (v === 'sql') switchToSql()
+              else setMode('builder')
+            }}
+          >
+            <TabsList>
+              <TabsTrigger value="sql">SQL</TabsTrigger>
+              <TabsTrigger value="builder">Builder</TabsTrigger>
+            </TabsList>
+            <TabsContent value="sql">
+              <SqlEditor value={sql} onChange={setSql} diagnostics={diagnostics ?? []} readOnly={!canEdit} sources={sources} />
+            </TabsContent>
+            <TabsContent value="builder">
+              <PipelineBuilder state={builderState} onChange={setBuilderState} sources={sources} />
+            </TabsContent>
+          </Tabs>
 
-          {mode === 'sql' ? (
-            <SqlEditor value={sql} onChange={setSql} diagnostics={diagnostics ?? []} readOnly={!canEdit} />
-          ) : (
-            <PipelineBuilder state={builderState} onChange={setBuilderState} />
-          )}
-
-          <div className="rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)] p-4">
-            <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Validation</h3>
-            {validating ? (
-              <p className="text-sm text-gray-500">Validating…</p>
-            ) : diagnostics === null ? (
-              <p className="text-sm text-gray-500">Start typing SQL to validate.</p>
-            ) : diagnostics.length === 0 ? (
-              <p className="flex items-center gap-1.5 text-sm text-[var(--sf-good)]">
-                <CheckIcon className="h-4 w-4" /> Valid{planSummary ? ` — ${planSummary}` : ''}
-              </p>
-            ) : (
-              <ul className="flex flex-col gap-1.5">
-                {diagnostics.map((d, i) => (
-                  <li
-                    key={i}
-                    title={d.message}
-                    className={`flex items-start gap-2 text-xs ${d.severity === 'Error' ? 'text-[var(--sf-bad)]' : 'text-[var(--sf-warn)]'}`}
-                  >
-                    {d.severity === 'Error' ? (
-                      <ErrorIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    ) : (
-                      <WarnIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    )}
-                    <span>
-                      <span className="font-mono text-gray-500">
-                        {d.line}:{d.column}
-                      </span>{' '}
-                      {d.message}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+          <Card>
+            <CardContent>
+              <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Validation</h3>
+              {validating ? (
+                <p className="text-sm text-muted-foreground">Validating…</p>
+              ) : diagnostics === null ? (
+                <p className="text-sm text-muted-foreground">Start typing SQL to validate.</p>
+              ) : diagnostics.length === 0 ? (
+                <Alert>
+                  <Check className="text-primary" />
+                  <AlertDescription>Valid{planSummary ? ` — ${planSummary}` : ''}</AlertDescription>
+                </Alert>
+              ) : (
+                <ul className="flex flex-col gap-1.5">
+                  {diagnostics.map((d, i) => (
+                    <li
+                      key={i}
+                      title={d.message}
+                      className={cn('flex items-start gap-2 text-xs', d.severity === 'Error' ? 'text-destructive' : 'text-warning')}
+                    >
+                      {d.severity === 'Error' ? (
+                        <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+                      ) : (
+                        <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+                      )}
+                      <span>
+                        <span className="font-mono text-muted-foreground">
+                          {d.line}:{d.column}
+                        </span>{' '}
+                        {d.message}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
 
           {formError && (
-            <p className="rounded-md border border-[var(--sf-bad)]/30 bg-[var(--sf-bad)]/10 px-3 py-2 text-sm text-[var(--sf-bad)]">
-              {formError}
-            </p>
+            <Alert variant="destructive">
+              <AlertDescription>{formError}</AlertDescription>
+            </Alert>
           )}
 
           <RoleGate min="Editor">
             <div className="flex flex-wrap gap-2">
-              <button
-                onClick={() => void handleSave(false)}
-                disabled={saving}
-                className="rounded-lg bg-gradient-to-r from-sky-400 to-violet-500 px-4 py-2 text-sm font-semibold text-slate-950 transition-opacity hover:opacity-90 disabled:opacity-50"
-              >
+              <Button onClick={() => void handleSave(false)} disabled={saving}>
+                {saving && <Spinner data-icon="inline-start" />}
                 {saving ? 'Saving…' : 'Save'}
-              </button>
-              <button
-                onClick={() => void handleSave(true)}
-                disabled={saving}
-                className="flex items-center gap-1.5 rounded-lg border border-[var(--sf-accent)]/40 px-4 py-2 text-sm font-semibold text-[var(--sf-accent)] transition-colors hover:bg-[var(--sf-accent)]/10 disabled:opacity-50"
-              >
-                <PlayIcon className="h-4 w-4" /> Save & start
-              </button>
+              </Button>
+              <Button variant="outline" onClick={() => void handleSave(true)} disabled={saving}>
+                <Play data-icon="inline-start" /> Save & start
+              </Button>
               {!isNew && (
-                <button
+                <Button
+                  variant="outline"
                   onClick={() => setConfirmDelete(true)}
                   disabled={saving}
-                  className="ml-auto flex items-center gap-1.5 rounded-lg border border-[var(--sf-border)] px-4 py-2 text-sm font-medium text-gray-400 transition-colors hover:border-[var(--sf-bad)]/40 hover:text-[var(--sf-bad)]"
+                  className="ml-auto hover:border-destructive/40 hover:text-destructive"
                 >
-                  <TrashIcon className="h-4 w-4" /> Delete
-                </button>
+                  <Trash2 data-icon="inline-start" /> Delete
+                </Button>
               )}
             </div>
           </RoleGate>
@@ -281,52 +311,53 @@ export function PipelineDetailPage() {
         {/* RIGHT */}
         <div className="flex flex-col gap-4">
           {isNew ? (
-            <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-[var(--sf-border)] p-10 text-center text-sm text-gray-500">
-              Save the pipeline to see live results here.
-            </div>
+            <Empty className="h-full border border-dashed">
+              <EmptyHeader>
+                <EmptyDescription>Save the pipeline to see live results here.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           ) : (
             <>
-              <div className="rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)] p-4">
-                <MetricsBar metrics={currentMetrics} />
-              </div>
-              <div className="rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)] p-4">
-                <LiveChart rows={rows} />
-              </div>
-              <div className="min-h-[20rem] flex-1 overflow-hidden rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)]">
+              <Card>
+                <CardContent>
+                  <MetricsBar metrics={currentMetrics} />
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent>
+                  <LiveChart rows={rows} />
+                </CardContent>
+              </Card>
+              <Card className="min-h-[20rem] flex-1 overflow-hidden py-0">
                 <ResultsTable rows={rows} />
-              </div>
+              </Card>
             </>
           )}
         </div>
       </div>
 
-      {confirmDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
-          <div className="w-full max-w-sm rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)] p-5">
-            <h3 className="text-sm font-semibold text-gray-100">Delete pipeline?</h3>
-            <p className="mt-2 text-sm text-gray-400">
-              This permanently removes <span className="font-medium text-gray-200">{name}</span> and its results.
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                onClick={() => setConfirmDelete(false)}
-                className="rounded-md border border-[var(--sf-border)] px-3 py-1.5 text-sm text-gray-300 hover:bg-white/5"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  setConfirmDelete(false)
-                  void handleDelete()
-                }}
-                className="rounded-md bg-[var(--sf-bad)]/20 px-3 py-1.5 text-sm font-medium text-[var(--sf-bad)] hover:bg-[var(--sf-bad)]/30"
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete pipeline?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes <span className="font-medium text-foreground">{name}</span> and its results.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                setConfirmDelete(false)
+                void handleDelete()
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

@@ -104,7 +104,14 @@ internal sealed class Parser
         }
 
         WindowSpec? window = null;
-        if (MatchKeyword("WINDOW")) window = ParseWindowSpec();
+        int? windowLine = null, windowCol = null;
+        if (Current.IsKeyword("WINDOW"))
+        {
+            var tok = Current;
+            windowLine = tok.Line; windowCol = tok.Column;
+            Advance();
+            window = ParseWindowSpec();
+        }
 
         EmitMode? emit = null;
         int? emitLine = null, emitCol = null;
@@ -118,7 +125,7 @@ internal sealed class Parser
             else throw Error(Current, $"Expected CHANGES or FINAL after EMIT, got '{Current.Text}'");
         }
 
-        return new SelectQuery(select, fromClause, where, groupBy, window, emit, emitLine, emitCol, gbLine, gbCol);
+        return new SelectQuery(select, fromClause, where, groupBy, window, emit, emitLine, emitCol, gbLine, gbCol, windowLine, windowCol);
     }
 
     private SelectClause ParseSelectClause()
@@ -254,7 +261,7 @@ internal sealed class Parser
 
     // ------------------------------------------------------------------
     // Expressions (Pratt-ish precedence chain)
-    // OR < AND < NOT < comparisons < + - < * / % < unary minus < primary
+    // OR < AND < NOT < comparisons < + - < * / % < unary minus < '->'/'->>'  (postfix) < primary
     // ------------------------------------------------------------------
 
     private Expr ParseOr()
@@ -338,7 +345,42 @@ internal sealed class Parser
             var operand = ParseUnary();
             return new UnaryExpr("-", operand, tok.Line, tok.Column);
         }
-        return ParsePrimary();
+        return ParsePostfix();
+    }
+
+    // Postgres JSON access — 'expr -> key' / 'expr ->> key', left-associative, chainable
+    // (payload -> 'order' ->> 'symbol'), binding tighter than unary minus so that
+    // '-a -> k' parses as '-(a -> k)', like ordinary member access.
+    private Expr ParsePostfix()
+    {
+        var left = ParsePrimary();
+        while (Current.IsSymbol("->") || Current.IsSymbol("->>"))
+        {
+            var tok = Advance();
+            bool returnText = tok.Text == "->>";
+            var key = ParseJsonKey();
+            left = new JsonAccessExpr(left, returnText, key, tok.Line, tok.Column);
+        }
+        return left;
+    }
+
+    // Postgres allows an arbitrary expression on the right of '->'/'->>'; this dialect restricts it to a
+    // string literal (object key) or an integer literal (0-based array index) — enough to express the
+    // common `payload -> 'field'` / `payload -> 0` cases without needing a runtime-typed key.
+    private Expr ParseJsonKey()
+    {
+        var tok = Current;
+        if (tok.Kind == TokenKind.String)
+        {
+            Advance();
+            return new StringLiteral(tok.StringValue!, tok.Line, tok.Column);
+        }
+        if (tok.Kind == TokenKind.Number && tok.LongValue is not null)
+        {
+            Advance();
+            return new NumberLiteral(null, tok.LongValue, tok.Line, tok.Column);
+        }
+        throw Error(tok, $"'->'/'->>' right operand must be a string literal (object key) or integer literal (array index), got '{tok.Text}'");
     }
 
     private Expr ParsePrimary()

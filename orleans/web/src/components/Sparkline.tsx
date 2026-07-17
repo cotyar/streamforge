@@ -3,7 +3,7 @@ export function Sparkline({
   values,
   width = 120,
   height = 32,
-  color = 'var(--sf-accent)',
+  color = 'var(--spark-stroke)',
 }: {
   values: number[]
   width?: number
@@ -13,7 +13,7 @@ export function Sparkline({
   if (values.length < 2) {
     return (
       <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="overflow-visible">
-        <line x1={0} y1={height - 1} x2={width} y2={height - 1} stroke="var(--sf-border)" strokeWidth={1} />
+        <line x1={0} y1={height - 1} x2={width} y2={height - 1} stroke="var(--border)" strokeWidth={1} />
       </svg>
     )
   }

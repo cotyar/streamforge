@@ -104,6 +104,7 @@ app.UseAuthorization();
 app.MapAuthEndpoints();
 app.MapSourcesEndpoints();
 app.MapPipelinesEndpoints();
+app.MapTablesEndpoints();
 app.MapUsersEndpoints();
 app.MapHub<StreamHub>("/hubs/stream");
 

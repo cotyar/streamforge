@@ -1,17 +1,25 @@
 import { NavLink, Navigate, Outlet } from 'react-router-dom'
+import { LayoutDashboard, LogOut, Moon, Sun, Users as UsersIconLucide, Workflow, Database, Table2 } from 'lucide-react'
 import { useAuth } from '../api/auth'
-import { DashboardIcon, LogoutIcon, PipelineIcon, SourcesIcon, UsersIcon } from './icons'
+import { cn } from '@/lib/utils'
+import { useTheme } from '@/lib/theme'
+import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Toaster } from '@/components/ui/sonner'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 
 const NAV_ITEMS = [
-  { to: '/', label: 'Dashboard', icon: DashboardIcon, end: true },
-  { to: '/pipelines', label: 'Pipelines', icon: PipelineIcon, end: false },
-  { to: '/sources', label: 'Sources', icon: SourcesIcon, end: false },
+  { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
+  { to: '/pipelines', label: 'Pipelines', icon: Workflow, end: false },
+  { to: '/tables', label: 'Tables', icon: Table2, end: false },
+  { to: '/sources', label: 'Sources', icon: Database, end: false },
 ] as const
 
-const ROLE_BADGE_STYLE: Record<string, string> = {
-  Admin: 'bg-[var(--sf-accent-2)]/15 text-[var(--sf-accent-2)] border-[var(--sf-accent-2)]/30',
-  Editor: 'bg-[var(--sf-accent)]/15 text-[var(--sf-accent)] border-[var(--sf-accent)]/30',
-  Viewer: 'border-[var(--sf-border)] text-gray-400',
+const ROLE_BADGE_VARIANT: Record<string, 'default' | 'secondary' | 'outline'> = {
+  Admin: 'default',
+  Editor: 'secondary',
+  Viewer: 'outline',
 }
 
 export function RequireAuth() {
@@ -20,16 +28,35 @@ export function RequireAuth() {
   return <Layout />
 }
 
+function ThemeToggle() {
+  const { theme, toggleTheme } = useTheme()
+  const isDark = theme === 'dark'
+  const label = isDark ? 'Switch to light theme' : 'Switch to dark theme'
+
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button variant="ghost" size="icon-sm" onClick={toggleTheme} aria-label={label}>
+            {isDark ? <Sun /> : <Moon />}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="top">{label}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 function Layout() {
   const { user, hasRole, logout } = useAuth()
 
   return (
-    <div className="flex h-full min-h-screen bg-[var(--sf-bg)]">
-      <aside className="flex w-60 shrink-0 flex-col border-r border-[var(--sf-border)] bg-[var(--sf-panel)]/60">
-        <div className="flex items-center gap-2 px-5 py-5">
-          <div className="h-7 w-7 rounded-md bg-gradient-to-br from-sky-400 to-violet-500" />
-          <span className="text-lg font-bold tracking-tight text-white">
-            Stream<span className="text-[var(--sf-accent)]">Forge</span>
+    <div className="flex h-full min-h-screen bg-background">
+      <aside className="flex w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
+        <div className="flex flex-col gap-0.5 px-5 py-5">
+          <span className="text-[10px] font-semibold tracking-widest text-muted-foreground">CORPORATE</span>
+          <span className="text-lg font-bold tracking-tight text-sidebar-foreground">
+            Stream<span className="text-primary">Forge</span>
           </span>
         </div>
 
@@ -40,14 +67,15 @@ function Layout() {
               to={to}
               end={end}
               className={({ isActive }) =>
-                `flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                cn(
+                  'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
                   isActive
-                    ? 'bg-[var(--sf-accent)]/12 text-[var(--sf-accent)]'
-                    : 'text-gray-400 hover:bg-white/5 hover:text-gray-200'
-                }`
+                    ? 'bg-sidebar-accent text-sidebar-primary'
+                    : 'text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground',
+                )
               }
             >
-              <Icon className="h-5 w-5" />
+              <Icon className="size-5" />
               {label}
             </NavLink>
           ))}
@@ -55,40 +83,36 @@ function Layout() {
             <NavLink
               to="/users"
               className={({ isActive }) =>
-                `flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                cn(
+                  'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
                   isActive
-                    ? 'bg-[var(--sf-accent)]/12 text-[var(--sf-accent)]'
-                    : 'text-gray-400 hover:bg-white/5 hover:text-gray-200'
-                }`
+                    ? 'bg-sidebar-accent text-sidebar-primary'
+                    : 'text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground',
+                )
               }
             >
-              <UsersIcon className="h-5 w-5" />
+              <UsersIconLucide className="size-5" />
               Users
             </NavLink>
           )}
         </nav>
 
         {user && (
-          <div className="border-t border-[var(--sf-border)] p-3">
+          <div className="border-t border-sidebar-border p-3">
             <div className="flex items-center gap-3 rounded-lg px-2 py-2">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/10 text-sm font-semibold text-gray-200">
-                {user.displayName.slice(0, 1).toUpperCase()}
-              </div>
+              <Avatar className="shrink-0">
+                <AvatarFallback>{user.displayName.slice(0, 1).toUpperCase()}</AvatarFallback>
+              </Avatar>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium text-gray-200">{user.displayName}</div>
-                <span
-                  className={`inline-block rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${ROLE_BADGE_STYLE[user.role]}`}
-                >
+                <div className="truncate text-sm font-medium text-sidebar-foreground">{user.displayName}</div>
+                <Badge variant={ROLE_BADGE_VARIANT[user.role]} className="mt-0.5">
                   {user.role}
-                </span>
+                </Badge>
               </div>
-              <button
-                onClick={logout}
-                title="Log out"
-                className="rounded-md p-1.5 text-gray-500 transition-colors hover:bg-white/5 hover:text-gray-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--sf-accent)]"
-              >
-                <LogoutIcon className="h-4 w-4" />
-              </button>
+              <ThemeToggle />
+              <Button variant="ghost" size="icon-sm" onClick={logout} title="Log out">
+                <LogOut />
+              </Button>
             </div>
           </div>
         )}
@@ -97,6 +121,7 @@ function Layout() {
       <main className="min-w-0 flex-1 overflow-y-auto">
         <Outlet />
       </main>
+      <Toaster />
     </div>
   )
 }

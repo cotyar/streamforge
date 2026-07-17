@@ -1,23 +1,32 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { Play, Square, Rocket } from 'lucide-react'
+import { toast } from 'sonner'
 import { pipelinesApi } from '../api/pipelines'
 import { sourcesApi } from '../api/sources'
-import type { PipelineDefinition, SourceDefinition } from '../api/types'
+import { tablesApi } from '../api/tables'
+import type { PipelineDefinition, SourceDefinition, TableDefinition } from '../api/types'
 import { useMetricsStream } from '../hooks/useMetricsStream'
 import { Topbar } from '../components/Topbar'
 import { StatusBadge } from '../components/StatusBadge'
 import { Sparkline } from '../components/Sparkline'
 import { RoleGate } from '../components/RoleGate'
-import { EmptyState } from '../components/EmptyState'
-import { SkeletonGrid, Skeleton } from '../components/Skeleton'
-import { PlayIcon, StopIcon } from '../components/icons'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 
-function StatTile({ label, value }: { label: string; value: string }) {
+function StatTile({ label, value, onClick }: { label: string; value: string; onClick?: () => void }) {
   return (
-    <div className="rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)] p-4">
-      <p className="text-xs font-medium uppercase tracking-wide text-gray-500">{label}</p>
-      <p className="mt-1.5 text-2xl font-semibold text-white">{value}</p>
-    </div>
+    <Card
+      onClick={onClick}
+      className={onClick ? 'cursor-pointer transition-colors hover:ring-primary/40' : undefined}
+    >
+      <CardContent>
+        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+        <p className="mt-1.5 text-2xl font-semibold text-foreground">{value}</p>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -25,6 +34,7 @@ export function DashboardPage() {
   const navigate = useNavigate()
   const [pipelines, setPipelines] = useState<PipelineDefinition[] | null>(null)
   const [sources, setSources] = useState<SourceDefinition[] | null>(null)
+  const [tables, setTables] = useState<TableDefinition[] | null>(null)
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set())
   const metrics = useMetricsStream()
   const [history, setHistory] = useState<Record<string, number[]>>({})
@@ -32,6 +42,7 @@ export function DashboardPage() {
   const load = useCallback(() => {
     pipelinesApi.list().then(setPipelines).catch(() => setPipelines([]))
     sourcesApi.list().then(setSources).catch(() => setSources([]))
+    tablesApi.list().then(setTables).catch(() => setTables([]))
   }, [])
 
   useEffect(() => {
@@ -65,7 +76,8 @@ export function DashboardPage() {
       if (goingToStart) await pipelinesApi.start(p.id)
       else await pipelinesApi.stop(p.id)
       load()
-    } catch {
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : `Failed to ${goingToStart ? 'start' : 'stop'} pipeline.`)
       load()
     } finally {
       setBusyIds((prev) => {
@@ -80,6 +92,8 @@ export function DashboardPage() {
   const runningCount = pipelines?.filter((p) => p.status === 'Running').length ?? 0
   const totalSources = sources?.length ?? 0
   const totalRowsPerSec = Object.values(metrics).reduce((sum, m) => sum + m.rowsOutPerSec, 0)
+  const totalTables = tables?.length ?? 0
+  const runningTables = tables?.filter((t) => t.status === 'Running').length ?? 0
 
   return (
     <div>
@@ -94,29 +108,40 @@ export function DashboardPage() {
               <StatTile label="Running" value={runningCount.toString()} />
               <StatTile label="Sources" value={totalSources.toString()} />
               <StatTile label="Rows/s (live)" value={totalRowsPerSec.toFixed(1)} />
+              <StatTile label="Tables" value={`${totalTables} (${runningTables} running)`} onClick={() => navigate('/tables')} />
             </>
           )}
         </div>
 
         <div>
-          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-gray-500">Pipelines</h2>
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">Pipelines</h2>
           {pipelines === null ? (
-            <SkeletonGrid />
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <Card key={i}>
+                  <CardContent className="flex flex-col gap-3">
+                    <Skeleton className="h-4 w-2/3" />
+                    <Skeleton className="h-3 w-1/3" />
+                    <Skeleton className="h-8 w-full" />
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
           ) : pipelines.length === 0 ? (
-            <EmptyState
-              title="No pipelines yet"
-              hint="Create your first streaming pipeline to see live metrics here."
-              action={
+            <Empty className="border border-dashed">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <Rocket />
+                </EmptyMedia>
+                <EmptyTitle>No pipelines yet</EmptyTitle>
+                <EmptyDescription>Create your first streaming pipeline to see live metrics here.</EmptyDescription>
+              </EmptyHeader>
+              <EmptyContent>
                 <RoleGate min="Editor">
-                  <button
-                    onClick={() => navigate('/pipelines/new')}
-                    className="rounded-lg bg-[var(--sf-accent)]/15 px-4 py-2 text-sm font-medium text-[var(--sf-accent)] transition-colors hover:bg-[var(--sf-accent)]/25"
-                  >
-                    New pipeline
-                  </button>
+                  <Button onClick={() => navigate('/pipelines/new')}>New pipeline</Button>
                 </RoleGate>
-              }
-            />
+              </EmptyContent>
+            </Empty>
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {pipelines.map((p) => {
@@ -124,52 +149,58 @@ export function DashboardPage() {
                 const rowHistory = history[p.id] ?? []
                 const busy = busyIds.has(p.id)
                 return (
-                  <div
+                  <Card
                     key={p.id}
                     onClick={() => navigate(`/pipelines/${p.id}`)}
-                    className="group flex cursor-pointer flex-col gap-3 rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)] p-5 transition-colors hover:border-[var(--sf-accent)]/40"
+                    className="group cursor-pointer transition-colors hover:ring-primary/40"
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <h3 className="truncate text-sm font-semibold text-gray-100 group-hover:text-white">{p.name}</h3>
-                        <p className="mt-0.5 truncate text-xs text-gray-500">{p.description || 'No description'}</p>
+                    <CardHeader>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <CardTitle className="truncate group-hover:text-foreground">{p.name}</CardTitle>
+                          <p className="mt-0.5 truncate text-xs text-muted-foreground">{p.description || 'No description'}</p>
+                        </div>
+                        <StatusBadge status={p.status} />
                       </div>
-                      <StatusBadge status={p.status} />
-                    </div>
+                    </CardHeader>
 
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex gap-4 text-xs text-gray-400">
-                        <span>
-                          in <span className="font-mono text-gray-200">{(m?.eventsInPerSec ?? 0).toFixed(1)}</span>/s
-                        </span>
-                        <span>
-                          out <span className="font-mono text-gray-200">{(m?.rowsOutPerSec ?? 0).toFixed(1)}</span>/s
-                        </span>
+                    <CardContent className="flex flex-col gap-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex gap-4 text-xs text-muted-foreground">
+                          <span>
+                            in <span className="font-mono text-foreground">{(m?.eventsInPerSec ?? 0).toFixed(1)}</span>/s
+                          </span>
+                          <span>
+                            out <span className="font-mono text-foreground">{(m?.rowsOutPerSec ?? 0).toFixed(1)}</span>/s
+                          </span>
+                        </div>
+                        <Sparkline values={rowHistory.length ? rowHistory : [0, 0]} width={90} height={28} />
                       </div>
-                      <Sparkline values={rowHistory.length ? rowHistory : [0, 0]} width={90} height={28} />
-                    </div>
 
-                    <RoleGate min="Editor">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          void toggle(p)
-                        }}
-                        disabled={busy}
-                        className="mt-1 flex items-center justify-center gap-1.5 self-start rounded-md border border-[var(--sf-border)] px-3 py-1.5 text-xs font-medium text-gray-300 transition-colors hover:border-[var(--sf-accent)] hover:text-[var(--sf-accent)] disabled:cursor-wait disabled:opacity-50"
-                      >
-                        {p.status === 'Running' ? (
-                          <>
-                            <StopIcon className="h-3.5 w-3.5" /> Stop
-                          </>
-                        ) : (
-                          <>
-                            <PlayIcon className="h-3.5 w-3.5" /> Start
-                          </>
-                        )}
-                      </button>
-                    </RoleGate>
-                  </div>
+                      <RoleGate min="Editor">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            void toggle(p)
+                          }}
+                          disabled={busy}
+                          className="self-start"
+                        >
+                          {p.status === 'Running' ? (
+                            <>
+                              <Square data-icon="inline-start" /> Stop
+                            </>
+                          ) : (
+                            <>
+                              <Play data-icon="inline-start" /> Start
+                            </>
+                          )}
+                        </Button>
+                      </RoleGate>
+                    </CardContent>
+                  </Card>
                 )
               })}
             </div>

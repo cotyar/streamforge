@@ -5,7 +5,9 @@ namespace StreamForge.Engine.Sql;
 /// and are skipped so scanning can continue.</summary>
 internal sealed class Tokenizer
 {
-    private static readonly string[] MultiCharSymbols = ["<>", "<=", ">=", "!="];
+    // "->>" must precede "->" — MultiCharSymbols is matched in array order (first match wins), not by
+    // length, so the 3-char Postgres "returns text" JSON operator has to be tried before its 2-char prefix.
+    private static readonly string[] MultiCharSymbols = ["->>", "<>", "<=", ">=", "!=", "->"];
 
     private readonly string _src;
     private int _pos;

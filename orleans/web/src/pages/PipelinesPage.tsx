@@ -1,14 +1,28 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { Pencil, Eye, Play, Plus, Square, Trash2, Workflow } from 'lucide-react'
+import { toast } from 'sonner'
 import { pipelinesApi } from '../api/pipelines'
 import type { PipelineDefinition } from '../api/types'
 import { extractSourcesFromSql } from '../lib/sqlSources'
 import { Topbar } from '../components/Topbar'
 import { StatusBadge } from '../components/StatusBadge'
 import { RoleGate } from '../components/RoleGate'
-import { EmptyState } from '../components/EmptyState'
-import { Skeleton } from '../components/Skeleton'
-import { EditIcon, EyeIcon, PlayIcon, PlusIcon, StopIcon, TrashIcon } from '../components/icons'
+import { Card } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 
 function formatDate(ms: number): string {
   return new Date(ms).toLocaleString(undefined, {
@@ -37,6 +51,9 @@ export function PipelinesPage() {
     setBusyIds((prev) => new Set(prev).add(id))
     fn()
       .then(load)
+      .catch((err: unknown) => {
+        toast.error(err instanceof Error ? err.message : 'Action failed.')
+      })
       .finally(() =>
         setBusyIds((prev) => {
           const next = new Set(prev)
@@ -54,6 +71,8 @@ export function PipelinesPage() {
     try {
       await pipelinesApi.remove(id)
       load()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete pipeline.')
     } finally {
       setBusyIds((prev) => {
         const next = new Set(prev)
@@ -70,12 +89,9 @@ export function PipelinesPage() {
         subtitle="Streaming SQL jobs running against your live sources"
         action={
           <RoleGate min="Editor">
-            <button
-              onClick={() => navigate('/pipelines/new')}
-              className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-sky-400 to-violet-500 px-4 py-2 text-sm font-semibold text-slate-950 transition-opacity hover:opacity-90"
-            >
-              <PlusIcon className="h-4 w-4" /> New pipeline
-            </button>
+            <Button onClick={() => navigate('/pipelines/new')}>
+              <Plus data-icon="inline-start" /> New pipeline
+            </Button>
           </RoleGate>
         }
       />
@@ -88,126 +104,119 @@ export function PipelinesPage() {
             ))}
           </div>
         ) : pipelines.length === 0 ? (
-          <EmptyState
-            title="Create your first streaming pipeline"
-            hint="Write streaming SQL or use the visual builder to join, filter, and window your live sources."
-            action={
+          <Empty className="border border-dashed">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <Workflow />
+              </EmptyMedia>
+              <EmptyTitle>Create your first streaming pipeline</EmptyTitle>
+              <EmptyDescription>
+                Write streaming SQL or use the visual builder to join, filter, and window your live sources.
+              </EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
               <RoleGate min="Editor">
-                <button
-                  onClick={() => navigate('/pipelines/new')}
-                  className="rounded-lg bg-[var(--sf-accent)]/15 px-4 py-2 text-sm font-medium text-[var(--sf-accent)] transition-colors hover:bg-[var(--sf-accent)]/25"
-                >
-                  New pipeline
-                </button>
+                <Button onClick={() => navigate('/pipelines/new')}>New pipeline</Button>
               </RoleGate>
-            }
-          />
+            </EmptyContent>
+          </Empty>
         ) : (
-          <div className="overflow-hidden rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)]">
-            <table className="w-full border-collapse text-left text-sm">
-              <thead>
-                <tr className="border-b border-[var(--sf-border)] text-xs uppercase tracking-wide text-gray-500">
-                  <th className="px-4 py-3 font-medium">Name</th>
-                  <th className="px-4 py-3 font-medium">Status</th>
-                  <th className="px-4 py-3 font-medium">Sources</th>
-                  <th className="px-4 py-3 font-medium">Description</th>
-                  <th className="px-4 py-3 font-medium">Updated</th>
-                  <th className="px-4 py-3 font-medium text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
+          <Card className="overflow-hidden py-0">
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead>Name</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Sources</TableHead>
+                  <TableHead>Description</TableHead>
+                  <TableHead>Updated</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {pipelines.map((p) => {
                   const busy = busyIds.has(p.id)
                   const sources = extractSourcesFromSql(p.sql)
                   return (
-                    <tr key={p.id} className="border-b border-[var(--sf-border)]/60 last:border-0 hover:bg-white/[0.02]">
-                      <td className="px-4 py-3">
-                        <Link to={`/pipelines/${p.id}`} className="font-medium text-gray-100 hover:text-[var(--sf-accent)]">
+                    <TableRow key={p.id}>
+                      <TableCell>
+                        <Link to={`/pipelines/${p.id}`} className="font-medium text-foreground hover:text-primary">
                           {p.name}
                         </Link>
-                        {p.error && <p className="mt-0.5 max-w-xs truncate text-xs text-[var(--sf-bad)]">{p.error}</p>}
-                      </td>
-                      <td className="px-4 py-3">
+                        {p.error && <p className="mt-0.5 max-w-xs truncate text-xs text-destructive">{p.error}</p>}
+                      </TableCell>
+                      <TableCell>
                         <StatusBadge status={p.status} />
-                      </td>
-                      <td className="px-4 py-3 text-xs text-gray-400">
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
                         {sources.length > 0 ? sources.join(', ') : '—'}
-                      </td>
-                      <td className="max-w-xs truncate px-4 py-3 text-gray-400">{p.description || '—'}</td>
-                      <td className="px-4 py-3 text-xs text-gray-500">{formatDate(p.updatedAtMs)}</td>
-                      <td className="px-4 py-3">
+                      </TableCell>
+                      <TableCell className="max-w-xs truncate text-muted-foreground">{p.description || '—'}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{formatDate(p.updatedAtMs)}</TableCell>
+                      <TableCell>
                         <div className="flex items-center justify-end gap-1">
-                          <Link
-                            to={`/pipelines/${p.id}`}
-                            title="View"
-                            className="rounded-md p-1.5 text-gray-400 transition-colors hover:bg-white/5 hover:text-gray-200"
-                          >
-                            <EyeIcon className="h-4 w-4" />
-                          </Link>
+                          <Button variant="ghost" size="icon-sm" asChild title="View">
+                            <Link to={`/pipelines/${p.id}`}>
+                              <Eye />
+                            </Link>
+                          </Button>
                           <RoleGate min="Editor">
                             <>
-                              <button
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
                                 title={p.status === 'Running' ? 'Stop' : 'Start'}
                                 disabled={busy}
                                 onClick={() =>
                                   withBusy(p.id, () => (p.status === 'Running' ? pipelinesApi.stop(p.id) : pipelinesApi.start(p.id)))
                                 }
-                                className="rounded-md p-1.5 text-gray-400 transition-colors hover:bg-white/5 hover:text-[var(--sf-accent)] disabled:opacity-40"
                               >
-                                {p.status === 'Running' ? <StopIcon className="h-4 w-4" /> : <PlayIcon className="h-4 w-4" />}
-                              </button>
-                              <Link
-                                to={`/pipelines/${p.id}`}
-                                title="Edit"
-                                className="rounded-md p-1.5 text-gray-400 transition-colors hover:bg-white/5 hover:text-gray-200"
-                              >
-                                <EditIcon className="h-4 w-4" />
-                              </Link>
-                              <button
+                                {p.status === 'Running' ? <Square /> : <Play />}
+                              </Button>
+                              <Button variant="ghost" size="icon-sm" asChild title="Edit">
+                                <Link to={`/pipelines/${p.id}`}>
+                                  <Pencil />
+                                </Link>
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
                                 title="Delete"
                                 disabled={busy}
                                 onClick={() => setPendingDelete(p)}
-                                className="rounded-md p-1.5 text-gray-400 transition-colors hover:bg-white/5 hover:text-[var(--sf-bad)] disabled:opacity-40"
+                                className="hover:text-destructive"
                               >
-                                <TrashIcon className="h-4 w-4" />
-                              </button>
+                                <Trash2 />
+                              </Button>
                             </>
                           </RoleGate>
                         </div>
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   )
                 })}
-              </tbody>
-            </table>
-          </div>
+              </TableBody>
+            </Table>
+          </Card>
         )}
       </div>
 
-      {pendingDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
-          <div className="w-full max-w-sm rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)] p-5">
-            <h3 className="text-sm font-semibold text-gray-100">Delete pipeline?</h3>
-            <p className="mt-2 text-sm text-gray-400">
-              This permanently removes <span className="font-medium text-gray-200">{pendingDelete.name}</span> and its results.
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                onClick={() => setPendingDelete(null)}
-                className="rounded-md border border-[var(--sf-border)] px-3 py-1.5 text-sm text-gray-300 hover:bg-white/5"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmDelete}
-                className="rounded-md bg-[var(--sf-bad)]/20 px-3 py-1.5 text-sm font-medium text-[var(--sf-bad)] hover:bg-[var(--sf-bad)]/30"
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <AlertDialog open={pendingDelete !== null} onOpenChange={(open) => !open && setPendingDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete pipeline?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes <span className="font-medium text-foreground">{pendingDelete?.name}</span> and its results.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={confirmDelete}>
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

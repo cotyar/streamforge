@@ -18,6 +18,19 @@ public interface IRegistryGrain : IGrainWithStringKey
     Task<bool> DeletePipelineAsync(string id);
     /// <summary>Start or stop a pipeline. Returns updated definition, null if not found. Sets Failed + Error on compile failure.</summary>
     Task<PipelineDefinition?> SetPipelineStatusAsync(string id, PipelineStatus status);
+
+    Task<List<TableDefinition>> GetTablesAsync();
+    Task<TableDefinition?> GetTableAsync(string id);
+    /// <summary>Validates name uniqueness across sources+tables (throws InvalidOperationException on
+    /// collision) and compile-checks the SQL, storing OutputSchema/StreamInputs/TableInputs when it compiles.</summary>
+    Task<TableDefinition> CreateTableAsync(TableDefinition def);
+    Task<TableDefinition?> UpdateTableAsync(TableDefinition def);
+    /// <summary>Throws InvalidOperationException (409-style) if a Running table depends on this one.</summary>
+    Task<bool> DeleteTableAsync(string id);
+    /// <summary>Start or stop a table. Starting requires all of its table inputs to be Running (sets
+    /// Failed + Error otherwise). Stopping throws InvalidOperationException (409-style) if a Running table
+    /// depends on this one. Returns updated definition, null if not found.</summary>
+    Task<TableDefinition?> SetTableStatusAsync(string id, PipelineStatus status);
 }
 
 /// <summary>Key = pipeline id. One activation per running pipeline.</summary>
@@ -36,6 +49,20 @@ public interface IGeneratorGrain : IGrainWithStringKey
     Task StopAsync();
     /// <summary>Keep-alive; timers alone don't extend activation lifetime.</summary>
     Task PingAsync();
+}
+
+/// <summary>Key = table name. One activation per running table. Materializes a Z-set (DBSP-style)
+/// incremental view: subscribes to its SQL's stream and table inputs, feeds deltas through a
+/// StreamForge.Engine TableExecutor, and publishes emitted deltas + persists a consolidated snapshot for
+/// rehydration-free reads.</summary>
+public interface ITableGrain : IGrainWithStringKey
+{
+    Task StartAsync(TableDefinition def);
+    Task StopAsync();
+    Task<List<TableRowDto>> GetRowsAsync(int limit, int offset);
+    Task<int> GetRowCountAsync();
+    Task<TableMetrics> GetMetricsAsync();
+    Task<long> GetSeqAsync();
 }
 
 /// <summary>Singleton (key = StreamConstants.UsersKey).</summary>

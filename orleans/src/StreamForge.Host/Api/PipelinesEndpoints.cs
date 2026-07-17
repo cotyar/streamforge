@@ -122,6 +122,7 @@ public static class PipelinesEndpoints
         FieldType.Long => FieldKind.Long,
         FieldType.Bool => FieldKind.Bool,
         FieldType.Timestamp => FieldKind.Timestamp,
+        FieldType.Json => FieldKind.Json,
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown field type"),
     };
 }

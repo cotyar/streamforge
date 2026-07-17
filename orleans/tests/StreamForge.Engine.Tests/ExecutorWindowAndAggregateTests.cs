@@ -173,4 +173,26 @@ public class ExecutorWindowAndAggregateTests
         Assert.Empty(results);
         Assert.Equal(1L, exec.LateEvents);
     }
+
+    [Fact]
+    public void GroupByJsonArrowArrowExtractedValueAggregatesPerDistinctKey()
+    {
+        var sql = "SELECT payload -> 'user' ->> 'tier' AS tier, COUNT(*) AS cnt " +
+                  "FROM events GROUP BY payload -> 'user' ->> 'tier' WINDOW TUMBLING(SIZE 10 SECONDS) EMIT FINAL";
+        var exec = CompileAndCreate(sql, Events);
+
+        object? PayloadWithTier(string tier) => new Dictionary<string, object?>
+        {
+            ["user"] = new Dictionary<string, object?> { ["tier"] = tier },
+        };
+
+        exec.OnEvent("events", Evt(1000, "events", ("eventType", "e"), ("payload", PayloadWithTier("gold"))));
+        exec.OnEvent("events", Evt(1100, "events", ("eventType", "e"), ("payload", PayloadWithTier("silver"))));
+        exec.OnEvent("events", Evt(1200, "events", ("eventType", "e"), ("payload", PayloadWithTier("gold"))));
+
+        var closed = exec.AdvanceWatermark(12000);
+        Assert.Equal(2, closed.Count);
+        Assert.Contains(closed, r => Equals(r["tier"], "gold") && Equals(r["cnt"], 2L));
+        Assert.Contains(closed, r => Equals(r["tier"], "silver") && Equals(r["cnt"], 1L));
+    }
 }

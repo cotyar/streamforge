@@ -15,4 +15,8 @@ public sealed class StreamHub : Hub
     public Task UnsubscribeSource(string name) => Groups.RemoveFromGroupAsync(Context.ConnectionId, $"source:{name}");
 
     public Task SubscribeMetrics() => Groups.AddToGroupAsync(Context.ConnectionId, "metrics");
+
+    public Task SubscribeTable(string name) => Groups.AddToGroupAsync(Context.ConnectionId, $"table:{name}");
+
+    public Task UnsubscribeTable(string name) => Groups.RemoveFromGroupAsync(Context.ConnectionId, $"table:{name}");
 }

@@ -1,22 +1,25 @@
 import type { PipelineStatus } from '../api/types'
+import { Badge } from '@/components/ui/badge'
+import { cn } from '@/lib/utils'
 
-const STYLES: Record<PipelineStatus, { dot: string; text: string; pulse: boolean; label: string }> = {
-  Running: { dot: 'bg-[var(--sf-good)]', text: 'text-[var(--sf-good)]', pulse: true, label: 'Running' },
-  Stopped: { dot: 'bg-gray-500', text: 'text-gray-400', pulse: false, label: 'Stopped' },
-  Failed: { dot: 'bg-[var(--sf-bad)]', text: 'text-[var(--sf-bad)]', pulse: false, label: 'Failed' },
+const STATUS_CONFIG: Record<
+  PipelineStatus,
+  { variant: 'default' | 'secondary' | 'destructive'; dot: string; pulse: boolean; label: string }
+> = {
+  Running: { variant: 'default', dot: 'bg-primary-foreground', pulse: true, label: 'Running' },
+  Stopped: { variant: 'secondary', dot: 'bg-muted-foreground', pulse: false, label: 'Stopped' },
+  Failed: { variant: 'destructive', dot: 'bg-destructive', pulse: false, label: 'Failed' },
 }
 
 export function StatusBadge({ status }: { status: PipelineStatus }) {
-  const s = STYLES[status]
+  const s = STATUS_CONFIG[status]
   return (
-    <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${s.text}`}>
-      <span className="relative flex h-2 w-2">
-        {s.pulse && (
-          <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${s.dot} opacity-60`} />
-        )}
-        <span className={`relative inline-flex h-2 w-2 rounded-full ${s.dot}`} />
+    <Badge variant={s.variant} className="gap-1.5">
+      <span className="relative flex size-2">
+        {s.pulse && <span className={cn('absolute inline-flex size-full animate-ping rounded-full opacity-60', s.dot)} />}
+        <span className={cn('relative inline-flex size-2 rounded-full', s.dot)} />
       </span>
       {s.label}
-    </span>
+    </Badge>
   )
 }

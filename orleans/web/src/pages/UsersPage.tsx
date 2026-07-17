@@ -1,18 +1,34 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
+import { Pencil, Plus, Trash2 } from 'lucide-react'
+import { toast } from 'sonner'
 import { usersApi } from '../api/users'
 import type { Role, UserInfo } from '../api/types'
 import { useAuth } from '../api/auth'
 import { Topbar } from '../components/Topbar'
-import { EmptyState } from '../components/EmptyState'
-import { Skeleton } from '../components/Skeleton'
-import { EditIcon, PlusIcon, TrashIcon } from '../components/icons'
+import { Card } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
+import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Users as UsersIcon } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 
 const ROLES: Role[] = ['Admin', 'Editor', 'Viewer']
-
-const inputCls =
-  'w-full rounded-md border border-[var(--sf-border)] bg-[var(--sf-bg)] px-2.5 py-1.5 text-sm text-gray-200 focus:border-[var(--sf-accent)] focus:outline-none'
-const labelCls = 'mb-1 block text-xs font-medium uppercase tracking-wide text-gray-500'
 
 function formatDate(ms: number): string {
   return new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
@@ -62,57 +78,70 @@ function UserModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
-      <form onSubmit={handleSubmit} className="flex w-full max-w-sm flex-col gap-4 rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)] p-5">
-        <h3 className="text-sm font-semibold text-gray-100">{isEdit ? `Edit ${initial?.username}` : 'New user'}</h3>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-sm">
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <DialogHeader>
+            <DialogTitle>{isEdit ? `Edit ${initial?.username}` : 'New user'}</DialogTitle>
+          </DialogHeader>
 
-        <div>
-          <label className={labelCls}>Username</label>
-          <input className={inputCls} value={username} disabled={isEdit} onChange={(e) => setUsername(e.target.value)} placeholder="jdoe" />
-        </div>
-        <div>
-          <label className={labelCls}>Display name</label>
-          <input className={inputCls} value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Jane Doe" />
-        </div>
-        <div>
-          <label className={labelCls}>Role</label>
-          <select className={inputCls} value={role} onChange={(e) => setRole(e.target.value as Role)}>
-            {ROLES.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label className={labelCls}>{isEdit ? 'New password (optional)' : 'Password'}</label>
-          <input
-            type="password"
-            className={inputCls}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder={isEdit ? 'Leave blank to keep current' : '••••••••'}
-          />
-        </div>
+          <FieldGroup className="gap-3">
+            <Field>
+              <FieldLabel htmlFor="user-username">Username</FieldLabel>
+              <Input id="user-username" value={username} disabled={isEdit} onChange={(e) => setUsername(e.target.value)} placeholder="jdoe" />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="user-display">Display name</FieldLabel>
+              <Input id="user-display" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Jane Doe" />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="user-role">Role</FieldLabel>
+              <Select value={role} onValueChange={(v) => setRole(v as Role)}>
+                <SelectTrigger id="user-role" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {ROLES.map((r) => (
+                      <SelectItem key={r} value={r}>
+                        {r}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="user-password">{isEdit ? 'New password (optional)' : 'Password'}</FieldLabel>
+              <Input
+                id="user-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={isEdit ? 'Leave blank to keep current' : '••••••••'}
+              />
+            </Field>
+          </FieldGroup>
 
-        {error && (
-          <p className="rounded-md border border-[var(--sf-bad)]/30 bg-[var(--sf-bad)]/10 px-3 py-2 text-sm text-[var(--sf-bad)]">{error}</p>
-        )}
+          {error && (
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
 
-        <div className="mt-1 flex justify-end gap-2">
-          <button type="button" onClick={onClose} className="rounded-md border border-[var(--sf-border)] px-3 py-1.5 text-sm text-gray-300 hover:bg-white/5">
-            Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={saving}
-            className="rounded-md bg-gradient-to-r from-sky-400 to-violet-500 px-4 py-1.5 text-sm font-semibold text-slate-950 hover:opacity-90 disabled:opacity-50"
-          >
-            {saving ? 'Saving…' : 'Save'}
-          </button>
-        </div>
-      </form>
-    </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button type="button" variant="outline">
+                Cancel
+              </Button>
+            </DialogClose>
+            <Button type="submit" disabled={saving}>
+              {saving ? 'Saving…' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -134,8 +163,13 @@ export function UsersPage() {
     if (!pendingDelete) return
     const username = pendingDelete.username
     setPendingDelete(null)
-    await usersApi.remove(username)
-    load()
+    try {
+      await usersApi.remove(username)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete user.')
+    } finally {
+      load()
+    }
   }
 
   return (
@@ -144,12 +178,9 @@ export function UsersPage() {
         title="Users"
         subtitle="Manage StreamForge accounts and roles"
         action={
-          <button
-            onClick={() => setModal({ mode: 'create' })}
-            className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-sky-400 to-violet-500 px-4 py-2 text-sm font-semibold text-slate-950 transition-opacity hover:opacity-90"
-          >
-            <PlusIcon className="h-4 w-4" /> New user
-          </button>
+          <Button onClick={() => setModal({ mode: 'create' })}>
+            <Plus data-icon="inline-start" /> New user
+          </Button>
         }
       />
 
@@ -161,56 +192,62 @@ export function UsersPage() {
             ))}
           </div>
         ) : users.length === 0 ? (
-          <EmptyState title="No users found" />
+          <Empty className="border border-dashed">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <UsersIcon />
+              </EmptyMedia>
+              <EmptyTitle>No users found</EmptyTitle>
+              <EmptyDescription>Add StreamForge accounts to grant access.</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         ) : (
-          <div className="overflow-hidden rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)]">
-            <table className="w-full border-collapse text-left text-sm">
-              <thead>
-                <tr className="border-b border-[var(--sf-border)] text-xs uppercase tracking-wide text-gray-500">
-                  <th className="px-4 py-3 font-medium">Username</th>
-                  <th className="px-4 py-3 font-medium">Display name</th>
-                  <th className="px-4 py-3 font-medium">Role</th>
-                  <th className="px-4 py-3 font-medium">Created</th>
-                  <th className="px-4 py-3 font-medium text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
+          <Card className="overflow-hidden py-0">
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead>Username</TableHead>
+                  <TableHead>Display name</TableHead>
+                  <TableHead>Role</TableHead>
+                  <TableHead>Created</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {users.map((u) => {
                   const isSelf = u.username === currentUser?.username
                   return (
-                    <tr key={u.username} className="border-b border-[var(--sf-border)]/60 last:border-0 hover:bg-white/[0.02]">
-                      <td className="px-4 py-3 font-medium text-gray-100">
+                    <TableRow key={u.username}>
+                      <TableCell className="font-medium text-foreground">
                         {u.username}
-                        {isSelf && <span className="ml-2 text-xs text-gray-500">(you)</span>}
-                      </td>
-                      <td className="px-4 py-3 text-gray-300">{u.displayName}</td>
-                      <td className="px-4 py-3 text-gray-400">{u.role}</td>
-                      <td className="px-4 py-3 text-xs text-gray-500">{formatDate(u.createdAtMs)}</td>
-                      <td className="px-4 py-3">
+                        {isSelf && <span className="ml-2 text-xs text-muted-foreground">(you)</span>}
+                      </TableCell>
+                      <TableCell className="text-foreground/80">{u.displayName}</TableCell>
+                      <TableCell className="text-muted-foreground">{u.role}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{formatDate(u.createdAtMs)}</TableCell>
+                      <TableCell>
                         <div className="flex items-center justify-end gap-1">
-                          <button
-                            title="Edit"
-                            onClick={() => setModal({ mode: 'edit', user: u })}
-                            className="rounded-md p-1.5 text-gray-400 transition-colors hover:bg-white/5 hover:text-gray-200"
-                          >
-                            <EditIcon className="h-4 w-4" />
-                          </button>
-                          <button
+                          <Button variant="ghost" size="icon-sm" title="Edit" onClick={() => setModal({ mode: 'edit', user: u })}>
+                            <Pencil />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
                             title={isSelf ? "You can't delete your own account" : 'Delete'}
                             disabled={isSelf}
                             onClick={() => setPendingDelete(u)}
-                            className="rounded-md p-1.5 text-gray-400 transition-colors hover:bg-white/5 hover:text-[var(--sf-bad)] disabled:cursor-not-allowed disabled:opacity-30"
+                            className="hover:text-destructive"
                           >
-                            <TrashIcon className="h-4 w-4" />
-                          </button>
+                            <Trash2 />
+                          </Button>
                         </div>
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   )
                 })}
-              </tbody>
-            </table>
-          </div>
+              </TableBody>
+            </Table>
+          </Card>
         )}
       </div>
 
@@ -225,30 +262,22 @@ export function UsersPage() {
         />
       )}
 
-      {pendingDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
-          <div className="w-full max-w-sm rounded-xl border border-[var(--sf-border)] bg-[var(--sf-panel)] p-5">
-            <h3 className="text-sm font-semibold text-gray-100">Delete user?</h3>
-            <p className="mt-2 text-sm text-gray-400">
-              This permanently removes <span className="font-medium text-gray-200">{pendingDelete.username}</span>.
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                onClick={() => setPendingDelete(null)}
-                className="rounded-md border border-[var(--sf-border)] px-3 py-1.5 text-sm text-gray-300 hover:bg-white/5"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => void confirmDelete()}
-                className="rounded-md bg-[var(--sf-bad)]/20 px-3 py-1.5 text-sm font-medium text-[var(--sf-bad)] hover:bg-[var(--sf-bad)]/30"
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <AlertDialog open={pendingDelete !== null} onOpenChange={(open) => !open && setPendingDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete user?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes <span className="font-medium text-foreground">{pendingDelete?.username}</span>.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={() => void confirmDelete()}>
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

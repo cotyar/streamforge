@@ -5,7 +5,7 @@
 // ============================================================================
 
 export type Role = 'Admin' | 'Editor' | 'Viewer'
-export type FieldType = 'String' | 'Double' | 'Long' | 'Bool' | 'Timestamp'
+export type FieldType = 'String' | 'Double' | 'Long' | 'Bool' | 'Timestamp' | 'Json'
 export type PipelineStatus = 'Stopped' | 'Running' | 'Failed'
 
 export interface FieldDef {
@@ -34,7 +34,11 @@ export interface PipelineDefinition {
   updatedAtMs: number
 }
 
-export type RowValue = string | number | boolean | null
+export interface JsonObject {
+  [key: string]: RowValue
+}
+export type JsonArray = RowValue[]
+export type RowValue = string | number | boolean | null | JsonObject | JsonArray
 export type ResultRow = Record<string, RowValue>
 
 export interface ResultEnvelope {
@@ -109,4 +113,73 @@ export interface HubEvents {
   pipelineMetrics: (metrics: PipelineMetrics) => void
   pipelineStatus: (pipelineId: string, status: PipelineStatus) => void
   sourceEvent: (sourceName: string, event: ResultRow) => void
+}
+
+// ============================================================================
+// Materialized tables — persistent Z-set incremental views over streams and
+// other tables. Shares the pipelines' Stopped/Running/Failed status union.
+// Field names below were confirmed empirically against the running backend
+// (curl, editor/editor123!) rather than assumed — the validate response in
+// particular uses different field names (`outputSchema`/`kind`) than the
+// TableDefinition's own `outputFields`/`type`.
+// ============================================================================
+
+export type TableStatus = PipelineStatus
+
+export interface TableDefinition {
+  id: string
+  name: string
+  description: string
+  sql: string
+  status: TableStatus
+  error: string | null
+  createdBy: string
+  createdAtMs: number
+  updatedAtMs: number
+  outputFields: FieldDef[]
+  streamInputs: string[]
+  tableInputs: string[]
+}
+
+export interface TableRowDto {
+  row: ResultRow
+  weight: number
+}
+
+export interface TableRowsResponse {
+  rows: TableRowDto[]
+  totalRows: number
+  seq: number
+}
+
+export interface TableMetrics {
+  tableId: string
+  status: TableStatus
+  rowCount: number
+  deltasIn: number
+  deltasOut: number
+  lastUpdateMs: number
+  rebuilding?: boolean
+}
+
+export interface TableOutputField {
+  name: string
+  kind: FieldType
+}
+
+export interface TableValidateResponse {
+  ok: boolean
+  diagnostics: SqlDiagnostic[]
+  planSummary: string | null
+  streamInputs: string[]
+  tableInputs: string[]
+  outputSchema: TableOutputField[]
+}
+
+// SignalR hub `/hubs/stream` (tables) — client→server: SubscribeTable(name),
+// UnsubscribeTable(name). Server→client `tableDelta` confirmed empirically
+// (throwaway @microsoft/signalr script against :5199) to carry 3 args:
+// (tableName, deltas, seq) — the backend-wide (name, payload, seq) convention.
+export interface TableHubEvents {
+  tableDelta: (tableName: string, deltas: TableRowDto[], seq: number) => void
 }

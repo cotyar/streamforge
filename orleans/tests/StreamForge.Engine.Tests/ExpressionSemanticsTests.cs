@@ -128,4 +128,119 @@ public class ExpressionSemanticsTests
     {
         Assert.Equal(1L, EvalSingle("qty % 2", ("qty", 5L), ("price", 1.0), ("symbol", "a"), ("active", true)));
     }
+
+    // ------------------------------------------------------------------
+    // JSON access ('->' / '->>') evaluator semantics
+    // ------------------------------------------------------------------
+
+    private static object? EvalJson(string selectExpr, object? payload)
+    {
+        var exec = CompileAndCreate($"SELECT {selectExpr} AS x FROM events", Events);
+        var results = exec.OnEvent("events", Evt(1000, "events", ("eventType", "e"), ("payload", payload)));
+        Assert.Single(results);
+        return results[0]["x"];
+    }
+
+    [Fact]
+    public void ArrowReturnsObjectFieldValue()
+    {
+        var payload = new Dictionary<string, object?> { ["symbol"] = "AAPL", ["qty"] = 10L };
+        Assert.Equal("AAPL", EvalJson("payload -> 'symbol'", payload));
+        Assert.Equal(10L, EvalJson("payload -> 'qty'", payload));
+    }
+
+    [Fact]
+    public void ArrowReturnsArrayElementByZeroBasedIndex()
+    {
+        var payload = new Dictionary<string, object?> { ["tags"] = new List<object?> { "web", "mobile", "api" } };
+        Assert.Equal("web", EvalJson("payload -> 'tags' -> 0", payload));
+        Assert.Equal("mobile", EvalJson("payload -> 'tags' -> 1", payload));
+    }
+
+    [Fact]
+    public void ArrowArrayIndexOutOfRangeIsNull()
+    {
+        var payload = new Dictionary<string, object?> { ["tags"] = new List<object?> { "web" } };
+        Assert.Null(EvalJson("payload -> 'tags' -> 5", payload));
+    }
+
+    [Fact]
+    public void ArrowOnNonListWithIntegerKeyIsNull()
+    {
+        var payload = new Dictionary<string, object?> { ["symbol"] = "AAPL" };
+        Assert.Null(EvalJson("payload -> 'symbol' -> 0", payload)); // 'symbol' is a string leaf, not a list
+    }
+
+    [Fact]
+    public void ArrowMissingKeyIsNull()
+    {
+        var payload = new Dictionary<string, object?> { ["symbol"] = "AAPL" };
+        Assert.Null(EvalJson("payload -> 'missing'", payload));
+    }
+
+    [Fact]
+    public void ArrowOnNonObjectWithStringKeyIsNull()
+    {
+        var payload = new Dictionary<string, object?> { ["tags"] = new List<object?> { "web" } };
+        Assert.Null(EvalJson("payload -> 'tags' -> 'notAKey'", payload)); // 'tags' is a list, not an object
+    }
+
+    [Fact]
+    public void NullLeftOperandPropagatesThroughArrowAndArrowArrow()
+    {
+        Assert.Null(EvalJson("payload -> 'x'", null));
+        Assert.Null(EvalJson("payload ->> 'x'", null));
+    }
+
+    [Fact]
+    public void ArrowArrowStringifiesEachPrimitiveTypeAndPropagatesNull()
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["s"] = "hello",
+            ["n"] = 3.5,
+            ["l"] = 42L,
+            ["b"] = true,
+            ["bf"] = false,
+            ["nul"] = null,
+        };
+        Assert.Equal("hello", EvalJson("payload ->> 's'", payload));
+        Assert.Equal("3.5", EvalJson("payload ->> 'n'", payload));
+        Assert.Equal("42", EvalJson("payload ->> 'l'", payload));
+        Assert.Equal("true", EvalJson("payload ->> 'b'", payload));
+        Assert.Equal("false", EvalJson("payload ->> 'bf'", payload));
+        Assert.Null(EvalJson("payload ->> 'nul'", payload)); // JSON null stored at the key
+        Assert.Null(EvalJson("payload ->> 'missing'", payload)); // key absent entirely
+    }
+
+    [Fact]
+    public void ArrowArrowSerializesNestedDictAndListToCompactJson()
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["order"] = new Dictionary<string, object?> { ["symbol"] = "AAPL", ["qty"] = 10L },
+            ["tags"] = new List<object?> { "web", "mobile" },
+        };
+        Assert.Equal("{\"symbol\":\"AAPL\",\"qty\":10}", EvalJson("payload ->> 'order'", payload));
+        Assert.Equal("[\"web\",\"mobile\"]", EvalJson("payload ->> 'tags'", payload));
+    }
+
+    [Fact]
+    public void ChainedArrowThenArrowArrowExtractsDeeplyNestedField()
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["user"] = new Dictionary<string, object?> { ["tier"] = "gold" },
+        };
+        Assert.Equal("gold", EvalJson("payload -> 'user' ->> 'tier'", payload));
+    }
+
+    [Fact]
+    public void BareJsonColumnProjectsAsIsInSelect()
+    {
+        var payload = new Dictionary<string, object?> { ["a"] = 1L };
+        var result = EvalJson("payload", payload);
+        var dict = Assert.IsType<Dictionary<string, object?>>(result);
+        Assert.Equal(1L, dict["a"]);
+    }
 }

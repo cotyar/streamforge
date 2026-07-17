@@ -141,7 +141,15 @@ public static class Planner
         AggregateCallExpr { IsStar: true } => "count_star",
         AggregateCallExpr agg => agg.Name.ToLowerInvariant(),
         FunctionCallExpr f => f.Name.ToLowerInvariant(),
+        JsonAccessExpr j => JsonKeyText(j.Key),
         _ => $"col{index + 1}",
+    };
+
+    private static string JsonKeyText(Expr key) => key switch
+    {
+        StringLiteral s => s.Value,
+        NumberLiteral { LongValue: { } n } => n.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        _ => "json",
     };
 
     private static void AssignGroupByIndexes(List<OutputItem> output, List<Expr>? groupBy, Dictionary<Expr, (string Alias, string Field)> bindings)
@@ -175,6 +183,9 @@ public static class Planner
                 case FunctionCallExpr f:
                     foreach (var a in f.Args) Walk(a);
                     break;
+                case JsonAccessExpr j:
+                    Walk(j.Left);
+                    break;
             }
         }
         foreach (var root in roots) Walk(root);
@@ -192,6 +203,7 @@ public static class Planner
         Identifier or QualifiedIdentifier when bindings.TryGetValue(e, out var b) => $"{b.Alias}_{b.Field}",
         Identifier id => id.Name,
         QualifiedIdentifier q => $"{q.Qualifier}_{q.Name}",
+        JsonAccessExpr j => $"{ColumnText(j.Left, bindings)}{(j.ReturnText ? "->>" : "->")}{JsonKeyText(j.Key)}",
         _ => "expr",
     };
 

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ResultEnvelope } from '../api/types'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 const WIDTH = 640
 const HEIGHT = 220
@@ -33,7 +34,7 @@ export function LiveChart({ rows }: { rows: ResultEnvelope[] }) {
   }, [rows, column])
 
   if (numericColumns.length === 0) {
-    return <p className="px-4 py-10 text-center text-sm text-gray-500">No numeric columns yet.</p>
+    return <p className="px-4 py-10 text-center text-sm text-muted-foreground">No numeric columns yet.</p>
   }
 
   const plotW = WIDTH - PAD.left - PAD.right
@@ -60,39 +61,42 @@ export function LiveChart({ rows }: { rows: ResultEnvelope[] }) {
   return (
     <div>
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-medium uppercase tracking-wide text-gray-500">Live chart</span>
-        <select
-          className="rounded-md border border-[var(--sf-border)] bg-[var(--sf-bg)] px-2 py-1 text-xs text-gray-200 focus:border-[var(--sf-accent)] focus:outline-none"
-          value={column}
-          onChange={(e) => setColumn(e.target.value)}
-        >
-          {numericColumns.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
+        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Live chart</span>
+        <Select value={column} onValueChange={setColumn}>
+          <SelectTrigger size="sm" className="text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {numericColumns.map((c) => (
+                <SelectItem key={c} value={c}>
+                  {c}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       </div>
       <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} className="w-full" preserveAspectRatio="none">
         {gridYs.map((y, i) => (
           <g key={i}>
-            <line x1={PAD.left} y1={y} x2={WIDTH - PAD.right} y2={y} stroke="var(--sf-border)" strokeWidth={1} />
-            <text x={PAD.left - 8} y={y + 3} textAnchor="end" fontSize={9} fill="#6b7280">
+            <line x1={PAD.left} y1={y} x2={WIDTH - PAD.right} y2={y} stroke="var(--border)" strokeWidth={1} />
+            <text x={PAD.left - 8} y={y + 3} textAnchor="end" fontSize={9} fill="var(--muted-foreground)">
               {(max - (i / gridRows) * range).toFixed(1)}
             </text>
           </g>
         ))}
         {coords.length > 1 && (
           <>
-            <path d={areaPath} fill="var(--sf-accent)" opacity={0.12} />
-            <path d={linePath} fill="none" stroke="var(--sf-accent)" strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" />
+            <path d={areaPath} fill="var(--chart-fill)" opacity={0.15} />
+            <path d={linePath} fill="none" stroke="var(--chart-stroke)" strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" />
           </>
         )}
-        {coords.length > 0 && <circle cx={coords[coords.length - 1].x} cy={coords[coords.length - 1].y} r={3} fill="var(--sf-accent)" />}
-        <text x={PAD.left} y={HEIGHT - 6} fontSize={9} fill="#6b7280">
+        {coords.length > 0 && <circle cx={coords[coords.length - 1].x} cy={coords[coords.length - 1].y} r={3} fill="var(--chart-stroke)" />}
+        <text x={PAD.left} y={HEIGHT - 6} fontSize={9} fill="var(--muted-foreground)">
           older
         </text>
-        <text x={WIDTH - PAD.right} y={HEIGHT - 6} textAnchor="end" fontSize={9} fill="#6b7280">
+        <text x={WIDTH - PAD.right} y={HEIGHT - 6} textAnchor="end" fontSize={9} fill="var(--muted-foreground)">
           now
         </text>
       </svg>

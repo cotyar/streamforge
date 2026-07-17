@@ -194,4 +194,85 @@ public class TokenizerAndParserTests
             Assert.NotEmpty(r.Diagnostics);
         }
     }
+
+    // ------------------------------------------------------------------
+    // JSON access ('->' / '->>') — tokenizer disambiguation and parser precedence.
+    // Internal Tokenizer/Parser types aren't exposed to tests, so — like every other tokenizer/parser
+    // test in this file — correctness is observed through Compile()/CompileAndCreate(): a mis-tokenized
+    // '->'/'->>' would either fail to parse or evaluate to the wrong value.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void MinusAndGreaterThanTokenizeCorrectlyWithNoWhitespace()
+    {
+        // "qty-price" must lex as (qty)(-)(price), not be swallowed by the new '->'/'->>' matching;
+        // "qty>0" must stay a plain '>' comparison.
+        var exec = CompileAndCreate("SELECT qty-price AS diff FROM trades WHERE qty>0", Trades);
+        var results = exec.OnEvent("trades", Evt(1000, "trades", ("symbol", "AAPL"), ("price", 3.0), ("qty", 10L), ("active", true)));
+        Assert.Single(results);
+        Assert.Equal(7.0, results[0]["diff"]);
+    }
+
+    [Fact]
+    public void ArrowAndArrowArrowLexCorrectlyWithAndWithoutWhitespace()
+    {
+        // "payload->'k'" (no space) and "payload ->> 'k'" (spaced) must both lex as single JSON
+        // operator tokens, not decompose into '-'/'>' pairs (which would be a parse error here).
+        var r = Compile("SELECT payload->'k' AS viaArrow, payload ->> 'k' AS viaArrowArrow FROM events", Events);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+    }
+
+    [Fact]
+    public void ArrowArrowIsMatchedBeforeArrowSoItIsNotSplit()
+    {
+        // If '->>' were mis-lexed as '->' followed by a stray '>', this would be a parse error
+        // (an operand can't start with '>'). Compiling successfully proves the longest match won.
+        var r = Compile("SELECT payload ->> 'k' AS x FROM events", Events);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+    }
+
+    [Fact]
+    public void ChainedJsonAccessParsesLeftAssociativeAndBindsTighterThanComparison()
+    {
+        // a -> 'k' ->> 'x' = 'y' must parse as ((a -> 'k') ->> 'x') = 'y'. If '->'/'->>' bound looser
+        // than '=' (or the chain were right-associative), 'x' = 'y' would need to itself be a valid
+        // JSON key (it isn't — keys are literals only), so this would fail to compile.
+        var exec = CompileAndCreate("SELECT eventType AS x FROM events WHERE payload -> 'k' ->> 'x' = 'y'", Events);
+
+        var matches = new Dictionary<string, object?> { ["k"] = new Dictionary<string, object?> { ["x"] = "y" } };
+        var matchResult = exec.OnEvent("events", Evt(1000, "events", ("eventType", "e1"), ("payload", matches)));
+        Assert.Single(matchResult);
+
+        var mismatches = new Dictionary<string, object?> { ["k"] = new Dictionary<string, object?> { ["x"] = "z" } };
+        var mismatchResult = exec.OnEvent("events", Evt(2000, "events", ("eventType", "e2"), ("payload", mismatches)));
+        Assert.Empty(mismatchResult);
+    }
+
+    [Fact]
+    public void JsonAccessBindsTighterThanUnaryMinus()
+    {
+        // '-payload -> 'k'' must parse as '-(payload -> 'k')', not '(-payload) -> 'k''. The two
+        // groupings are behaviorally distinguishable: with the intended (tighter-than-unary) grouping,
+        // 'payload -> 'k'' evaluates first (5L), then negation gives -5L. Under the wrong grouping,
+        // unary '-' would apply to the raw Dictionary payload first (evaluates to NULL, since unary
+        // minus only negates long/double), and NULL -> 'k' is NULL — so a NULL result would mean the
+        // parser bound '-' the wrong way around.
+        var exec = CompileAndCreate("SELECT -payload -> 'k' AS x FROM events", Events);
+        var payload = new Dictionary<string, object?> { ["k"] = 5L };
+        var results = exec.OnEvent("events", Evt(1000, "events", ("eventType", "e"), ("payload", payload)));
+        Assert.Single(results);
+        Assert.Equal(-5L, results[0]["x"]);
+    }
+
+    [Fact]
+    public void JsonAccessKeyMustBeStringOrIntegerLiteral()
+    {
+        var parenExpr = Compile("SELECT payload -> (1 + 1) AS x FROM events", Events);
+        Assert.False(parenExpr.Ok);
+        Assert.Contains(parenExpr.Diagnostics, d => d.Message.Contains("string literal") && d.Message.Contains("integer literal"));
+
+        var doubleKey = Compile("SELECT payload -> 1.5 AS x FROM events", Events);
+        Assert.False(doubleKey.Ok);
+        Assert.Contains(doubleKey.Diagnostics, d => d.Message.Contains("string literal") && d.Message.Contains("integer literal"));
+    }
 }

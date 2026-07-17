@@ -3,13 +3,14 @@
 // setup; accessTokenFactory reads the current bearer token from localStorage on
 // every (re)connect attempt, so no explicit wiring to the auth module is needed.
 import * as signalR from '@microsoft/signalr'
-import type { PipelineMetrics, PipelineStatus, ResultEnvelope, ResultRow } from '../api/types'
+import type { PipelineMetrics, PipelineStatus, ResultEnvelope, ResultRow, TableRowDto } from '../api/types'
 import { getStoredToken } from '../api/client'
 
 type RowsHandler = (rows: ResultEnvelope[]) => void
 type StatusHandler = (status: PipelineStatus) => void
 type MetricsHandler = (metrics: PipelineMetrics) => void
 type SourceHandler = (row: ResultRow) => void
+type TableDeltaHandler = (deltas: TableRowDto[], seq: number) => void
 type Unsubscribe = () => void
 
 let connection: signalR.HubConnection | null = null
@@ -25,6 +26,9 @@ const sourceRefCounts = new Map<string, number>()
 const metricsHandlers = new Set<MetricsHandler>()
 let metricsRefCount = 0
 
+const tableDeltaHandlers = new Map<string, Set<TableDeltaHandler>>()
+const tableRefCounts = new Map<string, number>()
+
 function registerListeners(conn: signalR.HubConnection) {
   conn.on('pipelineResult', (pipelineId: string, rows: ResultEnvelope[]) => {
     pipelineRowHandlers.get(pipelineId)?.forEach((h) => h(rows))
@@ -38,6 +42,9 @@ function registerListeners(conn: signalR.HubConnection) {
   conn.on('sourceEvent', (sourceName: string, row: ResultRow) => {
     sourceHandlers.get(sourceName)?.forEach((h) => h(row))
   })
+  conn.on('tableDelta', (tableName: string, deltas: TableRowDto[], seq: number) => {
+    tableDeltaHandlers.get(tableName)?.forEach((h) => h(deltas, seq))
+  })
 
   conn.onreconnected(() => {
     for (const id of pipelineRefCounts.keys()) {
@@ -48,6 +55,9 @@ function registerListeners(conn: signalR.HubConnection) {
     }
     if (metricsRefCount > 0) {
       void conn.invoke('subscribeMetrics')
+    }
+    for (const name of tableRefCounts.keys()) {
+      void conn.invoke('SubscribeTable', name)
     }
   })
 }
@@ -92,6 +102,8 @@ export async function disconnectHub(): Promise<void> {
   sourceRefCounts.clear()
   metricsHandlers.clear()
   metricsRefCount = 0
+  tableDeltaHandlers.clear()
+  tableRefCounts.clear()
   if (conn) {
     try {
       await conn.stop()
@@ -165,6 +177,47 @@ export function subscribeSource(name: string, onEvent: SourceHandler): Unsubscri
       if (connection) void connection.invoke('unsubscribeSource', name)
     } else {
       sourceRefCounts.set(name, next)
+    }
+  }
+}
+
+/** Subscribes to a materialized table's live delta stream by name (tables share the sources'
+ * namespace, so the hub keys off name rather than id — matches `SubscribeTable`/`UnsubscribeTable`
+ * on the hub, confirmed empirically to be the exact invoke-method casing the server expects).
+ *
+ * Gates the deferred `invoke('SubscribeTable', ...)` on *this handler* still being registered
+ * (rather than on the ref count being >0) so that a subscribe immediately followed by an
+ * unsubscribe — e.g. React StrictMode's dev-only mount→cleanup→remount — can't race the
+ * connection handshake into double-subscribing the server. With a ref-count-only gate, the first
+ * mount's orphaned `.then()` would still see a >0 count (bumped by the second mount) and send its
+ * own redundant SubscribeTable, which duplicated every delta batch server-side. */
+export function subscribeTable(name: string, onDeltas: TableDeltaHandler): Unsubscribe {
+  if (!tableDeltaHandlers.has(name)) tableDeltaHandlers.set(name, new Set())
+  tableDeltaHandlers.get(name)!.add(onDeltas)
+
+  const wasZero = (tableRefCounts.get(name) ?? 0) === 0
+  tableRefCounts.set(name, (tableRefCounts.get(name) ?? 0) + 1)
+
+  if (wasZero) {
+    void getConnection().then((conn) => {
+      if (tableDeltaHandlers.get(name)?.has(onDeltas)) {
+        void conn.invoke('SubscribeTable', name)
+      }
+    })
+  }
+
+  let done = false
+  return () => {
+    if (done) return
+    done = true
+    tableDeltaHandlers.get(name)?.delete(onDeltas)
+    const next = Math.max(0, (tableRefCounts.get(name) ?? 1) - 1)
+    if (next === 0) {
+      tableRefCounts.delete(name)
+      tableDeltaHandlers.delete(name)
+      if (connection) void connection.invoke('UnsubscribeTable', name)
+    } else {
+      tableRefCounts.set(name, next)
     }
   }
 }

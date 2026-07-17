@@ -6,6 +6,8 @@ import { LoginPage } from './pages/LoginPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { PipelinesPage } from './pages/PipelinesPage'
 import { PipelineDetailPage } from './pages/PipelineDetailPage'
+import { TablesPage } from './pages/TablesPage'
+import { TableDetailPage } from './pages/TableDetailPage'
 import { SourcesPage } from './pages/SourcesPage'
 import { UsersPage } from './pages/UsersPage'
 
@@ -25,6 +27,8 @@ export default function App() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/pipelines" element={<PipelinesPage />} />
             <Route path="/pipelines/:id" element={<PipelineDetailPage />} />
+            <Route path="/tables" element={<TablesPage />} />
+            <Route path="/tables/:id" element={<TableDetailPage />} />
             <Route path="/sources" element={<SourcesPage />} />
             <Route
               path="/users"

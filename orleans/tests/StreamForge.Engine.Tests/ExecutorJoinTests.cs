@@ -118,4 +118,34 @@ public class ExecutorJoinTests
         Assert.Equal("AAPL", results[0]["asym"]);
         Assert.Equal("AAPL", results[0]["bsym"]);
     }
+
+    [Fact]
+    public void JoinOnJsonArrowArrowExtractedEquiKeyMatches()
+    {
+        // ON e.payload ->> 'order' ->> 'symbol'... — wait, the equi-key itself is 'payload -> 'order' ->> 'symbol''
+        // (an object step then a text-extracting step). The equi-key extractor must walk through the
+        // JsonAccessExpr nodes on the JSON side to recognize this as a valid hash equi-key against t.symbol.
+        var sql = "SELECT e.eventType AS eventType, e.payload -> 'user' ->> 'tier' AS tier, t.price AS price FROM events e " +
+                  "JOIN trades t WITHIN 5 SECONDS ON e.payload -> 'order' ->> 'symbol' = t.symbol";
+        var exec = CompileAndCreate(sql, Events, Trades);
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["user"] = new Dictionary<string, object?> { ["tier"] = "gold" },
+            ["order"] = new Dictionary<string, object?> { ["symbol"] = "AAPL" },
+        };
+
+        var afterEvent = exec.OnEvent("events", Evt(1000, "events", ("eventType", "order.placed"), ("payload", payload)));
+        Assert.Empty(afterEvent);
+
+        var afterTrade = exec.OnEvent("trades", Evt(1100, "trades", ("symbol", "AAPL"), ("price", 150.0), ("qty", 10L), ("active", true)));
+        Assert.Single(afterTrade);
+        Assert.Equal("order.placed", afterTrade[0]["eventType"]);
+        Assert.Equal("gold", afterTrade[0]["tier"]);
+        Assert.Equal(150.0, afterTrade[0]["price"]);
+
+        // A trade for a different symbol must not match.
+        var noMatch = exec.OnEvent("trades", Evt(1200, "trades", ("symbol", "MSFT"), ("price", 250.0), ("qty", 5L), ("active", true)));
+        Assert.Empty(noMatch);
+    }
 }

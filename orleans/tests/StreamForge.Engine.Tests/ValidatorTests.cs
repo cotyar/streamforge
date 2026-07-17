@@ -184,4 +184,104 @@ public class ValidatorTests
         Assert.True(results[0].ContainsKey("symbol"));
         Assert.True(results[0].ContainsKey("price"));
     }
+
+    // ------------------------------------------------------------------
+    // JSON access ('->' / '->>') validator rules
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void ArrowOnNonJsonColumnIsError()
+    {
+        var r = Compile("SELECT t.price -> 'x' AS x FROM trades t", Trades);
+        Assert.False(r.Ok);
+        Assert.Contains(r.Diagnostics, d => d.Message.Contains("'->'") && d.Message.Contains("must be a JSON column"));
+    }
+
+    [Fact]
+    public void ArrowArrowOnNonJsonColumnIsError()
+    {
+        var r = Compile("SELECT t.symbol ->> 'x' AS x FROM trades t", Trades);
+        Assert.False(r.Ok);
+        Assert.Contains(r.Diagnostics, d => d.Message.Contains("'->>'") && d.Message.Contains("must be a JSON column"));
+    }
+
+    [Fact]
+    public void ArrowOnAnotherArrowResultIsValid()
+    {
+        // Chains validate: each '->' result is Json-kind, which is a valid left operand for the next '->'.
+        var r = Compile("SELECT payload -> 'order' -> 'symbol' AS x FROM events", Events);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+    }
+
+    [Fact]
+    public void BareJsonColumnInComparisonIsErrorWithArrowArrowHint()
+    {
+        var r = Compile("SELECT eventType FROM events WHERE payload = 'x'", Events);
+        Assert.False(r.Ok);
+        Assert.Contains(r.Diagnostics, d => d.Message.Contains("->>"));
+    }
+
+    [Fact]
+    public void BareJsonColumnInArithmeticIsError()
+    {
+        var r = Compile("SELECT payload + 1 AS x FROM events", Events);
+        Assert.False(r.Ok);
+        Assert.Contains(r.Diagnostics, d => d.Message.Contains("->>"));
+    }
+
+    [Fact]
+    public void BareJsonColumnEqualsNullIsAllowed()
+    {
+        var r = Compile("SELECT eventType FROM events WHERE payload = NULL", Events);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+
+        var neq = Compile("SELECT eventType FROM events WHERE payload != NULL", Events);
+        Assert.True(neq.Ok, string.Join(";", neq.Diagnostics));
+    }
+
+    [Fact]
+    public void TerminalArrowInComparisonIsErrorAndHintsArrowArrow()
+    {
+        // A '->' chain that never gets its final '->>' is still Json-kind, so using it directly in a
+        // comparison hits the same bare-Json rule — the diagnostic should nudge the user toward '->>'.
+        var r = Compile("SELECT eventType FROM events WHERE payload -> 'order' = 'x'", Events);
+        Assert.False(r.Ok);
+        Assert.Contains(r.Diagnostics, d => d.Message.Contains("->>"));
+    }
+
+    [Fact]
+    public void ArrowArrowResultComparesAsStringWithoutError()
+    {
+        var r = Compile("SELECT eventType FROM events WHERE payload ->> 'order' = 'x'", Events);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+    }
+
+    [Fact]
+    public void BareJsonColumnInSelectProjectsAsIsWithoutError()
+    {
+        var r = Compile("SELECT payload FROM events", Events);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+    }
+
+    [Fact]
+    public void JsonEquiKeyJoinOnClauseValidates()
+    {
+        // The equi-key extractor must traverse through JsonAccessExpr nodes to see that both operands
+        // reference the join's two sides.
+        var sql = "SELECT e.eventType, t.price FROM events e " +
+                  "JOIN trades t WITHIN 5 SECONDS ON e.payload -> 'order' ->> 'symbol' = t.symbol";
+        var r = Compile(sql, Events, Trades);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+    }
+
+    [Fact]
+    public void SeededJsonPayloadJoinDemoPipelineCompiles()
+    {
+        // Exact SQL seeded as the "JSON payload join" demo pipeline (RegistryGrain.SeedPipelines) —
+        // app_events' schema here is exactly TestHelpers.Events (eventType String, payload Json).
+        var sql = "SELECT e.eventType, e.payload -> 'user' ->> 'tier' AS tier, e.payload -> 'order' ->> 'symbol' AS symbol, t.price FROM events e " +
+                  "JOIN trades t WITHIN 10 SECONDS ON e.payload -> 'order' ->> 'symbol' = t.symbol";
+        var r = Compile(sql, Events, Trades);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+    }
 }
