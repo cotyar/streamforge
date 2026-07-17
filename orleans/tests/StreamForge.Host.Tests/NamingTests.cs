@@ -12,6 +12,8 @@ public class NamingTests
     [InlineData("audit-log", "AuditLog")]
     [InlineData("Already Pascal", "AlreadyPascal")]
     [InlineData("mixedCase_name", "MixedCaseName")]
+    [InlineData("VWAP by symbol (5s)", "VWAPBySymbol5s")]
+    [InlineData("foo(bar)!baz", "FooBarBaz")]
     public void Entity_name_becomes_PascalCase_message_name(string entityName, string expectedMessageName)
     {
         var schema = DescriptorFactory.Generate(entityName, TestHelpers.FlatFields);
@@ -21,6 +23,20 @@ public class NamingTests
 
         var root = schema.FileProto.MessageType.Single(m => m.Name == expectedMessageName);
         Assert.NotNull(root);
+    }
+
+    [Fact]
+    public void Entity_name_with_arbitrary_punctuation_yields_a_valid_proto_identifier()
+    {
+        // Regression test: pipeline names like "VWAP by symbol (5s)" (see SeedPipelines in
+        // RegistryGrain.cs) used to leave '(' and ')' embedded in the message name, producing
+        // an invalid proto3 identifier that failed protoc. ToPascalCase must now treat every
+        // non-alphanumeric character as a word separator, not just '_', '-', ' ', and '.'.
+        var schema = DescriptorFactory.Generate("VWAP by symbol (5s)", TestHelpers.FlatFields);
+        Assert.Equal("VWAPBySymbol5s", schema.MessageName);
+
+        var fd = DescriptorVerifier.Verify(schema.FileProto);
+        Assert.Contains(fd.MessageTypes, m => m.Name == "VWAPBySymbol5s");
     }
 
     [Fact]

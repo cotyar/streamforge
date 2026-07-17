@@ -11,6 +11,7 @@ using StreamForge.Abstractions;
 using StreamForge.Host.Api;
 using StreamForge.Host.Auth;
 using StreamForge.Host.Grpc;
+using StreamForge.Host.Grpc.Dynamic;
 using StreamForge.Host.Hubs;
 using StreamForge.Host.Services;
 using StreamForge.Host.Storage;
@@ -133,7 +134,6 @@ builder.Services.AddHostedService<GeneratorSupervisorService>();
 builder.Services.AddHostedService<StreamBridgeService>();
 
 builder.Services.AddGrpc();
-builder.Services.AddGrpcReflection();
 
 var app = builder.Build();
 
@@ -161,7 +161,14 @@ app.MapGrpcService<SourceGrpcService>();
 app.MapGrpcService<PipelineGrpcService>();
 app.MapGrpcService<TableGrpcService>();
 app.MapGrpcService<StreamGrpcService>();
-app.MapGrpcReflectionService();
+
+// Tier 2 — dynamic (runtime-typed) gRPC surface: server reflection over BOTH the static streamforge.v1
+// descriptors and per-entity descriptors generated on the fly for the current catalog (see
+// Grpc/Dynamic/DynamicReflectionService.cs for why this replaces the built-in
+// Grpc.AspNetCore.Server.Reflection package), plus one generic typed-streaming RPC
+// (Grpc/Dynamic/DynamicStreamService.cs) whose row payloads are encoded against those descriptors.
+app.MapGrpcService<DynamicReflectionService>();
+app.MapGrpcService<DynamicStreamService>();
 
 // Interactive user documentation (docs/index.html), served at /docs.
 var docsFile = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "docs", "index.html"));

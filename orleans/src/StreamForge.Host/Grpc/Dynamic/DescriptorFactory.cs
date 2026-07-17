@@ -308,7 +308,7 @@ public static class DescriptorFactory
         var capitalizeNext = true;
         foreach (var c in name)
         {
-            if (c is '_' or '-' or ' ' or '.')
+            if (!char.IsLetterOrDigit(c))
             {
                 capitalizeNext = true;
                 continue;
