@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, KeyboardEvent, SyntheticEvent, UIEvent } from 'react'
-import type { FieldType, SourceDefinition, SqlDiagnostic } from '../api/types'
+import type { FieldDef, FieldType, SourceDefinition, SqlDiagnostic } from '../api/types'
 import { cn } from '@/lib/utils'
 
 const KEYWORDS = new Set([
@@ -222,6 +222,64 @@ function resolveLastColumnType(
   return null
 }
 
+/** Resolves a column reference (`alias.col` or bare `col`) to its FieldDef, following alias/source resolution. */
+function resolveFieldRef(
+  baseRef: string,
+  aliasIndex: Map<string, string>,
+  byName: Map<string, SourceDefinition>,
+  referencedSourceNames: string[],
+): FieldDef | null {
+  const dot = baseRef.indexOf('.')
+  if (dot >= 0) {
+    const srcName = aliasIndex.get(baseRef.slice(0, dot))
+    const src = srcName ? byName.get(srcName) : undefined
+    return src?.fields.find((f) => f.name === baseRef.slice(dot + 1)) ?? null
+  }
+  for (const srcName of referencedSourceNames) {
+    const f = byName.get(srcName)?.fields.find((x) => x.name === baseRef)
+    if (f) return f
+  }
+  return null
+}
+
+/**
+ * When the caret sits inside an open JSON-path string (`payload -> 'user' ->> 'ti…`), resolves the
+ * declared nested schema at that depth and offers the child keys. Returns null when not in that context
+ * or when the field has no declared `children`.
+ */
+function jsonKeyContext(
+  value: string,
+  caret: number,
+  aliasIndex: Map<string, string>,
+  byName: Map<string, SourceDefinition>,
+  referencedSourceNames: string[],
+): { candidates: Suggestion[]; wordStart: number; prefix: string } | null {
+  // base column ref, then zero or more completed `-> 'key'` segments, then the open segment being typed.
+  const m = /([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)((?:\s*->>?\s*'[^']*')*)\s*->>?\s*'([^']*)$/.exec(value.slice(0, caret))
+  if (!m) return null
+  const [, baseRef, completed, partial] = m
+  let field = resolveFieldRef(baseRef, aliasIndex, byName, referencedSourceNames)
+  if (!field || field.type !== 'Json') return null
+  // Descend through the already-completed keys to the current nesting level.
+  const keyRe = /'([^']*)'/g
+  let km: RegExpExecArray | null
+  while ((km = keyRe.exec(completed))) {
+    const child: FieldDef | undefined = field.children?.find((c) => c.name === km![1])
+    if (!child || child.type !== 'Json') return null
+    field = child
+  }
+  const children = field.children ?? []
+  if (children.length === 0) return null
+  const candidates: Suggestion[] = children.map((c) => ({
+    kind: 'column',
+    label: c.name,
+    insertText: `${c.name}'`, // close the quote so `-> 'user` becomes `-> 'user'`
+    meta: c.type,
+    secondary: 'JSON key',
+  }))
+  return { candidates, wordStart: caret - partial.length, prefix: partial }
+}
+
 function buildSourceSuggestions(sources: SourceDefinition[]): Suggestion[] {
   return sources.map((s) => ({
     kind: 'source',
@@ -235,12 +293,11 @@ function buildDotSuggestions(identifier: string, aliasIndex: Map<string, string>
   const srcName = aliasIndex.get(identifier)
   const src = srcName ? byName.get(srcName) : undefined
   if (!src) return []
-  const suggestions: Suggestion[] = src.fields.map((f) => ({
-    kind: 'column',
-    label: f.name,
-    insertText: f.name,
-    meta: f.type,
-  }))
+  // Qualified star `alias.*` — expands to all columns of this input (valid in the SELECT list).
+  const suggestions: Suggestion[] = [{ kind: 'column', label: '*', insertText: '*', secondary: 'all columns', meta: 'star' }]
+  for (const f of src.fields) {
+    suggestions.push({ kind: 'column', label: f.name, insertText: f.name, meta: f.type })
+  }
   suggestions.push({ kind: 'column', label: '_ts', insertText: '_ts', meta: 'Timestamp' })
   suggestions.push({ kind: 'column', label: '_source', insertText: '_source', meta: 'String' })
   return suggestions
@@ -322,6 +379,15 @@ function computeAutocomplete(
   const refs = parseSourceRefs(sig)
   const aliasIndex = buildAliasIndex(refs)
   const referencedSourceNames = Array.from(new Set(refs.map((r) => r.sourceName).filter((n) => byName.has(n))))
+
+  // JSON key completion: caret inside an open `-> '…'` path → suggest the declared nested keys.
+  const jsonKey = jsonKeyContext(value, caret, aliasIndex, byName, referencedSourceNames)
+  if (jsonKey) {
+    const needle = opts.ignorePrefix ? '' : jsonKey.prefix.toLowerCase()
+    const filtered = needle === '' ? jsonKey.candidates : jsonKey.candidates.filter((c) => c.label.toLowerCase().startsWith(needle))
+    if (filtered.length === 0) return null
+    return { suggestions: filtered, wordStart: jsonKey.wordStart, wordEnd: caret }
+  }
 
   const context = resolveContext(sig, wordStart)
 
