@@ -1,5 +1,5 @@
 import { NavLink, Navigate, Outlet } from 'react-router-dom'
-import { BookOpen, LayoutDashboard, LogOut, Moon, Sun, Users as UsersIconLucide, Workflow, Database, Table2 } from 'lucide-react'
+import { BookOpen, Braces, LayoutDashboard, LogOut, Moon, Sun, Users as UsersIconLucide, Workflow, Database, Table2 } from 'lucide-react'
 import { useAuth } from '../api/auth'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/lib/theme'
@@ -14,6 +14,7 @@ const NAV_ITEMS = [
   { to: '/pipelines', label: 'Pipelines', icon: Workflow, end: false },
   { to: '/tables', label: 'Tables', icon: Table2, end: false },
   { to: '/sources', label: 'Sources', icon: Database, end: false },
+  { to: '/explorer', label: 'API Explorer', icon: Braces, end: false },
 ] as const
 
 const ROLE_BADGE_VARIANT: Record<string, 'default' | 'secondary' | 'outline'> = {

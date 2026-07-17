@@ -10,6 +10,7 @@ import { TablesPage } from './pages/TablesPage'
 import { TableDetailPage } from './pages/TableDetailPage'
 import { SourcesPage } from './pages/SourcesPage'
 import { UsersPage } from './pages/UsersPage'
+import { ApiExplorerPage } from './pages/ApiExplorerPage'
 
 function AdminRoute({ children }: { children: ReactNode }) {
   const { hasRole } = useAuth()
@@ -30,6 +31,7 @@ export default function App() {
             <Route path="/tables" element={<TablesPage />} />
             <Route path="/tables/:id" element={<TableDetailPage />} />
             <Route path="/sources" element={<SourcesPage />} />
+            <Route path="/explorer" element={<ApiExplorerPage />} />
             <Route
               path="/users"
               element={

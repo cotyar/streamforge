@@ -153,6 +153,7 @@ app.MapSourcesEndpoints();
 app.MapPipelinesEndpoints();
 app.MapTablesEndpoints();
 app.MapUsersEndpoints();
+app.MapMetaEndpoints();
 app.MapHub<StreamHub>("/hubs/stream");
 
 // gRPC control plane + streaming (see Protos/streamforge.proto) — served on the HTTP/2-only
