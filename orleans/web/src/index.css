@@ -1,0 +1,34 @@
+@import 'tailwindcss';
+
+/* StreamForge dark theme — matches the presentation deck aesthetic */
+:root {
+  --sf-bg: #0b0f17;
+  --sf-panel: #111827;
+  --sf-border: #1f2a3c;
+  --sf-accent: #38bdf8;
+  --sf-accent-2: #a78bfa;
+  --sf-good: #34d399;
+  --sf-warn: #fbbf24;
+  --sf-bad: #f87171;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--sf-bg);
+  color: #e5e7eb;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+@keyframes sf-flash {
+  0% {
+    background-color: rgba(56, 189, 248, 0.16);
+  }
+  100% {
+    background-color: transparent;
+  }
+}

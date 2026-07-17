@@ -1,0 +1,83 @@
+namespace StreamForge.Abstractions;
+
+[GenerateSerializer]
+public enum FieldType { String, Double, Long, Bool, Timestamp }
+
+[GenerateSerializer]
+public sealed record FieldDef([property: Id(0)] string Name, [property: Id(1)] FieldType Type);
+
+/// <summary>A stream source: schema + synthetic generator settings.</summary>
+[GenerateSerializer]
+public sealed class SourceDefinition
+{
+    [Id(0)] public string Name { get; set; } = "";
+    [Id(1)] public string Description { get; set; } = "";
+    [Id(2)] public List<FieldDef> Fields { get; set; } = [];
+    /// <summary>Generator profile: "trades" | "quotes" | "orders" | "generic".</summary>
+    [Id(3)] public string GeneratorProfile { get; set; } = "generic";
+    [Id(4)] public double EventsPerSecond { get; set; } = 5;
+    [Id(5)] public bool Enabled { get; set; } = true;
+}
+
+[GenerateSerializer]
+public enum PipelineStatus { Stopped, Running, Failed }
+
+[GenerateSerializer]
+public sealed class PipelineDefinition
+{
+    [Id(0)] public string Id { get; set; } = "";
+    [Id(1)] public string Name { get; set; } = "";
+    [Id(2)] public string Description { get; set; } = "";
+    [Id(3)] public string Sql { get; set; } = "";
+    [Id(4)] public PipelineStatus Status { get; set; } = PipelineStatus.Stopped;
+    [Id(5)] public string? Error { get; set; }
+    [Id(6)] public string CreatedBy { get; set; } = "";
+    [Id(7)] public long CreatedAtMs { get; set; }
+    [Id(8)] public long UpdatedAtMs { get; set; }
+}
+
+/// <summary>One emitted result row. Values are primitives only (string/double/long/bool/null).</summary>
+[GenerateSerializer]
+public sealed class ResultEnvelope
+{
+    [Id(0)] public string PipelineId { get; set; } = "";
+    [Id(1)] public long Seq { get; set; }
+    [Id(2)] public long TimestampMs { get; set; }
+    [Id(3)] public Dictionary<string, object?> Row { get; set; } = [];
+}
+
+[GenerateSerializer]
+public sealed class PipelineMetrics
+{
+    [Id(0)] public string PipelineId { get; set; } = "";
+    [Id(1)] public PipelineStatus Status { get; set; }
+    [Id(2)] public double EventsInPerSec { get; set; }
+    [Id(3)] public double RowsOutPerSec { get; set; }
+    [Id(4)] public long TotalEventsIn { get; set; }
+    [Id(5)] public long TotalRowsOut { get; set; }
+    [Id(6)] public long WindowsClosed { get; set; }
+    [Id(7)] public long LastEventTsMs { get; set; }
+}
+
+/// <summary>Published on the lifecycle stream when a pipeline changes state.</summary>
+[GenerateSerializer]
+public sealed class LifecycleEvent
+{
+    [Id(0)] public string PipelineId { get; set; } = "";
+    /// <summary>"created" | "updated" | "deleted" | "started" | "stopped" | "failed".</summary>
+    [Id(1)] public string Kind { get; set; } = "";
+    [Id(2)] public PipelineStatus Status { get; set; }
+    [Id(3)] public long TimestampMs { get; set; }
+}
+
+[GenerateSerializer]
+public sealed class UserRecord
+{
+    [Id(0)] public string Username { get; set; } = "";
+    [Id(1)] public string DisplayName { get; set; } = "";
+    /// <summary>"Admin" | "Editor" | "Viewer".</summary>
+    [Id(2)] public string Role { get; set; } = "Viewer";
+    [Id(3)] public string PasswordHash { get; set; } = "";
+    [Id(4)] public string PasswordSalt { get; set; } = "";
+    [Id(5)] public long CreatedAtMs { get; set; }
+}
