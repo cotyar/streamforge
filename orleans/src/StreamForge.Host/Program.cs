@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 using Orleans;
@@ -9,6 +10,7 @@ using Scalar.AspNetCore;
 using StreamForge.Abstractions;
 using StreamForge.Host.Api;
 using StreamForge.Host.Auth;
+using StreamForge.Host.Grpc;
 using StreamForge.Host.Hubs;
 using StreamForge.Host.Services;
 using StreamForge.Host.Storage;
@@ -17,10 +19,19 @@ const string SpaCorsPolicy = "SpaDev";
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Co-hosted process listens on http://localhost:5199 by default; ASPNETCORE_URLS (if set) wins.
+// Co-hosted process listens on http://localhost:5199 (REST/SignalR/SPA, HTTP/1.1) and
+// http://localhost:5299 (gRPC, cleartext h2c — HTTP/2-only, no ALPN without TLS) by default;
+// ASPNETCORE_URLS (if set) wins and skips both explicit Kestrel endpoints below.
 if (string.IsNullOrEmpty(builder.Configuration["urls"]))
 {
-    builder.WebHost.UseUrls("http://localhost:5199");
+    var httpPort = builder.Configuration.GetValue("Http:Port", 5199);
+    var grpcPort = builder.Configuration.GetValue("Grpc:Port", 5299);
+
+    builder.WebHost.ConfigureKestrel(kestrel =>
+    {
+        kestrel.ListenLocalhost(httpPort, o => o.Protocols = HttpProtocols.Http1);
+        kestrel.ListenLocalhost(grpcPort, o => o.Protocols = HttpProtocols.Http2);
+    });
 }
 
 builder.Host.UseOrleans(siloBuilder =>
@@ -121,6 +132,9 @@ builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddHostedService<GeneratorSupervisorService>();
 builder.Services.AddHostedService<StreamBridgeService>();
 
+builder.Services.AddGrpc();
+builder.Services.AddGrpcReflection();
+
 var app = builder.Build();
 
 app.UseCors(SpaCorsPolicy);
@@ -140,6 +154,14 @@ app.MapPipelinesEndpoints();
 app.MapTablesEndpoints();
 app.MapUsersEndpoints();
 app.MapHub<StreamHub>("/hubs/stream");
+
+// gRPC control plane + streaming (see Protos/streamforge.proto) — served on the HTTP/2-only
+// endpoint configured above (Grpc:Port, default 5299); doesn't share the REST/SignalR/SPA port.
+app.MapGrpcService<SourceGrpcService>();
+app.MapGrpcService<PipelineGrpcService>();
+app.MapGrpcService<TableGrpcService>();
+app.MapGrpcService<StreamGrpcService>();
+app.MapGrpcReflectionService();
 
 // Interactive user documentation (docs/index.html), served at /docs.
 var docsFile = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "docs", "index.html"));
