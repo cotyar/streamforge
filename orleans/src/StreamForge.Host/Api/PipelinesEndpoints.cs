@@ -101,6 +101,12 @@ public static class PipelinesEndpoints
             var def = await registry.GetPipelineAsync(id);
             if (def is null)
             {
+                // Name fallback (pipeline names aren't enforced unique — only resolve an unambiguous match).
+                var byName = (await registry.GetPipelinesAsync()).Where(p => p.Name == id).ToList();
+                if (byName.Count == 1) def = byName[0];
+            }
+            if (def is null)
+            {
                 return Results.NotFound();
             }
 

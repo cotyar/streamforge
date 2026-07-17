@@ -163,7 +163,8 @@ public static class TablesEndpoints
         group.MapGet("/{id}/proto", async (string id, IClusterClient client) =>
         {
             var registry = Registry(client);
-            var def = await registry.GetTableAsync(id);
+            var def = await registry.GetTableAsync(id)
+                ?? (await registry.GetTablesAsync()).FirstOrDefault(t => t.Name == id);
             if (def is null)
             {
                 return Results.NotFound();
