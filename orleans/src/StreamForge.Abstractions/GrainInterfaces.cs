@@ -110,6 +110,70 @@ public interface ITableHistoryGrain : IGrainWithStringKey
     Task<TableHistoryStats> GetStatsAsync();
 }
 
+// ============================================================================
+// Plan 003 M2: partitioned table execution grain topology. Additive — ITableGrain is unchanged; these
+// three grain kinds only exist for a table whose Parallelism &gt;= 2 (see TableGrain's coordinator-mode
+// doc comment). Every method receives the table's TableDefinition (already Orleans-serializable) rather
+// than a serialized StreamForge.Engine.Dataflow.TableDataflowPlan — each grain independently recompiles
+// the same SQL (via IRegistryGrain, exactly like TableGrain.StartAsync already does) and calls
+// TablePlan.CreateDataflow(def.Parallelism) itself; since compilation is a pure function of
+// (Sql, streamSchemas, tableSchemas), every grain deterministically arrives at the identical stage/edge
+// graph (same stage ids, same EdgeId values) without transmitting Expr-bearing internals over the wire.
+// ============================================================================
+
+/// <summary>Key = "{tableName}:{inputName}". One activation per (table, real external input) — a stream
+/// source name or an upstream table name the table's SQL reads from directly. Subscribes to that input's
+/// existing stream (StreamConstants.SourcesNamespace or TableDeltaNamespace — same identity a Parallelism==1
+/// TableGrain would use), stamps epochs (advance every 250ms tick OR 1000 buffered events, whichever
+/// first), and batches routed deltas into the dataflow graph's stage-0 partitions per
+/// TableDataflowPlan.EdgesForExternalInput's routing (hash/broadcast/local — see TableStageGrain's
+/// PushBatchAsync).</summary>
+public interface ITableIngestGrain : IGrainWithStringKey
+{
+    Task StartAsync(TableDefinition def, string inputName);
+    Task StopAsync();
+}
+
+/// <summary>Key = "{tableName}:{stageId}:{partition}". One activation per (table, dataflow stage,
+/// partition) — see StreamForge.Engine.Dataflow.TableDataflowPlan.Stages. Holds one
+/// StreamForge.Engine.Dataflow.ITableStageExecutor plus a FrontierTracker + EpochBuffer per the M0
+/// primitives; PushBatchAsync buffers an inbound (edge, epoch) batch, and on frontier advance processes
+/// all newly-ready batches deterministically (EpochBuffer.OnFrontier's ordering), routes emitted deltas to
+/// downstream stage partitions (or to TableOutputGrain when this stage's outbound edge is terminal), and
+/// propagates its own advanced frontier downstream (as an empty-delta DeltaBatch marker on every
+/// downstream partition, so a quiet stage doesn't stall a downstream FrontierTracker forever).</summary>
+public interface ITableStageGrain : IGrainWithStringKey
+{
+    Task StartAsync(TableDefinition def, int stageId, int partition);
+    Task StopAsync();
+
+    /// <summary>edgeId/fromPartition/epoch are the raw StreamForge.Engine.Dataflow EdgeId.Value/UpstreamId
+    /// components — passed as plain ints/longs (not the Dataflow types themselves) so this interface has
+    /// no Orleans-serialization dependency on StreamForge.Engine.Dataflow. originName is the real external
+    /// input name this batch ultimately traces back to (only meaningful on a Broadcast edge feeding a
+    /// scalar-subquery/semi-anti join's nested residual execution — see TableDataflowPlan's class doc);
+    /// pass "" when not applicable. deltas.Count == 0 is a valid, expected frontier-marker call.</summary>
+    Task PushBatchAsync(int edgeId, int fromPartition, long epoch, string originName, List<TableDeltaDto> deltas);
+
+    Task<TablePartitionMetrics> GetMetricsAsync();
+}
+
+/// <summary>Key = table name. One activation per Parallelism &gt;= 2 table. The single terminal publisher
+/// (plan 003 M2's terminal-publisher choice — see TableGrain's coordinator-mode doc comment for why a
+/// dedicated grain was chosen over "gather to partition 0"): every terminal-stage TableStageGrain (there
+/// may be up to Parallelism of them, one per partition of the plan's terminal stage) calls PublishAsync as
+/// its own epochs advance; this grain does no buffering/reordering of its own (Z-set consolidation is
+/// commutative — see TableDataflowPlan's class doc) and simply republishes each incoming batch onto the
+/// SAME (StreamConstants.TableDeltaNamespace, tableName) stream a Parallelism==1 TableGrain would have
+/// published to directly — so SignalR (StreamBridgeService), TableHistoryGrain, and any downstream
+/// table-over-table subscriber keep working unchanged regardless of which mode produced the table.</summary>
+public interface ITableOutputGrain : IGrainWithStringKey
+{
+    Task StartAsync(TableDefinition def);
+    Task StopAsync();
+    Task PublishAsync(List<TableDeltaDto> deltas);
+}
+
 /// <summary>Singleton (key = StreamConstants.UsersKey).</summary>
 public interface IUserStoreGrain : IGrainWithStringKey
 {

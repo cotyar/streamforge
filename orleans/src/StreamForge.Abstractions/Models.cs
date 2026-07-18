@@ -155,6 +155,29 @@ public sealed class TableDefinition
 
     [Id(19)] public List<string> Tags { get; set; } = [];
     [Id(20)] public Dictionary<string, string> Metadata { get; set; } = [];
+
+    /// <summary>Plan 003 M2: opt-in partitioned execution. 1 (default) = the original single-grain
+    /// TableGrain path, byte-for-byte unchanged (zero-risk default — see TableGrain's class comment on the
+    /// Parallelism==1 fast path). 2..16 deploys the partitioned dataflow graph (TableIngestGrain +
+    /// TableStageGrain × stages × partitions + TableOutputGrain) — see StreamForge.Engine.Dataflow.TableDataflowPlan
+    /// and TableGrain's Parallelism&gt;=2 coordinator-mode doc comment. Validated 1..16 by RegistryGrain;
+    /// changing it restarts the table (same restart condition as a SQL/search-config change).</summary>
+    [Id(21)] public int Parallelism { get; set; } = 1;
+}
+
+/// <summary>Plan 003 M2: one partition's contribution to a partitioned table's aggregate
+/// <see cref="TableMetrics"/> — additive detail, present only when Parallelism &gt;= 2 (see
+/// TableMetrics.Partitions). StageId/Partition identify which TableStageGrain this is; the rest mirrors
+/// TableMetrics' own per-activation counters at that grain.</summary>
+[GenerateSerializer]
+public sealed class TablePartitionMetrics
+{
+    [Id(0)] public int StageId { get; set; }
+    [Id(1)] public int Partition { get; set; }
+    [Id(2)] public long DeltasIn { get; set; }
+    [Id(3)] public long DeltasOut { get; set; }
+    [Id(4)] public long FrontierEpoch { get; set; } = -1;
+    [Id(5)] public long LastUpdateMs { get; set; }
 }
 
 /// <summary>Serializable mirror of StreamForge.Engine's TableDelta, for Orleans/SignalR transport: one Z-set
@@ -187,6 +210,11 @@ public sealed class TableMetrics
     /// <summary>True immediately after a restart-resume, until this table has rebuilt its state from live
     /// traffic — see TableGrain's rehydration-limitation comment.</summary>
     [Id(6)] public bool Rebuilding { get; set; }
+
+    /// <summary>Plan 003 M2: per-partition detail, present (non-null) only for a Parallelism &gt;= 2 table —
+    /// null/absent for every Parallelism==1 table, so this is additive-safe for existing consumers (REST
+    /// JSON, gRPC, any client that ignores unknown fields).</summary>
+    [Id(7)] public List<TablePartitionMetrics>? Partitions { get; set; }
 }
 
 // ============================================================================

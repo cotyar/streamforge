@@ -3,6 +3,7 @@ using Orleans.Runtime;
 using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
+using StreamForge.Engine.Dataflow;
 using StreamForge.Host.Search;
 
 namespace StreamForge.Host.Grains;
@@ -31,6 +32,26 @@ public sealed class TableGrainState
 /// availability (GetRowsAsync keeps returning it), but the table is marked "rebuilding" and its executor +
 /// snapshot are reset to empty — it rebuilds purely from live traffic going forward, exactly like a table
 /// that just started for the first time. GetMetricsAsync exposes the Rebuilding flag.
+///
+/// PLAN 003 M2 — PARALLELISM &gt;= 2 (coordinator mode): everything above this paragraph describes the
+/// Parallelism==1 fast path, kept byte-for-byte unchanged (see the Parallelism&lt;=1 branch in StartAsync/
+/// StopAsync below — zero-risk default per the M2 task). For Parallelism &gt;= 2, this grain becomes a
+/// coordinator + read grain instead of running the SQL itself: StartAsync deploys the partitioned graph
+/// (one ITableOutputGrain, one ITableStageGrain per (non-Ingest stage, partition), one ITableIngestGrain
+/// per real external input — see StreamForge.Engine.Dataflow.TableDataflowPlan and TableIngestGrain/
+/// TableStageGrain/TableOutputGrain's class docs), then subscribes to its OWN
+/// (StreamConstants.TableDeltaNamespace, tableName) delta stream — the same stream TableOutputGrain
+/// publishes to — and feeds those deltas into EXACTLY the same read-side machinery
+/// (state.State.Snapshot + TableSearchIndex) the Parallelism==1 path already uses, just fed by the
+/// partitioned graph's output instead of a locally-run TableExecutor. Rows/search/metrics/history/SignalR
+/// all therefore go through the identical code paths regardless of Parallelism — see
+/// GetRowsAsync/GetMetricsAsync/SearchAsync below, none of which branch on Parallelism at all. Consolidation
+/// of the incoming delta stream (Z-set summation: weight &lt;= 0 removes, else updates) is reimplemented
+/// here directly on the public TableRowDto shape rather than reusing StreamForge.Engine.Runtime's internal
+/// consolidation (Host has no InternalsVisibleTo into Engine — see AssemblyInfo.cs — matching the existing
+/// precedent in TableRowHistory.cs, which re-derives its own key logic rather than reaching into Engine
+/// internals); a scratch TableExecutor (created, never fed any events) supplies CanonicalRowKey, the one
+/// piece of key-derivation logic that IS already public.
 /// </summary>
 public sealed class TableGrain(
     [PersistentState("table", StreamConstants.StorageName)] IPersistentState<TableGrainState> state)
@@ -50,12 +71,38 @@ public sealed class TableGrain(
     private long _deltasOut;
     private long _lastUpdateMs;
 
+    // Plan 003 M2 — Parallelism >= 2 coordinator-mode state (see class doc). Unused, always default, on
+    // the Parallelism==1 path.
+    private bool _coordinatorMode;
+    private int _coordinatorParallelism;
+    private List<(int StageId, int PartitionCount)> _deployedStages = [];
+    private List<string> _deployedInputs = [];
+    private StreamSubscriptionHandle<List<TableDeltaDto>>? _coordinatorSub;
+    /// <summary>Coordinator mode's own live consolidated Z-set (canonical row key -> (row, weight)) — the
+    /// coordinator-mode analogue of TableExecutor's internal `_consolidated` (not reachable from Host —
+    /// see class doc), fed by <see cref="OnCoordinatorDeltaBatchAsync"/> and read by
+    /// ReflectDeltasInSearchIndex/FlushAsync/SearchAsync exactly where the classic path reads
+    /// `_executor.Snapshot()`.</summary>
+    private readonly Dictionary<string, (EventRecord Row, long Weight)> _coordinatorSnapshot = [];
+
     public async Task StartAsync(TableDefinition def)
     {
         await StopAsync();
 
         _def = def;
 
+        if (def.Parallelism <= 1)
+        {
+            await StartClassicAsync(def);
+        }
+        else
+        {
+            await StartCoordinatorAsync(def);
+        }
+    }
+
+    private async Task StartClassicAsync(TableDefinition def)
+    {
         var registry = GrainFactory.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
         var sources = await registry.GetSourcesAsync();
         var streamSchemas = sources.ToDictionary(
@@ -115,6 +162,58 @@ public sealed class TableGrain(
         this.DelayDeactivation(TimeSpan.FromDays(365));
     }
 
+    /// <summary>Plan 003 M2 — see class doc's coordinator-mode paragraph. Deploys the partitioned graph in
+    /// dependency order (TableOutputGrain, then every TableStageGrain, THEN every TableIngestGrain last) so
+    /// no early delta gets silently dropped by a not-yet-started downstream grain (every M2 grain no-ops a
+    /// call received before its own StartAsync — see TableStageGrain/TableOutputGrain.PushBatchAsync/
+    /// PublishAsync's `_status != Running` guard); subscribes to this table's own output stream BEFORE any
+    /// of that deployment, for the same reason on the read side.</summary>
+    private async Task StartCoordinatorAsync(TableDefinition def)
+    {
+        var (compileResult, dataflow) = await TableDataflowFactory.BuildAsync(GrainFactory, def);
+
+        _executor = compileResult.Plan!.CreateExecutor(); // scratch instance: CanonicalRowKey only, never fed an event
+        _status = PipelineStatus.Running;
+        _coordinatorMode = true;
+        _coordinatorParallelism = def.Parallelism;
+
+        if (state.State.Snapshot.Count > 0)
+        {
+            _rebuilding = true;
+            state.State.Snapshot = [];
+            state.State.Seq = 0;
+            _dirty = true;
+        }
+        _searchIndex = def.SearchEnabled ? new TableSearchIndex(def.SearchMode) : null;
+
+        var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
+        var ownStream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, def.Name));
+        _coordinatorSub = await ownStream.SubscribeAsync((batch, _) => OnCoordinatorDeltaBatchAsync(batch));
+
+        await GrainFactory.GetGrain<ITableOutputGrain>(def.Name).StartAsync(def);
+
+        _deployedStages = dataflow.Stages
+            .Where(s => s.Kind != TableStageKind.Ingest)
+            .Select(s => (s.StageId, dataflow.PartitionCountOf(s.StageId)))
+            .ToList();
+        foreach (var (stageId, partitionCount) in _deployedStages)
+        {
+            for (int p = 0; p < partitionCount; p++)
+            {
+                await GrainFactory.GetGrain<ITableStageGrain>($"{def.Name}:{stageId}:{p}").StartAsync(def, stageId, p);
+            }
+        }
+
+        _deployedInputs = compileResult.StreamInputs.Concat(compileResult.TableInputs).Distinct().ToList();
+        foreach (var inputName in _deployedInputs)
+        {
+            await GrainFactory.GetGrain<ITableIngestGrain>($"{def.Name}:{inputName}").StartAsync(def, inputName);
+        }
+
+        _flushTimer = this.RegisterGrainTimer(OnFlushTickAsync, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+        this.DelayDeactivation(TimeSpan.FromDays(365));
+    }
+
     public async Task StopAsync()
     {
         _status = PipelineStatus.Stopped;
@@ -133,6 +232,31 @@ public sealed class TableGrain(
             try { await handle.UnsubscribeAsync(); } catch { /* best-effort */ }
         }
         _tableSubs.Clear();
+
+        if (_coordinatorSub is not null)
+        {
+            try { await _coordinatorSub.UnsubscribeAsync(); } catch { /* best-effort */ }
+            _coordinatorSub = null;
+        }
+
+        if (_coordinatorMode && _def is not null)
+        {
+            foreach (var inputName in _deployedInputs)
+            {
+                try { await GrainFactory.GetGrain<ITableIngestGrain>($"{_def.Name}:{inputName}").StopAsync(); } catch { /* best-effort */ }
+            }
+            foreach (var (stageId, partitionCount) in _deployedStages)
+            {
+                for (int p = 0; p < partitionCount; p++)
+                {
+                    try { await GrainFactory.GetGrain<ITableStageGrain>($"{_def.Name}:{stageId}:{p}").StopAsync(); } catch { /* best-effort */ }
+                }
+            }
+            try { await GrainFactory.GetGrain<ITableOutputGrain>(_def.Name).StopAsync(); } catch { /* best-effort */ }
+            _deployedInputs = [];
+            _deployedStages = [];
+        }
+        _coordinatorMode = false;
 
         if (_dirty)
         {
@@ -164,16 +288,32 @@ public sealed class TableGrain(
 
     public Task<int> GetRowCountAsync() => Task.FromResult(state.State.Snapshot.Count);
 
-    public Task<TableMetrics> GetMetricsAsync() => Task.FromResult(new TableMetrics
+    /// <summary>Plan 003 M2: in coordinator mode (Parallelism &gt;= 2), additively fans out to every
+    /// deployed TableStageGrain for per-partition detail (TableMetrics.Partitions) — null/absent on the
+    /// Parallelism==1 path, so existing consumers see byte-identical JSON.</summary>
+    public async Task<TableMetrics> GetMetricsAsync()
     {
-        TableId = _def?.Id ?? this.GetPrimaryKeyString(),
-        Status = _status,
-        RowCount = state.State.Snapshot.Count,
-        DeltasIn = _deltasIn,
-        DeltasOut = _deltasOut,
-        LastUpdateMs = _lastUpdateMs,
-        Rebuilding = _rebuilding,
-    });
+        List<TablePartitionMetrics>? partitions = null;
+        if (_coordinatorMode && _def is not null)
+        {
+            var tasks = _deployedStages
+                .SelectMany(s => Enumerable.Range(0, s.PartitionCount)
+                    .Select(p => GrainFactory.GetGrain<ITableStageGrain>($"{_def.Name}:{s.StageId}:{p}").GetMetricsAsync()));
+            partitions = (await Task.WhenAll(tasks)).ToList();
+        }
+
+        return new TableMetrics
+        {
+            TableId = _def?.Id ?? this.GetPrimaryKeyString(),
+            Status = _status,
+            RowCount = state.State.Snapshot.Count,
+            DeltasIn = _deltasIn,
+            DeltasOut = _deltasOut,
+            LastUpdateMs = _lastUpdateMs,
+            Rebuilding = _rebuilding,
+            Partitions = partitions,
+        };
+    }
 
     public Task<long> GetSeqAsync() => Task.FromResult(state.State.Seq);
 
@@ -184,7 +324,7 @@ public sealed class TableGrain(
             return Task.FromResult(new List<TableRowDto>());
         }
 
-        var snapshot = _executor?.Snapshot();
+        IReadOnlyDictionary<string, (EventRecord Row, long Weight)>? snapshot = _coordinatorMode ? _coordinatorSnapshot : _executor?.Snapshot();
         var hits = _searchIndex.Search(query, limit);
         var rows = hits.Select(h =>
         {
@@ -229,6 +369,51 @@ public sealed class TableGrain(
         }
     }
 
+    /// <summary>Plan 003 M2 coordinator-mode read path: this table's OWN (StreamConstants.TableDeltaNamespace,
+    /// tableName) stream — published by TableOutputGrain — feeds directly into the same
+    /// snapshot+search machinery the classic path uses, via <see cref="_coordinatorSnapshot"/> in place of
+    /// `_executor.Snapshot()` (see class doc). No SQL runs here — the partitioned graph already computed
+    /// these deltas; this grain only consolidates + persists + indexes them for reads.</summary>
+    private Task OnCoordinatorDeltaBatchAsync(List<TableDeltaDto> batch)
+    {
+        if (_status != PipelineStatus.Running || _executor is null || batch.Count == 0) return Task.CompletedTask;
+
+        var deltas = new List<TableDelta>(batch.Count);
+        foreach (var d in batch)
+        {
+            var delta = new TableDelta(new EventRecord(d.Row), d.Weight);
+            deltas.Add(delta);
+            ApplyCoordinatorConsolidation(delta);
+        }
+
+        _deltasIn += deltas.Count;
+        _deltasOut += deltas.Count; // pure read-side relay: "consumed" and "reflected" are the same count here
+        _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        _rebuilding = false;
+        _dirty = true;
+
+        if (_searchIndex is not null)
+        {
+            ReflectDeltasInSearchIndex(deltas);
+        }
+        return Task.CompletedTask;
+    }
+
+    private void ApplyCoordinatorConsolidation(TableDelta delta)
+    {
+        var key = _executor!.CanonicalRowKey(delta.Row);
+        if (_coordinatorSnapshot.TryGetValue(key, out var existing))
+        {
+            long newWeight = existing.Weight + delta.Weight;
+            if (newWeight <= 0) _coordinatorSnapshot.Remove(key);
+            else _coordinatorSnapshot[key] = (existing.Row, newWeight);
+        }
+        else if (delta.Weight > 0)
+        {
+            _coordinatorSnapshot[key] = (delta.Row, delta.Weight);
+        }
+    }
+
     private async Task ApplyAndPublishAsync(IReadOnlyList<TableDelta> deltas)
     {
         _dirty = true;
@@ -251,7 +436,7 @@ public sealed class TableGrain(
     /// (Remove). Only rows actually touched by this batch are re-checked, not the whole table.</summary>
     private void ReflectDeltasInSearchIndex(IReadOnlyList<TableDelta> deltas)
     {
-        var snapshot = _executor!.Snapshot();
+        IReadOnlyDictionary<string, (EventRecord Row, long Weight)> snapshot = _coordinatorMode ? _coordinatorSnapshot : _executor!.Snapshot();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var delta in deltas)
         {
@@ -277,7 +462,7 @@ public sealed class TableGrain(
             return;
         }
 
-        var snapshot = _executor.Snapshot();
+        var snapshot = _coordinatorMode ? _coordinatorSnapshot : _executor.Snapshot();
         state.State.Snapshot = snapshot.ToDictionary(
             kv => kv.Key,
             kv => new TableRowDto { Row = new Dictionary<string, object?>(kv.Value.Row), Weight = kv.Value.Weight });
