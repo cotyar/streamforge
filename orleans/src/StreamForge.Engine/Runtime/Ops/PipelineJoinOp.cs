@@ -16,7 +16,7 @@ namespace StreamForge.Engine.Runtime.Ops;
 /// (WorkingRow, join key, matched-flag) tuple; bounded by the join's WITHIN window (evicted once the
 /// watermark passes entry.Ts + Within), unlike table mode's unbounded join state.
 /// </summary>
-internal sealed class PipelineJoinOp
+internal sealed class PipelineJoinOp : IPipelineJoinStage
 {
     internal sealed class BufEntry
     {

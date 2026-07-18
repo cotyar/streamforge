@@ -14,6 +14,8 @@ internal sealed class Parser
     private static readonly HashSet<string> ClauseKeywords = new(StringComparer.OrdinalIgnoreCase)
     {
         "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "WHERE", "GROUP", "WINDOW", "EMIT", "ON", "WITHIN", "FROM",
+        // Plan 004 N2: reserved so `expr IN (...)`/`EXISTS (...)` never get mistaken for an AS-less alias.
+        "IN", "EXISTS",
     };
 
     private readonly List<Token> _tokens;
@@ -97,10 +99,52 @@ internal sealed class Parser
     {
         var newFrom = new FromClause(
             SubstituteFromItem(query.From.Source, resolved, allCteNames),
-            query.From.Joins.Select(j => new JoinClause(j.Kind, SubstituteFromItem(j.Source, resolved, allCteNames), j.Within, j.On, j.Line, j.Column)).ToList());
+            query.From.Joins.Select(j => new JoinClause(
+                j.Kind, SubstituteFromItem(j.Source, resolved, allCteNames), j.Within,
+                j.On is null ? null : SubstituteCtesInExpr(j.On, resolved, allCteNames), j.Line, j.Column)).ToList());
 
-        return new SelectQuery(query.Select, newFrom, query.Where, query.GroupBy, query.Window, query.Emit,
+        // Plan 004 N2/N3/N4: a CTE reference can ALSO appear inside a WHERE-position IN/EXISTS predicate's
+        // or a scalar subquery expression's OWN nested SelectQuery (e.g. `WHERE symbol IN (SELECT symbol
+        // FROM hot)`) — those inner SelectQuery nodes need the SAME CTE substitution pass applied to them,
+        // recursively, or a CTE name used only inside a subquery predicate would never resolve (it's not
+        // reachable through FROM/JOIN's own SubstituteFromItem walk at all). Select items and WHERE both
+        // need this; GROUP BY expressions can't syntactically contain one of these subquery forms in this
+        // dialect but are walked too for robustness against future grammar growth.
+        var newWhere = query.Where is null ? null : SubstituteCtesInExpr(query.Where, resolved, allCteNames);
+        var newSelect = new SelectClause(query.Select.IsStar,
+            query.Select.Items.Select(i => new SelectItem(SubstituteCtesInExpr(i.Expression, resolved, allCteNames), i.Alias)).ToList());
+        var newGroupBy = query.GroupBy?.Select(g => SubstituteCtesInExpr(g, resolved, allCteNames)).ToList();
+
+        return new SelectQuery(newSelect, newFrom, newWhere, newGroupBy, query.Window, query.Emit,
             query.EmitLine, query.EmitColumn, query.GroupByLine, query.GroupByColumn, query.WindowLine, query.WindowColumn);
+    }
+
+    /// <summary>Walks an expression tree substituting CTE references inside any nested SelectQuery it
+    /// carries (InSubqueryExpr/ExistsExpr/ScalarSubqueryExpr) — see SubstituteCtes's doc comment on why
+    /// this is needed at all. Every other expression shape just recurses structurally.</summary>
+    private Expr SubstituteCtesInExpr(Expr e, IReadOnlyDictionary<string, SelectQuery> resolved, HashSet<string> allCteNames)
+    {
+        switch (e)
+        {
+            case InSubqueryExpr ins:
+                return new InSubqueryExpr(SubstituteCtesInExpr(ins.Left, resolved, allCteNames), SubstituteCtes(ins.Subquery, resolved, allCteNames), ins.Negated, ins.Line, ins.Column);
+            case ExistsExpr ex:
+                return new ExistsExpr(SubstituteCtes(ex.Subquery, resolved, allCteNames), ex.Negated, ex.Line, ex.Column);
+            case ScalarSubqueryExpr sse:
+                return new ScalarSubqueryExpr(SubstituteCtes(sse.Query, resolved, allCteNames), sse.Line, sse.Column);
+            case UnaryExpr u:
+                return new UnaryExpr(u.Op, SubstituteCtesInExpr(u.Operand, resolved, allCteNames), u.Line, u.Column);
+            case BinaryExpr b:
+                return new BinaryExpr(b.Op, SubstituteCtesInExpr(b.Left, resolved, allCteNames), SubstituteCtesInExpr(b.Right, resolved, allCteNames), b.Line, b.Column);
+            case FunctionCallExpr f:
+                return new FunctionCallExpr(f.Name, f.Args.Select(a => SubstituteCtesInExpr(a, resolved, allCteNames)).ToList(), f.Line, f.Column);
+            case AggregateCallExpr agg:
+                return agg.Arg is null ? agg : new AggregateCallExpr(agg.Name, SubstituteCtesInExpr(agg.Arg, resolved, allCteNames), agg.IsStar, agg.Line, agg.Column);
+            case JsonAccessExpr j:
+                return new JsonAccessExpr(SubstituteCtesInExpr(j.Left, resolved, allCteNames), j.ReturnText, j.Key, j.Line, j.Column);
+            default:
+                return e;
+        }
     }
 
     private FromItem SubstituteFromItem(FromItem item, IReadOnlyDictionary<string, SelectQuery> resolved, HashSet<string> allCteNames)
@@ -275,6 +319,8 @@ internal sealed class Parser
 
     private bool PeekIsSymbol(int offset, string symbol) => PeekAt(offset).IsSymbol(symbol);
 
+    private bool PeekIsKeyword(int offset, string keyword) => PeekAt(offset).IsKeyword(keyword);
+
     private NamedSource ParseSourceRef()
     {
         var nameTok = ExpectIdentifierToken();
@@ -436,10 +482,29 @@ internal sealed class Parser
         if (Current.IsKeyword("NOT"))
         {
             var tok = Advance();
+            // 'NOT EXISTS (...)' — handled here (rather than as a generic UnaryExpr("NOT", ExistsExpr))
+            // so ExistsExpr carries its own Negated flag directly, matching InSubqueryExpr's shape and
+            // giving Planner one uniform (Negated: bool) field to rewrite from instead of two AST shapes.
+            if (Current.IsKeyword("EXISTS"))
+            {
+                Advance(); // 'EXISTS'
+                return ParseExistsBody(negated: true, tok.Line, tok.Column);
+            }
             var operand = ParseNot();
             return new UnaryExpr("NOT", operand, tok.Line, tok.Column);
         }
         return ParseComparison();
+    }
+
+    /// <summary>Plan 004 N2: `( SELECT ... )` following an already-consumed 'EXISTS' (or 'NOT EXISTS')
+    /// keyword — <paramref name="line"/>/<paramref name="col"/> is that keyword's own position (NOT's for
+    /// the negated form, matching InSubqueryExpr's convention of pointing at the earliest keyword).</summary>
+    private ExistsExpr ParseExistsBody(bool negated, int line, int col)
+    {
+        ExpectSymbol("(");
+        var subquery = ParseSelectQuery();
+        ExpectSymbol(")");
+        return new ExistsExpr(subquery, negated, line, col);
     }
 
     private static readonly string[] ComparisonOps = ["=", "!=", "<>", "<", "<=", ">", ">="];
@@ -447,6 +512,26 @@ internal sealed class Parser
     private Expr ParseComparison()
     {
         var left = ParseAdditive();
+
+        // Plan 004 N2: '[NOT] IN ( SELECT ... )' — same precedence slot as the comparison operators below
+        // (binds a left operand, produces a boolean). Only the subquery form is supported (no literal
+        // list `IN (1, 2, 3)` grammar exists in this dialect yet); ExpectKeyword("SELECT") inside
+        // ParseSelectQuery gives a clear, positioned diagnostic if a caller tries a literal list.
+        bool inNegated = false;
+        if (Current.IsKeyword("NOT") && PeekIsKeyword(1, "IN"))
+        {
+            inNegated = true;
+            Advance(); // 'NOT'
+        }
+        if (Current.IsKeyword("IN"))
+        {
+            var tok = Advance(); // 'IN'
+            ExpectSymbol("(");
+            var subquery = ParseSelectQuery();
+            ExpectSymbol(")");
+            return new InSubqueryExpr(left, subquery, inNegated, tok.Line, tok.Column);
+        }
+
         if (Current.Kind == TokenKind.Symbol && ComparisonOps.Contains(Current.Text))
         {
             var tok = Advance();
@@ -539,6 +624,15 @@ internal sealed class Parser
                 return new StringLiteral(tok.StringValue!, tok.Line, tok.Column);
             case TokenKind.Symbol when tok.IsSymbol("("):
                 Advance();
+                // Plan 004 N3/N4: '( SELECT ... )' used as a value expression — a scalar subquery. Look-
+                // ahead on the SELECT keyword alone disambiguates from a plain parenthesized expression
+                // '(expr)': this dialect's expression grammar never starts a bare expression with SELECT.
+                if (Current.IsKeyword("SELECT"))
+                {
+                    var subquery = ParseSelectQuery();
+                    ExpectSymbol(")");
+                    return new ScalarSubqueryExpr(subquery, tok.Line, tok.Column);
+                }
                 var inner = ParseOr();
                 ExpectSymbol(")");
                 return inner;
@@ -557,6 +651,7 @@ internal sealed class Parser
         if (string.Equals(name, "TRUE", StringComparison.OrdinalIgnoreCase)) return new BoolLiteral(true, tok.Line, tok.Column);
         if (string.Equals(name, "FALSE", StringComparison.OrdinalIgnoreCase)) return new BoolLiteral(false, tok.Line, tok.Column);
         if (string.Equals(name, "NULL", StringComparison.OrdinalIgnoreCase)) return new NullLiteral(tok.Line, tok.Column);
+        if (string.Equals(name, "EXISTS", StringComparison.OrdinalIgnoreCase)) return ParseExistsBody(negated: false, tok.Line, tok.Column);
 
         if (Current.IsSymbol("("))
         {

@@ -103,6 +103,39 @@ internal sealed class AggregateCallExpr(string name, Expr? arg, bool isStar, int
     public bool IsStar { get; } = isStar;
 }
 
+/// <summary>Plan 004 N2: `expr [NOT] IN ( SELECT ... )`. Position-restricted (WHERE top-level AND-conjunct
+/// only — see Validator's `_resolvingWhere`/`_whereTopLevelConjuncts`); the subquery is uncorrelated in
+/// this tier (no outer-alias visibility — same rule N1's DerivedSource uses). Plan-time rewrite: Planner
+/// turns this into a semi-join (Negated=false) or anti-join (Negated=true) join stage appended to the
+/// query's join chain, and removes this conjunct from the residual WHERE — see Planner.RewriteWhereForSubqueryPredicates.</summary>
+internal sealed class InSubqueryExpr(Expr left, SelectQuery subquery, bool negated, int line, int col) : Expr(line, col)
+{
+    public Expr Left { get; } = left;
+    public SelectQuery Subquery { get; } = subquery;
+    public bool Negated { get; } = negated;
+}
+
+/// <summary>Plan 004 N2: `[NOT] EXISTS ( SELECT ... )`. Same position restriction and uncorrelated-subquery
+/// rule as <see cref="InSubqueryExpr"/> — Planner rewrites this to the same semi/anti join machinery using
+/// a constant join key on both sides (existence of ANY row, not a specific key match).</summary>
+internal sealed class ExistsExpr(SelectQuery subquery, bool negated, int line, int col) : Expr(line, col)
+{
+    public SelectQuery Subquery { get; } = subquery;
+    public bool Negated { get; } = negated;
+}
+
+/// <summary>Plan 004 N3/N4: `( SELECT agg(...) FROM ... [WHERE ... [AND inner.k = outer.k]] )` used as a
+/// value expression (WHERE/SELECT). Parser doesn't distinguish N3 (uncorrelated) from N4 (single-level
+/// equality-correlated) — that split happens in the Validator, based on whether the inner query's WHERE
+/// references an outer-scope alias. Must resolve to an aggregate query with no explicit GROUP BY (N4's
+/// GROUP BY is synthesized at validation time by decorrelation — never written by the SQL author). Planner
+/// rewrites every occurrence into a bound reference to a synthetic join stage's output column — see
+/// Planner.RewriteScalarSubqueries.</summary>
+internal sealed class ScalarSubqueryExpr(SelectQuery query, int line, int col) : Expr(line, col)
+{
+    public SelectQuery Query { get; } = query;
+}
+
 internal sealed class SelectItem(Expr expression, string? alias)
 {
     public Expr Expression { get; } = expression;
@@ -140,7 +173,13 @@ internal sealed class DerivedSource(SelectQuery query, string alias, int line, i
     public SelectQuery Query { get; } = query;
 }
 
-internal enum JoinKind { Inner, Left, Right, Full, Cross }
+/// <summary>Semi/Anti/Scalar are never produced by the parser (ParseJoinClause only yields Inner/Left/
+/// Right/Full/Cross) — they're synthesized by Planner at plan-time when rewriting a WHERE-position
+/// IN/EXISTS predicate (Semi = IN/EXISTS, Anti = NOT IN/NOT EXISTS) or a scalar subquery expression
+/// (Scalar, N3/N4) into an extra join stage appended after the query's real joins. See
+/// Planner.RewriteWhereForSubqueryPredicates / RewriteScalarSubqueries and Runtime/Ops/TableSemiAntiOp.cs
+/// / Runtime/Ops/PipelineSubqueryOp.cs.</summary>
+internal enum JoinKind { Inner, Left, Right, Full, Cross, Semi, Anti, Scalar }
 
 internal sealed class JoinClause(JoinKind kind, FromItem source, TimeSpan? within, Expr? on, int line, int col)
 {

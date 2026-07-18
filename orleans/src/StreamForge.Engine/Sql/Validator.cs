@@ -38,6 +38,52 @@ internal sealed class ResolvedSource
     public DerivedInfo? Derived { get; init; }
 }
 
+/// <summary>Plan 004 N2: one resolved `[NOT] IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` WHERE predicate
+/// — uncorrelated in this tier. Planner rewrites the predicate's own AST node into a Semi (Negated=false)
+/// or Anti (Negated=true) join stage appended to the query's join chain, and drops the predicate out of
+/// the residual WHERE — see Planner.RewriteWhereForSubqueryPredicates.</summary>
+internal sealed class SubqueryPredicateInfo
+{
+    public required SelectQuery Query { get; init; }
+    public required ValidationResult Validation { get; init; }
+    public required bool Negated { get; init; }
+    /// <summary>Null for EXISTS (existence-only — no specific key column; Planner uses a constant key on
+    /// both sides of the synthesized join instead). Set for IN: the subquery's single projected output
+    /// column's name, matching the naming DerivedDefaultName/Planner.DefaultName would assign it.</summary>
+    public required string? KeyColumnName { get; init; }
+}
+
+/// <summary>Plan 004 N4: one component of a scalar subquery's equality correlation —
+/// `<paramref name="InnerExpr"/> = <paramref name="OuterAlias"/>.<paramref name="OuterField"/>` (or the
+/// reverse) found as a top-level WHERE conjunct of the subquery. Planner uses <see cref="InnerExpr"/> as
+/// (one component of) the decorrelated join's inner-side key and <see cref="OuterAlias"/>/
+/// <see cref="OuterField"/> to build the outer-side key.</summary>
+internal sealed class CorrelationKey
+{
+    public required Expr InnerExpr { get; init; }
+    public required string OuterAlias { get; init; }
+    public required string OuterField { get; init; }
+}
+
+/// <summary>Plan 004 N3 (Correlations empty) / N4 (Correlations non-empty): one resolved scalar subquery
+/// expression. <see cref="ResidualQuery"/> is <see cref="ScalarSubqueryExpr.Query"/> with its correlation
+/// conjuncts stripped out of WHERE and — for N4 — a synthesized GROUP BY + `__key{i}` projections added
+/// (the decorrelation itself; see Validator.ResolveScalarSubquery). Planner compiles ResidualQuery exactly
+/// like a derived table (BuildCompiledPlan/BuildCompiledTablePlan) and wires it as a Scalar-kind join
+/// stage, then rewrites the original ScalarSubqueryExpr node (everywhere it appears in Output/WHERE) into
+/// a bound reference to that join's <see cref="ValueColumnName"/> output column.</summary>
+internal sealed class ScalarSubqueryInfo
+{
+    public required SelectQuery ResidualQuery { get; init; }
+    public required ValidationResult Validation { get; init; }
+    /// <summary>Empty for N3 (uncorrelated — Planner joins on a constant key instead).</summary>
+    public required List<CorrelationKey> Correlations { get; init; }
+    public required string ValueColumnName { get; init; }
+    /// <summary>N4 only: ResidualQuery's synthesized `__key{i}` output column names, same order as
+    /// <see cref="Correlations"/>.</summary>
+    public required List<string> KeyColumnNames { get; init; }
+}
+
 internal sealed class ValidationResult
 {
     public required List<SqlDiagnostic> Diagnostics { get; init; }
@@ -53,6 +99,11 @@ internal sealed class ValidationResult
     public required List<string> StreamInputs { get; init; }
     /// <summary>Table mode only: distinct other-table names referenced (FROM/JOIN).</summary>
     public required List<string> TableInputs { get; init; }
+    /// <summary>Plan 004 N2: every resolved IN/EXISTS WHERE predicate, keyed by its own InSubqueryExpr or
+    /// ExistsExpr AST node.</summary>
+    public required Dictionary<Expr, SubqueryPredicateInfo> SubqueryPredicates { get; init; }
+    /// <summary>Plan 004 N3/N4: every resolved scalar subquery expression, keyed by its own AST node.</summary>
+    public required Dictionary<ScalarSubqueryExpr, ScalarSubqueryInfo> ScalarSubqueries { get; init; }
     public bool HasAggregates => UsedAggregates.Count > 0;
     public bool HasErrors => Diagnostics.Exists(d => d.Severity == DiagnosticSeverity.Error);
 }
@@ -81,6 +132,19 @@ internal sealed class Validator
     private readonly List<SqlDiagnostic> _diags = [];
     private readonly Dictionary<Expr, (string Alias, string Field)> _bindings = new(ReferenceEqualityComparer.Instance);
     private readonly List<AggregateCallExpr> _usedAggregates = [];
+
+    // Plan 004 N2: WHERE-position gating for IN/EXISTS subquery predicates. Set only while resolving this
+    // query's own WHERE clause (Run() toggles _resolvingWhere around that one ResolveExpr call);
+    // _whereTopLevelConjuncts is FlattenAnd(q.Where)'s yield, by reference — the exact set of nodes an
+    // IN/EXISTS predicate is allowed to BE (not just appear inside): a predicate nested inside OR/NOT/
+    // another operator isn't in this set even while _resolvingWhere is true, since pushing it down into a
+    // semi/anti join would change the query's meaning (see ResolveInSubquery/ResolveExists).
+    private bool _resolvingWhere;
+    private HashSet<Expr>? _whereTopLevelConjuncts;
+
+    // Plan 004 N2/N3/N4 resolved-subquery side tables — see SubqueryPredicateInfo/ScalarSubqueryInfo docs.
+    private readonly Dictionary<Expr, SubqueryPredicateInfo> _subqueryPredicates = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<ScalarSubqueryExpr, ScalarSubqueryInfo> _scalarSubqueries = new(ReferenceEqualityComparer.Instance);
 
     // Tracks the resolved FieldKind of expression nodes: a column reference gets its schema kind, a
     // JsonAccessExpr gets Json ('->') or String ('->>'), and (for table-mode OutputSchema derivation)
@@ -205,7 +269,15 @@ internal sealed class Validator
 
         var fullScope = sources.Select(s => (s.Alias, s.Schema)).ToList();
 
-        if (q.Where is not null) ResolveExpr(q.Where, fullScope, aggDepth: 0);
+        if (q.Where is not null)
+        {
+            // Plan 004 N2: only a top-level (AND-connected) conjunct of WHERE may be an IN/EXISTS
+            // predicate — see the _whereTopLevelConjuncts field doc.
+            _whereTopLevelConjuncts = new HashSet<Expr>(FlattenAnd(q.Where), ReferenceEqualityComparer.Instance);
+            _resolvingWhere = true;
+            ResolveExpr(q.Where, fullScope, aggDepth: 0);
+            _resolvingWhere = false;
+        }
 
         if (q.GroupBy is not null)
         {
@@ -266,6 +338,22 @@ internal sealed class Validator
                     _diags.Add(new SqlDiagnostic("star is not allowed with GROUP BY/aggregates", qStar.Line, qStar.Column));
                     continue;
                 }
+                // Plan 004 N3/N4: a scalar subquery outside any aggregate's own argument can't sit in a
+                // grouped/windowed/aggregated query's SELECT list in this engine — TableReduceOp/
+                // PipelineWindowOp evaluate non-GROUP-BY select items post-aggregation against a synthetic
+                // all-empty row (see their BuildRow), which has none of the joined fields a rewritten
+                // scalar-subquery reference needs; silently evaluating to NULL there would be a correctness
+                // bug, not a supported case, so this is a diagnostic instead. A scalar subquery used as an
+                // AGGREGATE's own argument (e.g. `SUM(price - (SELECT AVG(price) FROM trades))`) is fine —
+                // aggregate arguments ARE evaluated against the real per-row WorkingRow pre-aggregation.
+                var badScalarSubquery = FindScalarSubqueryOutsideAggregate(item.Expression, insideAggregate: false);
+                if (badScalarSubquery is not null)
+                {
+                    _diags.Add(new SqlDiagnostic(
+                        "Scalar subquery in the SELECT list of a grouped/windowed/aggregated query is not supported in this tier — move it to WHERE, or restructure without GROUP BY/WINDOW/aggregates (plan 004 N3/N4)",
+                        badScalarSubquery.Line, badScalarSubquery.Column));
+                }
+
                 if (ContainsAggregate(item.Expression)) continue;
                 bool matchesGroupBy = groupByList.Any(g => StructurallyEqual(item.Expression, g));
                 if (!matchesGroupBy)
@@ -287,6 +375,8 @@ internal sealed class Validator
             ExprKinds = _exprKind,
             StreamInputs = _streamInputs.Distinct(StringComparer.Ordinal).ToList(),
             TableInputs = _tableInputs.Distinct(StringComparer.Ordinal).ToList(),
+            SubqueryPredicates = _subqueryPredicates,
+            ScalarSubqueries = _scalarSubqueries,
         };
     }
 
@@ -315,18 +405,9 @@ internal sealed class Validator
 
         if (item is DerivedSource ds)
         {
-            ValidationResult inner = _mode == ValidationMode.Table
-                ? ValidateTable(ds.Query, _streamSchemasForRecursion!, _tableSchemasForRecursion!)
-                : Validate(ds.Query, _schemas);
+            ValidationResult inner = ValidateNestedUncorrelated(ds.Query);
             _diags.AddRange(inner.Diagnostics);
-            if (_mode == ValidationMode.Table)
-            {
-                // Flatten the derived table's own stream/table dependencies into the outer query's —
-                // TableCompileResult.StreamInputs/TableInputs must report real leaf inputs transitively,
-                // not a synthetic "(derived)" marker no caller could ever feed an event/delta for.
-                _streamInputs.AddRange(inner.StreamInputs);
-                _tableInputs.AddRange(inner.TableInputs);
-            }
+            FoldNestedInputs(inner);
             var schema = BuildDerivedOutputSchema(ds.Query, inner);
             return (true, "(derived)", schema, false, new DerivedInfo { Query = ds.Query, Validation = inner });
         }
@@ -353,6 +434,25 @@ internal sealed class Validator
         }
 
         return (true, sref.Name, namedSchema, isTable, null);
+    }
+
+    /// <summary>Validates <paramref name="q"/> as a fully independent, uncorrelated query against this
+    /// Validator's own namespace — the one mechanism N1's derived tables, N2's IN/EXISTS subqueries, and
+    /// (for the residual, correlation-conjuncts-stripped query) N3/N4's scalar subqueries all share. "Same
+    /// mode, same schemas" is what makes it uncorrelated: no outer alias is ever added to the scope the
+    /// recursive Validate/ValidateTable call resolves against, so a reference to one fails exactly like any
+    /// other unknown source would.</summary>
+    private ValidationResult ValidateNestedUncorrelated(SelectQuery q) =>
+        _mode == ValidationMode.Table ? ValidateTable(q, _streamSchemasForRecursion!, _tableSchemasForRecursion!) : Validate(q, _schemas);
+
+    /// <summary>Table mode only: folds a nested (uncorrelated) validation's own leaf StreamInputs/
+    /// TableInputs into this query's — see ResolveFromItem's original doc comment on why this must be
+    /// transitive rather than reporting the synthetic "(derived)" marker.</summary>
+    private void FoldNestedInputs(ValidationResult inner)
+    {
+        if (_mode != ValidationMode.Table) return;
+        _streamInputs.AddRange(inner.StreamInputs);
+        _tableInputs.AddRange(inner.TableInputs);
     }
 
     /// <summary>Plan 004 N1: "a derived table's output schema (existing BuildOutputSchema) is the
@@ -484,6 +584,15 @@ internal sealed class Validator
                 _usedAggregates.Add(agg);
                 if (!agg.IsStar && agg.Arg is not null) ResolveExpr(agg.Arg, scope, aggDepth + 1);
                 RecordAggregateKind(e, agg);
+                return;
+            case InSubqueryExpr ins:
+                ResolveInSubquery(ins, scope, aggDepth);
+                return;
+            case ExistsExpr ex:
+                ResolveExists(ex);
+                return;
+            case ScalarSubqueryExpr sse:
+                ResolveScalarSubquery(sse, scope);
                 return;
             default:
                 return;
@@ -701,6 +810,280 @@ internal sealed class Validator
     }
 
     // ------------------------------------------------------------------
+    // Plan 004 N2 — IN / EXISTS subquery predicates (WHERE, top-level AND-conjunct only)
+    // ------------------------------------------------------------------
+
+    private bool IsAllowedSubqueryPredicatePosition(Expr e) =>
+        _resolvingWhere && _whereTopLevelConjuncts is not null && _whereTopLevelConjuncts.Contains(e);
+
+    private string SubqueryPredicatePositionMessage() =>
+        _resolvingWhere
+            ? "IN/EXISTS subquery predicates must be a top-level AND-connected condition in WHERE (not nested inside OR/NOT/another expression) — plan 004 N2"
+            : "IN/EXISTS subquery predicates are only allowed in WHERE (not SELECT list, ON, or GROUP BY) — plan 004 N2";
+
+    /// <summary>Plan 004 N2, pipelines only: "the subquery side must be a windowed derived query" — true
+    /// when <paramref name="q"/> itself windows, OR (recursively) any of its FROM/JOIN sources is a
+    /// derived table/CTE whose own inner query is transitively windowed. This is exactly what makes "the
+    /// most recent inner window close" well-defined for the rolling-snapshot membership/value rule the
+    /// runtime implements (see Runtime/Ops/PipelineSubqueryOp.cs) — an unwindowed subquery has no notion of
+    /// "close" to snapshot from at all.</summary>
+    private static bool IsTransitivelyWindowed(SelectQuery q, ValidationResult v) =>
+        q.Window is not null || v.Sources.Any(s => s.Derived is not null && IsTransitivelyWindowed(s.Derived.Query, s.Derived.Validation));
+
+    private void ResolveExists(ExistsExpr ex)
+    {
+        if (!IsAllowedSubqueryPredicatePosition(ex))
+        {
+            _diags.Add(new SqlDiagnostic(SubqueryPredicatePositionMessage(), ex.Line, ex.Column));
+            return;
+        }
+
+        var inner = ValidateNestedUncorrelated(ex.Subquery);
+        _diags.AddRange(inner.Diagnostics);
+        FoldNestedInputs(inner);
+
+        // EXISTS/NOT EXISTS is uncorrelated in this tier (plan 004 N2: "the subquery is uncorrelated for
+        // IN/EXISTS in this tier"): the inner query above was validated against ONLY this query's own
+        // namespace, with no outer alias in scope, so a reference to one already surfaced as the SAME
+        // "Unknown source"/"Unknown column" diagnostic an uncorrelated N1 derived table would produce — no
+        // separate correlation-detection pass needed here (unlike N4's scalar subqueries, which DO support
+        // equality correlation and so need to tell "correlated" apart from "just wrong").
+        if (_mode == ValidationMode.Stream && !IsTransitivelyWindowed(ex.Subquery, inner))
+        {
+            _diags.Add(new SqlDiagnostic(
+                "EXISTS subquery in a pipeline must be windowed (directly, or via a windowed derived source/CTE) so its membership is well-defined — plan 004 N2",
+                ex.Line, ex.Column));
+        }
+
+        _exprKind[ex] = FieldKind.Bool;
+        _subqueryPredicates[ex] = new SubqueryPredicateInfo { Query = ex.Subquery, Validation = inner, Negated = ex.Negated, KeyColumnName = null };
+    }
+
+    private void ResolveInSubquery(InSubqueryExpr ie, List<(string Alias, SourceSchema Schema)> scope, int aggDepth)
+    {
+        ResolveExpr(ie.Left, scope, aggDepth);
+
+        if (!IsAllowedSubqueryPredicatePosition(ie))
+        {
+            _diags.Add(new SqlDiagnostic(SubqueryPredicatePositionMessage(), ie.Line, ie.Column));
+            return;
+        }
+
+        var inner = ValidateNestedUncorrelated(ie.Subquery);
+        _diags.AddRange(inner.Diagnostics);
+        FoldNestedInputs(inner);
+
+        bool singleColumn = !ie.Subquery.Select.IsStar && ie.Subquery.Select.Items.Count == 1 && ie.Subquery.Select.Items[0].Expression is not QualifiedStarExpr;
+        if (!singleColumn)
+        {
+            _diags.Add(new SqlDiagnostic("IN subquery must select exactly one column", ie.Line, ie.Column));
+        }
+
+        if (_mode == ValidationMode.Stream && !IsTransitivelyWindowed(ie.Subquery, inner))
+        {
+            _diags.Add(new SqlDiagnostic(
+                "IN subquery in a pipeline must be windowed (directly, or via a windowed derived source/CTE) so its membership set is well-defined — plan 004 N2",
+                ie.Line, ie.Column));
+        }
+
+        _exprKind[ie] = FieldKind.Bool;
+        string? keyColumn = singleColumn ? (ie.Subquery.Select.Items[0].Alias ?? DerivedDefaultName(ie.Subquery.Select.Items[0].Expression, 0)) : null;
+        _subqueryPredicates[ie] = new SubqueryPredicateInfo { Query = ie.Subquery, Validation = inner, Negated = ie.Negated, KeyColumnName = keyColumn };
+    }
+
+    // ------------------------------------------------------------------
+    // Plan 004 N3/N4 — scalar subquery expressions
+    // ------------------------------------------------------------------
+
+    private static HashSet<string> CollectFromAliases(SelectQuery q)
+    {
+        var result = new HashSet<string>(StringComparer.Ordinal) { q.From.Source.Alias };
+        foreach (var j in q.From.Joins) result.Add(j.Source.Alias);
+        return result;
+    }
+
+    /// <summary>True when <paramref name="e"/> references an alias that resolves against
+    /// <paramref name="outerAliases"/> and is NOT shadowed by <paramref name="innerAliases"/> (standard SQL
+    /// scoping: an inner FROM/JOIN alias of the same name always shadows the outer one). Only qualified
+    /// references (`alias.field`, `alias.*`) can be correlation refs in this dialect — a bare identifier is
+    /// always resolved against the subquery's own scope only (see ResolveScalarSubquery's doc on this
+    /// descope). Does not descend into a nested subquery expression (ScalarSubqueryExpr/InSubqueryExpr's
+    /// own subquery/ExistsExpr) — those are independently scoped and validated on their own.</summary>
+    private static bool ContainsOuterRef(Expr e, HashSet<string> innerAliases, HashSet<string> outerAliases) => e switch
+    {
+        QualifiedIdentifier qid => !innerAliases.Contains(qid.Qualifier) && outerAliases.Contains(qid.Qualifier),
+        QualifiedStarExpr qs => !innerAliases.Contains(qs.Alias) && outerAliases.Contains(qs.Alias),
+        UnaryExpr u => ContainsOuterRef(u.Operand, innerAliases, outerAliases),
+        BinaryExpr b => ContainsOuterRef(b.Left, innerAliases, outerAliases) || ContainsOuterRef(b.Right, innerAliases, outerAliases),
+        FunctionCallExpr f => f.Args.Any(a => ContainsOuterRef(a, innerAliases, outerAliases)),
+        AggregateCallExpr agg => agg.Arg is not null && ContainsOuterRef(agg.Arg, innerAliases, outerAliases),
+        JsonAccessExpr j => ContainsOuterRef(j.Left, innerAliases, outerAliases),
+        InSubqueryExpr ins => ContainsOuterRef(ins.Left, innerAliases, outerAliases), // .Subquery is independently scoped
+        _ => false,
+    };
+
+    private static bool QueryHasOuterRefOutsideWhere(SelectQuery q, HashSet<string> innerAliases, HashSet<string> outerAliases)
+    {
+        if (!q.Select.IsStar && q.Select.Items.Any(i => ContainsOuterRef(i.Expression, innerAliases, outerAliases))) return true;
+        if (q.GroupBy is not null && q.GroupBy.Any(g => ContainsOuterRef(g, innerAliases, outerAliases))) return true;
+        return false;
+    }
+
+    /// <summary>If <paramref name="eq"/> is exactly `innerExpr = outerAlias.outerField` or the reverse (one
+    /// side a single qualified reference to an outer-scope alias, the other side an inner-only expression),
+    /// resolves the outer field against <paramref name="outerScope"/> and returns the split — this IS
+    /// plan 004 N4's "single-level equality correlation" shape. Returns false (not this shape) for anything
+    /// looser — e.g. an outer ref buried inside a larger expression on either side — which the caller then
+    /// reports as "beyond equality".</summary>
+    private bool TrySplitCorrelationEquality(
+        BinaryExpr eq, HashSet<string> innerAliases, HashSet<string> outerAliases, List<(string Alias, SourceSchema Schema)> outerScope,
+        out Expr innerExpr, out string outerAlias, out string outerField)
+    {
+        innerExpr = null!; outerAlias = ""; outerField = "";
+
+        bool TryOuterSide(Expr outerSide, Expr otherSide, out Expr resolvedInner, out string resolvedAlias, out string resolvedField)
+        {
+            resolvedInner = null!; resolvedAlias = ""; resolvedField = "";
+            if (outerSide is not QualifiedIdentifier q || innerAliases.Contains(q.Qualifier) || !outerAliases.Contains(q.Qualifier)) return false;
+            if (ContainsOuterRef(otherSide, innerAliases, outerAliases)) return false; // both sides reference outer — not a clean split
+
+            var outerSourceSchema = outerScope.First(s => string.Equals(s.Alias, q.Qualifier, StringComparison.Ordinal)).Schema;
+            var canonicalField = outerSourceSchema.Fields.Keys.FirstOrDefault(k => string.Equals(k, q.Name, StringComparison.OrdinalIgnoreCase));
+            if (canonicalField is null)
+            {
+                _diags.Add(new SqlDiagnostic($"Unknown column '{q.Name}' on '{q.Qualifier}'", q.Line, q.Column));
+                return false;
+            }
+
+            resolvedInner = otherSide; resolvedAlias = q.Qualifier; resolvedField = canonicalField;
+            return true;
+        }
+
+        if (TryOuterSide(eq.Left, eq.Right, out innerExpr, out outerAlias, out outerField)) return true;
+        if (TryOuterSide(eq.Right, eq.Left, out innerExpr, out outerAlias, out outerField)) return true;
+        return false;
+    }
+
+    /// <summary>Resolves a scalar subquery expression (plan 004 N3 uncorrelated / N4 equality-correlated —
+    /// the parser doesn't distinguish them; this method does, based on whether the inner WHERE references
+    /// an outer-scope alias). N4's decorrelation happens right here: correlation conjuncts are stripped out
+    /// of a residual copy of the inner query's WHERE, and (when any correlation was found) a GROUP BY over
+    /// every correlation's inner expression is synthesized, with each one ALSO projected under a synthetic
+    /// `__key{i}` name so Planner's decorrelated join can bind against it as an ordinary output column —
+    /// exactly the "GROUP-BY-k aggregate joined on k" plan 004 N4 specifies. The residual query (N3: an
+    /// unchanged copy; N4: WHERE-stripped + GROUP BY/`__key{i}`-augmented) is then validated exactly like an
+    /// N1 derived table — see ValidateNestedUncorrelated.</summary>
+    private void ResolveScalarSubquery(ScalarSubqueryExpr sse, List<(string Alias, SourceSchema Schema)> outerScope)
+    {
+        var innerAliases = CollectFromAliases(sse.Query);
+        var outerAliases = outerScope.Select(s => s.Alias).ToHashSet(StringComparer.Ordinal);
+
+        var pureInnerConjuncts = new List<Expr>();
+        var correlations = new List<(Expr InnerExpr, string OuterAlias, string OuterField)>();
+        bool invalidCorrelation = false;
+
+        if (sse.Query.Where is not null)
+        {
+            foreach (var conjunct in FlattenAnd(sse.Query.Where))
+            {
+                if (!ContainsOuterRef(conjunct, innerAliases, outerAliases))
+                {
+                    pureInnerConjuncts.Add(conjunct);
+                    continue;
+                }
+                if (conjunct is BinaryExpr { Op: "=" } eq &&
+                    TrySplitCorrelationEquality(eq, innerAliases, outerAliases, outerScope, out var innerExpr, out var outerAlias, out var outerField))
+                {
+                    correlations.Add((innerExpr, outerAlias, outerField));
+                    continue;
+                }
+                invalidCorrelation = true;
+            }
+        }
+
+        if (!invalidCorrelation && QueryHasOuterRefOutsideWhere(sse.Query, innerAliases, outerAliases))
+        {
+            invalidCorrelation = true;
+        }
+
+        if (invalidCorrelation)
+        {
+            _diags.Add(new SqlDiagnostic("Correlated subqueries beyond equality are not supported — rewrite as a JOIN", sse.Line, sse.Column));
+            return;
+        }
+
+        if (sse.Query.GroupBy is not null)
+        {
+            _diags.Add(new SqlDiagnostic(
+                "Scalar subquery may not have its own GROUP BY — use equality correlation instead (plan 004 N4) or drop it for an uncorrelated single-row aggregate (N3)",
+                sse.Line, sse.Column));
+            return;
+        }
+        if (sse.Query.Select.IsStar || sse.Query.Select.Items.Count != 1 || sse.Query.Select.Items[0].Expression is QualifiedStarExpr)
+        {
+            _diags.Add(new SqlDiagnostic("Scalar subquery must select exactly one column", sse.Line, sse.Column));
+            return;
+        }
+        var valueItem = sse.Query.Select.Items[0];
+        if (!ContainsAggregate(valueItem.Expression))
+        {
+            _diags.Add(new SqlDiagnostic(
+                "Scalar subquery must be a single-row aggregate query (an aggregate with no GROUP BY) — anything else is not provably single-row",
+                sse.Line, sse.Column));
+            return;
+        }
+
+        Expr? residualWhere = pureInnerConjuncts.Count == 0 ? null : pureInnerConjuncts.Aggregate((a, b) => new BinaryExpr("AND", a, b, a.Line, a.Column));
+
+        var selectItems = new List<SelectItem>(sse.Query.Select.Items);
+        var keyColumnNames = new List<string>();
+        List<Expr>? groupBy = null;
+        if (correlations.Count > 0)
+        {
+            groupBy = [];
+            for (int i = 0; i < correlations.Count; i++)
+            {
+                var name = $"__key{i}";
+                keyColumnNames.Add(name);
+                groupBy.Add(correlations[i].InnerExpr);
+                selectItems.Add(new SelectItem(correlations[i].InnerExpr, name));
+            }
+        }
+
+        var residualQuery = new SelectQuery(
+            new SelectClause(isStar: false, selectItems),
+            sse.Query.From,
+            residualWhere,
+            groupBy,
+            sse.Query.Window,
+            sse.Query.Emit,
+            sse.Query.EmitLine, sse.Query.EmitColumn, sse.Query.GroupByLine, sse.Query.GroupByColumn, sse.Query.WindowLine, sse.Query.WindowColumn);
+
+        var inner = ValidateNestedUncorrelated(residualQuery);
+        _diags.AddRange(inner.Diagnostics);
+        FoldNestedInputs(inner);
+
+        if (_mode == ValidationMode.Stream && !IsTransitivelyWindowed(residualQuery, inner))
+        {
+            _diags.Add(new SqlDiagnostic(
+                "Scalar subquery in a pipeline must be windowed (directly, or via a windowed derived source/CTE) so its value is well-defined — plan 004 N3/N4",
+                sse.Line, sse.Column));
+        }
+
+        var valueColumnName = valueItem.Alias ?? DerivedDefaultName(valueItem.Expression, 0);
+        var kind = inner.ExprKinds.TryGetValue(valueItem.Expression, out var k) ? k : FieldKind.Double;
+        _exprKind[sse] = kind;
+        _scalarSubqueries[sse] = new ScalarSubqueryInfo
+        {
+            ResidualQuery = residualQuery,
+            Validation = inner,
+            Correlations = correlations.Select(c => new CorrelationKey { InnerExpr = c.InnerExpr, OuterAlias = c.OuterAlias, OuterField = c.OuterField }).ToList(),
+            ValueColumnName = valueColumnName,
+            KeyColumnNames = keyColumnNames,
+        };
+    }
+
+    // ------------------------------------------------------------------
     // Equi-join key extraction
     // ------------------------------------------------------------------
 
@@ -778,11 +1161,32 @@ internal sealed class Validator
     internal static bool ContainsAggregate(Expr e) => e switch
     {
         AggregateCallExpr => true,
+        // Plan 004 N3/N4: a scalar subquery's value doesn't vary across an outer GROUP BY group any
+        // differently than an aggregate's would (N3: truly constant; N4: constant per the correlation
+        // key) — exempt it from "non-aggregate select item must appear in GROUP BY" the same way an
+        // aggregate is exempt, rather than forcing it to structurally match a GROUP BY expression.
+        ScalarSubqueryExpr => true,
         UnaryExpr u => ContainsAggregate(u.Operand),
         BinaryExpr b => ContainsAggregate(b.Left) || ContainsAggregate(b.Right),
         FunctionCallExpr f => f.Args.Any(ContainsAggregate),
         JsonAccessExpr j => ContainsAggregate(j.Left),
         _ => false,
+    };
+
+    /// <summary>Plan 004 N3/N4: finds the first ScalarSubqueryExpr in <paramref name="e"/> that is NOT
+    /// nested inside an aggregate call's own argument (see the caller's doc comment for why that
+    /// distinction matters) — returns its node (for position), or null if none. Doesn't descend into
+    /// InSubqueryExpr/ExistsExpr/ScalarSubqueryExpr's own subqueries — those are independently-scoped
+    /// nested queries with their own validation, not part of this expression tree's evaluation.</summary>
+    private static Expr? FindScalarSubqueryOutsideAggregate(Expr e, bool insideAggregate) => e switch
+    {
+        ScalarSubqueryExpr when !insideAggregate => e,
+        AggregateCallExpr agg => agg.Arg is not null ? FindScalarSubqueryOutsideAggregate(agg.Arg, insideAggregate: true) : null,
+        UnaryExpr u => FindScalarSubqueryOutsideAggregate(u.Operand, insideAggregate),
+        BinaryExpr b => FindScalarSubqueryOutsideAggregate(b.Left, insideAggregate) ?? FindScalarSubqueryOutsideAggregate(b.Right, insideAggregate),
+        FunctionCallExpr f => f.Args.Select(a => FindScalarSubqueryOutsideAggregate(a, insideAggregate)).FirstOrDefault(r => r is not null),
+        JsonAccessExpr j => FindScalarSubqueryOutsideAggregate(j.Left, insideAggregate),
+        _ => null,
     };
 
     private bool StructurallyEqual(Expr a, Expr b) => StructurallyEqual(a, b, _bindings);

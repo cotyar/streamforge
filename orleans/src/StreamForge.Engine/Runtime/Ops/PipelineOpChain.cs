@@ -26,3 +26,29 @@ internal interface IPipelineOpChain
 
     IReadOnlyList<EventRecord> AdvanceWatermark(long nowMs);
 }
+
+/// <summary>The two-input-edge contract every pipeline-mode join-chain stage implements — ordinary
+/// WITHIN-buffered interval joins (<see cref="PipelineJoinOp"/>) and plan 004 N2/N3/N4's rolling-snapshot
+/// subquery stages (<see cref="PipelineSubqueryOp"/>) alike. Extracted so
+/// <see cref="StreamForge.Engine.PipelineExecutor"/>'s `_joins` list can hold either kind uniformly.
+/// OnRight/Evict are still called for a snapshot stage (they're part of the shared per-row RIGHT-arrival
+/// path an ORDINARY join-position role uses — see ExecutorImpl.ProcessIncomingRow) but always return an
+/// empty list there: a snapshot stage's B-side state only ever changes via
+/// <see cref="IPipelineSnapshotJoinStage.OnRightBatch"/>, which ExecutorImpl routes a derived subquery
+/// role's WHOLE emission batch through instead (see RoleEntry.IsSnapshotJoin) — see
+/// PipelineSubqueryOp's class doc for why a snapshot must be replaced from a whole batch, never built up
+/// row-by-row through the ordinary per-row OnRight path.</summary>
+internal interface IPipelineJoinStage
+{
+    List<WorkingRow> OnLeft(WorkingRow row);
+    List<WorkingRow> OnRight(WorkingRow row);
+    List<WorkingRow> Evict(long watermark);
+}
+
+/// <summary>Additional contract for plan 004 N2/N3/N4's rolling-snapshot join stages
+/// (<see cref="PipelineSubqueryOp"/>) — batch-shaped B-side delivery instead of the ordinary per-row
+/// <see cref="IPipelineJoinStage.OnRight"/>. See PipelineSubqueryOp's class doc.</summary>
+internal interface IPipelineSnapshotJoinStage : IPipelineJoinStage
+{
+    void OnRightBatch(IReadOnlyList<WorkingRow> rows);
+}

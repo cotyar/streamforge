@@ -36,3 +36,17 @@ internal interface ITableOp
 {
     IReadOnlyList<TableDelta> OnFrontier(Epoch epoch);
 }
+
+/// <summary>The two-input-edge contract every table-mode JOIN-CHAIN stage implements — ordinary equi-joins
+/// (<see cref="TableJoinOp"/>) and plan 004 N2's semi/anti presence joins (<see cref="TableSemiAntiOp"/>)
+/// alike. Extracted so <see cref="StreamForge.Engine.TableExecutor"/>'s `_joins` list can hold either kind
+/// uniformly — TableExecutorImpl's dispatch (HandleIncoming/PropagateForward) already only ever calls
+/// OnLeftBatch/OnRightBatch, never anything TableJoinOp-specific, so no other change is needed there.
+/// Plan 004 N3/N4's Scalar-kind join stage does NOT get its own op — it reuses TableJoinOp directly (a
+/// singleton or correlated-key equi-join is exactly what TableJoinOp already computes correctly,
+/// retractions included — see Planner.BuildScalarJoin's doc comment).</summary>
+internal interface ITableJoinStage : ITableOp
+{
+    IReadOnlyList<TableRowDelta> OnLeftBatch(Epoch epoch, IReadOnlyList<TableRowDelta> input);
+    IReadOnlyList<TableRowDelta> OnRightBatch(Epoch epoch, IReadOnlyList<TableRowDelta> input);
+}

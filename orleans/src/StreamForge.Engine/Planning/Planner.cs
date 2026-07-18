@@ -90,7 +90,19 @@ public static class Planner
         }).ToList();
 
         var bindings = v.Bindings;
-        var output = BuildOutput(q, sources, bindings);
+
+        // Plan 004 N2/N3/N4: rewrite WHERE (extracting IN/EXISTS predicates into semi/anti join stages,
+        // substituting scalar subquery occurrences) and the projection (substituting scalar subquery
+        // occurrences) — each substitution appends one Semi/Anti/Scalar CompiledJoin to `joins`, AFTER the
+        // real joins, so a synthesized join's key expressions (which may reference already-joined outer
+        // columns — N4 correlation, or an IN's left operand from a joined alias) resolve against the fully
+        // accumulated row. See SubqueryRewriter.RewriteWhere/RewriteSelectItems below.
+        var where = RewriteWhereForSubqueryPredicates(q.Where, v, bindings, joins);
+        var selectItems = q.Select.Items.Select(item => new SelectItem(RewriteScalarSubqueries(item.Expression, v, bindings, joins), item.Alias)).ToList();
+        var qForOutput = new SelectQuery(new SelectClause(q.Select.IsStar, selectItems), q.From, q.Where, q.GroupBy, q.Window, q.Emit,
+            q.EmitLine, q.EmitColumn, q.GroupByLine, q.GroupByColumn, q.WindowLine, q.WindowColumn);
+
+        var output = BuildOutput(qForOutput, sources, bindings);
 
         if (q.Window is not null)
         {
@@ -104,15 +116,20 @@ public static class Planner
         // Real, externally-feedable leaf source names: a derived source contributes its own (already
         // transitively flattened) child SourceNames instead of its synthetic "(derived)" marker, so
         // CompileResult.SourceNames always names actual streams a caller can OnEvent() — see
-        // ExecutorImpl's role table, which dispatches derived nodes by these same leaf names.
-        var sourceNames = sources.SelectMany(s => (IEnumerable<string>)(s.DerivedPlan?.SourceNames ?? [s.SourceName])).Distinct().ToList();
+        // ExecutorImpl's role table, which dispatches derived nodes by these same leaf names. Plan 004
+        // N2/N3/N4's synthesized Semi/Anti/Scalar joins are ALSO derived-plan-backed (never a plain named
+        // source — see SubqueryRewriter) and must contribute their own leaf names the exact same way, or a
+        // subquery's real stream inputs would silently never receive events.
+        var sourceNames = sources.SelectMany(s => (IEnumerable<string>)(s.DerivedPlan?.SourceNames ?? [s.SourceName]))
+            .Concat(joins.Where(j => j.Kind is JoinKind.Semi or JoinKind.Anti or JoinKind.Scalar).SelectMany(j => j.DerivedPlan!.SourceNames))
+            .Distinct().ToList();
         var sourceLabel = string.Join(",", sources.Select(s => s.Alias));
 
         return new CompiledPlan
         {
             Sources = sources,
             Joins = joins,
-            Where = q.Where,
+            Where = where,
             GroupBy = q.GroupBy,
             Window = q.Window,
             Emit = q.Emit ?? EmitMode.Final,
@@ -324,5 +341,222 @@ public static class Planner
         parts.Add($"SELECT {output.Count}");
 
         return string.Join(" → ", parts);
+    }
+
+    // ------------------------------------------------------------------
+    // Plan 004 N2/N3/N4 — subquery predicate/expression rewriting. See BuildCompiledPlan's call site doc
+    // comment for the overall shape; CompiledTablePlan's TablePlanner.cs carries a near-identical copy
+    // (different Compiled*/Join DTOs — same "necessarily duplicated" reasoning as
+    // Validator.BuildDerivedOutputSchema's doc comment).
+    // ------------------------------------------------------------------
+
+    private static IEnumerable<Expr> FlattenAndForRewrite(Expr e)
+    {
+        if (e is BinaryExpr { Op: "AND" } b)
+        {
+            foreach (var x in FlattenAndForRewrite(b.Left)) yield return x;
+            foreach (var x in FlattenAndForRewrite(b.Right)) yield return x;
+        }
+        else
+        {
+            yield return e;
+        }
+    }
+
+    /// <summary>Plan 004 N2: extracts every top-level (AND-connected) IN/EXISTS predicate out of
+    /// <paramref name="where"/> into its own synthesized Semi (IN/EXISTS) or Anti (NOT IN/NOT EXISTS) join
+    /// appended to <paramref name="joins"/>, leaving the remaining conjuncts — each also scanned for a
+    /// nested scalar subquery (plan 004 N3/N4) — as the residual WHERE. Validator already confirmed every
+    /// InSubqueryExpr/ExistsExpr reaching here is a top-level conjunct (see its `_whereTopLevelConjuncts`
+    /// gate) and has a corresponding entry in v.SubqueryPredicates (compilation would have already bailed
+    /// out on a diagnostic otherwise).</summary>
+    private static Expr? RewriteWhereForSubqueryPredicates(Expr? where, ValidationResult v, Dictionary<Expr, (string Alias, string Field)> bindings, List<CompiledJoin> joins)
+    {
+        if (where is null) return null;
+
+        var residual = new List<Expr>();
+        foreach (var conjunct in FlattenAndForRewrite(where))
+        {
+            if (conjunct is InSubqueryExpr ins && v.SubqueryPredicates.TryGetValue(ins, out var inInfo))
+            {
+                joins.Add(BuildSemiAntiJoin(inInfo, ins.Left, bindings, joins.Count));
+                continue;
+            }
+            if (conjunct is ExistsExpr existsExpr && v.SubqueryPredicates.TryGetValue(existsExpr, out var existsInfo))
+            {
+                joins.Add(BuildSemiAntiJoin(existsInfo, insLeft: null, bindings, joins.Count));
+                continue;
+            }
+            residual.Add(RewriteScalarSubqueries(conjunct, v, bindings, joins));
+        }
+
+        if (residual.Count == 0) return null;
+        return residual.Aggregate((a, b) => new BinaryExpr("AND", a, b, a.Line, a.Column));
+    }
+
+    private static CompiledJoin BuildSemiAntiJoin(SubqueryPredicateInfo info, Expr? insLeft, Dictionary<Expr, (string Alias, string Field)> bindings, int index)
+    {
+        string alias = $"__sq{index}";
+        var derivedPlan = BuildCompiledPlan(info.Query, info.Validation);
+
+        Expr leftKey, rightKey;
+        if (insLeft is not null)
+        {
+            // IN: leftKey is the subquery's own left operand — already resolved/bound by the Validator
+            // against the OUTER scope (see Validator.ResolveInSubquery), so it's already present in
+            // `bindings` (== v.Bindings, the SAME dictionary CompiledPlan.Bindings ends up as).
+            leftKey = insLeft;
+            var rightNode = new QualifiedIdentifier(alias, info.KeyColumnName!, 0, 0);
+            bindings[rightNode] = (alias, info.KeyColumnName!);
+            rightKey = rightNode;
+        }
+        else
+        {
+            // EXISTS: existence of ANY row, not a specific key match — both sides use the SAME constant so
+            // presence never depends on a column value (see Runtime/Ops/TableSemiAntiOp.cs's class doc).
+            leftKey = new NumberLiteral(null, 0L, 0, 0);
+            rightKey = new NumberLiteral(null, 0L, 0, 0);
+        }
+
+        return new CompiledJoin
+        {
+            Kind = info.Negated ? JoinKind.Anti : JoinKind.Semi,
+            Alias = alias,
+            SourceName = "(derived)",
+            Schema = derivedPlan.OutputSchema,
+            Within = TimeSpan.Zero,
+            LeftKey = leftKey,
+            RightKey = rightKey,
+            Residual = null,
+            DerivedPlan = derivedPlan,
+        };
+    }
+
+    /// <summary>Plan 004 N3 (info.Correlations empty)/N4 (non-empty): builds the Scalar-kind join stage a
+    /// resolved scalar subquery rewrites into. N3 joins on a constant key both sides (singleton cross-join
+    /// — "reuse TableJoinOp/an equivalent pipeline op with a constant key"). N4 joins on the FIRST
+    /// correlation component's key; any ADDITIONAL correlation components become residual equality
+    /// conjuncts against their own `__key{i}` projection — the same "one hash key + residual" shape this
+    /// engine already uses for any other multi-condition equi-join (see Validator.ExtractEquiKey).</summary>
+    private static CompiledJoin BuildScalarJoin(ScalarSubqueryInfo info, Dictionary<Expr, (string Alias, string Field)> bindings, int index)
+    {
+        string alias = $"__sq{index}";
+        var derivedPlan = BuildCompiledPlan(info.ResidualQuery, info.Validation);
+
+        Expr leftKey, rightKey;
+        Expr? residual = null;
+
+        if (info.Correlations.Count == 0)
+        {
+            leftKey = new NumberLiteral(null, 0L, 0, 0);
+            rightKey = new NumberLiteral(null, 0L, 0, 0);
+        }
+        else
+        {
+            var first = info.Correlations[0];
+            var outerNode = new QualifiedIdentifier(first.OuterAlias, first.OuterField, 0, 0);
+            bindings[outerNode] = (first.OuterAlias, first.OuterField);
+            leftKey = outerNode;
+
+            var innerNode = new QualifiedIdentifier(alias, info.KeyColumnNames[0], 0, 0);
+            bindings[innerNode] = (alias, info.KeyColumnNames[0]);
+            rightKey = innerNode;
+
+            for (int i = 1; i < info.Correlations.Count; i++)
+            {
+                var c = info.Correlations[i];
+                var outerN = new QualifiedIdentifier(c.OuterAlias, c.OuterField, 0, 0);
+                bindings[outerN] = (c.OuterAlias, c.OuterField);
+                var innerN = new QualifiedIdentifier(alias, info.KeyColumnNames[i], 0, 0);
+                bindings[innerN] = (alias, info.KeyColumnNames[i]);
+                var eq = new BinaryExpr("=", outerN, innerN, 0, 0);
+                residual = residual is null ? eq : new BinaryExpr("AND", residual, eq, 0, 0);
+            }
+        }
+
+        return new CompiledJoin
+        {
+            Kind = JoinKind.Scalar,
+            Alias = alias,
+            SourceName = "(derived)",
+            Schema = derivedPlan.OutputSchema,
+            Within = TimeSpan.Zero,
+            LeftKey = leftKey,
+            RightKey = rightKey,
+            Residual = residual,
+            DerivedPlan = derivedPlan,
+        };
+    }
+
+    /// <summary>Plan 004 N3/N4: replaces every ScalarSubqueryExpr in <paramref name="e"/> with a bound
+    /// reference to its synthesized Scalar join stage's output column, appending one CompiledJoin per
+    /// occurrence to <paramref name="joins"/>. Reference-preserving: a subtree with no scalar subquery
+    /// inside it is returned UNCHANGED (same object) rather than rebuilt, so v.Bindings/v.ExprKinds lookups
+    /// keyed by the original node identity keep working for everything this rewrite doesn't touch; where a
+    /// node genuinely IS rebuilt (something inside it changed), its own recorded ExprKind (if any) is
+    /// copied forward onto the new node for the same reason.</summary>
+    private static Expr RewriteScalarSubqueries(Expr e, ValidationResult v, Dictionary<Expr, (string Alias, string Field)> bindings, List<CompiledJoin> joins)
+    {
+        switch (e)
+        {
+            case ScalarSubqueryExpr sse when v.ScalarSubqueries.TryGetValue(sse, out var info):
+            {
+                var join = BuildScalarJoin(info, bindings, joins.Count);
+                joins.Add(join);
+                var node = new QualifiedIdentifier(join.Alias, info.ValueColumnName, sse.Line, sse.Column);
+                bindings[node] = (join.Alias, info.ValueColumnName);
+                if (v.ExprKinds.TryGetValue(sse, out var k)) v.ExprKinds[node] = k;
+                return node;
+            }
+            case UnaryExpr u:
+            {
+                var operand = RewriteScalarSubqueries(u.Operand, v, bindings, joins);
+                if (ReferenceEquals(operand, u.Operand)) return e;
+                var rebuilt = new UnaryExpr(u.Op, operand, u.Line, u.Column);
+                CopyExprKind(v, e, rebuilt);
+                return rebuilt;
+            }
+            case BinaryExpr b:
+            {
+                var left = RewriteScalarSubqueries(b.Left, v, bindings, joins);
+                var right = RewriteScalarSubqueries(b.Right, v, bindings, joins);
+                if (ReferenceEquals(left, b.Left) && ReferenceEquals(right, b.Right)) return e;
+                var rebuilt = new BinaryExpr(b.Op, left, right, b.Line, b.Column);
+                CopyExprKind(v, e, rebuilt);
+                return rebuilt;
+            }
+            case FunctionCallExpr f:
+            {
+                var args = f.Args.Select(a => RewriteScalarSubqueries(a, v, bindings, joins)).ToList();
+                if (args.Zip(f.Args).All(p => ReferenceEquals(p.First, p.Second))) return e;
+                var rebuilt = new FunctionCallExpr(f.Name, args, f.Line, f.Column);
+                CopyExprKind(v, e, rebuilt);
+                return rebuilt;
+            }
+            case AggregateCallExpr agg:
+            {
+                if (agg.Arg is null) return e;
+                var arg = RewriteScalarSubqueries(agg.Arg, v, bindings, joins);
+                if (ReferenceEquals(arg, agg.Arg)) return e;
+                var rebuilt = new AggregateCallExpr(agg.Name, arg, agg.IsStar, agg.Line, agg.Column);
+                CopyExprKind(v, e, rebuilt);
+                return rebuilt;
+            }
+            case JsonAccessExpr j:
+            {
+                var left = RewriteScalarSubqueries(j.Left, v, bindings, joins);
+                if (ReferenceEquals(left, j.Left)) return e;
+                var rebuilt = new JsonAccessExpr(left, j.ReturnText, j.Key, j.Line, j.Column);
+                CopyExprKind(v, e, rebuilt);
+                return rebuilt;
+            }
+            default:
+                return e;
+        }
+    }
+
+    private static void CopyExprKind(ValidationResult v, Expr from, Expr to)
+    {
+        if (v.ExprKinds.TryGetValue(from, out var k)) v.ExprKinds[to] = k;
     }
 }

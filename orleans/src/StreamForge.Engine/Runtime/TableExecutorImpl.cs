@@ -2,6 +2,7 @@ using StreamForge.Engine.Dataflow;
 using StreamForge.Engine.Planning;
 using StreamForge.Engine.Runtime;
 using StreamForge.Engine.Runtime.Ops;
+using StreamForge.Engine.Sql;
 
 namespace StreamForge.Engine;
 
@@ -49,7 +50,7 @@ public sealed partial class TableExecutor
     }
 
     private bool _initialized;
-    private readonly List<TableJoinOp> _joins = [];
+    private readonly List<ITableJoinStage> _joins = [];
     private TableFilterProjectOp? _filterProject;
     private TableReduceOp? _reduce;
     private readonly Dictionary<string, TableIngestOp> _ingestOps = [];
@@ -74,7 +75,13 @@ public sealed partial class TableExecutor
         for (int i = 0; i < compiled.Joins.Count; i++)
         {
             var j = compiled.Joins[i];
-            _joins.Add(new TableJoinOp(j.LeftKey!, j.RightKey!, j.Residual, compiled.Bindings));
+            // Plan 004 N2: Semi/Anti (IN/EXISTS ↔ NOT IN/NOT EXISTS) get the presence-based op; every other
+            // kind — including N3/N4's Scalar joins — reuses TableJoinOp as-is (see its class doc and
+            // Planner.BuildScalarJoin's doc comment on why a plain equi-join is already retraction-correct
+            // for those).
+            _joins.Add(j.Kind is JoinKind.Semi or JoinKind.Anti
+                ? new TableSemiAntiOp(j.Kind, j.LeftKey!, j.RightKey!, compiled.Bindings)
+                : new TableJoinOp(j.LeftKey!, j.RightKey!, j.Residual, compiled.Bindings));
         }
 
         _filterProject = new TableFilterProjectOp(compiled);

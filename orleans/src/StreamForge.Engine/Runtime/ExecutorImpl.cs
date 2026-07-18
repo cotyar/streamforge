@@ -37,10 +37,15 @@ public sealed partial class PipelineExecutor : IPipelineOpChain
         public required int StageIndex; // -1 = FROM
         public required string Alias;
         public PipelineExecutor? Derived;
+        /// <summary>Plan 004 N2/N3/N4: true when StageIndex targets a Semi/Anti/Scalar join stage — such a
+        /// role's nested executor emissions are delivered as a WHOLE BATCH to that stage's
+        /// IPipelineSnapshotJoinStage.OnRightBatch (see OnEventCore/AdvanceWatermarkCore), never one row at
+        /// a time through the ordinary derived-join path ProcessIncomingRow uses.</summary>
+        public bool IsSnapshotJoin;
     }
 
     private bool _initialized;
-    private readonly List<PipelineJoinOp> _joins = [];
+    private readonly List<IPipelineJoinStage> _joins = [];
     private PipelineFilterProjectOp? _filterProject;
     private PipelineWindowOp? _window;
 
@@ -67,34 +72,46 @@ public sealed partial class PipelineExecutor : IPipelineOpChain
         for (int i = 0; i < compiled.Joins.Count; i++)
         {
             var j = compiled.Joins[i];
-            _joins.Add(new PipelineJoinOp(j.Kind, j.Within, j.LeftKey, j.RightKey, j.Residual, compiled.Bindings, accumulated.ToList(), (j.Alias, j.Schema)));
+            if (j.Kind is JoinKind.Semi or JoinKind.Anti or JoinKind.Scalar)
+            {
+                // Plan 004 N2/N3/N4: rolling-snapshot subquery stage — see PipelineSubqueryOp's class doc.
+                _joins.Add(new PipelineSubqueryOp(j.Kind, j.LeftKey!, j.RightKey!, j.Residual, compiled.Bindings, (j.Alias, j.Schema)));
+            }
+            else
+            {
+                _joins.Add(new PipelineJoinOp(j.Kind, j.Within, j.LeftKey, j.RightKey, j.Residual, compiled.Bindings, accumulated.ToList(), (j.Alias, j.Schema)));
+            }
             accumulated.Add((j.Alias, j.Schema));
         }
 
         _filterProject = new PipelineFilterProjectOp(compiled);
         if (compiled.Window is not null) _window = new PipelineWindowOp(compiled);
 
-        AddRole(compiled.Sources[0].SourceName, isFrom: true, stageIndex: -1, compiled.Sources[0].Alias, compiled.Sources[0].DerivedPlan);
+        AddRole(compiled.Sources[0].SourceName, isFrom: true, stageIndex: -1, compiled.Sources[0].Alias, compiled.Sources[0].DerivedPlan, isSnapshotJoin: false);
         for (int i = 0; i < compiled.Joins.Count; i++)
         {
-            AddRole(compiled.Joins[i].SourceName, isFrom: false, stageIndex: i, compiled.Joins[i].Alias, compiled.Joins[i].DerivedPlan);
+            var j = compiled.Joins[i];
+            bool isSnapshotJoin = j.Kind is JoinKind.Semi or JoinKind.Anti or JoinKind.Scalar;
+            AddRole(j.SourceName, isFrom: false, stageIndex: i, j.Alias, j.DerivedPlan, isSnapshotJoin);
         }
     }
 
-    private void AddRole(string sourceName, bool isFrom, int stageIndex, string alias, CompiledPlan? derivedPlan)
+    private void AddRole(string sourceName, bool isFrom, int stageIndex, string alias, CompiledPlan? derivedPlan, bool isSnapshotJoin)
     {
         if (derivedPlan is null)
         {
-            var entry = new RoleEntry { IsFrom = isFrom, StageIndex = stageIndex, Alias = alias, Derived = null };
+            var entry = new RoleEntry { IsFrom = isFrom, StageIndex = stageIndex, Alias = alias, Derived = null, IsSnapshotJoin = isSnapshotJoin };
             AddRoleUnder(sourceName, entry);
             return;
         }
 
-        // Derived table/CTE (plan 004 N1): one nested PipelineExecutor per derived source, registered
-        // under every real leaf source name it transitively depends on (DerivedPlan.SourceNames is
-        // already flattened through any further nesting — see Planner.BuildCompiledPlan).
+        // Derived table/CTE (plan 004 N1) — also always true of a plan 004 N2/N3/N4 synthesized subquery
+        // stage, which is ALWAYS DerivedPlan-backed (a parsed subquery, never a plain named source; see
+        // Planner.BuildSemiAntiJoin/BuildScalarJoin): one nested PipelineExecutor per derived source,
+        // registered under every real leaf source name it transitively depends on (DerivedPlan.SourceNames
+        // is already flattened through any further nesting — see Planner.BuildCompiledPlan).
         var derivedExecutor = new PipelineExecutor(new PipelinePlan(derivedPlan));
-        var derivedEntry = new RoleEntry { IsFrom = isFrom, StageIndex = stageIndex, Alias = alias, Derived = derivedExecutor };
+        var derivedEntry = new RoleEntry { IsFrom = isFrom, StageIndex = stageIndex, Alias = alias, Derived = derivedExecutor, IsSnapshotJoin = isSnapshotJoin };
         _derivedNodes.Add(derivedEntry);
         foreach (var leaf in derivedPlan.SourceNames)
         {
@@ -131,19 +148,33 @@ public sealed partial class PipelineExecutor : IPipelineOpChain
                 if (role.Derived is null)
                 {
                     ProcessIncomingRow(role, WorkingRow.FromEvent(role.Alias, evt), results);
+                    continue;
                 }
-                else
+
+                // The derived source's own nested executor sees the raw event first; only what IT
+                // emits (e.g. a closed window's final row, or an immediate unwindowed passthrough)
+                // becomes this alias's input event one level up — plan 004 N1's stated windows-in-
+                // windows semantics: "emissions enter the outer level as events timestamped at window
+                // end" (or, for an unwindowed derived source, at the emission's own row timestamp).
+                var emissions = role.Derived.OnEvent(sourceName, evt);
+
+                if (role.IsSnapshotJoin)
                 {
-                    // The derived source's own nested executor sees the raw event first; only what IT
-                    // emits (e.g. a closed window's final row, or an immediate unwindowed passthrough)
-                    // becomes this alias's input event one level up — plan 004 N1's stated windows-in-
-                    // windows semantics: "emissions enter the outer level as events timestamped at window
-                    // end" (or, for an unwindowed derived source, at the emission's own row timestamp).
-                    foreach (var emission in role.Derived.OnEvent(sourceName, evt))
-                    {
-                        ProcessIncomingRow(role, WorkingRow.FromEvent(role.Alias, emission), results);
-                        BumpWatermark(emission.Timestamp);
-                    }
+                    // Plan 004 N2/N3/N4: the WHOLE emission batch (possibly empty) replaces the subquery's
+                    // rolling snapshot in one shot — never delivered as individual row arrivals (see
+                    // PipelineSubqueryOp's class doc). A B-side arrival never directly produces outer-row
+                    // output; only a FROM-position (A-side) row does, tested against whichever snapshot is
+                    // currently live.
+                    ((IPipelineSnapshotJoinStage)_joins[role.StageIndex]).OnRightBatch(
+                        emissions.Select(e => WorkingRow.FromEvent(role.Alias, e)).ToList());
+                    foreach (var emission in emissions) BumpWatermark(emission.Timestamp);
+                    continue;
+                }
+
+                foreach (var emission in emissions)
+                {
+                    ProcessIncomingRow(role, WorkingRow.FromEvent(role.Alias, emission), results);
+                    BumpWatermark(emission.Timestamp);
                 }
             }
         }
@@ -179,7 +210,17 @@ public sealed partial class PipelineExecutor : IPipelineOpChain
         // includes anything the derived level just emitted.
         foreach (var role in _derivedNodes)
         {
-            foreach (var emission in role.Derived!.AdvanceWatermark(nowMs))
+            var emissions = role.Derived!.AdvanceWatermark(nowMs);
+
+            if (role.IsSnapshotJoin)
+            {
+                ((IPipelineSnapshotJoinStage)_joins[role.StageIndex]).OnRightBatch(
+                    emissions.Select(e => WorkingRow.FromEvent(role.Alias, e)).ToList());
+                foreach (var emission in emissions) BumpWatermark(emission.Timestamp);
+                continue;
+            }
+
+            foreach (var emission in emissions)
             {
                 ProcessIncomingRow(role, WorkingRow.FromEvent(role.Alias, emission), results);
                 BumpWatermark(emission.Timestamp);

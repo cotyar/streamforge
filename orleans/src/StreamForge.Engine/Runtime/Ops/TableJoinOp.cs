@@ -28,7 +28,7 @@ namespace StreamForge.Engine.Runtime.Ops;
 /// (not copied) rather than duplicated into a separate snapshot type. A POCO snapshot for M2 checkpointing
 /// is exactly `{ Left: ZSetIndex, Right: ZSetIndex }`.
 /// </summary>
-internal sealed class TableJoinOp(Expr leftKey, Expr rightKey, Expr? residual, IReadOnlyDictionary<Expr, (string Alias, string Field)> bindings) : ITableOp
+internal sealed class TableJoinOp(Expr leftKey, Expr rightKey, Expr? residual, IReadOnlyDictionary<Expr, (string Alias, string Field)> bindings) : ITableJoinStage
 {
     /// <summary>This join's state, left side (rows accumulated from everything folded so far).</summary>
     public ZSetIndex Left { get; } = new();
