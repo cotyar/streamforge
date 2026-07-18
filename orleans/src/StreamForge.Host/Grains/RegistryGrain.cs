@@ -705,6 +705,31 @@ public sealed class RegistryGrain(
             SearchMode = searchMode,
         };
 
+        // "order_states" (Phase L3): current state per order_id, honestly derived from "order_events"
+        // with MAX-only running aggregates — the pre-LATEST-BY pattern (plan 002 Phase L3 defers the
+        // `LATEST BY` sugar to a later engine wave). MAX is the *correct* "latest" here only because
+        // stage_rank/stage_ts/qty/filled_qty are all monotone non-decreasing per order_id by construction
+        // (see MarketDataProfiles' "lifecycle" profile) — symbol/side are MAX'd too, which is trivially
+        // honest since they're constant per order_id, not because they're monotone. Deliberately NOT
+        // MAX(stage): the stage *string* isn't ordered the way stage_rank is (alphabetically "ACK" <
+        // "CANCELED" < "FILLED" < "NEW" < "PART_FILL"), so MAX(stage) would silently give a wrong answer;
+        // callers derive the display stage from stage_rank instead.
+        var orderStates = Make(
+            "order_states",
+            "Current state per live order (Phase L3): one row per order_id, derived from order_events via " +
+            "monotone MAX aggregates (honest pre-LATEST-BY pattern — see plan 002 Phase L3).",
+            "SELECT order_id, MAX(symbol) AS symbol, MAX(side) AS side, MAX(stage_rank) AS stage_rank, " +
+            "MAX(stage_ts) AS last_ts, MAX(qty) AS qty, MAX(filled_qty) AS filled_qty, COUNT(*) AS events " +
+            "FROM order_events GROUP BY order_id",
+            PipelineStatus.Running);
+        // Row history mode: LastN(8), not MinBy/MaxBy — the demo goal is the STAGE TRAIL (NEW, ACK,
+        // PART_FILL, PART_FILL, ..., FILLED/CANCELED) for a clicked order, i.e. the recent-versions trail,
+        // not a peak+latest pair. MaxBy(stage_rank) would only ever retain 2 entries (the FILLED/CANCELED
+        // extreme + itself as latest) and lose the PART_FILL steps in between — LastN(8) keeps the walk.
+        orderStates.HistoryEnabled = true;
+        orderStates.HistoryMode = TableHistoryMode.LastN;
+        orderStates.HistoryLimit = 8;
+
         return
         [
             Make(
@@ -726,6 +751,7 @@ public sealed class RegistryGrain(
                 "Symbols from 'positions' with more than 50 trades — table-over-table chaining demo.",
                 "SELECT p.symbol, p.trades, p.avg_price FROM positions p WHERE p.trades > 50",
                 PipelineStatus.Stopped),
+            orderStates,
         ];
     }
 
@@ -781,6 +807,15 @@ public sealed class RegistryGrain(
                 "SELECT e.eventType, e.payload -> 'user' ->> 'tier' AS tier, e.payload -> 'order' ->> 'symbol' AS symbol, t.price FROM app_events e " +
                 "JOIN trades t WITHIN 10 SECONDS ON e.payload -> 'order' ->> 'symbol' = t.symbol",
                 PipelineStatus.Stopped),
+            Make(
+                "fill-rate-5s",
+                "Per-symbol fill activity over 5-second tumbling windows (Phase L3): count of PART_FILL/FILLED " +
+                "order_events and their filled_qty. Note: filled_qty is order_events' cumulative-fill field, " +
+                "not a per-fill delta, so SUM(filled_qty) here is a windowed sum of cumulative snapshots — " +
+                "useful as an activity/volume-scale signal, not a literal 'shares filled in this window' count.",
+                "SELECT symbol, COUNT(*) AS fills, SUM(filled_qty) AS filled FROM order_events " +
+                "WHERE stage = 'PART_FILL' OR stage = 'FILLED' GROUP BY symbol WINDOW TUMBLING(SIZE 5 SECONDS)",
+                PipelineStatus.Running),
         ];
     }
 

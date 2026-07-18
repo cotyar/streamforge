@@ -194,6 +194,15 @@ public static class MarketDataProfiles
                 break;
             }
 
+            case "lifecycle":
+            {
+                // Phase L3: stateful per-order lifecycle machine. GenerateEvent is static/shared like
+                // NextMid above, but only one GeneratorGrain (key "order_events") drives this profile, so
+                // the shared pool is safe under its own lock — see PopulateLifecycleEvent.
+                PopulateLifecycleEvent(evt);
+                break;
+            }
+
             default: // generic
             {
                 // Honor the source's declared schema (incl. drilled-in JSON shape); fall back to a
@@ -231,6 +240,174 @@ public static class MarketDataProfiles
             : new Dictionary<string, object?> { ["value"] = Random.Shared.Next(1, 100) },
         _ => null,
     };
+
+    // ------------------------------------------------------------------
+    // "lifecycle" profile (Phase L3): stateful per-generator order state machines.
+    // NEW -> ACK -> PART_FILL x(0-3) -> FILLED | CANCELED (~15% cancel), maintaining a small live pool.
+    // ------------------------------------------------------------------
+
+    private sealed class LiveOrder
+    {
+        public required string OrderId { get; init; }
+        public required string Symbol { get; init; }
+        public required string Side { get; init; }
+        public required long Qty { get; init; }
+        public long FilledQty;
+        public double Px;
+        public int StageRank; // 1=NEW 2=ACK 3=PART_FILL 4=FILLED 5=CANCELED
+        public int PlannedPartials; // 0-3, decided at spawn
+        public int PartialsEmitted;
+        public bool WillCancel; // ~15% of spawned orders
+        public int CancelAfterPartials; // only meaningful when WillCancel: # of partials completed before cancel
+    }
+
+    private static readonly string[] LifecycleStageNames = ["NEW", "ACK", "PART_FILL", "FILLED", "CANCELED"];
+    private static readonly Dictionary<string, LiveOrder> LiveOrders = new();
+    private static readonly object LifecycleLock = new();
+    private const int LifecyclePoolMin = 10;
+    private const int LifecyclePoolMax = 20;
+
+    /// <summary>Drives one order-lifecycle event per call: spawns a new order (NEW) while the live pool is
+    /// below <see cref="LifecyclePoolMin"/> (occasionally even above it, up to <see cref="LifecyclePoolMax"/>,
+    /// so the pool keeps refreshing instead of stalling at the floor), otherwise advances a randomly chosen
+    /// live order to its next stage. Terminal orders (FILLED/CANCELED) are retired from the pool the instant
+    /// their terminal event is built, so no order_id ever emits an event after going terminal.</summary>
+    private static void PopulateLifecycleEvent(EventRecord evt)
+    {
+        lock (LifecycleLock)
+        {
+            LiveOrder chosen;
+            if (LiveOrders.Count < LifecyclePoolMin ||
+                (LiveOrders.Count < LifecyclePoolMax && Random.Shared.NextDouble() < 0.3))
+            {
+                chosen = SpawnOrder();
+            }
+            else
+            {
+                var keys = LiveOrders.Keys.ToArray();
+                chosen = LiveOrders[keys[Random.Shared.Next(keys.Length)]];
+                AdvanceOrder(chosen);
+            }
+
+            evt["order_id"] = chosen.OrderId;
+            evt["symbol"] = chosen.Symbol;
+            evt["side"] = chosen.Side;
+            evt["stage"] = LifecycleStageNames[chosen.StageRank - 1];
+            evt["stage_rank"] = (long)chosen.StageRank;
+            evt["stage_ts"] = evt[EventRecord.TimestampField];
+            evt["qty"] = chosen.Qty;
+            evt["filled_qty"] = chosen.FilledQty;
+            evt["px"] = chosen.Px;
+
+            if (chosen.StageRank is 4 or 5) // FILLED | CANCELED: terminal, retire from the pool
+            {
+                LiveOrders.Remove(chosen.OrderId);
+            }
+        }
+    }
+
+    private static LiveOrder SpawnOrder()
+    {
+        var plannedPartials = Random.Shared.Next(0, 4); // 0-3
+        var willCancel = Random.Shared.NextDouble() < 0.15; // ~15% cancel
+        var order = new LiveOrder
+        {
+            OrderId = $"ORD-{Guid.NewGuid().ToString("n")[..8].ToUpperInvariant()}",
+            Symbol = RandomSymbol(),
+            Side = RandomSide(),
+            Qty = Random.Shared.NextInt64(2, 51) * 100, // 200..5000, a plausible order size
+            StageRank = 1, // NEW
+            PlannedPartials = plannedPartials,
+            WillCancel = willCancel,
+            CancelAfterPartials = willCancel ? Random.Shared.Next(0, plannedPartials + 1) : -1,
+        };
+        LiveOrders[order.OrderId] = order;
+        return order;
+    }
+
+    /// <summary>Advances one order by exactly one stage step, mutating it in place. NEW -&gt; ACK always;
+    /// from ACK/PART_FILL, a WillCancel order jumps straight to CANCELED once it has emitted exactly
+    /// CancelAfterPartials partial fills (0 = cancel right after ACK, no fills at all); otherwise the order
+    /// either takes another PART_FILL (rank stays 3, filled_qty grows) or, once PlannedPartials have all
+    /// been emitted, takes its final fill and moves to FILLED (filled_qty == qty by construction).</summary>
+    private static void AdvanceOrder(LiveOrder o)
+    {
+        switch (o.StageRank)
+        {
+            case 1: // NEW -> ACK
+                o.StageRank = 2;
+                break;
+
+            case 2: // ACK -> CANCELED (no fills) | first PART_FILL | FILLED (no partials planned)
+                if (o.WillCancel && o.CancelAfterPartials == 0)
+                {
+                    o.StageRank = 5;
+                }
+                else if (o.PlannedPartials > 0)
+                {
+                    ApplyFill(o, isFinal: false);
+                    o.PartialsEmitted++;
+                    o.StageRank = 3;
+                }
+                else
+                {
+                    ApplyFill(o, isFinal: true);
+                    o.StageRank = 4;
+                }
+                break;
+
+            case 3: // PART_FILL -> CANCELED | another PART_FILL | FILLED
+                if (o.WillCancel && o.PartialsEmitted == o.CancelAfterPartials)
+                {
+                    o.StageRank = 5;
+                }
+                else if (o.PartialsEmitted < o.PlannedPartials)
+                {
+                    ApplyFill(o, isFinal: false);
+                    o.PartialsEmitted++;
+                }
+                else
+                {
+                    ApplyFill(o, isFinal: true);
+                    o.StageRank = 4;
+                }
+                break;
+
+            default:
+                break; // terminal orders are removed from the pool and never advanced again
+        }
+    }
+
+    /// <summary>Applies one fill increment (partial or final) to <paramref name="o"/>: bumps FilledQty by a
+    /// jittered fraction of the remaining quantity (or exactly the remainder when isFinal), and rolls Px
+    /// forward as the cumulative volume-weighted average fill price. Increment is always clamped into
+    /// [1, remaining], so FilledQty is monotone non-decreasing and never exceeds Qty by construction.</summary>
+    private static void ApplyFill(LiveOrder o, bool isFinal)
+    {
+        var remaining = o.Qty - o.FilledQty;
+        if (remaining <= 0) return; // already fully filled; nothing to do (keeps the invariant airtight)
+
+        var fillPrice = Math.Round(NextMid(o.Symbol) * (1 + (Random.Shared.NextDouble() * 2 - 1) * 0.001), 2);
+        long increment;
+        if (isFinal)
+        {
+            increment = remaining;
+        }
+        else
+        {
+            var partialsStillToCome = Math.Max(0, o.PlannedPartials - o.PartialsEmitted - 1);
+            var portionsLeft = partialsStillToCome + 2; // this fill + future partials + the eventual final fill
+            var basePortion = Math.Max(1, remaining / portionsLeft);
+            var jitter = 0.6 + Random.Shared.NextDouble() * 0.6;
+            increment = Math.Clamp((long)Math.Round(basePortion * jitter), 1, remaining);
+        }
+
+        var newFilledQty = o.FilledQty + increment;
+        o.Px = o.FilledQty == 0
+            ? fillPrice
+            : Math.Round((o.Px * o.FilledQty + fillPrice * increment) / newFilledQty, 4);
+        o.FilledQty = newFilledQty;
+    }
 
     /// <summary>Default demo sources seeded on first registry initialization.</summary>
     public static List<SourceDefinition> SeedSources() =>
@@ -346,6 +523,31 @@ public static class MarketDataProfiles
                     new FieldDef("expiry_ts", FieldType.Timestamp),
                     new FieldDef("ratio", FieldType.Double),
                 ], IsArray: true),
+            ],
+        },
+        new SourceDefinition
+        {
+            Name = "order_events",
+            Description = "Synthetic order lifecycle events (Phase L3): per-order state machines progressing " +
+                "NEW -> ACK -> PART_FILL x(0-3) -> FILLED | CANCELED (~15% cancel), with monotone stage_rank " +
+                "and cumulative filled_qty — the honest pre-LATEST-BY building block for 'order_states'.",
+            GeneratorProfile = "lifecycle",
+            EventsPerSecond = 5,
+            Enabled = true,
+            Fields =
+            [
+                new FieldDef("order_id", FieldType.String),
+                new FieldDef("symbol", FieldType.String),
+                new FieldDef("side", FieldType.String),
+                new FieldDef("stage", FieldType.String),
+                // Monotone non-decreasing per order_id: NEW=1, ACK=2, PART_FILL=3, FILLED=4, CANCELED=5.
+                new FieldDef("stage_rank", FieldType.Long),
+                new FieldDef("stage_ts", FieldType.Timestamp),
+                new FieldDef("qty", FieldType.Long),
+                // Cumulative, monotone non-decreasing; equals qty exactly once stage == FILLED.
+                new FieldDef("filled_qty", FieldType.Long),
+                // Average fill price so far; 0 until the first fill.
+                new FieldDef("px", FieldType.Double),
             ],
         },
     ];
