@@ -58,19 +58,36 @@ public static class TablePlanner
         };
     }
 
+    /// <summary>Recursive for the same reason Planner.BuildCompiledPlan is — see its doc comment. Plan 004
+    /// N1's "table mode: an inline intermediate Z-set operator (same machinery as named table-over-table
+    /// chaining)" is realized at the runtime layer (TableExecutorImpl nests a full child TableExecutor per
+    /// derived source, wired exactly like table-over-table OnTableDelta chaining) — here, planning only
+    /// needs to build that child's CompiledTablePlan.</summary>
     private static CompiledTablePlan BuildCompiledTablePlan(SelectQuery q, ValidationResult v)
     {
-        var sources = v.Sources.Select(s => new CompiledTableSource { Alias = s.Alias, SourceName = s.SourceName, Schema = s.Schema, IsTable = s.IsTable }).ToList();
-        var joins = v.Joins.Select(j => new CompiledTableJoin
+        var sources = v.Sources.Select(s => new CompiledTableSource
         {
-            Kind = j.Kind,
-            Alias = j.Alias,
-            SourceName = j.SourceName,
-            Schema = v.Sources.First(s => s.Alias == j.Alias).Schema,
-            IsTable = j.IsTable,
-            LeftKey = j.LeftKey,
-            RightKey = j.RightKey,
-            Residual = j.Residual,
+            Alias = s.Alias,
+            SourceName = s.SourceName,
+            Schema = s.Schema,
+            IsTable = s.IsTable,
+            DerivedPlan = s.Derived is null ? null : BuildCompiledTablePlan(s.Derived.Query, s.Derived.Validation),
+        }).ToList();
+        var joins = v.Joins.Select(j =>
+        {
+            var srcEntry = v.Sources.First(s => s.Alias == j.Alias);
+            return new CompiledTableJoin
+            {
+                Kind = j.Kind,
+                Alias = j.Alias,
+                SourceName = j.SourceName,
+                Schema = srcEntry.Schema,
+                IsTable = j.IsTable,
+                LeftKey = j.LeftKey,
+                RightKey = j.RightKey,
+                Residual = j.Residual,
+                DerivedPlan = sources.First(s => s.Alias == j.Alias).DerivedPlan,
+            };
         }).ToList();
 
         var bindings = v.Bindings;
@@ -88,6 +105,11 @@ public static class TablePlanner
         var sourceLabel = string.Join(",", sources.Select(s => s.Alias));
         var outputSchema = BuildOutputSchema(output, sources, v.ExprKinds);
 
+        // Flattened, transitively-real leaf StreamInputs/TableInputs: Validator.ResolveFromItem already
+        // folded a derived source's own inner StreamInputs/TableInputs into v.StreamInputs/v.TableInputs
+        // (see its doc comment), so v.StreamInputs/v.TableInputs are already the right (leaf, feedable)
+        // set here — no extra flattening needed at this layer, unlike pipeline mode's SourceNames (which
+        // is computed from the Sources list directly, not from a Validator-tracked accumulator).
         return new CompiledTablePlan
         {
             Sources = sources,

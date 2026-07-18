@@ -26,7 +26,7 @@ internal sealed class Parser
         var parser = new Parser(tokens);
         try
         {
-            var query = parser.ParseSelectQuery();
+            var query = parser.ParseTopLevel();
             if (parser.Current.Kind != TokenKind.EndOfInput)
             {
                 throw parser.Error(parser.Current, $"Unexpected token '{parser.Current.Text}'");
@@ -36,6 +36,91 @@ internal sealed class Parser
         catch (ParseException ex)
         {
             return (null, [ex.Diagnostic]);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // WITH (CTEs) — plan 004 N1: "CTEs desugar to derived tables at parse time (single mechanism
+    // downstream)". Parsed as an ordered name -> body list, then substituted into every FROM/JOIN
+    // NamedSource whose name matches a CTE name — in declaration order, so a CTE body may only see CTEs
+    // declared strictly before it (no self/forward reference: that's recursion, out of scope per plan
+    // 004's header, and gets a positioned diagnostic instead of silently mis-resolving).
+    // ------------------------------------------------------------------
+
+    private SelectQuery ParseTopLevel()
+    {
+        if (!Current.IsKeyword("WITH")) return ParseSelectQuery();
+
+        Advance(); // WITH
+        var cteNames = new List<string>();
+        var cteBodies = new List<SelectQuery>();
+        var ctePositions = new List<(int Line, int Column)>();
+
+        while (true)
+        {
+            var nameTok = ExpectIdentifierToken();
+            if (cteNames.Contains(nameTok.Text, StringComparer.OrdinalIgnoreCase))
+            {
+                throw Error(nameTok, $"Duplicate CTE name '{nameTok.Text}' in WITH list");
+            }
+            ExpectKeyword("AS");
+            ExpectSymbol("(");
+            var body = ParseSelectQuery();
+            ExpectSymbol(")");
+            cteNames.Add(nameTok.Text);
+            cteBodies.Add(body);
+            ctePositions.Add((nameTok.Line, nameTok.Column));
+
+            if (Current.IsSymbol(",")) { Advance(); continue; }
+            break;
+        }
+
+        var mainQuery = ParseSelectQuery();
+
+        // Desugar in declaration order: CTE i's body may only reference CTE 0..i-1 (already desugared);
+        // referencing itself or a later CTE name is the recursion this dialect rejects.
+        var allCteNames = new HashSet<string>(cteNames, StringComparer.OrdinalIgnoreCase);
+        var resolved = new Dictionary<string, SelectQuery>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < cteNames.Count; i++)
+        {
+            resolved[cteNames[i]] = SubstituteCtes(cteBodies[i], resolved, allCteNames);
+        }
+        return SubstituteCtes(mainQuery, resolved, allCteNames);
+    }
+
+    /// <summary>Rewrites every FROM/JOIN NamedSource in <paramref name="query"/> (recursing into any
+    /// already-nested DerivedSource) whose name matches a resolved CTE into a DerivedSource wrapping that
+    /// CTE's (already-desugared) body. A name that matches <paramref name="allCteNames"/> but is NOT yet in
+    /// <paramref name="resolved"/> is a self/forward reference — recursion, rejected here with a positioned
+    /// diagnostic naming the offending reference.</summary>
+    private SelectQuery SubstituteCtes(SelectQuery query, IReadOnlyDictionary<string, SelectQuery> resolved, HashSet<string> allCteNames)
+    {
+        var newFrom = new FromClause(
+            SubstituteFromItem(query.From.Source, resolved, allCteNames),
+            query.From.Joins.Select(j => new JoinClause(j.Kind, SubstituteFromItem(j.Source, resolved, allCteNames), j.Within, j.On, j.Line, j.Column)).ToList());
+
+        return new SelectQuery(query.Select, newFrom, query.Where, query.GroupBy, query.Window, query.Emit,
+            query.EmitLine, query.EmitColumn, query.GroupByLine, query.GroupByColumn, query.WindowLine, query.WindowColumn);
+    }
+
+    private FromItem SubstituteFromItem(FromItem item, IReadOnlyDictionary<string, SelectQuery> resolved, HashSet<string> allCteNames)
+    {
+        switch (item)
+        {
+            case NamedSource ns:
+                if (resolved.TryGetValue(ns.Name, out var body))
+                {
+                    return new DerivedSource(body, ns.Alias, ns.Line, ns.Column);
+                }
+                if (allCteNames.Contains(ns.Name))
+                {
+                    throw Error(new Token(TokenKind.Identifier, ns.Name, ns.Line, ns.Column), $"Recursive or forward CTE reference '{ns.Name}' is not supported — a CTE may only reference CTEs declared earlier in the same WITH list");
+                }
+                return ns;
+            case DerivedSource ds:
+                return new DerivedSource(SubstituteCtes(ds.Query, resolved, allCteNames), ds.Alias, ds.Line, ds.Column);
+            default:
+                return item;
         }
     }
 
@@ -83,7 +168,7 @@ internal sealed class Parser
         ExpectKeyword("SELECT");
         var select = ParseSelectClause();
         ExpectKeyword("FROM");
-        var from = ParseSourceRef();
+        var from = ParseFromItem();
         var joins = new List<JoinClause>();
         while (IsJoinStart()) joins.Add(ParseJoinClause());
         var fromClause = new FromClause(from, joins);
@@ -190,7 +275,7 @@ internal sealed class Parser
 
     private bool PeekIsSymbol(int offset, string symbol) => PeekAt(offset).IsSymbol(symbol);
 
-    private SourceRef ParseSourceRef()
+    private NamedSource ParseSourceRef()
     {
         var nameTok = ExpectIdentifierToken();
         string alias = nameTok.Text;
@@ -202,7 +287,36 @@ internal sealed class Parser
         {
             alias = Advance().Text;
         }
-        return new SourceRef(nameTok.Text, alias, nameTok.Line, nameTok.Column);
+        return new NamedSource(nameTok.Text, alias, nameTok.Line, nameTok.Column);
+    }
+
+    /// <summary>FROM/JOIN item: either a plain named source, or a derived table `( SELECT ... ) alias`
+    /// (plan 004 N1) — an alias is mandatory for a derived table (Postgres's own rule; also required here
+    /// since the derived table has no name of its own to fall back on).</summary>
+    private FromItem ParseFromItem()
+    {
+        if (Current.IsSymbol("("))
+        {
+            var openTok = Advance();
+            var inner = ParseSelectQuery();
+            ExpectSymbol(")");
+
+            string alias;
+            if (MatchKeyword("AS"))
+            {
+                alias = ExpectIdentifierToken().Text;
+            }
+            else if (Current.Kind == TokenKind.Identifier && !ClauseKeywords.Contains(Current.Text))
+            {
+                alias = Advance().Text;
+            }
+            else
+            {
+                throw Error(Current, "A derived table (subquery in FROM/JOIN) requires an alias");
+            }
+            return new DerivedSource(inner, alias, openTok.Line, openTok.Column);
+        }
+        return ParseSourceRef();
     }
 
     private bool IsJoinStart() =>
@@ -220,7 +334,7 @@ internal sealed class Parser
         else if (MatchKeyword("FULL")) { MatchKeyword("OUTER"); ExpectKeyword("JOIN"); kind = JoinKind.Full; }
         else { ExpectKeyword("JOIN"); kind = JoinKind.Inner; }
 
-        var source = ParseSourceRef();
+        var source = ParseFromItem();
 
         TimeSpan? within = null;
         if (MatchKeyword("WITHIN")) within = ParseDuration();

@@ -57,19 +57,36 @@ public static class Planner
         };
     }
 
+    /// <summary>Builds the executable plan from a validated query — recursive: plan 004 N1's derived
+    /// tables/CTEs each carry their own (already-validated, see Validator.ResolveFromItem) inner
+    /// SelectQuery + ValidationResult, so a derived source's nested CompiledPlan is built by calling right
+    /// back into this same method — no re-tokenizing/re-parsing/re-validating, and inner diagnostics were
+    /// already folded into the outer diagnostics list during validation (Compile() bails out before ever
+    /// reaching here if any of them are errors).</summary>
     private static CompiledPlan BuildCompiledPlan(SelectQuery q, ValidationResult v)
     {
-        var sources = v.Sources.Select(s => new CompiledSource { Alias = s.Alias, SourceName = s.SourceName, Schema = s.Schema }).ToList();
-        var joins = v.Joins.Select(j => new CompiledJoin
+        var sources = v.Sources.Select(s => new CompiledSource
         {
-            Kind = j.Kind,
-            Alias = j.Alias,
-            SourceName = j.SourceName,
-            Schema = v.Sources.First(s => s.Alias == j.Alias).Schema,
-            Within = j.Within ?? TimeSpan.Zero,
-            LeftKey = j.LeftKey,
-            RightKey = j.RightKey,
-            Residual = j.Residual,
+            Alias = s.Alias,
+            SourceName = s.SourceName,
+            Schema = s.Schema,
+            DerivedPlan = s.Derived is null ? null : BuildCompiledPlan(s.Derived.Query, s.Derived.Validation),
+        }).ToList();
+        var joins = v.Joins.Select(j =>
+        {
+            var srcEntry = v.Sources.First(s => s.Alias == j.Alias);
+            return new CompiledJoin
+            {
+                Kind = j.Kind,
+                Alias = j.Alias,
+                SourceName = j.SourceName,
+                Schema = srcEntry.Schema,
+                Within = j.Within ?? TimeSpan.Zero,
+                LeftKey = j.LeftKey,
+                RightKey = j.RightKey,
+                Residual = j.Residual,
+                DerivedPlan = sources.First(s => s.Alias == j.Alias).DerivedPlan,
+            };
         }).ToList();
 
         var bindings = v.Bindings;
@@ -84,7 +101,11 @@ public static class Planner
         var aggregateIndex = new Dictionary<AggregateCallExpr, int>(ReferenceEqualityComparer.Instance);
         for (int i = 0; i < aggregateNodes.Count; i++) aggregateIndex[aggregateNodes[i]] = i;
 
-        var sourceNames = sources.Select(s => s.SourceName).Distinct().ToList();
+        // Real, externally-feedable leaf source names: a derived source contributes its own (already
+        // transitively flattened) child SourceNames instead of its synthetic "(derived)" marker, so
+        // CompileResult.SourceNames always names actual streams a caller can OnEvent() — see
+        // ExecutorImpl's role table, which dispatches derived nodes by these same leaf names.
+        var sourceNames = sources.SelectMany(s => (IEnumerable<string>)(s.DerivedPlan?.SourceNames ?? [s.SourceName])).Distinct().ToList();
         var sourceLabel = string.Join(",", sources.Select(s => s.Alias));
 
         return new CompiledPlan

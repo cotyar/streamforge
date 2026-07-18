@@ -16,10 +16,32 @@ internal sealed class JoinBinding(JoinKind kind, string alias, string sourceName
     public bool IsTable { get; } = isTable;
 }
 
+/// <summary>Plan 004 N1: set on a <see cref="ResolvedSource"/> when it came from `FROM (SELECT ...) alias`
+/// or a desugared WITH-list CTE. Carries the (already parser-desugared) inner query plus its own,
+/// independently-computed <see cref="ValidationResult"/> — Planner reuses both directly (no re-validation)
+/// to build the nested child CompiledPlan/CompiledTablePlan this source wraps at plan time.</summary>
+internal sealed class DerivedInfo
+{
+    public required SelectQuery Query { get; init; }
+    public required ValidationResult Validation { get; init; }
+}
+
+/// <summary>One resolved FROM/JOIN source — a plain named stream/table (Derived is null) or a derived
+/// table/CTE (Derived is set; Schema is then the inner query's synthesized output schema, "one level up"
+/// per plan 004 N1).</summary>
+internal sealed class ResolvedSource
+{
+    public required string Alias { get; init; }
+    public required string SourceName { get; init; }
+    public required SourceSchema Schema { get; init; }
+    public required bool IsTable { get; init; }
+    public DerivedInfo? Derived { get; init; }
+}
+
 internal sealed class ValidationResult
 {
     public required List<SqlDiagnostic> Diagnostics { get; init; }
-    public required List<(string Alias, string SourceName, SourceSchema Schema, bool IsTable)> Sources { get; init; }
+    public required List<ResolvedSource> Sources { get; init; }
     public required Dictionary<Expr, (string Alias, string Field)> Bindings { get; init; }
     public required List<JoinBinding> Joins { get; init; }
     public required List<AggregateCallExpr> UsedAggregates { get; init; }
@@ -50,6 +72,12 @@ internal sealed class Validator
     private readonly List<string> _streamInputs = [];
     private readonly List<string> _tableInputs = [];
 
+    // Table mode only: the original (pre-merge) stream/table schema dicts, retained so a derived table's
+    // recursive Validator.ValidateTable call gets the exact same streams-vs-tables split as the outer query
+    // (the merged _schemas dict alone can't distinguish which side a name came from).
+    private readonly IReadOnlyDictionary<string, SourceSchema>? _streamSchemasForRecursion;
+    private readonly IReadOnlyDictionary<string, SourceSchema>? _tableSchemasForRecursion;
+
     private readonly List<SqlDiagnostic> _diags = [];
     private readonly Dictionary<Expr, (string Alias, string Field)> _bindings = new(ReferenceEqualityComparer.Instance);
     private readonly List<AggregateCallExpr> _usedAggregates = [];
@@ -75,6 +103,9 @@ internal sealed class Validator
         var merged = new Dictionary<string, SourceSchema>(streamSchemas, StringComparer.Ordinal);
         foreach (var kv in tableSchemas) merged[kv.Key] = kv.Value;
         _schemas = merged;
+
+        _streamSchemasForRecursion = streamSchemas;
+        _tableSchemasForRecursion = tableSchemas;
     }
 
     public static ValidationResult Validate(SelectQuery query, IReadOnlyDictionary<string, SourceSchema> schemas)
@@ -94,7 +125,7 @@ internal sealed class Validator
 
     private ValidationResult Run(SelectQuery q)
     {
-        var sources = new List<(string Alias, string SourceName, SourceSchema Schema, bool IsTable)>();
+        var sources = new List<ResolvedSource>();
         var aliasSeen = new HashSet<string>(StringComparer.Ordinal);
         var joins = new List<JoinBinding>();
 
@@ -105,9 +136,10 @@ internal sealed class Validator
         foreach (var j in q.From.Joins)
         {
             var leftAliasesBefore = sources.Select(s => s.Alias).ToHashSet(StringComparer.Ordinal);
-            bool sourceOk = RegisterSource(j.Source, sources, aliasSeen, addToSourcesNow: false);
-            _schemas.TryGetValue(j.Source.Name, out var jSchema);
-            bool jIsTable = _mode == ValidationMode.Table && _tableNames.Contains(j.Source.Name);
+            var resolved = ResolveFromItem(j.Source, aliasSeen);
+            bool sourceOk = resolved.Ok;
+            var jSchema = resolved.Schema;
+            bool jIsTable = resolved.IsTable;
 
             if (_mode == ValidationMode.Stream)
             {
@@ -163,9 +195,12 @@ internal sealed class Validator
                 }
             }
 
-            if (sourceOk) sources.Add((j.Source.Alias, j.Source.Name, jSchema!, jIsTable));
+            if (sourceOk)
+            {
+                sources.Add(new ResolvedSource { Alias = j.Source.Alias, SourceName = resolved.SourceName, Schema = jSchema!, IsTable = jIsTable, Derived = resolved.Derived });
+            }
 
-            joins.Add(new JoinBinding(j.Kind, j.Source.Alias, j.Source.Name, j.Within, leftKey, rightKey, residual, jIsTable));
+            joins.Add(new JoinBinding(j.Kind, j.Source.Alias, resolved.SourceName, j.Within, leftKey, rightKey, residual, jIsTable));
         }
 
         var fullScope = sources.Select(s => (s.Alias, s.Schema)).ToList();
@@ -255,24 +290,60 @@ internal sealed class Validator
         };
     }
 
-    private bool RegisterSource(SourceRef sref, List<(string Alias, string SourceName, SourceSchema Schema, bool IsTable)> sources, HashSet<string> aliasSeen, bool addToSourcesNow = true)
+    private void RegisterSource(FromItem item, List<ResolvedSource> sources, HashSet<string> aliasSeen)
     {
-        if (!aliasSeen.Add(sref.Alias))
+        var r = ResolveFromItem(item, aliasSeen);
+        if (r.Ok)
         {
-            _diags.Add(new SqlDiagnostic($"Duplicate alias '{sref.Alias}'", sref.Line, sref.Column));
+            sources.Add(new ResolvedSource { Alias = item.Alias, SourceName = r.SourceName, Schema = r.Schema!, IsTable = r.IsTable, Derived = r.Derived });
         }
+    }
+
+    /// <summary>Resolves one FROM/JOIN item — a plain named source (existing lookup rules unchanged) or a
+    /// derived table/CTE (plan 004 N1: recursively validates the inner query against the SAME
+    /// stream/table namespace — uncorrelated, no outer-alias visibility — then synthesizes this alias's
+    /// schema from the inner query's own output). Does NOT add to <paramref name="sources"/> itself
+    /// (callers differ: FROM adds unconditionally via <see cref="RegisterSource"/>, JOIN adds after also
+    /// resolving its ON clause) — but DOES perform the duplicate-alias check every FROM/JOIN item needs,
+    /// same as the pre-N1 RegisterSource did regardless of call site.</summary>
+    private (bool Ok, string SourceName, SourceSchema? Schema, bool IsTable, DerivedInfo? Derived) ResolveFromItem(FromItem item, HashSet<string> aliasSeen)
+    {
+        if (!aliasSeen.Add(item.Alias))
+        {
+            _diags.Add(new SqlDiagnostic($"Duplicate alias '{item.Alias}'", item.Line, item.Column));
+        }
+
+        if (item is DerivedSource ds)
+        {
+            ValidationResult inner = _mode == ValidationMode.Table
+                ? ValidateTable(ds.Query, _streamSchemasForRecursion!, _tableSchemasForRecursion!)
+                : Validate(ds.Query, _schemas);
+            _diags.AddRange(inner.Diagnostics);
+            if (_mode == ValidationMode.Table)
+            {
+                // Flatten the derived table's own stream/table dependencies into the outer query's —
+                // TableCompileResult.StreamInputs/TableInputs must report real leaf inputs transitively,
+                // not a synthetic "(derived)" marker no caller could ever feed an event/delta for.
+                _streamInputs.AddRange(inner.StreamInputs);
+                _tableInputs.AddRange(inner.TableInputs);
+            }
+            var schema = BuildDerivedOutputSchema(ds.Query, inner);
+            return (true, "(derived)", schema, false, new DerivedInfo { Query = ds.Query, Validation = inner });
+        }
+
+        var sref = (NamedSource)item;
 
         if (_mode == ValidationMode.Table && _ambiguousNames.Contains(sref.Name))
         {
             _diags.Add(new SqlDiagnostic($"Ambiguous name '{sref.Name}' — present in both streams and tables", sref.Line, sref.Column));
-            return false;
+            return (false, sref.Name, null, false, null);
         }
 
-        if (!_schemas.TryGetValue(sref.Name, out var schema))
+        if (!_schemas.TryGetValue(sref.Name, out var namedSchema))
         {
             var available = string.Join(", ", _schemas.Keys.OrderBy(k => k, StringComparer.Ordinal));
             _diags.Add(new SqlDiagnostic($"Unknown source '{sref.Name}' — available: {available}", sref.Line, sref.Column));
-            return false;
+            return (false, sref.Name, null, false, null);
         }
 
         bool isTable = _mode == ValidationMode.Table && _tableNames.Contains(sref.Name);
@@ -281,9 +352,65 @@ internal sealed class Validator
             if (isTable) _tableInputs.Add(sref.Name); else _streamInputs.Add(sref.Name);
         }
 
-        if (addToSourcesNow) sources.Add((sref.Alias, sref.Name, schema, isTable));
-        return true;
+        return (true, sref.Name, namedSchema, isTable, null);
     }
+
+    /// <summary>Plan 004 N1: "a derived table's output schema (existing BuildOutputSchema) is the
+    /// synthetic source schema one level up." Mirrors Planning.Planner/TablePlanner's BuildOutputSchema —
+    /// necessarily duplicated (not shared) here: Sql/ sits below Planning/ in this codebase's layering
+    /// (Planner references Validator, not the reverse), and Planner's version works off its own
+    /// Planning-specific OutputItem/CompiledSource DTOs the Validator doesn't have yet at this point in the
+    /// pipeline. Same star/qualified-star/default-naming rules as both those methods.</summary>
+    private static SourceSchema BuildDerivedOutputSchema(SelectQuery q, ValidationResult inner)
+    {
+        var fields = new Dictionary<string, FieldKind>();
+        bool prefixed = inner.Sources.Count > 1;
+
+        void AddSourceFields(ResolvedSource src)
+        {
+            foreach (var (fname, fkind) in src.Schema.Fields)
+            {
+                fields[prefixed ? $"{src.Alias}_{fname}" : fname] = fkind;
+            }
+        }
+
+        if (q.Select.IsStar)
+        {
+            foreach (var src in inner.Sources) AddSourceFields(src);
+            return new SourceSchema("(derived)", fields);
+        }
+
+        for (int i = 0; i < q.Select.Items.Count; i++)
+        {
+            var item = q.Select.Items[i];
+            if (item.Expression is QualifiedStarExpr qs)
+            {
+                var src = inner.Sources.FirstOrDefault(s => string.Equals(s.Alias, qs.Alias, StringComparison.Ordinal));
+                if (src is not null) AddSourceFields(src);
+                continue;
+            }
+            var name = item.Alias ?? DerivedDefaultName(item.Expression, i);
+            var kind = inner.ExprKinds.TryGetValue(item.Expression, out var k) ? k : FieldKind.String;
+            fields[name] = kind;
+        }
+        return new SourceSchema("(derived)", fields);
+    }
+
+    private static string DerivedDefaultName(Expr e, int index) => e switch
+    {
+        Identifier id => id.Name,
+        QualifiedIdentifier q => q.Name,
+        AggregateCallExpr { IsStar: true } => "count_star",
+        AggregateCallExpr agg => agg.Name.ToLowerInvariant(),
+        FunctionCallExpr f => f.Name.ToLowerInvariant(),
+        JsonAccessExpr j => j.Key switch
+        {
+            StringLiteral s => s.Value,
+            NumberLiteral { LongValue: { } n } => n.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            _ => "json",
+        },
+        _ => $"col{index + 1}",
+    };
 
     private static string JoinLabel(JoinKind kind) => kind switch
     {

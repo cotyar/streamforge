@@ -16,6 +16,12 @@ internal sealed class CompiledSource
     public required string Alias { get; init; }
     public required string SourceName { get; init; }
     public required SourceSchema Schema { get; init; }
+    /// <summary>Plan 004 N1: set when this FROM source is a derived table/CTE — the nested, fully compiled
+    /// child plan this source wraps. Null for a plain named stream. See ExecutorImpl's derived-node
+    /// wiring: the child plan gets its own nested PipelineExecutor, fed by the same real leaf source names
+    /// (<see cref="CompiledPlan.SourceNames"/>, already flattened through it), whose emissions become this
+    /// alias's input events one level up — exactly plan 003 M1's IPipelineOpChain composability seam.</summary>
+    public CompiledPlan? DerivedPlan { get; init; }
 }
 
 internal sealed class CompiledJoin
@@ -28,6 +34,8 @@ internal sealed class CompiledJoin
     public Expr? LeftKey { get; init; }
     public Expr? RightKey { get; init; }
     public Expr? Residual { get; init; }
+    /// <summary>Plan 004 N1: set when this JOIN's source is a derived table/CTE. See CompiledSource.DerivedPlan.</summary>
+    public CompiledPlan? DerivedPlan { get; init; }
 }
 
 /// <summary>The fully resolved, executable form of a compiled query — everything the runtime needs,

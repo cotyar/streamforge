@@ -8,6 +8,12 @@ internal sealed class CompiledTableSource
     public required string SourceName { get; init; }
     public required SourceSchema Schema { get; init; }
     public required bool IsTable { get; init; }
+    /// <summary>Plan 004 N1: set when this FROM source is a derived table/CTE — the nested, fully compiled
+    /// child table plan this source wraps. Null for a plain named stream/table. See TableExecutorImpl's
+    /// derived-node wiring: the child plan gets its own nested TableExecutor (the same "table-over-table
+    /// chaining" mechanism this codebase already has — TableExecutor.OnTableDelta), fed by the same real
+    /// leaf stream/table inputs, whose emitted TableDeltas become this alias's input deltas one level up.</summary>
+    public CompiledTablePlan? DerivedPlan { get; init; }
 }
 
 internal sealed class CompiledTableJoin
@@ -20,6 +26,8 @@ internal sealed class CompiledTableJoin
     public Expr? LeftKey { get; init; }
     public Expr? RightKey { get; init; }
     public Expr? Residual { get; init; }
+    /// <summary>Plan 004 N1: set when this JOIN's source is a derived table/CTE. See CompiledTableSource.DerivedPlan.</summary>
+    public CompiledTablePlan? DerivedPlan { get; init; }
 }
 
 /// <summary>The fully resolved, executable form of a compiled TABLE query — the table-mode analogue of

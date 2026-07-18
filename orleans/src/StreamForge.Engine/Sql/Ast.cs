@@ -115,29 +115,46 @@ internal sealed class SelectClause(bool isStar, List<SelectItem> items)
     public List<SelectItem> Items { get; } = items;
 }
 
-internal sealed class SourceRef(string name, string alias, int line, int col)
+/// <summary>One FROM/JOIN item — either a plain named source (stream/table) or a derived table (plan 004
+/// N1: `FROM ( SELECT ... ) alias`, and WITH-list CTEs, which desugar to this same node at parse time —
+/// see Parser's CTE substitution pass). A single base type lets Validator/Planner walk FROM/JOIN sources
+/// uniformly regardless of which kind resolved there.</summary>
+internal abstract class FromItem(string alias, int line, int col)
 {
-    public string Name { get; } = name;
     public string Alias { get; } = alias;
     public int Line { get; } = line;
     public int Column { get; } = col;
 }
 
+internal sealed class NamedSource(string name, string alias, int line, int col) : FromItem(alias, line, col)
+{
+    public string Name { get; } = name;
+}
+
+/// <summary>A parenthesized derived table `( SELECT ... ) alias`, or a WITH-list CTE reference already
+/// substituted in-place by the parser (see Parser.SubstituteCtes) — either way, by the time Validator sees
+/// this node, it is a fully self-contained inner query with no outer-scope visibility (N1 derived tables
+/// are uncorrelated; correlation is N4 territory and doesn't reuse this node).</summary>
+internal sealed class DerivedSource(SelectQuery query, string alias, int line, int col) : FromItem(alias, line, col)
+{
+    public SelectQuery Query { get; } = query;
+}
+
 internal enum JoinKind { Inner, Left, Right, Full, Cross }
 
-internal sealed class JoinClause(JoinKind kind, SourceRef source, TimeSpan? within, Expr? on, int line, int col)
+internal sealed class JoinClause(JoinKind kind, FromItem source, TimeSpan? within, Expr? on, int line, int col)
 {
     public JoinKind Kind { get; } = kind;
-    public SourceRef Source { get; } = source;
+    public FromItem Source { get; } = source;
     public TimeSpan? Within { get; } = within;
     public Expr? On { get; } = on;
     public int Line { get; } = line;
     public int Column { get; } = col;
 }
 
-internal sealed class FromClause(SourceRef source, List<JoinClause> joins)
+internal sealed class FromClause(FromItem source, List<JoinClause> joins)
 {
-    public SourceRef Source { get; } = source;
+    public FromItem Source { get; } = source;
     public List<JoinClause> Joins { get; } = joins;
 }
 
