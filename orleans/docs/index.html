@@ -211,6 +211,8 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#sql-joins" class="sub">Joins</a>
   <a href="#sql-windows" class="sub">Windows &amp; EMIT</a>
   <a href="#sql-json" class="sub">JSON operators</a>
+  <a href="#sql-nested" class="sub">Nested queries</a>
+  <a href="#sql-unnest" class="sub">UNNEST &amp; LATEST BY</a>
   <a href="#sql-functions" class="sub">Functions &amp; expressions</a>
   <div class="navgap"></div>
   <a href="#tables">Materialized tables</a>
@@ -320,12 +322,13 @@ cd web &amp;&amp; bun install &amp;&amp; bun run build &amp;&amp; cd ..
 
 <section id="sql">
 <h2>Streaming SQL reference</h2>
-<pre><code><span class="sql-k">SELECT</span> expr [<span class="sql-k">AS</span> alias], … | * | alias.*
-<span class="sql-k">FROM</span> source [alias]
-  [ [<span class="sql-k">INNER</span>|<span class="sql-k">LEFT</span> [<span class="sql-k">OUTER</span>]|<span class="sql-k">RIGHT</span> [<span class="sql-k">OUTER</span>]|<span class="sql-k">FULL</span> [<span class="sql-k">OUTER</span>]] <span class="sql-k">JOIN</span> source [alias] <span class="sql-k">WITHIN</span> dur <span class="sql-k">ON</span> expr
-  | <span class="sql-k">CROSS JOIN</span> source [alias] <span class="sql-k">WITHIN</span> dur ] …
-[<span class="sql-k">WHERE</span> expr]
-[<span class="sql-k">GROUP BY</span> expr, …]
+<pre><code>[<span class="sql-k">WITH</span> name <span class="sql-k">AS</span> (<span class="sql-k">SELECT</span> …), …]
+<span class="sql-k">SELECT</span> expr [<span class="sql-k">AS</span> alias], … | * | alias.*
+<span class="sql-k">FROM</span> source | (<span class="sql-k">SELECT</span> …) alias [, <span class="sql-k">UNNEST</span>(expr) <span class="sql-k">AS</span> l …]
+  [ [<span class="sql-k">INNER</span>|<span class="sql-k">LEFT</span> [<span class="sql-k">OUTER</span>]|<span class="sql-k">RIGHT</span> [<span class="sql-k">OUTER</span>]|<span class="sql-k">FULL</span> [<span class="sql-k">OUTER</span>]] <span class="sql-k">JOIN</span> source|(<span class="sql-k">SELECT</span> …) [alias] <span class="sql-k">WITHIN</span> dur <span class="sql-k">ON</span> expr
+  | <span class="sql-k">CROSS JOIN</span> source <span class="sql-k">WITHIN</span> dur | [<span class="sql-k">CROSS</span>] <span class="sql-k">JOIN UNNEST</span>(expr) <span class="sql-k">AS</span> l ] …
+[<span class="sql-k">WHERE</span> expr]   -- may contain [NOT] IN (SELECT …), [NOT] EXISTS (SELECT …), scalar (SELECT agg…)
+[<span class="sql-k">GROUP BY</span> expr, … | <span class="sql-k">LATEST BY</span> (col, …)]   -- LATEST BY: tables only
 [<span class="sql-k">WINDOW</span> <span class="sql-k">TUMBLING</span>(<span class="sql-k">SIZE</span> dur) | <span class="sql-k">HOPPING</span>(<span class="sql-k">SIZE</span> dur, <span class="sql-k">ADVANCE BY</span> dur) | <span class="sql-k">SESSION</span>(<span class="sql-k">GAP</span> dur)]
 [<span class="sql-k">EMIT CHANGES</span> | <span class="sql-k">EMIT FINAL</span>]</code></pre>
 <p>Durations: <code>N MILLISECONDS | SECONDS | MINUTES | HOURS</code> (singular accepted). Keywords are case-insensitive; comments start with <code>--</code>. <code>SELECT *</code> and <code>alias.*</code> expand to all columns (alias-prefixed like <code>t_symbol</code> when the query has multiple inputs); stars are not allowed with <code>GROUP BY</code>/aggregates.</p>
@@ -365,6 +368,23 @@ cd web &amp;&amp; bun install &amp;&amp; bun run build &amp;&amp; cd ..
 <span class="sql-k">FROM</span> app_events e <span class="sql-k">JOIN</span> trades t <span class="sql-k">WITHIN</span> 10 <span class="sql-k">SECONDS</span>
   <span class="sql-k">ON</span> e.payload -&gt; <span class="sql-s">'order'</span> -&gt;&gt; <span class="sql-s">'symbol'</span> = t.symbol</code></pre>
 <div class="callout"><b>Tip:</b> comparing a raw <code>-&gt;</code> result is an error — the validator's message nudges you to finish the path with <code>-&gt;&gt;</code> (text) before comparing.</div>
+
+<h3 id="sql-nested">Nested queries</h3>
+<p><b>Derived tables &amp; CTEs</b> — a FROM/JOIN item can be an inline subquery (alias required), and <code>WITH</code> names them for reuse. CTEs may reference only CTEs declared before them; recursion is not supported (by design — see Limitations). Windows may nest: an inner windowed query's rows enter the outer query timestamped at the inner <b>window end</b>.</p>
+<pre><code><span class="sql-k">WITH</span> hot <span class="sql-k">AS</span> (<span class="sql-k">SELECT</span> symbol <span class="sql-k">FROM</span> trades <span class="sql-k">GROUP BY</span> symbol <span class="sql-k">WINDOW TUMBLING</span>(<span class="sql-k">SIZE</span> 10 <span class="sql-k">SECONDS</span>))
+<span class="sql-k">SELECT</span> t.symbol, <span class="sql-k">SUM</span>(t.price * t.qty) / <span class="sql-k">SUM</span>(t.qty) <span class="sql-k">AS</span> vwap
+<span class="sql-k">FROM</span> trades t <span class="sql-k">WHERE</span> t.symbol <span class="sql-k">IN</span> (<span class="sql-k">SELECT</span> symbol <span class="sql-k">FROM</span> hot)
+<span class="sql-k">GROUP BY</span> t.symbol <span class="sql-k">WINDOW TUMBLING</span>(<span class="sql-k">SIZE</span> 5 <span class="sql-k">SECONDS</span>)</code></pre>
+<p><b>Subquery predicates</b> — <code>[NOT] IN (SELECT …)</code> and <code>[NOT] EXISTS (SELECT …)</code> in WHERE (top-level AND positions) become semi/anti joins. Membership is by <i>presence</i>, so duplicates on the subquery side never fan out, and retracting the last matching row flips all affected rows. <code>NOT IN</code> ignores NULLs from the subquery (a documented deviation from three-valued SQL). <b>Scalar subqueries</b> — <code>(SELECT AVG(price) FROM …)</code> as an expression: single aggregate, no GROUP BY; in tables the result updates continuously with retract/assert cascades; correlated forms are supported for <i>equality</i> correlation only (decorrelated into a GROUP-BY join) — anything fancier gets a diagnostic suggesting a JOIN.</p>
+<p><b>Streaming honesty rule</b> — in <i>pipelines</i>, a subquery used for membership or a scalar must be <b>windowed</b>: its value is a rolling snapshot replaced at each inner window close, and events test against the snapshot current at their arrival. Tables have no such restriction (running Z-sets compose directly).</p>
+
+<h3 id="sql-unnest">Arrays, UNNEST &amp; LATEST BY</h3>
+<p>Sources can declare <b>array fields</b> (e.g. a multileg instrument's <code>legs</code> — see the seeded <code>structures</code> source). <code>UNNEST</code> flattens them: one row per element, in order; empty/NULL arrays produce zero rows. The element binds to its alias as a JSON value addressed with <code>-&gt;</code>/<code>-&gt;&gt;</code>:</p>
+<pre><code><span class="sql-k">SELECT</span> l -&gt;&gt; 'ccy' <span class="sql-k">AS</span> ccy, <span class="sql-k">SUM</span>(l -&gt; 'notional') <span class="sql-k">AS</span> notional
+<span class="sql-k">FROM</span> structures s, <span class="sql-k">UNNEST</span>(s.legs) <span class="sql-k">AS</span> l
+<span class="sql-k">GROUP BY</span> l -&gt;&gt; 'ccy'</code></pre>
+<p>⚠ Aggregate over <code>-&gt;</code> (raw value), not <code>-&gt;&gt;</code> — <code>-&gt;&gt;</code> always returns text, and text contributes nothing to SUM/AVG. In tables, UNNEST is Z-set linear: retracting a 3-leg row retracts all 3 flattened rows. UNNEST arguments may reference only real sources (no UNNEST-of-UNNEST).</p>
+<p><b><code>LATEST BY (key, …)</code></b> (tables only, replaces GROUP BY) keeps the <i>latest full row</i> per key by event time, emitting retract/assert pairs as keys update — the natural way to materialize current state from an event stream (see the seeded <code>order_states</code>). Late (older-timestamped) arrivals are ignored; an upstream retraction of the retained row drops the key entirely (no fallback to older versions).</p>
 
 <h3 id="sql-functions">Functions, expressions &amp; NULL</h3>
 <p>Scalar functions: <code>ABS</code>, <code>ROUND(x[, digits])</code>, <code>UPPER</code>, <code>LOWER</code>, <code>COALESCE(a, b, …)</code>. Full boolean/comparison/arithmetic expressions with SQL three-valued NULL semantics (<code>NULL op x</code> is NULL; <code>WHERE</code> requires true). Numeric type promotion is automatic; division always yields a double.</p>
@@ -521,6 +541,8 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 <li><b>Table joins are INNER-only.</b> Incremental outer joins over changing state are a meaningfully harder algebra; deferred deliberately.</li>
 <li><b>Late events are dropped</b>, not retroactively corrected — bounded-lateness semantics, not full differential dataflow.</li>
 <li><b>JSON path keys are literals</b> (<code>-&gt; 'key'</code>, <code>-&gt; 0</code>); computed keys aren't supported.</li>
+<li><b>No recursive CTEs</b> — by design, not omission: recursion requires iterative dataflow (multitemporal timestamps à la Materialize), which would replace the epoch-based DBSP architecture. Bounded-depth traversals unroll into joins; "latest per chain" is <code>LATEST BY</code> + row history.</li>
+<li><b>Correlated subqueries beyond equality</b> get a diagnostic ("rewrite as a JOIN"); <code>NOT IN</code> ignores subquery NULLs; no LEFT UNNEST; <code>LATEST BY</code> keeps a single row per key (no fallback history — that's what row history is for).</li>
 </ul>
 </section>
 
