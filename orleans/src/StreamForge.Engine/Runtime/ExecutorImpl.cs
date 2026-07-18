@@ -77,6 +77,11 @@ public sealed partial class PipelineExecutor : IPipelineOpChain
                 // Plan 004 N2/N3/N4: rolling-snapshot subquery stage — see PipelineSubqueryOp's class doc.
                 _joins.Add(new PipelineSubqueryOp(j.Kind, j.LeftKey!, j.RightKey!, j.Residual, compiled.Bindings, (j.Alias, j.Schema)));
             }
+            else if (j.Kind == JoinKind.Unnest)
+            {
+                // Plan 002 L2: 1-to-N row expansion, no ON/WITHIN — see PipelineUnnestOp's class doc.
+                _joins.Add(new PipelineUnnestOp(j.UnnestExpr!, j.Alias, compiled.Bindings));
+            }
             else
             {
                 _joins.Add(new PipelineJoinOp(j.Kind, j.Within, j.LeftKey, j.RightKey, j.Residual, compiled.Bindings, accumulated.ToList(), (j.Alias, j.Schema)));
@@ -91,6 +96,7 @@ public sealed partial class PipelineExecutor : IPipelineOpChain
         for (int i = 0; i < compiled.Joins.Count; i++)
         {
             var j = compiled.Joins[i];
+            if (j.Kind == JoinKind.Unnest) continue; // no external driving source — see PipelineUnnestOp's class doc
             bool isSnapshotJoin = j.Kind is JoinKind.Semi or JoinKind.Anti or JoinKind.Scalar;
             AddRole(j.SourceName, isFrom: false, stageIndex: i, j.Alias, j.DerivedPlan, isSnapshotJoin);
         }

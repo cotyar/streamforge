@@ -53,6 +53,7 @@ public sealed partial class TableExecutor
     private readonly List<ITableJoinStage> _joins = [];
     private TableFilterProjectOp? _filterProject;
     private TableReduceOp? _reduce;
+    private TableLatestByOp? _latestBy;
     private readonly Dictionary<string, TableIngestOp> _ingestOps = [];
 
     // real leaf stream/table name -> every role it plays in the plan (FROM and/or one or more JOIN
@@ -75,13 +76,16 @@ public sealed partial class TableExecutor
         for (int i = 0; i < compiled.Joins.Count; i++)
         {
             var j = compiled.Joins[i];
-            // Plan 004 N2: Semi/Anti (IN/EXISTS ↔ NOT IN/NOT EXISTS) get the presence-based op; every other
-            // kind — including N3/N4's Scalar joins — reuses TableJoinOp as-is (see its class doc and
-            // Planner.BuildScalarJoin's doc comment on why a plain equi-join is already retraction-correct
-            // for those).
-            _joins.Add(j.Kind is JoinKind.Semi or JoinKind.Anti
-                ? new TableSemiAntiOp(j.Kind, j.LeftKey!, j.RightKey!, compiled.Bindings)
-                : new TableJoinOp(j.LeftKey!, j.RightKey!, j.Residual, compiled.Bindings));
+            // Plan 004 N2: Semi/Anti (IN/EXISTS ↔ NOT IN/NOT EXISTS) get the presence-based op; plan 002 L2's
+            // Unnest gets the 1-to-N expansion op; every other kind — including N3/N4's Scalar joins —
+            // reuses TableJoinOp as-is (see its class doc and Planner.BuildScalarJoin's doc comment on why a
+            // plain equi-join is already retraction-correct for those).
+            _joins.Add(j.Kind switch
+            {
+                JoinKind.Semi or JoinKind.Anti => new TableSemiAntiOp(j.Kind, j.LeftKey!, j.RightKey!, compiled.Bindings),
+                JoinKind.Unnest => new TableUnnestOp(j.UnnestExpr!, j.Alias, compiled.Bindings),
+                _ => new TableJoinOp(j.LeftKey!, j.RightKey!, j.Residual, compiled.Bindings),
+            });
         }
 
         _filterProject = new TableFilterProjectOp(compiled);
@@ -90,10 +94,17 @@ public sealed partial class TableExecutor
         {
             _reduce = new TableReduceOp(compiled);
         }
+        else if (compiled.LatestBy is not null)
+        {
+            // Plan 002 L3: LATEST BY is mutually exclusive with GROUP BY/aggregates by construction (see
+            // Validator's exclusivity diagnostics) — this `else` mirrors that at the runtime layer too.
+            _latestBy = new TableLatestByOp(compiled, compiled.LatestBy);
+        }
 
         AddRole(compiled.Sources[0].SourceName, isFrom: true, stageIndex: -1, compiled.Sources[0].Alias, compiled.Sources[0].DerivedPlan);
         for (int i = 0; i < compiled.Joins.Count; i++)
         {
+            if (compiled.Joins[i].Kind == JoinKind.Unnest) continue; // no external driving source — see TableUnnestOp's class doc
             AddRole(compiled.Joins[i].SourceName, isFrom: false, stageIndex: i, compiled.Joins[i].Alias, compiled.Joins[i].DerivedPlan);
         }
     }
@@ -180,6 +191,11 @@ public sealed partial class TableExecutor
             {
                 var filtered = _filterProject!.OnBatch(epoch, afterJoins);
                 output.AddRange(_reduce.OnBatch(epoch, filtered));
+            }
+            else if (_latestBy is not null)
+            {
+                var filtered = _filterProject!.OnBatch(epoch, afterJoins);
+                output.AddRange(_latestBy.OnBatch(epoch, filtered));
             }
             else
             {

@@ -16,6 +16,9 @@ internal sealed class Parser
         "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "WHERE", "GROUP", "WINDOW", "EMIT", "ON", "WITHIN", "FROM",
         // Plan 004 N2: reserved so `expr IN (...)`/`EXISTS (...)` never get mistaken for an AS-less alias.
         "IN", "EXISTS",
+        // Plan 002 L2/L3: reserved so `FROM src UNNEST(...)`/`... LATEST BY (...)` never get mistaken for
+        // an AS-less alias (mirrors how JOIN/WHERE/GROUP are already reserved above).
+        "UNNEST", "LATEST",
     };
 
     private readonly List<Token> _tokens;
@@ -116,7 +119,8 @@ internal sealed class Parser
         var newGroupBy = query.GroupBy?.Select(g => SubstituteCtesInExpr(g, resolved, allCteNames)).ToList();
 
         return new SelectQuery(newSelect, newFrom, newWhere, newGroupBy, query.Window, query.Emit,
-            query.EmitLine, query.EmitColumn, query.GroupByLine, query.GroupByColumn, query.WindowLine, query.WindowColumn);
+            query.EmitLine, query.EmitColumn, query.GroupByLine, query.GroupByColumn, query.WindowLine, query.WindowColumn,
+            query.LatestBy, query.LatestByLine, query.LatestByColumn);
     }
 
     /// <summary>Walks an expression tree substituting CTE references inside any nested SelectQuery it
@@ -214,11 +218,38 @@ internal sealed class Parser
         ExpectKeyword("FROM");
         var from = ParseFromItem();
         var joins = new List<JoinClause>();
+        // Plan 002 L2: comma form `FROM src alias, UNNEST(expr) AS l[, UNNEST(expr2) AS l2, ...]` desugars
+        // to the JOIN form right here — every comma-separated item after the primary FROM source must be
+        // an UNNEST (this dialect has no general comma cross-join); real JOINs (if any) follow afterward.
+        while (Current.IsSymbol(","))
+        {
+            var commaTok = Advance();
+            if (!Current.IsKeyword("UNNEST"))
+            {
+                throw Error(Current, "Expected UNNEST after ',' in FROM — this dialect's only comma-FROM sugar is 'FROM src, UNNEST(expr) AS alias' (plan 002 L2)");
+            }
+            var unnest = ParseUnnestSource();
+            joins.Add(new JoinClause(JoinKind.Unnest, unnest, null, null, commaTok.Line, commaTok.Column));
+        }
         while (IsJoinStart()) joins.Add(ParseJoinClause());
         var fromClause = new FromClause(from, joins);
 
         Expr? where = null;
         if (MatchKeyword("WHERE")) where = ParseOr();
+
+        List<Expr>? latestBy = null;
+        int? latestByLine = null, latestByCol = null;
+        if (Current.IsKeyword("LATEST"))
+        {
+            var tok = Current;
+            latestByLine = tok.Line; latestByCol = tok.Column;
+            Advance();
+            ExpectKeyword("BY");
+            ExpectSymbol("(");
+            latestBy = [ParseOr()];
+            while (Current.IsSymbol(",")) { Advance(); latestBy.Add(ParseOr()); }
+            ExpectSymbol(")");
+        }
 
         List<Expr>? groupBy = null;
         int? gbLine = null, gbCol = null;
@@ -254,7 +285,7 @@ internal sealed class Parser
             else throw Error(Current, $"Expected CHANGES or FINAL after EMIT, got '{Current.Text}'");
         }
 
-        return new SelectQuery(select, fromClause, where, groupBy, window, emit, emitLine, emitCol, gbLine, gbCol, windowLine, windowCol);
+        return new SelectQuery(select, fromClause, where, groupBy, window, emit, emitLine, emitCol, gbLine, gbCol, windowLine, windowCol, latestBy, latestByLine, latestByCol);
     }
 
     private SelectClause ParseSelectClause()
@@ -341,6 +372,13 @@ internal sealed class Parser
     /// since the derived table has no name of its own to fall back on).</summary>
     private FromItem ParseFromItem()
     {
+        if (Current.IsKeyword("UNNEST"))
+        {
+            // UNNEST can never be the FIRST FROM item (plan 002 L2: its expr must reference a real,
+            // already-in-scope FROM source) — see ParseSelectQuery's comma-loop and ParseJoinClause's own
+            // UNNEST branch for the two positions where it IS allowed.
+            throw Error(Current, "UNNEST cannot be the first FROM item — it must follow a real source, e.g. 'FROM src, UNNEST(expr) AS alias' or '... JOIN UNNEST(expr) AS alias'");
+        }
         if (Current.IsSymbol("("))
         {
             var openTok = Advance();
@@ -369,16 +407,56 @@ internal sealed class Parser
         Current.IsKeyword("JOIN") || Current.IsKeyword("INNER") || Current.IsKeyword("LEFT") ||
         Current.IsKeyword("RIGHT") || Current.IsKeyword("FULL") || Current.IsKeyword("CROSS");
 
+    /// <summary>Plan 002 L2: `UNNEST(expr) AS alias` (or bare `alias` — same implicit-alias sugar every
+    /// other FROM item supports), used by both the comma form (ParseSelectQuery's loop) and the JOIN form
+    /// (ParseJoinClause below). Alias is mandatory (no fallback name exists for an expression).</summary>
+    private UnnestSource ParseUnnestSource()
+    {
+        var startTok = Current;
+        ExpectKeyword("UNNEST");
+        ExpectSymbol("(");
+        var expr = ParseOr();
+        ExpectSymbol(")");
+
+        string alias;
+        if (MatchKeyword("AS"))
+        {
+            alias = ExpectIdentifierToken().Text;
+        }
+        else if (Current.Kind == TokenKind.Identifier && !ClauseKeywords.Contains(Current.Text))
+        {
+            alias = Advance().Text;
+        }
+        else
+        {
+            throw Error(Current, "UNNEST requires an alias, e.g. UNNEST(expr) AS alias");
+        }
+        return new UnnestSource(expr, alias, startTok.Line, startTok.Column);
+    }
+
     private JoinClause ParseJoinClause()
     {
         var startTok = Current;
         JoinKind kind;
+        bool isOuterKind = false;
         if (MatchKeyword("CROSS")) { ExpectKeyword("JOIN"); kind = JoinKind.Cross; }
         else if (MatchKeyword("INNER")) { ExpectKeyword("JOIN"); kind = JoinKind.Inner; }
-        else if (MatchKeyword("LEFT")) { MatchKeyword("OUTER"); ExpectKeyword("JOIN"); kind = JoinKind.Left; }
-        else if (MatchKeyword("RIGHT")) { MatchKeyword("OUTER"); ExpectKeyword("JOIN"); kind = JoinKind.Right; }
-        else if (MatchKeyword("FULL")) { MatchKeyword("OUTER"); ExpectKeyword("JOIN"); kind = JoinKind.Full; }
+        else if (MatchKeyword("LEFT")) { MatchKeyword("OUTER"); ExpectKeyword("JOIN"); kind = JoinKind.Left; isOuterKind = true; }
+        else if (MatchKeyword("RIGHT")) { MatchKeyword("OUTER"); ExpectKeyword("JOIN"); kind = JoinKind.Right; isOuterKind = true; }
+        else if (MatchKeyword("FULL")) { MatchKeyword("OUTER"); ExpectKeyword("JOIN"); kind = JoinKind.Full; isOuterKind = true; }
         else { ExpectKeyword("JOIN"); kind = JoinKind.Inner; }
+
+        // Plan 002 L2: '[CROSS] JOIN UNNEST(expr) AS alias' — no ON, no WITHIN, no NULL-padding outer-join
+        // variant (see UnnestSource's doc comment: "no LEFT UNNEST" is a deliberate dialect limitation).
+        if (Current.IsKeyword("UNNEST"))
+        {
+            if (isOuterKind)
+            {
+                throw Error(startTok, "UNNEST may only be used with JOIN or CROSS JOIN, not LEFT/RIGHT/FULL — there is no LEFT UNNEST NULL-padding in this dialect");
+            }
+            var unnestSource = ParseUnnestSource();
+            return new JoinClause(JoinKind.Unnest, unnestSource, null, null, startTok.Line, startTok.Column);
+        }
 
         var source = ParseFromItem();
 

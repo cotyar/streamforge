@@ -3,7 +3,7 @@ using System.Collections.Generic;
 namespace StreamForge.Engine.Sql;
 
 /// <summary>A resolved, validated JOIN: its equi-key (null only when validation already failed) and residual filter.</summary>
-internal sealed class JoinBinding(JoinKind kind, string alias, string sourceName, TimeSpan? within, Expr? leftKey, Expr? rightKey, Expr? residual, bool isTable = false)
+internal sealed class JoinBinding(JoinKind kind, string alias, string sourceName, TimeSpan? within, Expr? leftKey, Expr? rightKey, Expr? residual, bool isTable = false, Expr? unnestExpr = null)
 {
     public JoinKind Kind { get; } = kind;
     public string Alias { get; } = alias;
@@ -14,6 +14,9 @@ internal sealed class JoinBinding(JoinKind kind, string alias, string sourceName
     public Expr? Residual { get; } = residual;
     /// <summary>Table mode only: whether SourceName resolved against the table namespace (vs. streams).</summary>
     public bool IsTable { get; } = isTable;
+    /// <summary>Plan 002 L2: set only when Kind == Unnest — the expression to unnest (evaluated against
+    /// whatever real sources precede this join). Null for every other join kind.</summary>
+    public Expr? UnnestExpr { get; } = unnestExpr;
 }
 
 /// <summary>Plan 004 N1: set on a <see cref="ResolvedSource"/> when it came from `FROM (SELECT ...) alias`
@@ -36,6 +39,10 @@ internal sealed class ResolvedSource
     public required SourceSchema Schema { get; init; }
     public required bool IsTable { get; init; }
     public DerivedInfo? Derived { get; init; }
+    /// <summary>Plan 002 L2: true when this source is an UNNEST alias (its Schema is the synthetic
+    /// one-field element schema — see Validator.ResolveUnnestJoin) rather than a real named/derived
+    /// source.</summary>
+    public bool IsUnnest { get; init; }
 }
 
 /// <summary>Plan 004 N2: one resolved `[NOT] IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` WHERE predicate
@@ -104,6 +111,9 @@ internal sealed class ValidationResult
     public required Dictionary<Expr, SubqueryPredicateInfo> SubqueryPredicates { get; init; }
     /// <summary>Plan 004 N3/N4: every resolved scalar subquery expression, keyed by its own AST node.</summary>
     public required Dictionary<ScalarSubqueryExpr, ScalarSubqueryInfo> ScalarSubqueries { get; init; }
+    /// <summary>Plan 002 L3: the query's LATEST BY key expressions (table mode only — see the
+    /// "LATEST BY is table-mode only" diagnostic), carried through unchanged from SelectQuery.LatestBy.</summary>
+    public required List<Expr>? LatestBy { get; init; }
     public bool HasAggregates => UsedAggregates.Count > 0;
     public bool HasErrors => Diagnostics.Exists(d => d.Severity == DiagnosticSeverity.Error);
 }
@@ -152,6 +162,13 @@ internal sealed class Validator
     // map (StarExpr, NullLiteral, ...) simply have no meaningful kind for our purposes.
     private readonly Dictionary<Expr, FieldKind> _exprKind = new(ReferenceEqualityComparer.Instance);
 
+    // Plan 002 L2: every UNNEST alias resolved so far, in this query's own FROM/JOIN chain — populated as
+    // each UnnestSource resolves (see ResolveUnnestJoin), consulted (a) to keep a LATER UNNEST's own expr
+    // from referencing an EARLIER unnest alias (only real FROM sources are allowed — see
+    // FindUnnestAliasReference) and (b) to give `unnestAlias.field` a tailored diagnostic instead of the
+    // generic "unknown column" one (see ResolveQualifiedIdentifier).
+    private readonly HashSet<string> _unnestAliases = new(StringComparer.Ordinal);
+
     private Validator(IReadOnlyDictionary<string, SourceSchema> schemas)
     {
         _mode = ValidationMode.Stream;
@@ -199,6 +216,15 @@ internal sealed class Validator
         // JOINs, left-to-right, each ON scoped to (aliases so far) ∪ (this join's alias).
         foreach (var j in q.From.Joins)
         {
+            // Plan 002 L2: UNNEST has no ON/WITHIN/equi-key concept at all — a completely different shape
+            // from every other JoinKind, so it's resolved by its own dedicated method rather than falling
+            // through the WITHIN/ON machinery below (which would reject it for missing both).
+            if (j.Source is UnnestSource unnestSrc)
+            {
+                ResolveUnnestJoin(unnestSrc, sources, aliasSeen, joins);
+                continue;
+            }
+
             var leftAliasesBefore = sources.Select(s => s.Alias).ToHashSet(StringComparer.Ordinal);
             var resolved = ResolveFromItem(j.Source, aliasSeen);
             bool sourceOk = resolved.Ok;
@@ -284,6 +310,14 @@ internal sealed class Validator
             foreach (var g in q.GroupBy) ResolveExpr(g, fullScope, aggDepth: 0);
         }
 
+        // Plan 002 L3: LATEST BY key expressions resolve against the same fullScope GROUP BY does — any
+        // aggregate used inside one (like an aggregate used inside GROUP BY) folds into _usedAggregates the
+        // same way, so the "combined with aggregates" exclusivity check below sees it without extra plumbing.
+        if (q.LatestBy is not null)
+        {
+            foreach (var k in q.LatestBy) ResolveExpr(k, fullScope, aggDepth: 0);
+        }
+
         if (!q.Select.IsStar)
         {
             foreach (var item in q.Select.Items) ResolveExpr(item.Expression, fullScope, aggDepth: 0);
@@ -306,6 +340,10 @@ internal sealed class Validator
             {
                 _diags.Add(new SqlDiagnostic("EMIT requires a WINDOW clause", q.EmitLine ?? 1, q.EmitColumn ?? 1));
             }
+            if (q.LatestBy is not null)
+            {
+                _diags.Add(new SqlDiagnostic("LATEST BY is table-mode only", q.LatestByLine ?? 1, q.LatestByColumn ?? 1));
+            }
         }
         else
         {
@@ -320,6 +358,20 @@ internal sealed class Validator
             if (q.Emit is not null)
             {
                 _diags.Add(new SqlDiagnostic("EMIT not allowed in table mode", q.EmitLine ?? 1, q.EmitColumn ?? 1));
+            }
+            // Plan 002 L3: LATEST BY is table-mode's running-argmax-by-_ts sugar (see TableLatestByOp) —
+            // mutually exclusive with GROUP BY/aggregates (WINDOW is already structurally forbidden above
+            // regardless of LATEST BY, so no extra diagnostic is needed for that combination).
+            if (q.LatestBy is not null)
+            {
+                if (q.GroupBy is not null)
+                {
+                    _diags.Add(new SqlDiagnostic("LATEST BY may not be combined with GROUP BY", q.LatestByLine ?? 1, q.LatestByColumn ?? 1));
+                }
+                if (hasAggregates)
+                {
+                    _diags.Add(new SqlDiagnostic("LATEST BY may not be combined with aggregate functions", q.LatestByLine ?? 1, q.LatestByColumn ?? 1));
+                }
             }
         }
 
@@ -377,6 +429,7 @@ internal sealed class Validator
             TableInputs = _tableInputs.Distinct(StringComparer.Ordinal).ToList(),
             SubqueryPredicates = _subqueryPredicates,
             ScalarSubqueries = _scalarSubqueries,
+            LatestBy = q.LatestBy,
         };
     }
 
@@ -435,6 +488,75 @@ internal sealed class Validator
 
         return (true, sref.Name, namedSchema, isTable, null);
     }
+
+    // ------------------------------------------------------------------
+    // Plan 002 L2 — UNNEST(expr) AS alias
+    // ------------------------------------------------------------------
+
+    /// <summary>Resolves one UNNEST join item (see UnnestSource's doc comment for the two syntactic forms
+    /// that both land here). Unlike every other JoinKind, there's no ON/WITHIN/equi-key to extract: the
+    /// alias's "schema" is a synthetic one-field element schema (field name == alias name, kind Json —
+    /// element typing is dynamic; see the class-level design note this mirrors in WorkingRow/
+    /// ExpressionEvaluator), and <paramref name="unnestSrc"/>'s own Expr is resolved against only the REAL
+    /// (non-UNNEST) sources registered so far — see FindUnnestAliasReference for why another UNNEST alias
+    /// specifically is rejected rather than silently falling through to a generic "unknown column".</summary>
+    private void ResolveUnnestJoin(UnnestSource unnestSrc, List<ResolvedSource> sources, HashSet<string> aliasSeen, List<JoinBinding> joins)
+    {
+        if (!aliasSeen.Add(unnestSrc.Alias))
+        {
+            _diags.Add(new SqlDiagnostic($"Duplicate alias '{unnestSrc.Alias}'", unnestSrc.Line, unnestSrc.Column));
+        }
+
+        var referencedUnnestAlias = FindUnnestAliasReference(unnestSrc.Expr);
+        if (referencedUnnestAlias is not null)
+        {
+            _diags.Add(new SqlDiagnostic(
+                $"UNNEST argument may not reference another UNNEST alias '{referencedUnnestAlias}' — only real FROM sources are allowed (UNNEST-of-UNNEST is not supported; plan 002 L2)",
+                unnestSrc.Expr.Line, unnestSrc.Expr.Column));
+        }
+        else
+        {
+            var realScope = sources.Where(s => !s.IsUnnest).Select(s => (s.Alias, s.Schema)).ToList();
+            ResolveExpr(unnestSrc.Expr, realScope, aggDepth: 0);
+
+            var exprKind = GetExprKind(unnestSrc.Expr);
+            if (exprKind is not null && exprKind != FieldKind.Json)
+            {
+                _diags.Add(new SqlDiagnostic(
+                    $"UNNEST argument must be a JSON value (a JSON column, or a '->' JSON access expression) — got {DescribeKind(exprKind)}, which can never be a JSON array",
+                    unnestSrc.Expr.Line, unnestSrc.Expr.Column));
+            }
+        }
+
+        // Synthetic one-field element schema: the field NAME equals the alias itself, which is what makes a
+        // bare `Identifier(alias)` in SELECT ("the element itself") resolve through the EXACT SAME
+        // ResolveBareIdentifier/RecordColumnKind path every other bare column reference already uses — no
+        // separate "pseudo-column" special case needed anywhere else in the validator, planner, or runtime
+        // (WorkingRow keys this "{alias}_{alias}", same convention as any other alias-qualified field).
+        var elementSchema = new SourceSchema("(unnest)", new Dictionary<string, FieldKind> { [unnestSrc.Alias] = FieldKind.Json });
+        sources.Add(new ResolvedSource { Alias = unnestSrc.Alias, SourceName = "(unnest)", Schema = elementSchema, IsTable = false, Derived = null, IsUnnest = true });
+        _unnestAliases.Add(unnestSrc.Alias);
+
+        joins.Add(new JoinBinding(JoinKind.Unnest, unnestSrc.Alias, "(unnest)", within: null, leftKey: null, rightKey: null, residual: null, isTable: false, unnestExpr: unnestSrc.Expr));
+    }
+
+    /// <summary>Walks <paramref name="e"/> for the first Identifier/QualifiedIdentifier that names an
+    /// already-resolved UNNEST alias (see <see cref="_unnestAliases"/>) — used to reject "UNNEST of an
+    /// UNNEST alias" with a specific, helpful diagnostic instead of letting it fall through to whatever
+    /// generic "unknown source/column" message an intentionally-narrowed scope would otherwise produce.
+    /// Doesn't descend into a nested subquery expression's own SelectQuery — UNNEST's grammar (ParseOr) can
+    /// syntactically admit a ScalarSubqueryExpr/InSubqueryExpr/ExistsExpr as its argument, but those are
+    /// independently scoped and not what this check is about.</summary>
+    private string? FindUnnestAliasReference(Expr e) => e switch
+    {
+        Identifier id when _unnestAliases.Contains(id.Name) => id.Name,
+        QualifiedIdentifier qid when _unnestAliases.Contains(qid.Qualifier) => qid.Qualifier,
+        UnaryExpr u => FindUnnestAliasReference(u.Operand),
+        BinaryExpr b => FindUnnestAliasReference(b.Left) ?? FindUnnestAliasReference(b.Right),
+        FunctionCallExpr f => f.Args.Select(FindUnnestAliasReference).FirstOrDefault(r => r is not null),
+        JsonAccessExpr j => FindUnnestAliasReference(j.Left),
+        _ => null,
+    };
 
     /// <summary>Validates <paramref name="q"/> as a fully independent, uncorrelated query against this
     /// Validator's own namespace — the one mechanism N1's derived tables, N2's IN/EXISTS subqueries, and
@@ -695,6 +817,17 @@ internal sealed class Validator
         {
             _bindings[qid] = (alias, CanonicalReserved(qid.Name));
             _exprKind[qid] = ReservedKind(qid.Name);
+            return;
+        }
+        // Plan 002 L2: `unnestAlias.field` — the alias's value is a single JSON element, not a row with
+        // named fields (its own field name is a synthetic key equal to the alias, not "field" — see
+        // ResolveUnnestJoin), so this is an error unconditionally, with a message pointing at the '->>'
+        // syntax it should have used instead of the generic "unknown column on alias" wording.
+        if (_unnestAliases.Contains(alias))
+        {
+            _diags.Add(new SqlDiagnostic(
+                $"UNNEST alias '{alias}' has no field '{qid.Name}' — its value is a single JSON array element, not a row; use a JSON operator instead, e.g. {alias} ->> '{qid.Name}'",
+                qid.Line, qid.Column));
             return;
         }
         var field = schema.Fields.Keys.FirstOrDefault(k => string.Equals(k, qid.Name, StringComparison.OrdinalIgnoreCase));

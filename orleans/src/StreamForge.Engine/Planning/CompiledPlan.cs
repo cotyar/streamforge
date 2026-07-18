@@ -36,6 +36,9 @@ internal sealed class CompiledJoin
     public Expr? Residual { get; init; }
     /// <summary>Plan 004 N1: set when this JOIN's source is a derived table/CTE. See CompiledSource.DerivedPlan.</summary>
     public CompiledPlan? DerivedPlan { get; init; }
+    /// <summary>Plan 002 L2: set only when Kind == Unnest — the expression PipelineUnnestOp evaluates
+    /// against the accumulated left row. Null for every other join kind.</summary>
+    public Expr? UnnestExpr { get; init; }
 }
 
 /// <summary>The fully resolved, executable form of a compiled query — everything the runtime needs,

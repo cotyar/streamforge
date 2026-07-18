@@ -86,6 +86,7 @@ public static class Planner
                 RightKey = j.RightKey,
                 Residual = j.Residual,
                 DerivedPlan = sources.First(s => s.Alias == j.Alias).DerivedPlan,
+                UnnestExpr = j.UnnestExpr,
             };
         }).ToList();
 
@@ -119,8 +120,14 @@ public static class Planner
         // ExecutorImpl's role table, which dispatches derived nodes by these same leaf names. Plan 004
         // N2/N3/N4's synthesized Semi/Anti/Scalar joins are ALSO derived-plan-backed (never a plain named
         // source — see SubqueryRewriter) and must contribute their own leaf names the exact same way, or a
-        // subquery's real stream inputs would silently never receive events.
-        var sourceNames = sources.SelectMany(s => (IEnumerable<string>)(s.DerivedPlan?.SourceNames ?? [s.SourceName]))
+        // subquery's real stream inputs would silently never receive events. Plan 002 L2: an UNNEST alias's
+        // synthetic "(unnest)" SourceName is EXCLUDED here — it has no external driving source at all (it's
+        // derived purely from an expression over the already-accumulated row; see PipelineUnnestOp/
+        // ExecutorImpl's role-registration skip) and would otherwise pollute CompileResult.SourceNames with
+        // a name no caller can ever meaningfully OnEvent().
+        var unnestAliases = joins.Where(j => j.Kind == JoinKind.Unnest).Select(j => j.Alias).ToHashSet();
+        var sourceNames = sources.Where(s => !unnestAliases.Contains(s.Alias))
+            .SelectMany(s => (IEnumerable<string>)(s.DerivedPlan?.SourceNames ?? [s.SourceName]))
             .Concat(joins.Where(j => j.Kind is JoinKind.Semi or JoinKind.Anti or JoinKind.Scalar).SelectMany(j => j.DerivedPlan!.SourceNames))
             .Distinct().ToList();
         var sourceLabel = string.Join(",", sources.Select(s => s.Alias));
@@ -302,6 +309,14 @@ public static class Planner
 
         foreach (var j in joins)
         {
+            if (j.Kind == JoinKind.Unnest)
+            {
+                // Plan 002 L2: UNNEST has no WITHIN/duration and no separate SourceName — print the
+                // unnested expression's column text instead of the ⋈[label,duration] shape every other
+                // join kind uses.
+                sb.Append($" ⇶[UNNEST] {ColumnText(j.UnnestExpr!, bindings)} AS {j.Alias}");
+                continue;
+            }
             string symbol = j.Kind == JoinKind.Cross ? "×" : "⋈";
             string label = j.Kind switch
             {

@@ -87,6 +87,7 @@ public static class TablePlanner
                 RightKey = j.RightKey,
                 Residual = j.Residual,
                 DerivedPlan = sources.First(s => s.Alias == j.Alias).DerivedPlan,
+                UnnestExpr = j.UnnestExpr,
             };
         }).ToList();
 
@@ -96,7 +97,7 @@ public static class TablePlanner
         var where = RewriteWhereForSubqueryPredicates(q.Where, v, bindings, joins);
         var selectItems = q.Select.Items.Select(item => new SelectItem(RewriteScalarSubqueries(item.Expression, v, bindings, joins), item.Alias)).ToList();
         var qForOutput = new SelectQuery(new SelectClause(q.Select.IsStar, selectItems), q.From, q.Where, q.GroupBy, q.Window, q.Emit,
-            q.EmitLine, q.EmitColumn, q.GroupByLine, q.GroupByColumn, q.WindowLine, q.WindowColumn);
+            q.EmitLine, q.EmitColumn, q.GroupByLine, q.GroupByColumn, q.WindowLine, q.WindowColumn, q.LatestBy, q.LatestByLine, q.LatestByColumn);
 
         var output = BuildOutput(qForOutput, sources, bindings);
 
@@ -133,6 +134,7 @@ public static class TablePlanner
             TableInputs = v.TableInputs,
             SourceLabel = sourceLabel,
             OutputSchema = outputSchema,
+            LatestBy = q.LatestBy,
         };
     }
 
@@ -286,7 +288,9 @@ public static class TablePlanner
 
         foreach (var j in joins)
         {
-            sb.Append($" ⋈[INNER] {j.SourceName} AS {j.Alias}");
+            sb.Append(j.Kind == JoinKind.Unnest
+                ? $" ⇶[UNNEST] {FormatColumnName(j.UnnestExpr!, bindings)} AS {j.Alias}"
+                : $" ⋈[INNER] {j.SourceName} AS {j.Alias}");
         }
 
         var parts = new List<string> { sb.ToString() };
@@ -296,6 +300,11 @@ public static class TablePlanner
         if (q.GroupBy is not null)
         {
             parts.Add("GROUP BY " + string.Join(", ", q.GroupBy.Select(g => FormatColumnName(g, bindings))));
+        }
+
+        if (q.LatestBy is not null)
+        {
+            parts.Add("LATEST BY " + string.Join(", ", q.LatestBy.Select(k => FormatColumnName(k, bindings))));
         }
 
         // See Planner.BuildPlanSummary's comment: output.Count is accurate for star, qualified-star, and

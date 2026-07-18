@@ -28,6 +28,9 @@ internal sealed class CompiledTableJoin
     public Expr? Residual { get; init; }
     /// <summary>Plan 004 N1: set when this JOIN's source is a derived table/CTE. See CompiledTableSource.DerivedPlan.</summary>
     public CompiledTablePlan? DerivedPlan { get; init; }
+    /// <summary>Plan 002 L2: set only when Kind == Unnest — the expression TableUnnestOp evaluates against
+    /// the accumulated left row. Null for every other join kind.</summary>
+    public Expr? UnnestExpr { get; init; }
 }
 
 /// <summary>The fully resolved, executable form of a compiled TABLE query — the table-mode analogue of
@@ -48,4 +51,8 @@ internal sealed class CompiledTablePlan
     public required List<string> TableInputs { get; init; }
     public required string SourceLabel { get; init; } // comma-joined source names, used as output _source
     public required SourceSchema OutputSchema { get; init; }
+    /// <summary>Plan 002 L3: LATEST BY key expressions — null unless the query has a LATEST BY clause
+    /// (mutually exclusive with GroupBy/HasAggregates by construction; see Validator's exclusivity
+    /// diagnostics). See Runtime/Ops/TableLatestByOp.cs.</summary>
+    public List<Expr>? LatestBy { get; init; }
 }

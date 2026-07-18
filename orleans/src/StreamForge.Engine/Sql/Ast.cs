@@ -173,13 +173,29 @@ internal sealed class DerivedSource(SelectQuery query, string alias, int line, i
     public SelectQuery Query { get; } = query;
 }
 
+/// <summary>Plan 002 L2: `UNNEST(expr) AS alias` — either the JOIN-position form (`JOIN UNNEST(...) AS l`,
+/// `CROSS JOIN UNNEST(...) AS l`) or the comma form (`FROM src, UNNEST(...) AS l`), which the parser
+/// desugars into this same node at parse time (see Parser.ParseSelectQuery's comma-UNNEST loop) — both
+/// forms produce a <see cref="JoinClause"/> of <see cref="JoinKind.Unnest"/> wrapping one of these.
+/// <see cref="Expr"/> is evaluated once per input row (against whatever real FROM/JOIN sources precede it
+/// — see Validator.ResolveUnnestJoin: an UNNEST argument may reference only real sources, never another
+/// UNNEST alias) and must yield a JSON array; the alias binds to ONE ELEMENT per output row (element
+/// typing is dynamic — see WorkingRow/ExpressionEvaluator: the alias behaves as a single Json-kind
+/// pseudo-column, addressed only via '->'/'->>' , never 'alias.field' dot access).</summary>
+internal sealed class UnnestSource(Expr expr, string alias, int line, int col) : FromItem(alias, line, col)
+{
+    public Expr Expr { get; } = expr;
+}
+
 /// <summary>Semi/Anti/Scalar are never produced by the parser (ParseJoinClause only yields Inner/Left/
-/// Right/Full/Cross) — they're synthesized by Planner at plan-time when rewriting a WHERE-position
+/// Right/Full/Cross/Unnest) — they're synthesized by Planner at plan-time when rewriting a WHERE-position
 /// IN/EXISTS predicate (Semi = IN/EXISTS, Anti = NOT IN/NOT EXISTS) or a scalar subquery expression
 /// (Scalar, N3/N4) into an extra join stage appended after the query's real joins. See
 /// Planner.RewriteWhereForSubqueryPredicates / RewriteScalarSubqueries and Runtime/Ops/TableSemiAntiOp.cs
-/// / Runtime/Ops/PipelineSubqueryOp.cs.</summary>
-internal enum JoinKind { Inner, Left, Right, Full, Cross, Semi, Anti, Scalar }
+/// / Runtime/Ops/PipelineSubqueryOp.cs. Unnest (plan 002 L2) IS parser-produced (see UnnestSource) — it
+/// sits in the same JoinClause chain as an ordinary join but has no ON/WITHIN and no right-hand driving
+/// source of its own (see Runtime/Ops/PipelineUnnestOp.cs / TableUnnestOp.cs).</summary>
+internal enum JoinKind { Inner, Left, Right, Full, Cross, Semi, Anti, Scalar, Unnest }
 
 internal sealed class JoinClause(JoinKind kind, FromItem source, TimeSpan? within, Expr? on, int line, int col)
 {
@@ -229,7 +245,10 @@ internal sealed class SelectQuery(
     int? groupByLine,
     int? groupByColumn,
     int? windowLine = null,
-    int? windowColumn = null)
+    int? windowColumn = null,
+    List<Expr>? latestBy = null,
+    int? latestByLine = null,
+    int? latestByColumn = null)
 {
     public SelectClause Select { get; } = select;
     public FromClause From { get; } = from;
@@ -243,4 +262,11 @@ internal sealed class SelectQuery(
     public int? GroupByColumn { get; } = groupByColumn;
     public int? WindowLine { get; } = windowLine;
     public int? WindowColumn { get; } = windowColumn;
+
+    /// <summary>Plan 002 L3 (deferred sugar, landed alongside L2): `LATEST BY (col[, col...])` —
+    /// table-mode-only clause (see Validator's "LATEST BY is table-mode only" diagnostic), mutually
+    /// exclusive with GROUP BY/WINDOW/aggregates. Null when absent.</summary>
+    public List<Expr>? LatestBy { get; } = latestBy;
+    public int? LatestByLine { get; } = latestByLine;
+    public int? LatestByColumn { get; } = latestByColumn;
 }

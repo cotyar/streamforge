@@ -20,6 +20,10 @@ internal static class TestHelpers
     public static readonly SourceSchema Ref = Schema("ref", ("symbol", FieldKind.String), ("tag", FieldKind.String));
     public static readonly SourceSchema Events = Schema("events", ("eventType", FieldKind.String), ("payload", FieldKind.Json));
 
+    // Plan 002 L2/L3 fixtures — multileg instruments (UNNEST) and order lifecycle events (LATEST BY).
+    public static readonly SourceSchema Structures = Schema("structures", ("trade_id", FieldKind.String), ("legs", FieldKind.Json), ("payload", FieldKind.Json));
+    public static readonly SourceSchema OrderEvents = Schema("order_events", ("order_id", FieldKind.String), ("stage", FieldKind.String), ("filled_qty", FieldKind.Long));
+
     public static CompileResult Compile(string sql, params SourceSchema[] schemas) => SqlCompiler.Compile(sql, Schemas(schemas));
 
     public static PipelineExecutor CompileAndCreate(string sql, params SourceSchema[] schemas)
