@@ -154,10 +154,14 @@ public sealed class TableStageGrain : Grain, ITableStageGrain
     {
         if (_outEdge.ToStageId == -1)
         {
+            // Plan 003 M4: always call PublishAsync, even with zero rows — TableOutputGrain now forwards
+            // (partition, frontier) to the coordinator's own FrontierTracker (see ITableGrain.
+            // OnOutputBatchAsync's doc comment), which needs a marker on every advance of THIS partition's
+            // frontier to avoid stalling, exactly like every other downstream hop in the graph already
+            // requires (see the non-terminal branch below, which never skips an empty target).
             var all = outByPartition.Values.SelectMany(x => x).ToList();
-            if (all.Count == 0) return; // TableOutputGrain doesn't track frontier; no need for empty markers
             var dtos = all.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight }).ToList();
-            await GrainFactory.GetGrain<ITableOutputGrain>(_tableName).PublishAsync(dtos);
+            await GrainFactory.GetGrain<ITableOutputGrain>(_tableName).PublishAsync(_partition, frontier.Value, dtos);
             return;
         }
 
@@ -181,5 +185,7 @@ public sealed class TableStageGrain : Grain, ITableStageGrain
         DeltasOut = _deltasOut,
         FrontierEpoch = _frontier?.Frontier.Value ?? -1,
         LastUpdateMs = _lastUpdateMs,
+        // Plan 003 M4: real operator name for the M5 dataflow panel — see TableStageKindLabel's doc comment.
+        Kind = _stage is not null ? TableStageKindLabel.Of(_stage.Kind) : "",
     });
 }

@@ -40,14 +40,12 @@ function lagClasses(frontierEpoch: number, maxFrontier: number): string {
  * parallelism == 1 case, and a lighter loading placeholder covers the gap between a table going
  * Running at P>=2 and its first metrics poll actually carrying `partitions`.
  *
- * Stage columns are labeled only by `stageId` (Stage 1, Stage 2, …) — TablePartitionMetrics does not
- * carry the stage's operator kind or alias (Ingest/Join/Reduce/…, see TableDataflowPlan.StageDescriptor
- * on the backend), so this UI cannot render real operator names, only the plan-internal numbering.
- * "Ingest" and "Output" are drawn as structural end-caps (the graph's known entry/exit points) rather
- * than data-bearing columns, since neither is represented in the partition metrics array (Ingest runs
- * at partition count 1 and isn't tracked per-partition; the terminal gather isn't a TableStageGrain at
- * all) — candid gap for a future M3/M4 metrics pass: a `kind`/`alias` field on TablePartitionMetrics
- * would let this render real op names instead of bare stage ids.
+ * Stage columns are labeled `Stage {id} · {kind}` — TablePartitionMetrics.kind (plan 003 M4) carries the
+ * real operator name (Join/SemiAnti/Unnest/FilterProject/Reduce/LatestBy — see
+ * StreamForge.Engine.Dataflow.TableStageKindLabel on the backend). "Ingest" and "Output" are still drawn
+ * as structural end-caps (the graph's known entry/exit points) rather than data-bearing columns, since
+ * neither is represented in the partition metrics array (Ingest runs at partition count 1 and isn't
+ * tracked per-partition; the terminal gather isn't a TableStageGrain at all).
  *
  * Delta rate is derived client-side the same way useTableMetrics derives its aggregate deltasIn/s —
  * diffing cumulative per-cell counters between successive polls — off the SAME `metrics` object the
@@ -83,6 +81,14 @@ export function DataflowPanel({ table, metrics }: { table: TableDefinition; metr
   const cellByKey = useMemo(() => {
     const m = new Map<string, TablePartitionMetrics>()
     for (const p of partitions ?? []) m.set(cellKey(p.stageId, p.partition), p)
+    return m
+  }, [partitions])
+
+  // Plan 003 M4: every partition of a given stageId shares the same operator kind — take it from
+  // whichever partition happened to report first.
+  const kindByStageId = useMemo(() => {
+    const m = new Map<number, string>()
+    for (const p of partitions ?? []) if (p.kind && !m.has(p.stageId)) m.set(p.stageId, p.kind)
     return m
   }, [partitions])
 
@@ -144,7 +150,10 @@ export function DataflowPanel({ table, metrics }: { table: TableDefinition; metr
             {stageIds.map((stageId) => (
               <div key={stageId} className="flex items-stretch gap-2">
                 <div className="flex flex-col gap-1">
-                  <div className="text-center text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Stage {stageId}</div>
+                  <div className="text-center text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                    Stage {stageId}
+                    {kindByStageId.get(stageId) ? ` · ${kindByStageId.get(stageId)}` : ''}
+                  </div>
                   <div className="flex flex-col gap-1">
                     {Array.from({ length: partitionCount }, (_, partition) => {
                       const cell = cellByKey.get(cellKey(stageId, partition))
@@ -169,7 +178,7 @@ export function DataflowPanel({ table, metrics }: { table: TableDefinition; metr
                             {cell ? (
                               <div className="flex flex-col gap-0.5">
                                 <span>
-                                  Stage {cell.stageId} · partition {cell.partition}
+                                  Stage {cell.stageId} ({cell.kind || 'unknown'}) · partition {cell.partition}
                                 </span>
                                 <span>Frontier epoch {cell.frontierEpoch}</span>
                                 <span>

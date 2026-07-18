@@ -75,6 +75,27 @@ public interface ITableGrain : IGrainWithStringKey
     /// Empty query or a table with SearchEnabled=false both yield an empty list — callers that need to tell
     /// those apart go through the /api/tables/{id}/search endpoint instead, which checks SearchEnabled first.</summary>
     Task<List<TableRowDto>> SearchAsync(string query, int limit);
+
+    /// <summary>Plan 003 M4: the epoch a coordinator-mode (Parallelism &gt;= 2) table's read-side snapshot
+    /// currently reflects — null for a Parallelism==1 table (see TableMetrics.SnapshotFrontierEpoch, which
+    /// carries the identical value; this method exists so the /rows endpoint can read it in O(1) without
+    /// paying for GetMetricsAsync's full per-partition fan-out on every poll).</summary>
+    Task<long?> GetSnapshotFrontierEpochAsync();
+
+    /// <summary>Plan 003 M4: called by ITableOutputGrain.PublishAsync (one call per terminal-stage
+    /// partition's own frontier advance) — the dedicated, epoch-aware ingestion path for a coordinator-mode
+    /// table's read-side snapshot, replacing the pre-M4 design of self-subscribing to the table's own output
+    /// delta stream (see TableGrain's class doc for why that design couldn't give an honest frontier: batches
+    /// from different terminal partitions arrived and were applied independently, so a read between two such
+    /// arrivals could observe a partially-applied epoch). This method instead buffers per (partition, epoch)
+    /// with the same FrontierTracker+EpochBuffer primitives every other dataflow hop uses, and only
+    /// consolidates a batch into the read-side snapshot once EVERY terminal partition has reported reaching
+    /// that epoch — making "the snapshot reflects all deltas &lt;= frontierEpoch and none beyond" true by
+    /// construction, not by convention. fromPartition/epoch are the terminal stage's own UpstreamId
+    /// components (plain ints/longs, matching ITableStageGrain.PushBatchAsync's no-Dataflow-dependency
+    /// rule). Not part of the table's public read surface — internal to the M2 grain topology, called only
+    /// by this table's own ITableOutputGrain.</summary>
+    Task OnOutputBatchAsync(int fromPartition, long epoch, List<TableDeltaDto> deltas);
 }
 
 /// <summary>Key = table name. One activation per table with row history ever configured. Subscribes to
@@ -166,12 +187,21 @@ public interface ITableStageGrain : IGrainWithStringKey
 /// commutative — see TableDataflowPlan's class doc) and simply republishes each incoming batch onto the
 /// SAME (StreamConstants.TableDeltaNamespace, tableName) stream a Parallelism==1 TableGrain would have
 /// published to directly — so SignalR (StreamBridgeService), TableHistoryGrain, and any downstream
-/// table-over-table subscriber keep working unchanged regardless of which mode produced the table.</summary>
+/// table-over-table subscriber keep working unchanged regardless of which mode produced the table.
+///
+/// PLAN 003 M4: <paramref name="fromPartition"/>/<paramref name="epoch"/> (a caller's own EdgeId.Value/
+/// UpstreamId components, plain ints/longs per the same no-Dataflow-dependency rule ITableStageGrain.
+/// PushBatchAsync already follows) additively carry the terminal-stage partition's own frontier at the
+/// moment it routed this batch out. PublishAsync forwards them, ALONGSIDE the unchanged stream republish,
+/// to the owning ITableGrain's OnOutputBatchAsync — see that method's doc comment for why frontier
+/// tracking rides a second, dedicated channel instead of being folded into the shared delta stream's
+/// payload (answer: because that stream's item type is a public contract several OTHER unrelated
+/// consumers depend on unchanged).</summary>
 public interface ITableOutputGrain : IGrainWithStringKey
 {
     Task StartAsync(TableDefinition def);
     Task StopAsync();
-    Task PublishAsync(List<TableDeltaDto> deltas);
+    Task PublishAsync(int fromPartition, long epoch, List<TableDeltaDto> deltas);
 }
 
 // ============================================================================

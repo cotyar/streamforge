@@ -19,6 +19,14 @@ namespace StreamForge.Host.Grains;
 /// stage — that would make partition 0 an implicit single point of coordination with no clean home for the
 /// gather logic; a dedicated grain keeps the terminal-stage TableStageGrains uniform with every other
 /// partition and gives the gather point its own identity or per-table lifecycle.)
+///
+/// PLAN 003 M4: PublishAsync additionally forwards (fromPartition, epoch) to the owning ITableGrain's
+/// OnOutputBatchAsync — a second, direct-call delivery path, separate from (and always alongside) the
+/// unchanged stream republish above. See ITableGrain.OnOutputBatchAsync's doc comment for why: the
+/// coordinator needs (data, epoch) delivered together, atomically, on ONE path it fully controls the
+/// buffering of, to make its frontier honest — riding the existing shared delta stream (whose payload type
+/// and per-partition-immediate-republish behavior several OTHER consumers depend on unchanged) can't give
+/// that guarantee.
 /// </summary>
 public sealed class TableOutputGrain : Grain, ITableOutputGrain
 {
@@ -44,12 +52,19 @@ public sealed class TableOutputGrain : Grain, ITableOutputGrain
         return base.OnDeactivateAsync(reason, cancellationToken);
     }
 
-    public async Task PublishAsync(List<TableDeltaDto> deltas)
+    public async Task PublishAsync(int fromPartition, long epoch, List<TableDeltaDto> deltas)
     {
-        if (_status != PipelineStatus.Running || deltas.Count == 0) return;
+        if (_status != PipelineStatus.Running) return;
 
-        var stream = this.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, this.GetPrimaryKeyString()));
-        await stream.OnNextAsync(deltas);
+        if (deltas.Count > 0)
+        {
+            var stream = this.GetStreamProvider(StreamConstants.ProviderName)
+                .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, this.GetPrimaryKeyString()));
+            await stream.OnNextAsync(deltas);
+        }
+
+        // Plan 003 M4: always forwarded, even when deltas is empty — an empty-epoch marker, exactly like
+        // every other hop in the graph (see this class's doc comment above).
+        await GrainFactory.GetGrain<ITableGrain>(this.GetPrimaryKeyString()).OnOutputBatchAsync(fromPartition, epoch, deltas);
     }
 }

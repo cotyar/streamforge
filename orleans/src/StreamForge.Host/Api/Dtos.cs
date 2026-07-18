@@ -61,7 +61,14 @@ public sealed record ValidateTableResponse(
     IReadOnlyList<string> TableInputs,
     IReadOnlyList<FieldDefDto> OutputSchema);
 
-public sealed record TableRowsResponse(IReadOnlyList<TableRowDto> Rows, int TotalRows, long Seq);
+/// <summary>Plan 003 M4: <paramref name="FrontierEpoch"/> is additive (default null) — non-null only for a
+/// Parallelism &gt;= 2 table's coordinator, once it has observed a full round (see TableGrain's class doc
+/// and TableMetrics.SnapshotFrontierEpoch, which carries the identical value). CONSISTENCY STATEMENT: when
+/// non-null, <paramref name="Rows"/> reflects ALL deltas whose epoch is &lt;= FrontierEpoch and NONE beyond
+/// it — see TableGrain.OnOutputBatchAsync's doc comment for exactly why that's true by construction, not
+/// just by convention. Null for every Parallelism==1 table (classic mode has no partitioned frontier) and
+/// for a Parallelism &gt;= 2 table that hasn't yet completed its first round.</summary>
+public sealed record TableRowsResponse(IReadOnlyList<TableRowDto> Rows, int TotalRows, long Seq, long? FrontierEpoch = null);
 
 // Row history (Feature B). The client hands back the exact row object it already has (from the live grid
 // or a search result) rather than pre-computing/round-tripping an opaque key — the server derives the

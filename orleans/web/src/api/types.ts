@@ -187,6 +187,10 @@ export interface TableRowsResponse {
   rows: TableRowDto[]
   totalRows: number
   seq: number
+  /** Plan 003 M4: non-null only for a parallelism >= 2 table once its coordinator has completed a full
+   * round (see TableMetrics.snapshotFrontierEpoch — same value). When present, `rows` reflects ALL deltas
+   * whose epoch is <= frontierEpoch and NONE beyond it. */
+  frontierEpoch?: number | null
 }
 
 // GET /api/tables/{id}/search?q=&limit= — empty q returns rows: []. A 400 means the table's
@@ -200,9 +204,7 @@ export interface TableSearchResponse {
 
 // Plan 003 M5: one partition's contribution to a parallelized table's aggregate TableMetrics —
 // confirmed empirically against a live P=4 table (curl, editor/editor123!). stageId identifies which
-// TableStageGrain this is (numbering is plan-internal — the backend does not expose the stage's
-// operator kind/alias, e.g. "Reduce" vs "FilterProject" — see DataflowPanel's doc comment for how the
-// UI copes with that).
+// TableStageGrain this is (numbering is plan-internal).
 export interface TablePartitionMetrics {
   stageId: number
   partition: number
@@ -211,6 +213,11 @@ export interface TablePartitionMetrics {
   /** -1 = never advanced yet. */
   frontierEpoch: number
   lastUpdateMs: number
+  /** Plan 003 M4: this stage's real operator name (e.g. "Join" | "SemiAnti" | "Unnest" |
+   * "FilterProject" | "Reduce" | "LatestBy" — see StreamForge.Engine.Dataflow.TableStageKindLabel on the
+   * backend). "" only in the (never-happens-in-practice) case the producing grain never learned its own
+   * stage descriptor. */
+  kind: string
 }
 
 export interface TableMetrics {
@@ -224,6 +231,10 @@ export interface TableMetrics {
   /** Plan 003 M5: per-partition detail, present only for a parallelism >= 2 table — absent for every
    * parallelism == 1 table. */
   partitions?: TablePartitionMetrics[] | null
+  /** Plan 003 M4: the epoch this table's read-side snapshot (rowCount / rows / search) reflects — same
+   * value as TableRowsResponse.frontierEpoch. Non-null only for a parallelism >= 2 table once its
+   * coordinator has completed a full round. */
+  snapshotFrontierEpoch?: number | null
 }
 
 export interface TableOutputField {

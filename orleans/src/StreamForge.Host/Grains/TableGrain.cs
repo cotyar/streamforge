@@ -1,5 +1,7 @@
 using Orleans;
+using Orleans.Concurrency;
 using Orleans.Runtime;
+using Orleans.Serialization.Invocation;
 using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
@@ -52,7 +54,68 @@ public sealed class TableGrainState
 /// precedent in TableRowHistory.cs, which re-derives its own key logic rather than reaching into Engine
 /// internals); a scratch TableExecutor (created, never fed any events) supplies CanonicalRowKey, the one
 /// piece of key-derivation logic that IS already public.
+///
+/// PLAN 003 M4 — FRONTIER-CONSISTENT READS: coordinator mode no longer self-subscribes to its own output
+/// delta stream to feed the read-side snapshot (that was the pre-M4 design). Each terminal-stage
+/// TableStageGrain's ITableOutputGrain.PublishAsync call now ALSO calls this grain's
+/// <see cref="OnOutputBatchAsync"/> directly, carrying (fromPartition, epoch) alongside the deltas; this
+/// grain buffers those per (partition, epoch) with the same FrontierTracker+EpochBuffer M0 primitives every
+/// other dataflow hop uses (_outputFrontier/_outputBuffer below), registered over every terminal-stage
+/// partition, and only consolidates a batch into _coordinatorSnapshot/the search index once EVERY terminal
+/// partition has reported reaching that epoch. <see cref="GetSnapshotFrontierEpochAsync"/> (mirrored on
+/// TableMetrics.SnapshotFrontierEpoch) then reports that same epoch.
+///
+/// THE CONSISTENCY STATEMENT this makes true (not just documented, but true BY CONSTRUCTION — see
+/// OnOutputBatchAsync): at any point a caller observes SnapshotFrontierEpoch == F via GetRowsAsync/
+/// GetMetricsAsync/GetSnapshotFrontierEpochAsync, the rows/search results served AT THAT SAME MOMENT
+/// reflect ALL deltas whose epoch is &lt;= F and NONE beyond it. This holds because (a)
+/// _coordinatorSnapshot is only ever mutated inside OnOutputBatchAsync, synchronously, with no `await`
+/// between reading the newly-ready batches and updating _snapshotFrontierEpoch (Orleans single-threads one
+/// grain's turns, so no GetRowsAsync call can be dispatched mid-way through one OnOutputBatchAsync
+/// invocation), and (b) a batch is never consolidated before _outputFrontier's combined frontier (min over
+/// every terminal partition's own high-water mark) has reached its epoch — so nothing above F is ever
+/// partially reflected, and _snapshotFrontierEpoch is only ever raised to a value that has actually just
+/// been applied, never ahead of it (EpochBuffer.OnFrontier returns exactly the batches whose epoch &lt;=
+/// the new frontier; OnOutputBatchAsync applies precisely those before advancing _snapshotFrontierEpoch to
+/// that same frontier — no gap between "applied" and "reported").
+///
+/// This is a genuine behavior change from the pre-M4 design (see OnOutputBatchAsync's own doc comment, and
+/// ITableOutputGrain.PublishAsync's): the OLD design applied each terminal partition's batch to the
+/// snapshot IMMEDIATELY on arrival, with no cross-partition epoch gating at all, so a GetRowsAsync call
+/// between two partitions' arrivals for what should be "the same round" could observe a genuinely partial
+/// epoch — and there was no frontier signal to report in the first place. The (StreamConstants.
+/// TableDeltaNamespace, tableName) delta stream itself — the one SignalR/TableHistoryGrain/downstream
+/// tables consume — is UNCHANGED: TableOutputGrain still republishes every incoming batch onto it
+/// immediately, in receipt order, exactly as before M4 (see that grain's doc comment).
+///
+/// LATE/OUT-OF-ORDER INPUT POLICY (documented here as the table-wide doc-of-record — see TableIngestGrain's
+/// own doc comment for the partitioned-path mechanism): every event is epoch-stamped at ARRIVAL, by
+/// whichever ingest flush window (250ms tick or 1000-event threshold, whichever first) it lands in — there
+/// is no retro-dating to an earlier epoch and no watermark-based drop at the dataflow layer. A "late" event
+/// (by business-time, e.g. an old order_events row) simply lands in whatever epoch it happens to arrive in;
+/// it is processed exactly like any other delta in that epoch — deterministic, honest, no silent loss.
+/// Table-mode operators have no epoch/watermark-driven eviction (unlike pipelines' windows/joins — see
+/// StreamForge.Engine.Runtime.Ops.ITableOp's doc comment), so nothing here ever expires or gets evicted for
+/// being late. The ONE exception, and it is a QUERY semantic, not a dataflow-layer drop: `LATEST BY` (see
+/// StreamForge.Engine.Runtime.Ops.TableLatestByOp's doc comment) compares the arriving row's OWN Ts field
+/// against the currently-retained row's Ts for that key, and ignores a strictly-older-Ts arrival — that's
+/// business-time ordering the query explicitly asked for, orthogonal to (and unrelated to) dataflow-layer
+/// epoch/arrival-order lateness, which this table (and every other) never drops.
+///
+/// [MayInterleave] ON OnOutputBatchAsync (plan 003 M4, mirrors RegistryGrain's identical fix for an
+/// identical shape of problem — see that class's doc comment): TableOutputGrain.PublishAsync calls back
+/// into THIS grain (the same one orchestrating TableOutputGrain/TableStageGrain's own start/stop) — without
+/// interleaving, a StopAsync turn that's mid-teardown (awaiting some TableStageGrain's own StopAsync, which
+/// can't complete until an in-flight PushBatchAsync finishes routing through TableOutputGrain.PublishAsync
+/// back to THIS grain's OnOutputBatchAsync) deadlocks: OnOutputBatchAsync sits queued behind the very
+/// StopAsync turn that's blocked waiting on it. Safe to interleave because OnOutputBatchAsync's body has no
+/// `await` (runs to completion atomically once started, regardless of what else is mid-flight) and is
+/// guarded by null/status checks that harmlessly no-op against a torn-down or not-yet-fully-started
+/// coordinator (see StopAsync clearing _outputFrontier/_outputBuffer early, and StartCoordinatorAsync's own
+/// ordering comment) — exactly the same "no-op before ready" pattern TableStageGrain/TableOutputGrain
+/// already use for their own `_status != Running` guards.
 /// </summary>
+[MayInterleave(nameof(MayInterleave))]
 public sealed class TableGrain(
     [PersistentState("table", StreamConstants.StorageName)] IPersistentState<TableGrainState> state)
     : Grain, ITableGrain
@@ -81,13 +144,25 @@ public sealed class TableGrain(
     /// (arrangeable edge, partition) — used by StopAsync to detach cleanly and by GetMetricsAsync to fold
     /// each arrangement's own Rebuilding into this table's and to report ArrangedInputs.</summary>
     private List<(string ArrangementKey, string ConsumerId)> _deployedArrangements = [];
-    private StreamSubscriptionHandle<List<TableDeltaDto>>? _coordinatorSub;
     /// <summary>Coordinator mode's own live consolidated Z-set (canonical row key -> (row, weight)) — the
     /// coordinator-mode analogue of TableExecutor's internal `_consolidated` (not reachable from Host —
-    /// see class doc), fed by <see cref="OnCoordinatorDeltaBatchAsync"/> and read by
+    /// see class doc), fed by <see cref="OnOutputBatchAsync"/> and read by
     /// ReflectDeltasInSearchIndex/FlushAsync/SearchAsync exactly where the classic path reads
     /// `_executor.Snapshot()`.</summary>
     private readonly Dictionary<string, (EventRecord Row, long Weight)> _coordinatorSnapshot = [];
+
+    /// <summary>Plan 003 M4 — the M0 primitives (see FrontierTracker/EpochBuffer's own doc comments),
+    /// registered over every terminal-stage partition (one UpstreamId per partition, keyed on the
+    /// compiled dataflow's TerminalEdge.EdgeId — the one edge every terminal partition's own
+    /// RouteDownstreamAsync call reports on), driving <see cref="OnOutputBatchAsync"/>. Null on the
+    /// Parallelism==1 path and before StartCoordinatorAsync has run.</summary>
+    private FrontierTracker? _outputFrontier;
+    private EpochBuffer? _outputBuffer;
+    private EdgeId _terminalEdgeId;
+    /// <summary>Plan 003 M4 — the epoch _coordinatorSnapshot currently, honestly, fully reflects (see class
+    /// doc's consistency statement). Null until OnOutputBatchAsync has observed at least one full round
+    /// (every terminal partition reporting) since the last StartCoordinatorAsync.</summary>
+    private long? _snapshotFrontierEpoch;
 
     public async Task StartAsync(TableDefinition def)
     {
@@ -198,9 +273,18 @@ public sealed class TableGrain(
         }
         _searchIndex = def.SearchEnabled ? new TableSearchIndex(def.SearchMode) : null;
 
-        var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
-        var ownStream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, def.Name));
-        _coordinatorSub = await ownStream.SubscribeAsync((batch, _) => OnCoordinatorDeltaBatchAsync(batch));
+        // Plan 003 M4: initialize the coordinator's own frontier tracker BEFORE deploying anything that
+        // could call back into OnOutputBatchAsync — one UpstreamId per terminal-stage partition, keyed on
+        // the compiled dataflow's own TerminalEdge.EdgeId (see class doc). Safe to set up synchronously
+        // here even though TableGrain is non-reentrant and this call could theoretically race a downstream
+        // callback: any OnOutputBatchAsync call arriving while this StartAsync turn is still in flight is
+        // queued by Orleans behind it, never interleaved — so these fields are always fully initialized
+        // before the first real invocation runs.
+        _terminalEdgeId = dataflow.TerminalEdge.EdgeId;
+        int terminalPartitionCount = dataflow.PartitionCountOf(dataflow.TerminalEdge.FromStageId);
+        _outputFrontier = new FrontierTracker(Enumerable.Range(0, terminalPartitionCount).Select(p => new UpstreamId(_terminalEdgeId, p)));
+        _outputBuffer = new EpochBuffer();
+        _snapshotFrontierEpoch = null;
 
         await GrainFactory.GetGrain<ITableOutputGrain>(def.Name).StartAsync(def);
 
@@ -282,11 +366,11 @@ public sealed class TableGrain(
         }
         _tableSubs.Clear();
 
-        if (_coordinatorSub is not null)
-        {
-            try { await _coordinatorSub.UnsubscribeAsync(); } catch { /* best-effort */ }
-            _coordinatorSub = null;
-        }
+        // Plan 003 M4: no stream subscription to tear down anymore (see class doc) — just drop the
+        // frontier-tracking state so a stopped table reports no stale frontier.
+        _outputFrontier = null;
+        _outputBuffer = null;
+        _snapshotFrontierEpoch = null;
 
         if (_coordinatorMode && _def is not null)
         {
@@ -312,12 +396,23 @@ public sealed class TableGrain(
             _deployedInputs = [];
             _deployedStages = [];
         }
-        _coordinatorMode = false;
 
+        // Plan 003 M4 fix: flush BEFORE clearing _coordinatorMode, not after — FlushAsync's `_coordinatorMode
+        // ? _coordinatorSnapshot : _executor.Snapshot()` branch must still see _coordinatorMode==true here,
+        // otherwise a coordinator-mode table's final on-stop flush silently persists the scratch executor's
+        // (always-empty — see class doc, "never fed an event") snapshot instead of the real
+        // _coordinatorSnapshot, losing every row from the persisted state.State.Snapshot on every stop. This
+        // was a latent pre-M4 bug masked by GetRowsAsync/GetRowCountAsync previously reading the (up to 2s
+        // stale) persisted copy — by the time a poll observed the row count, the periodic 2s flush timer had
+        // usually already run it correctly WHILE _coordinatorMode was still true. M4's live-read fix (see
+        // GetRowsAsync's doc comment) made reads fast enough to reliably outrace that timer, exposing this
+        // ordering bug as a real, reproducible restart-resume data loss — see
+        // TableFrontierClusterTests/PartitionedTableClusterTests' restart-resume assertions.
         if (_dirty)
         {
             await FlushAsync();
         }
+        _coordinatorMode = false;
 
         _executor = null;
         _searchIndex = null;
@@ -333,16 +428,31 @@ public sealed class TableGrain(
         await base.OnDeactivateAsync(reason, cancellationToken);
     }
 
+    /// <summary>Plan 003 M4: coordinator mode (Parallelism &gt;= 2) serves rows from the LIVE
+    /// <see cref="_coordinatorSnapshot"/> rather than the write-behind-persisted state.State.Snapshot (which
+    /// can lag up to the 2s flush-timer interval — see class doc / OnFlushTickAsync). This is required for
+    /// the frontier-consistency statement to actually hold: <see cref="_snapshotFrontierEpoch"/> is advanced
+    /// synchronously, in the same OnOutputBatchAsync call that updates _coordinatorSnapshot, so reading rows
+    /// from anything else (state.State.Snapshot included) could report a frontier ahead of what the rows
+    /// served actually reflect. state.State.Snapshot remains the PERSISTED copy either way — still flushed
+    /// on the same 2s cadence, still what restart-resume reads (see StartCoordinatorAsync's Rebuilding
+    /// logic) — this change only affects which copy live reads are served from, for coordinator mode only;
+    /// the Parallelism==1 path is completely unchanged (still reads state.State.Snapshot, exactly as
+    /// before M4).</summary>
     public Task<List<TableRowDto>> GetRowsAsync(int limit, int offset)
     {
-        var rows = state.State.Snapshot.Values
+        var source = _coordinatorMode
+            ? _coordinatorSnapshot.Values.Select(v => new TableRowDto { Row = new Dictionary<string, object?>(v.Row), Weight = v.Weight })
+            : state.State.Snapshot.Values;
+        var rows = source
             .Skip(Math.Max(0, offset))
             .Take(Math.Max(0, limit))
             .ToList();
         return Task.FromResult(rows);
     }
 
-    public Task<int> GetRowCountAsync() => Task.FromResult(state.State.Snapshot.Count);
+    public Task<int> GetRowCountAsync() =>
+        Task.FromResult(_coordinatorMode ? _coordinatorSnapshot.Count : state.State.Snapshot.Count);
 
     /// <summary>Plan 003 M2: in coordinator mode (Parallelism &gt;= 2), additively fans out to every
     /// deployed TableStageGrain for per-partition detail (TableMetrics.Partitions) — null/absent on the
@@ -377,15 +487,26 @@ public sealed class TableGrain(
         {
             TableId = _def?.Id ?? this.GetPrimaryKeyString(),
             Status = _status,
-            RowCount = state.State.Snapshot.Count,
+            // Plan 003 M4: live count for coordinator mode — see GetRowsAsync's doc comment for why
+            // (state.State.Snapshot lags up to the 2s flush interval; RowCount must agree with
+            // SnapshotFrontierEpoch below, which is also updated live).
+            RowCount = _coordinatorMode ? _coordinatorSnapshot.Count : state.State.Snapshot.Count,
             DeltasIn = _deltasIn,
             DeltasOut = _deltasOut,
             LastUpdateMs = _lastUpdateMs,
             Rebuilding = _rebuilding || arrangementsRebuilding,
             Partitions = partitions,
             ArrangedInputs = arrangedInputs,
+            // Plan 003 M4: see class doc's consistency statement — null for Parallelism==1 (no partitioned
+            // frontier exists) and until the first full round has been observed.
+            SnapshotFrontierEpoch = _coordinatorMode ? _snapshotFrontierEpoch : null,
         };
     }
+
+    /// <summary>Plan 003 M4 — O(1) mirror of TableMetrics.SnapshotFrontierEpoch, for the /rows endpoint (see
+    /// TableRowsResponse.FrontierEpoch) so it doesn't have to pay for GetMetricsAsync's per-partition
+    /// fan-out on every poll just to read one long.</summary>
+    public Task<long?> GetSnapshotFrontierEpochAsync() => Task.FromResult(_coordinatorMode ? _snapshotFrontierEpoch : null);
 
     public Task<long> GetSeqAsync() => Task.FromResult(state.State.Seq);
 
@@ -441,35 +562,70 @@ public sealed class TableGrain(
         }
     }
 
-    /// <summary>Plan 003 M2 coordinator-mode read path: this table's OWN (StreamConstants.TableDeltaNamespace,
-    /// tableName) stream — published by TableOutputGrain — feeds directly into the same
-    /// snapshot+search machinery the classic path uses, via <see cref="_coordinatorSnapshot"/> in place of
-    /// `_executor.Snapshot()` (see class doc). No SQL runs here — the partitioned graph already computed
-    /// these deltas; this grain only consolidates + persists + indexes them for reads.</summary>
-    private Task OnCoordinatorDeltaBatchAsync(List<TableDeltaDto> batch)
+    /// <summary>Plan 003 M4 coordinator-mode read path (replaces the pre-M4 self-subscription design — see
+    /// class doc): called by this table's own ITableOutputGrain.PublishAsync once per terminal-stage
+    /// partition's own frontier advance. Buffers (fromPartition, epoch, deltas) with _outputBuffer and
+    /// observes it on _outputFrontier (the same FrontierTracker+EpochBuffer pattern TableStageGrain.
+    /// PushBatchAsync already uses for every OTHER hop — see that method); only once EVERY terminal
+    /// partition has reported reaching a given epoch does that epoch's batches become "ready", at which
+    /// point — synchronously, no `await` in between — they are consolidated into
+    /// <see cref="_coordinatorSnapshot"/>/the search index AND _snapshotFrontierEpoch is advanced to match.
+    /// That synchronous, no-await body is exactly what makes the class doc's consistency statement true —
+    /// and still holds despite this method being [MayInterleave] (see class doc): interleaving only changes
+    /// which QUEUED turn Orleans picks up next when another turn is suspended at an `await`; it never
+    /// interrupts a synchronous method's body mid-statement. Since neither this method nor GetRowsAsync
+    /// ever yields, one always runs to completion before the other can start — no GetRowsAsync call can
+    /// ever observe _coordinatorSnapshot mid-update, and _snapshotFrontierEpoch never claims more than what
+    /// was just applied. No SQL runs here — the partitioned graph already computed these deltas; this grain
+    /// only consolidates + persists + indexes them for reads.</summary>
+    public Task OnOutputBatchAsync(int fromPartition, long epochValue, List<TableDeltaDto> deltas)
     {
-        if (_status != PipelineStatus.Running || _executor is null || batch.Count == 0) return Task.CompletedTask;
-
-        var deltas = new List<TableDelta>(batch.Count);
-        foreach (var d in batch)
+        if (!_coordinatorMode || _status != PipelineStatus.Running || _executor is null
+            || _outputFrontier is null || _outputBuffer is null)
         {
-            var delta = new TableDelta(new EventRecord(d.Row), d.Weight);
-            deltas.Add(delta);
-            ApplyCoordinatorConsolidation(delta);
+            return Task.CompletedTask;
         }
 
-        _deltasIn += deltas.Count;
-        _deltasOut += deltas.Count; // pure read-side relay: "consumed" and "reflected" are the same count here
-        _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        _rebuilding = false;
-        _dirty = true;
+        var epoch = new Epoch(epochValue);
+        IReadOnlyList<TableDelta> tableDeltas = deltas.Count == 0
+            ? []
+            : deltas.Select(d => new TableDelta(new EventRecord(d.Row), d.Weight)).ToList();
+        _outputBuffer.Add(new DeltaBatch(_terminalEdgeId, fromPartition, epoch, tableDeltas));
 
-        if (_searchIndex is not null)
+        var observation = _outputFrontier.Observe(new UpstreamId(_terminalEdgeId, fromPartition), epoch);
+        if (!observation.Advanced) return Task.CompletedTask; // another terminal partition still holds the frontier back
+
+        var ready = _outputBuffer.OnFrontier(observation.Frontier);
+        var allDeltas = new List<TableDelta>();
+        foreach (var batch in ready) allDeltas.AddRange(batch.Deltas);
+
+        if (allDeltas.Count > 0)
         {
-            ReflectDeltasInSearchIndex(deltas);
+            foreach (var delta in allDeltas) ApplyCoordinatorConsolidation(delta);
+            _deltasIn += allDeltas.Count;
+            _deltasOut += allDeltas.Count; // pure read-side relay: "consumed" and "reflected" are the same count here
+            _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _rebuilding = false; // real traffic observed since resume — mirrors the classic path's own rule (empty epoch markers do NOT clear this)
+            _dirty = true;
+
+            if (_searchIndex is not null)
+            {
+                ReflectDeltasInSearchIndex(allDeltas);
+            }
         }
+
+        // Frontier progress is reported regardless of whether this round carried any real deltas — an
+        // empty epoch still honestly advances what the snapshot is known to reflect (see EpochBuffer's own
+        // doc comment: "an empty epoch still advances ... downstream consumer learn[s] that upstream
+        // reached that epoch with nothing to say").
+        _snapshotFrontierEpoch = observation.Frontier.Value;
         return Task.CompletedTask;
     }
+
+    /// <summary>[MayInterleave] predicate (see class doc) — only OnOutputBatchAsync is allowed to jump the
+    /// queue ahead of/alongside another in-flight turn; everything else (StartAsync/StopAsync/GetRowsAsync/
+    /// etc.) stays strictly serialized, exactly like RegistryGrain's identical MayInterleave predicate.</summary>
+    public static bool MayInterleave(IInvokable req) => req.GetMethodName() == nameof(ITableGrain.OnOutputBatchAsync);
 
     private void ApplyCoordinatorConsolidation(TableDelta delta)
     {

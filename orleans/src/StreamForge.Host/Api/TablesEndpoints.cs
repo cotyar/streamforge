@@ -159,7 +159,8 @@ public static class TablesEndpoints
             var rows = await grain.GetRowsAsync(limit ?? 100, offset ?? 0);
             var total = await grain.GetRowCountAsync();
             var seq = await grain.GetSeqAsync();
-            return Results.Ok(new TableRowsResponse(rows, total, seq));
+            var frontierEpoch = await grain.GetSnapshotFrontierEpochAsync();
+            return Results.Ok(new TableRowsResponse(rows, total, seq, frontierEpoch));
         }).RequireAuthorization("Viewer");
 
         group.MapGet("/{id}/metrics", async (string id, IClusterClient client) =>

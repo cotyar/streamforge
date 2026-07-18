@@ -178,6 +178,12 @@ public sealed class TablePartitionMetrics
     [Id(3)] public long DeltasOut { get; set; }
     [Id(4)] public long FrontierEpoch { get; set; } = -1;
     [Id(5)] public long LastUpdateMs { get; set; }
+    /// <summary>Plan 003 M4: this stage's operator name (StreamForge.Engine.Dataflow.TableStageKind, e.g.
+    /// "Join"/"Reduce"/"FilterProject" — see StreamForge.Engine.Dataflow.TableStageKindLabel), for the M5
+    /// dataflow panel to render real operator names instead of bare stage ids. Additive; "" only if the
+    /// producing grain somehow never learned its own stage descriptor (never happens in practice — see
+    /// TableStageGrain.GetMetricsAsync).</summary>
+    [Id(6)] public string Kind { get; set; } = "";
 }
 
 /// <summary>Serializable mirror of StreamForge.Engine's TableDelta, for Orleans/SignalR transport: one Z-set
@@ -223,6 +229,18 @@ public sealed class TableMetrics
     /// not affect Rebuilding (see that flag's own doc — an attached-but-still-rebuilding-from-checkpoint
     /// arrangement is folded into THIS table's own Rebuilding instead).</summary>
     [Id(8)] public List<string>? ArrangedInputs { get; set; }
+
+    /// <summary>Plan 003 M4: the epoch this table's consolidated read-side snapshot (Snapshot/RowCount/
+    /// search index — everything GetRowsAsync/SearchAsync serve) reflects, for a Parallelism &gt;= 2 table
+    /// only — null/absent for every Parallelism==1 table (which has no partitioned frontier at all) AND
+    /// for a Parallelism &gt;= 2 table that hasn't yet observed a full epoch from every terminal-stage
+    /// partition (see TableGrain's OnOutputBatchAsync doc comment for exactly what this number means and
+    /// the consistency guarantee it carries: the snapshot reflects ALL deltas whose epoch is &lt;= this
+    /// value and NONE beyond it). Mirrors <see cref="Host.Api.TableRowsResponse.FrontierEpoch"/> (same
+    /// value, exposed on the read path that actually needs it) — kept on both DTOs since GetRowsAsync
+    /// callers (REST /rows, StreamForge.Host.Api.TableRowsResponse.FrontierEpoch) shouldn't have to pay
+    /// for a full GetMetricsAsync fan-out just to read it.</summary>
+    [Id(9)] public long? SnapshotFrontierEpoch { get; set; }
 }
 
 /// <summary>
