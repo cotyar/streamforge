@@ -1,5 +1,7 @@
+using StreamForge.Engine.Dataflow;
 using StreamForge.Engine.Planning;
 using StreamForge.Engine.Runtime;
+using StreamForge.Engine.Runtime.Ops;
 
 namespace StreamForge.Engine;
 
@@ -11,17 +13,33 @@ public sealed partial class TablePlan
     internal TablePlan(CompiledTablePlan compiled) => Compiled = compiled;
 }
 
-/// <summary>Single-threaded Z-set runtime for a compiled table: folds JOINs left-to-right through a chain
-/// of <see cref="TableJoinStage"/>s (relational equi-join, both sides fully indexed), applies WHERE
-/// (weight passthrough), then hands surviving (row, weight) deltas to a <see cref="TableGroupOperator"/>
-/// (if grouped/aggregated — emits retraction/assertion pairs) or projects them straight through
-/// (filter/project: weight passthrough). Every emitted delta also folds into this table's own consolidated
-/// output Z-set, exposed via Snapshot().</summary>
+/// <summary>
+/// Façade over the table-mode operator chain (plan 003 M1: "TableExecutor becomes a façade: builds the
+/// op chain from the compiled plan, feeds OnStreamEvent/OnTableDelta through it ... produces identical
+/// outputs"). Builds one <see cref="TableIngestOp"/> per input role, a chain of <see cref="TableJoinOp"/>
+/// (one per JOIN, left-to-right), a <see cref="TableFilterProjectOp"/> (WHERE, +terminal projection when
+/// ungrouped) and — when the plan groups/aggregates — a <see cref="TableReduceOp"/> (GROUP BY, retraction/
+/// assertion emission). Every emitted delta also folds into this table's own consolidated output Z-set,
+/// exposed via Snapshot() — that bookkeeping stays here rather than becoming its own op because it plays
+/// the role plan 003 assigns to a separate grain kind (TableReadGrain), not an operator in the dataflow
+/// graph proper.
+///
+/// EPOCH: single-partition, in-process — table mode has no real partitioning yet (that's M2). Each call
+/// to OnStreamEvent/OnTableDelta is stamped with its own epoch from a trivial monotonically advancing
+/// counter (plan 003 M1: "epoch = a trivial advancing counter"); every op invoked while servicing one
+/// call shares that call's epoch, since the whole call is one atomic admission from this table's point of
+/// view. No op in table mode's OnFrontier hook does anything with epochs yet (see each op's class doc) —
+/// this façade doesn't even call OnFrontier on the hot path for that reason; the hook is proven live via
+/// dedicated per-op unit tests instead (see OpsTests / TableReduceOpTests etc. — OnFrontier pass-through
+/// is asserted there, not exercised through this façade).
+/// </summary>
 public sealed partial class TableExecutor
 {
     private bool _initialized;
-    private readonly List<TableJoinStage> _stages = [];
-    private TableGroupOperator? _group;
+    private readonly List<TableJoinOp> _joins = [];
+    private TableFilterProjectOp? _filterProject;
+    private TableReduceOp? _reduce;
+    private readonly Dictionary<string, TableIngestOp> _ingestOps = [];
 
     // source/table name -> every role it plays in the plan (FROM and/or one or more JOIN aliases).
     private readonly Dictionary<string, List<(bool IsFrom, int StageIndex, string Alias)>> _roles = [];
@@ -29,6 +47,8 @@ public sealed partial class TableExecutor
     // Consolidated output: canonical row text -> (row, weight). Weight <= 0 entries are pruned immediately
     // (DBSP-style consolidation) — Snapshot() only ever exposes weight > 0 rows.
     private readonly Dictionary<string, (EventRecord Row, long Weight)> _consolidated = [];
+
+    private long _epochCounter;
 
     private void EnsureInit()
     {
@@ -40,12 +60,14 @@ public sealed partial class TableExecutor
         for (int i = 0; i < compiled.Joins.Count; i++)
         {
             var j = compiled.Joins[i];
-            _stages.Add(new TableJoinStage(j.LeftKey!, j.RightKey!, j.Residual, compiled.Bindings));
+            _joins.Add(new TableJoinOp(j.LeftKey!, j.RightKey!, j.Residual, compiled.Bindings));
         }
+
+        _filterProject = new TableFilterProjectOp(compiled);
 
         if (compiled.GroupBy is not null || compiled.HasAggregates)
         {
-            _group = new TableGroupOperator(compiled);
+            _reduce = new TableReduceOp(compiled);
         }
 
         AddRole(compiled.Sources[0].SourceName, isFrom: true, stageIndex: -1, compiled.Sources[0].Alias);
@@ -63,6 +85,11 @@ public sealed partial class TableExecutor
             _roles[name] = list;
         }
         list.Add((isFrom, stageIndex, alias));
+
+        if (!_ingestOps.ContainsKey(alias))
+        {
+            _ingestOps[alias] = new TableIngestOp(alias);
+        }
     }
 
     private IReadOnlyList<TableDelta> OnStreamEventCore(string source, EventRecord evt)
@@ -88,31 +115,25 @@ public sealed partial class TableExecutor
         var output = new List<TableDelta>();
         if (!_roles.TryGetValue(name, out var roles)) return output;
 
-        var compiled = _plan.Compiled;
+        var epoch = new Epoch(_epochCounter++);
+        var admission = new List<TableDelta> { new(evt, weight) };
 
         foreach (var role in roles)
         {
-            var initial = WorkingRow.FromEvent(role.Alias, evt);
-            List<(WorkingRow Row, long Weight)> combined = role.IsFrom
-                ? PropagateForward(0, [(initial, weight)])
-                : PropagateForward(role.StageIndex + 1, _stages[role.StageIndex].OnRight(initial, weight));
+            var admitted = _ingestOps[role.Alias].OnBatch(epoch, admission);
 
-            foreach (var (row, w) in combined)
+            var afterJoins = role.IsFrom
+                ? PropagateForward(0, epoch, admitted)
+                : PropagateForward(role.StageIndex + 1, epoch, _joins[role.StageIndex].OnRightBatch(epoch, admitted));
+
+            if (_reduce is not null)
             {
-                if (compiled.Where is not null)
-                {
-                    var ok = ExpressionEvaluator.IsTrue(ExpressionEvaluator.Eval(compiled.Where, new EvalContext(row, compiled.Bindings)));
-                    if (!ok) continue;
-                }
-
-                if (_group is not null)
-                {
-                    output.AddRange(_group.OnDelta(row, w));
-                }
-                else
-                {
-                    output.Add(new TableDelta(ProjectRow(row, compiled), w));
-                }
+                var filtered = _filterProject!.OnBatch(epoch, afterJoins);
+                output.AddRange(_reduce.OnBatch(epoch, filtered));
+            }
+            else
+            {
+                output.AddRange(_filterProject!.OnBatchTerminal(epoch, afterJoins));
             }
         }
 
@@ -124,17 +145,12 @@ public sealed partial class TableExecutor
         return output;
     }
 
-    private List<(WorkingRow Row, long Weight)> PropagateForward(int fromStageIndexInclusive, List<(WorkingRow Row, long Weight)> rows)
+    private IReadOnlyList<TableRowDelta> PropagateForward(int fromStageIndexInclusive, Epoch epoch, IReadOnlyList<TableRowDelta> rows)
     {
         var current = rows;
-        for (int s = fromStageIndexInclusive; s < _stages.Count; s++)
+        for (int s = fromStageIndexInclusive; s < _joins.Count; s++)
         {
-            var next = new List<(WorkingRow, long)>();
-            foreach (var (r, w) in current)
-            {
-                next.AddRange(_stages[s].OnLeft(r, w));
-            }
-            current = next;
+            current = _joins[s].OnLeftBatch(epoch, current);
         }
         return current;
     }
@@ -152,18 +168,5 @@ public sealed partial class TableExecutor
         {
             _consolidated[key] = (delta.Row, delta.Weight);
         }
-    }
-
-    private static EventRecord ProjectRow(WorkingRow row, CompiledTablePlan compiled)
-    {
-        var evt = new EventRecord();
-        var ctx = new EvalContext(row, compiled.Bindings);
-        foreach (var item in compiled.Output)
-        {
-            evt[item.Name] = ExpressionEvaluator.Eval(item.Expression, ctx);
-        }
-        evt[EventRecord.TimestampField] = row.Ts;
-        evt[EventRecord.SourceField] = compiled.SourceLabel;
-        return evt;
     }
 }

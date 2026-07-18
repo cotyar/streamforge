@@ -1,14 +1,24 @@
 using StreamForge.Engine.Sql;
 
-namespace StreamForge.Engine.Runtime;
+namespace StreamForge.Engine.Runtime.Ops;
 
-/// <summary>One stage of a left-to-right folded interval join: `(accumulatedLeft) JOIN rightAlias WITHIN d [ON ...]`.
-/// Buffers both sides; on arrival matches against the opposite buffer immediately; on eviction (watermark passing
-/// entry.Ts + Within) null-pads unmatched LEFT/RIGHT/FULL entries. CROSS matches every currently buffered
-/// opposite-side row, ignoring key and residual.</summary>
-internal sealed class JoinStage
+/// <summary>
+/// One stage of a left-to-right folded interval join: `(accumulatedLeft) JOIN rightAlias WITHIN d [ON ...]`.
+/// Buffers both sides; on arrival matches against the opposite buffer immediately; on eviction (watermark
+/// passing entry.Ts + Within) null-pads unmatched LEFT/RIGHT/FULL entries. CROSS matches every currently
+/// buffered opposite-side row, ignoring key and residual.
+///
+/// Mechanical relocation of the pre-M1 `JoinStage` (Runtime/JoinOperator.cs) into the explicit-op shape
+/// (plan 003 M1 Part B) — algorithm unchanged (buffered interval join, watermark-driven eviction, outer-
+/// join null-padding); only the type name and namespace moved.
+///
+/// STATE: <see cref="Left"/> and <see cref="Right"/> — buffered entries per side, each a plain
+/// (WorkingRow, join key, matched-flag) tuple; bounded by the join's WITHIN window (evicted once the
+/// watermark passes entry.Ts + Within), unlike table mode's unbounded join state.
+/// </summary>
+internal sealed class PipelineJoinOp
 {
-    private sealed class BufEntry
+    internal sealed class BufEntry
     {
         public required WorkingRow Row;
         public object? Key;
@@ -24,10 +34,13 @@ internal sealed class JoinStage
     private readonly WorkingRow _nullRight;
     private readonly WorkingRow _nullLeft;
 
-    private readonly List<BufEntry> _left = [];
-    private readonly List<BufEntry> _right = [];
+    /// <summary>This op's state, left side — buffered entries awaiting either a match or WITHIN eviction.</summary>
+    public List<BufEntry> Left { get; } = [];
 
-    public JoinStage(
+    /// <summary>This op's state, right side — buffered entries awaiting either a match or WITHIN eviction.</summary>
+    public List<BufEntry> Right { get; } = [];
+
+    public PipelineJoinOp(
         JoinKind kind,
         TimeSpan within,
         Expr? leftKey,
@@ -54,8 +67,8 @@ internal sealed class JoinStage
     private List<WorkingRow> OnArrival(WorkingRow row, bool isLeft)
     {
         var results = new List<WorkingRow>();
-        var otherBuf = isLeft ? _right : _left;
-        var ownBuf = isLeft ? _left : _right;
+        var otherBuf = isLeft ? Right : Left;
+        var ownBuf = isLeft ? Left : Right;
 
         if (_kind == JoinKind.Cross)
         {
@@ -96,7 +109,7 @@ internal sealed class JoinStage
     {
         var results = new List<WorkingRow>();
 
-        _left.RemoveAll(e =>
+        Left.RemoveAll(e =>
         {
             if (watermark <= e.Row.Ts + _withinMs) return false;
             if (!e.Matched && (_kind == JoinKind.Left || _kind == JoinKind.Full))
@@ -106,7 +119,7 @@ internal sealed class JoinStage
             return true;
         });
 
-        _right.RemoveAll(e =>
+        Right.RemoveAll(e =>
         {
             if (watermark <= e.Row.Ts + _withinMs) return false;
             if (!e.Matched && (_kind == JoinKind.Right || _kind == JoinKind.Full))

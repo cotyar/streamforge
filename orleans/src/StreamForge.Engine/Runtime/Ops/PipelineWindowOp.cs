@@ -1,14 +1,27 @@
 using StreamForge.Engine.Planning;
 using StreamForge.Engine.Sql;
 
-namespace StreamForge.Engine.Runtime;
+namespace StreamForge.Engine.Runtime.Ops;
 
-/// <summary>Maintains per-(window,group) aggregate state for TUMBLING/HOPPING/SESSION windows.
-/// EMIT CHANGES additionally emits an update row (_final=false) on every contributing input row;
-/// closed windows always emit a final row (watermark passing window end / session gap).</summary>
-internal sealed class WindowOperator(CompiledPlan plan)
+/// <summary>
+/// Maintains per-(window,group) aggregate state for TUMBLING/HOPPING/SESSION windows. EMIT CHANGES
+/// additionally emits an update row (_final=false) on every contributing input row; closed windows always
+/// emit a final row (watermark passing window end / session gap).
+///
+/// Mechanical relocation of the pre-M1 `WindowOperator` (Runtime/WindowOperator.cs) into the explicit-op
+/// shape (plan 003 M1 Part B) — algorithm unchanged (tumbling/hopping/session window resolution, EMIT
+/// CHANGES, watermark-driven close); only the type name and namespace moved.
+///
+/// STATE: <see cref="States"/> (window-key string -> WindowState) and <see cref="OpenSession"/>
+/// (group-key string -> the currently-open session for SESSION windows, a subset view of States kept for
+/// O(1) "is there an open session for this group" lookups — not independent state). Each WindowState
+/// carries Start/End/GroupValues/GroupKeyStr plus a per-aggregate accumulator array (Aggregator[] —
+/// see this M1 pass's residue report on TableReduceOp for the identical caveat: Aggregator's own fields
+/// aren't yet plain POCO data).
+/// </summary>
+internal sealed class PipelineWindowOp(CompiledPlan plan)
 {
-    private sealed class WindowState
+    internal sealed class WindowState
     {
         public required long Start;
         public long End;
@@ -17,8 +30,13 @@ internal sealed class WindowOperator(CompiledPlan plan)
         public required Aggregator[] Aggregators;
     }
 
-    private readonly Dictionary<string, WindowState> _states = [];
-    private readonly Dictionary<string, WindowState> _openSession = [];
+    /// <summary>This op's primary state: window-key string -> running per-window aggregate state.</summary>
+    public Dictionary<string, WindowState> States { get; } = [];
+
+    /// <summary>Derived index (group-key -> currently-open session), SESSION windows only. Not independent
+    /// state — always a subset of <see cref="States"/>'s values.</summary>
+    public Dictionary<string, WindowState> OpenSession { get; } = [];
+
     private long _sessionSeq;
 
     public List<EventRecord> OnRow(WorkingRow row)
@@ -53,7 +71,7 @@ internal sealed class WindowOperator(CompiledPlan plan)
         var results = new List<EventRecord>();
         List<string>? toClose = null;
 
-        foreach (var (key, state) in _states)
+        foreach (var (key, state) in States)
         {
             bool due = plan.Window is SessionWindowSpec sw
                 ? watermark > state.End + (long)Math.Round(sw.Gap.TotalMilliseconds)
@@ -68,11 +86,11 @@ internal sealed class WindowOperator(CompiledPlan plan)
         {
             foreach (var key in toClose)
             {
-                var state = _states[key];
-                _states.Remove(key);
-                if (_openSession.TryGetValue(state.GroupKeyStr, out var open) && ReferenceEquals(open, state))
+                var state = States[key];
+                States.Remove(key);
+                if (OpenSession.TryGetValue(state.GroupKeyStr, out var open) && ReferenceEquals(open, state))
                 {
-                    _openSession.Remove(state.GroupKeyStr);
+                    OpenSession.Remove(state.GroupKeyStr);
                 }
             }
         }
@@ -107,7 +125,7 @@ internal sealed class WindowOperator(CompiledPlan plan)
             case SessionWindowSpec s:
             {
                 long gap = (long)Math.Round(s.Gap.TotalMilliseconds);
-                if (_openSession.TryGetValue(groupKeyStr, out var open) && ts <= open.End + gap)
+                if (OpenSession.TryGetValue(groupKeyStr, out var open) && ts <= open.End + gap)
                 {
                     open.End = Math.Max(open.End, ts);
                     return [open];
@@ -120,8 +138,8 @@ internal sealed class WindowOperator(CompiledPlan plan)
                     GroupKeyStr = groupKeyStr,
                     Aggregators = CreateAggregators(),
                 };
-                _states[$"S|{groupKeyStr}|{_sessionSeq++}"] = created;
-                _openSession[groupKeyStr] = created;
+                States[$"S|{groupKeyStr}|{_sessionSeq++}"] = created;
+                OpenSession[groupKeyStr] = created;
                 return [created];
             }
             default:
@@ -132,7 +150,7 @@ internal sealed class WindowOperator(CompiledPlan plan)
     private WindowState GetOrCreate(long start, long end, string groupKeyStr, object?[] groupValues)
     {
         var key = $"{start}|{end}|{groupKeyStr}";
-        if (_states.TryGetValue(key, out var existing)) return existing;
+        if (States.TryGetValue(key, out var existing)) return existing;
         var state = new WindowState
         {
             Start = start,
@@ -141,7 +159,7 @@ internal sealed class WindowOperator(CompiledPlan plan)
             GroupKeyStr = groupKeyStr,
             Aggregators = CreateAggregators(),
         };
-        _states[key] = state;
+        States[key] = state;
         return state;
     }
 
@@ -158,7 +176,7 @@ internal sealed class WindowOperator(CompiledPlan plan)
     private static string EncodeGroupKey(object?[] values)
     {
         if (values.Length == 0) return "∅";
-        return string.Join("\u001F", values.Select(v => v switch
+        return string.Join("", values.Select(v => v switch
         {
             null => "N",
             long l => $"L:{l}",

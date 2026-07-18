@@ -1,5 +1,6 @@
 using StreamForge.Engine.Planning;
 using StreamForge.Engine.Runtime;
+using StreamForge.Engine.Runtime.Ops;
 using StreamForge.Engine.Sql;
 
 namespace StreamForge.Engine;
@@ -12,16 +13,24 @@ public sealed partial class PipelinePlan
     internal PipelinePlan(CompiledPlan compiled) => Compiled = compiled;
 }
 
-/// <summary>Single-threaded runtime for a compiled pipeline: folds JOINs left-to-right through a chain of
-/// <see cref="JoinStage"/>s, applies WHERE, then hands surviving rows to a <see cref="WindowOperator"/> (if
-/// windowed) or projects them immediately.</summary>
-public sealed partial class PipelineExecutor
+/// <summary>
+/// Façade over the pipeline-mode operator chain (plan 003 M1 Part B — the streaming-executor analogue of
+/// TableExecutor's table-mode façade). Builds a chain of <see cref="PipelineJoinOp"/> (one per JOIN,
+/// left-to-right), a <see cref="PipelineFilterProjectOp"/> (WHERE, +terminal projection when unwindowed)
+/// and — when the plan windows — a <see cref="PipelineWindowOp"/>. Implements
+/// <see cref="IPipelineOpChain"/> (declared on THIS partial-class part, not PublicApi.cs — PublicApi.cs's
+/// frozen signatures are untouched) so a whole compiled pipeline's executor can be embedded as a node
+/// feeding another chain's OnEvent calls (plan 004 N1's derived-table/windows-in-windows seam — see
+/// IPipelineOpChain's doc comment and PipelineComposabilityTests for a hand-built proof).
+/// </summary>
+public sealed partial class PipelineExecutor : IPipelineOpChain
 {
     private const long AllowedLatenessMs = 1000;
 
     private bool _initialized;
-    private readonly List<JoinStage> _stages = [];
-    private WindowOperator? _window;
+    private readonly List<PipelineJoinOp> _joins = [];
+    private PipelineFilterProjectOp? _filterProject;
+    private PipelineWindowOp? _window;
 
     // sourceName -> every role that source plays in the plan (FROM and/or one or more JOIN aliases;
     // a source referenced twice under different aliases gets the event delivered to every alias).
@@ -40,11 +49,12 @@ public sealed partial class PipelineExecutor
         for (int i = 0; i < compiled.Joins.Count; i++)
         {
             var j = compiled.Joins[i];
-            _stages.Add(new JoinStage(j.Kind, j.Within, j.LeftKey, j.RightKey, j.Residual, compiled.Bindings, accumulated.ToList(), (j.Alias, j.Schema)));
+            _joins.Add(new PipelineJoinOp(j.Kind, j.Within, j.LeftKey, j.RightKey, j.Residual, compiled.Bindings, accumulated.ToList(), (j.Alias, j.Schema)));
             accumulated.Add((j.Alias, j.Schema));
         }
 
-        if (compiled.Window is not null) _window = new WindowOperator(compiled);
+        _filterProject = new PipelineFilterProjectOp(compiled);
+        if (compiled.Window is not null) _window = new PipelineWindowOp(compiled);
 
         AddRole(compiled.Sources[0].SourceName, isFrom: true, stageIndex: -1, compiled.Sources[0].Alias);
         for (int i = 0; i < compiled.Joins.Count; i++)
@@ -82,7 +92,7 @@ public sealed partial class PipelineExecutor
                 var initial = WorkingRow.FromEvent(role.Alias, evt);
                 List<WorkingRow> combinedRows = role.IsFrom
                     ? PropagateForward(0, [initial])
-                    : PropagateForward(role.StageIndex + 1, _stages[role.StageIndex].OnRight(initial));
+                    : PropagateForward(role.StageIndex + 1, _joins[role.StageIndex].OnRight(initial));
                 ProcessRows(combinedRows, results);
             }
         }
@@ -103,9 +113,9 @@ public sealed partial class PipelineExecutor
 
         var results = new List<EventRecord>();
 
-        for (int i = 0; i < _stages.Count; i++)
+        for (int i = 0; i < _joins.Count; i++)
         {
-            var evicted = _stages[i].Evict(newWatermark);
+            var evicted = _joins[i].Evict(newWatermark);
             var propagated = PropagateForward(i + 1, evicted);
             ProcessRows(propagated, results);
         }
@@ -118,10 +128,10 @@ public sealed partial class PipelineExecutor
     private List<WorkingRow> PropagateForward(int fromStageIndexInclusive, List<WorkingRow> rows)
     {
         var current = rows;
-        for (int s = fromStageIndexInclusive; s < _stages.Count; s++)
+        for (int s = fromStageIndexInclusive; s < _joins.Count; s++)
         {
             var next = new List<WorkingRow>();
-            foreach (var r in current) next.AddRange(_stages[s].OnLeft(r));
+            foreach (var r in current) next.AddRange(_joins[s].OnLeft(r));
             current = next;
         }
         return current;
@@ -129,36 +139,14 @@ public sealed partial class PipelineExecutor
 
     private void ProcessRows(List<WorkingRow> rows, List<EventRecord> results)
     {
-        var compiled = _plan.Compiled;
-        foreach (var row in rows)
+        if (_window is not null)
         {
-            if (compiled.Where is not null)
-            {
-                var whereResult = ExpressionEvaluator.Eval(compiled.Where, new EvalContext(row, compiled.Bindings));
-                if (!ExpressionEvaluator.IsTrue(whereResult)) continue;
-            }
-
-            if (_window is not null)
-            {
-                results.AddRange(_window.OnRow(row));
-            }
-            else
-            {
-                results.Add(ProjectRow(row, compiled));
-            }
+            var filtered = _filterProject!.OnBatch(rows);
+            foreach (var row in filtered) results.AddRange(_window.OnRow(row));
         }
-    }
-
-    private static EventRecord ProjectRow(WorkingRow row, CompiledPlan compiled)
-    {
-        var evt = new EventRecord();
-        var ctx = new EvalContext(row, compiled.Bindings);
-        foreach (var item in compiled.Output)
+        else
         {
-            evt[item.Name] = ExpressionEvaluator.Eval(item.Expression, ctx);
+            results.AddRange(_filterProject!.OnBatchTerminal(rows));
         }
-        evt[EventRecord.TimestampField] = row.Ts;
-        evt[EventRecord.SourceField] = compiled.SourceLabel;
-        return evt;
     }
 }
