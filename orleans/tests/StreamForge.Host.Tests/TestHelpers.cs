@@ -44,6 +44,37 @@ internal static class TestHelpers
     /// silently collide onto the same field number and DescriptorFactory emits an invalid descriptor
     /// with a repeated field name) — a latent pre-existing gap, out of scope here, avoided by using
     /// unique names throughout.</summary>
+    /// <summary>A repeated nested-message field: "legs" is IsArray + Children (each element shaped like
+    /// a small leg record) — DescriptorFactory should render this as "repeated Legs legs". Used by the
+    /// Repeated*/Multileg* test suites (Phase L1 typed leg arrays).</summary>
+    public static readonly List<FieldDef> RepeatedNestedFields =
+    [
+        new FieldDef("trade_id", FieldType.String),
+        new FieldDef("legs", FieldType.Json, Children:
+        [
+            new FieldDef("leg_no", FieldType.Long),
+            new FieldDef("ccy", FieldType.String),
+            new FieldDef("notional", FieldType.Double),
+            new FieldDef("active", FieldType.Bool),
+            new FieldDef("as_of", FieldType.Timestamp),
+        ], IsArray: true),
+    ];
+
+    /// <summary>A repeated scalar field: "tags" is IsArray with no Children -> repeated string.</summary>
+    public static readonly List<FieldDef> RepeatedScalarFields =
+    [
+        new FieldDef("id", FieldType.String),
+        new FieldDef("tags", FieldType.String, IsArray: true),
+    ];
+
+    /// <summary>A repeated schemaless Json field: "blobs" is IsArray + Type=Json + no Children ->
+    /// repeated google.protobuf.Struct.</summary>
+    public static readonly List<FieldDef> RepeatedStructFields =
+    [
+        new FieldDef("id", FieldType.String),
+        new FieldDef("blobs", FieldType.Json, IsArray: true),
+    ];
+
     public static readonly List<FieldDef> KitchenSinkFields =
     [
         new FieldDef("event_type", FieldType.String),

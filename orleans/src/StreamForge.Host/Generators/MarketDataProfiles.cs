@@ -28,6 +28,14 @@ public static class MarketDataProfiles
     private static readonly string[] AppEventTypes = ["order.placed", "order.amended", "order.cancelled"];
     private static readonly string[] TagPool = ["web", "mobile", "api", "priority", "retry"];
 
+    private static readonly string[] Ccys = ["USD", "EUR", "GBP", "JPY"];
+    private static readonly string[] OptionStrategyProducts = ["STRADDLE", "STRANGLE", "FLY"];
+
+    private static string RandomCcy() => Ccys[Random.Shared.Next(Ccys.Length)];
+
+    /// <summary>A round-ish notional, e.g. 12,000,000 — plausible for an IR swap leg.</summary>
+    private static double RandomNotional() => Random.Shared.Next(1, 100) * 1_000_000.0;
+
     /// <summary>Random non-empty subset of <see cref="TagPool"/>, as a JSON array value (List&lt;object?&gt;
     /// of string leaves) — used to exercise the JSON value domain's list side in the demo payload.</summary>
     private static List<object?> RandomTagSubset()
@@ -119,6 +127,70 @@ public static class MarketDataProfiles
 
                 evt["eventType"] = AppEventTypes[Random.Shared.Next(AppEventTypes.Length)];
                 evt["payload"] = payload;
+                break;
+            }
+
+            case "multileg":
+            {
+                // Alternates between two multileg instrument families sharing one typed "legs" array
+                // schema (see SeedSources' combined Leg field list): IR swaps (2 fixed-shape legs) and
+                // option strategies (2-4 legs). Each leg dict only sets the fields relevant to its own
+                // family — the rest are simply absent, which both EventRecord and ProtoWireEncoder
+                // already treat as "omit that field for this element" (proto3 default semantics).
+                var tradeId = $"T-{Random.Shared.Next(100_000, 999_999)}";
+                evt["trade_id"] = tradeId;
+
+                if (Random.Shared.NextDouble() < 0.5)
+                {
+                    var ccy = RandomCcy();
+                    evt["product"] = "IRS";
+                    evt["notional_ccy"] = ccy;
+                    evt["legs"] = new List<object?>
+                    {
+                        new Dictionary<string, object?>
+                        {
+                            ["leg_no"] = 1L,
+                            ["pay_rcv"] = "PAY",
+                            ["notional"] = RandomNotional(),
+                            ["ccy"] = ccy,
+                            ["rate_type"] = "FIXED",
+                            ["rate"] = Math.Round(Random.Shared.NextDouble() * 5, 3),
+                        },
+                        new Dictionary<string, object?>
+                        {
+                            ["leg_no"] = 2L,
+                            ["pay_rcv"] = "RCV",
+                            ["notional"] = RandomNotional(),
+                            ["ccy"] = ccy,
+                            ["rate_type"] = "FLOAT",
+                            ["rate"] = Math.Round(Random.Shared.NextDouble() * 5, 3),
+                        },
+                    };
+                }
+                else
+                {
+                    var product = OptionStrategyProducts[Random.Shared.Next(OptionStrategyProducts.Length)];
+                    var legCount = product == "FLY" ? Random.Shared.Next(3, 5) : 2; // STRADDLE/STRANGLE: 2, FLY: 3-4
+                    var symbol = RandomSymbol();
+                    var mid = NextMid(symbol);
+                    var expiryTs = DateTimeOffset.UtcNow.AddDays(Random.Shared.Next(7, 180)).ToUnixTimeMilliseconds();
+
+                    evt["product"] = product;
+                    var legs = new List<object?>();
+                    for (var legNo = 1; legNo <= legCount; legNo++)
+                    {
+                        var strikeOffset = (legNo - (legCount + 1) / 2.0) * 0.02;
+                        legs.Add(new Dictionary<string, object?>
+                        {
+                            ["leg_no"] = (long)legNo,
+                            ["cp"] = legNo % 2 == 0 ? "PUT" : "CALL",
+                            ["strike"] = Math.Round(mid * (1 + strikeOffset), 2),
+                            ["expiry_ts"] = expiryTs,
+                            ["ratio"] = 1.0,
+                        });
+                    }
+                    evt["legs"] = legs;
+                }
                 break;
             }
 
@@ -239,6 +311,41 @@ public static class MarketDataProfiles
                     ]),
                     new FieldDef("tags", FieldType.Json),
                 ]),
+            ],
+        },
+        new SourceDefinition
+        {
+            Name = "structures",
+            Description = "Synthetic multileg instruments: IR swaps and option strategies (Phase L1 typed leg arrays)",
+            GeneratorProfile = "multileg",
+            EventsPerSecond = 3,
+            Enabled = true,
+            Fields =
+            [
+                new FieldDef("trade_id", FieldType.String),
+                // "IRS" (interest-rate swap) or one of OptionStrategyProducts (STRADDLE/STRANGLE/FLY).
+                new FieldDef("product", FieldType.String),
+                // Swaps only; absent (omitted) for option-strategy events.
+                new FieldDef("notional_ccy", FieldType.String),
+                // Typed leg list: IsArray + Children -> DescriptorFactory emits a repeated nested
+                // message. The Leg shape is a union of both instrument families' leg fields — each
+                // generated leg dict only populates the subset relevant to its own product, leaving the
+                // rest absent (proto3 "missing = omitted" semantics, same as any other field).
+                new FieldDef("legs", FieldType.Json, Children:
+                [
+                    new FieldDef("leg_no", FieldType.Long),
+                    // -- IR swap leg fields --
+                    new FieldDef("pay_rcv", FieldType.String),
+                    new FieldDef("notional", FieldType.Double),
+                    new FieldDef("ccy", FieldType.String),
+                    new FieldDef("rate_type", FieldType.String),
+                    new FieldDef("rate", FieldType.Double),
+                    // -- option-strategy leg fields --
+                    new FieldDef("cp", FieldType.String),
+                    new FieldDef("strike", FieldType.Double),
+                    new FieldDef("expiry_ts", FieldType.Timestamp),
+                    new FieldDef("ratio", FieldType.Double),
+                ], IsArray: true),
             ],
         },
     ];

@@ -6,12 +6,21 @@ public enum FieldType { String, Double, Long, Bool, Timestamp, Json }
 /// <summary>A source field. <see cref="Children"/> is the declared nested shape of a
 /// <see cref="FieldType.Json"/> field (drill-down schema) — metadata that documents the payload,
 /// drives synthetic generation for the "generic" profile, and feeds editor autocomplete. Null/empty
-/// for scalar fields.</summary>
+/// for scalar fields.
+///
+/// <para><see cref="IsArray"/> (additive, default false): the field holds a JSON array rather than a
+/// single value. Combined with the other two: IsArray + <see cref="Children"/> declared = a typed list
+/// of records (each element shaped like <see cref="Children"/>) — DescriptorFactory emits a repeated
+/// nested message. IsArray + no Children (and Type != Json) = a repeated scalar of <see cref="Type"/>.
+/// IsArray + Type == Json + no Children = a repeated schemaless value — DescriptorFactory emits
+/// repeated google.protobuf.Struct. Orthogonal to Type/Children, so every existing combination keeps
+/// its current (non-array) meaning.</para></summary>
 [GenerateSerializer]
 public sealed record FieldDef(
     [property: Id(0)] string Name,
     [property: Id(1)] FieldType Type,
-    [property: Id(2)] List<FieldDef>? Children = null);
+    [property: Id(2)] List<FieldDef>? Children = null,
+    [property: Id(3)] bool IsArray = false);
 
 /// <summary>A stream source: schema + synthetic generator settings.</summary>
 [GenerateSerializer]

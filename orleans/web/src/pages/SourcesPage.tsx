@@ -115,6 +115,17 @@ function FieldEditor({
             </Select>
             <Button
               type="button"
+              variant={f.isArray ? 'secondary' : 'ghost'}
+              size="icon-sm"
+              className="shrink-0 font-mono text-[11px]"
+              title={f.isArray ? 'List field (repeated) — click to make it scalar' : 'Make this a list (repeated) field'}
+              aria-pressed={!!f.isArray}
+              onClick={() => update(i, { isArray: !f.isArray })}
+            >
+              []
+            </Button>
+            <Button
+              type="button"
               variant="ghost"
               size="icon-sm"
               className="hover:text-destructive"
@@ -162,6 +173,7 @@ function SchemaNode({ field, depth }: { field: FieldDef; depth: number }) {
             <span className="inline-block size-3" />
           )}
           {field.name}
+          {field.isArray && <span className="text-muted-foreground/70">[]</span>}
         </span>
         <span className="text-muted-foreground">{field.type}</span>
       </div>

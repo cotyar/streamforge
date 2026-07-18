@@ -23,6 +23,11 @@ namespace StreamForge.Host.Grpc.Dynamic;
 /// <para>Wire types: string/nested-message/Struct → length-delimited; double → fixed64; long/bool/
 /// Timestamp(millis) → varint; the envelope's <c>weight</c> → sint64 (zigzag varint) via
 /// <see cref="CodedOutputStream.WriteSInt64"/>, which zigzag-encodes internally.</para>
+///
+/// <para><see cref="FieldDef.IsArray"/> fields expect a <c>List&lt;object?&gt;</c> (or other
+/// <c>IEnumerable&lt;object?&gt;</c>) value; each non-null element is written as its own tag+value entry
+/// at the field's number (plain/unpacked repeated — see <see cref="WriteRepeatedField"/>). An empty or
+/// all-null list omits the field entirely, same as a missing/null scalar.</para>
 /// </summary>
 public static class ProtoWireEncoder
 {
@@ -89,37 +94,79 @@ public static class ProtoWireEncoder
             var path = FieldNumberMap.ChildPath(scope, f.Name);
             var number = numbers.Active[path];
 
-            switch (f.Type)
+            if (f.IsArray)
             {
-                case FieldType.String:
-                    output.WriteTag(number, WireFormat.WireType.LengthDelimited);
-                    output.WriteString(ToStringValue(value));
-                    break;
-                case FieldType.Double:
-                    output.WriteTag(number, WireFormat.WireType.Fixed64);
-                    output.WriteDouble(ToDouble(value));
-                    break;
-                case FieldType.Long:
-                    output.WriteTag(number, WireFormat.WireType.Varint);
-                    output.WriteInt64(ToInt64(value));
-                    break;
-                case FieldType.Bool:
-                    output.WriteTag(number, WireFormat.WireType.Varint);
-                    output.WriteBool(ToBool(value));
-                    break;
-                case FieldType.Timestamp:
-                    output.WriteTag(number, WireFormat.WireType.Varint);
-                    output.WriteInt64(ToInt64(value)); // already epoch millis
-                    break;
-                case FieldType.Json when f.Children is { Count: > 0 }:
-                    WriteNestedMessage(output, number, path, f.Children, numbers, value);
-                    break;
-                case FieldType.Json:
-                    WriteStructField(output, number, value);
-                    break;
-                default:
-                    throw new ArgumentOutOfRangeException(nameof(defs), f.Type, "Unknown field type");
+                WriteRepeatedField(output, number, path, f, numbers, value);
             }
+            else
+            {
+                WriteFieldValue(output, number, path, f, numbers, value);
+            }
+        }
+    }
+
+    /// <summary>Writes an IsArray field as plain (non-packed) repeated entries: one tag+value per
+    /// element, all at the same field number — valid proto3 wire data for every field kind this library
+    /// emits (length-delimited kinds have no packed form at all; for varint/fixed64 scalar kinds, a
+    /// conformant reader accepts unpacked entries interchangeably with the packed form real protoc
+    /// output would use, per the protobuf encoding spec). An empty (or entirely-null) list writes
+    /// nothing, so the field is omitted exactly like a missing/null scalar.</summary>
+    private static void WriteRepeatedField(
+        CodedOutputStream output, int number, string path, FieldDef f, FieldNumberMap numbers, object value)
+    {
+        if (value is not IEnumerable<object?> list)
+        {
+            throw new InvalidOperationException(
+                $"Field \"{path}\" is declared IsArray and requires a List<object?> (or other IEnumerable<object?>) value; got {value.GetType()}.");
+        }
+
+        foreach (var element in list)
+        {
+            if (element is null)
+            {
+                continue; // proto3: a null list element carries no value to write - skip it, matching the missing/null-scalar convention above
+            }
+            WriteFieldValue(output, number, path, f, numbers, element);
+        }
+    }
+
+    /// <summary>Writes one value (a scalar leaf, a nested-message element, or a schemaless Json/Struct
+    /// element) at <paramref name="number"/>, dispatching on <paramref name="f"/>.Type exactly like the
+    /// non-array case — shared by both the singular field path and each element of a repeated field, so
+    /// element shape is guaranteed identical to the non-array shape for the same FieldDef.Type/Children.</summary>
+    private static void WriteFieldValue(
+        CodedOutputStream output, int number, string path, FieldDef f, FieldNumberMap numbers, object value)
+    {
+        switch (f.Type)
+        {
+            case FieldType.String:
+                output.WriteTag(number, WireFormat.WireType.LengthDelimited);
+                output.WriteString(ToStringValue(value));
+                break;
+            case FieldType.Double:
+                output.WriteTag(number, WireFormat.WireType.Fixed64);
+                output.WriteDouble(ToDouble(value));
+                break;
+            case FieldType.Long:
+                output.WriteTag(number, WireFormat.WireType.Varint);
+                output.WriteInt64(ToInt64(value));
+                break;
+            case FieldType.Bool:
+                output.WriteTag(number, WireFormat.WireType.Varint);
+                output.WriteBool(ToBool(value));
+                break;
+            case FieldType.Timestamp:
+                output.WriteTag(number, WireFormat.WireType.Varint);
+                output.WriteInt64(ToInt64(value)); // already epoch millis
+                break;
+            case FieldType.Json when f.Children is { Count: > 0 }:
+                WriteNestedMessage(output, number, path, f.Children, numbers, value);
+                break;
+            case FieldType.Json:
+                WriteStructField(output, number, value);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(f), f.Type, "Unknown field type");
         }
     }
 

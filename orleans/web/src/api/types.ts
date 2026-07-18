@@ -13,6 +13,11 @@ export interface FieldDef {
   type: FieldType
   /** Declared nested shape of a `Json` field (drill-down schema). Absent for scalar fields. */
   children?: FieldDef[]
+  /** The field holds a JSON array rather than a single value (additive; absent/false = scalar, the
+   * pre-existing default). Combined with the other two: isArray + children = a typed list of records
+   * (each element shaped like `children`); isArray + no children (type != 'Json') = a repeated scalar;
+   * isArray + type 'Json' + no children = a repeated schemaless value. */
+  isArray?: boolean
 }
 
 // ============================================================================

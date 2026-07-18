@@ -29,6 +29,12 @@ public sealed record GeneratedSchema(
 /// commented), Json with declared <see cref="FieldDef.Children"/>→a nested message type (recursively),
 /// Json without children (schemaless)→google.protobuf.Struct.</para>
 ///
+/// <para><see cref="FieldDef.IsArray"/>→proto3 <c>repeated</c> on the field, orthogonal to the type
+/// mapping above: a repeated nested message (Children declared), a repeated scalar, or repeated
+/// google.protobuf.Struct (schemaless Json). <see cref="FieldNumberMap"/> numbering is unaffected —
+/// an array field's Children still scope by the array field's own path, exactly like a non-array Json
+/// field's Children.</para>
+///
 /// <para>Alongside the entity's own message, two envelope messages are always generated so both
 /// pipeline results and table deltas have typed wrappers:
 /// <c>{Entity}Event</c> { row, int64 seq, int64 ts_ms } and
@@ -115,34 +121,41 @@ public static class DescriptorFactory
             {
                 Name = f.Name,
                 Number = number,
-                Label = FieldDescriptorProto.Types.Label.Optional,
+                // IsArray -> "repeated": the wire cardinality (element shape is otherwise identical to
+                // the non-array case — see ProtoWireEncoder for the matching repeated-write logic).
+                Label = f.IsArray ? FieldDescriptorProto.Types.Label.Repeated : FieldDescriptorProto.Types.Label.Optional,
             };
+            var arraySuffix = f.IsArray ? ", repeated" : "";
 
             string comment;
             switch (f.Type)
             {
                 case FieldType.String:
                     fieldProto.Type = FieldDescriptorProto.Types.Type.String;
-                    comment = "StreamForge: String";
+                    comment = "StreamForge: String" + arraySuffix;
                     break;
                 case FieldType.Double:
                     fieldProto.Type = FieldDescriptorProto.Types.Type.Double;
-                    comment = "StreamForge: Double";
+                    comment = "StreamForge: Double" + arraySuffix;
                     break;
                 case FieldType.Long:
                     fieldProto.Type = FieldDescriptorProto.Types.Type.Int64;
-                    comment = "StreamForge: Long";
+                    comment = "StreamForge: Long" + arraySuffix;
                     break;
                 case FieldType.Bool:
                     fieldProto.Type = FieldDescriptorProto.Types.Type.Bool;
-                    comment = "StreamForge: Bool";
+                    comment = "StreamForge: Bool" + arraySuffix;
                     break;
                 case FieldType.Timestamp:
                     fieldProto.Type = FieldDescriptorProto.Types.Type.Int64;
-                    comment = "StreamForge: Timestamp (epoch milliseconds)";
+                    comment = "StreamForge: Timestamp (epoch milliseconds)" + arraySuffix;
                     break;
                 case FieldType.Json when f.Children is { Count: > 0 }:
                 {
+                    // IsArray + Children: a typed list of records — the nested message describes ONE
+                    // element's shape; "repeated" (above) carries the list-ness. Naming intentionally
+                    // matches the non-array case (PascalCase of the field name, e.g. "legs" -> "Legs")
+                    // rather than singularizing — see DescriptorFactory's doc comment.
                     var nestedName = ToPascalCase(f.Name);
                     var nestedFqn = fqnPrefix + "." + nestedName;
                     var nestedMsg = BuildMessage(nestedName, nestedFqn, path, f.Children, numbers, state);
@@ -150,14 +163,16 @@ public static class DescriptorFactory
                     msg.NestedType.Add(nestedMsg);
                     fieldProto.Type = FieldDescriptorProto.Types.Type.Message;
                     fieldProto.TypeName = "." + nestedFqn;
-                    comment = "StreamForge: Json (nested)";
+                    comment = "StreamForge: Json (nested)" + arraySuffix;
                     break;
                 }
                 case FieldType.Json:
+                    // IsArray + Type=Json + no Children: repeated google.protobuf.Struct (a list of
+                    // schemaless values), same well-known type as the singular schemaless case.
                     fieldProto.Type = FieldDescriptorProto.Types.Type.Message;
                     fieldProto.TypeName = StructTypeName;
                     state.NeedsStruct = true;
-                    comment = "StreamForge: Json (schemaless)";
+                    comment = "StreamForge: Json (schemaless)" + arraySuffix;
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(defs), f.Type, "Unknown field type");
@@ -280,16 +295,22 @@ public static class DescriptorFactory
         sb.Append(pad).Append("}\n");
     }
 
-    private static string FieldTypeText(FieldDescriptorProto field) => field.Type switch
+    private static string FieldTypeText(FieldDescriptorProto field)
     {
-        FieldDescriptorProto.Types.Type.String => "string",
-        FieldDescriptorProto.Types.Type.Double => "double",
-        FieldDescriptorProto.Types.Type.Int64 => "int64",
-        FieldDescriptorProto.Types.Type.Bool => "bool",
-        FieldDescriptorProto.Types.Type.Sint64 => "sint64",
-        FieldDescriptorProto.Types.Type.Message => field.TypeName == StructTypeName ? "google.protobuf.Struct" : field.TypeName.Split('.')[^1],
-        _ => throw new ArgumentOutOfRangeException(nameof(field), field.Type, "Unhandled field type in text renderer"),
-    };
+        var baseType = field.Type switch
+        {
+            FieldDescriptorProto.Types.Type.String => "string",
+            FieldDescriptorProto.Types.Type.Double => "double",
+            FieldDescriptorProto.Types.Type.Int64 => "int64",
+            FieldDescriptorProto.Types.Type.Bool => "bool",
+            FieldDescriptorProto.Types.Type.Sint64 => "sint64",
+            FieldDescriptorProto.Types.Type.Message => field.TypeName == StructTypeName ? "google.protobuf.Struct" : field.TypeName.Split('.')[^1],
+            _ => throw new ArgumentOutOfRangeException(nameof(field), field.Type, "Unhandled field type in text renderer"),
+        };
+        // proto3 "repeated" cardinality prefix — mirrors FieldDescriptorProto.Label, set from
+        // FieldDef.IsArray in BuildMessage above.
+        return field.Label == FieldDescriptorProto.Types.Label.Repeated ? "repeated " + baseType : baseType;
+    }
 
     // ------------------------------------------------------------------
     // Naming

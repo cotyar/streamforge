@@ -244,8 +244,11 @@ function resolveFieldRef(
 
 /**
  * When the caret sits inside an open JSON-path string (`payload -> 'user' ->> 'ti…`), resolves the
- * declared nested schema at that depth and offers the child keys. Returns null when not in that context
- * or when the field has no declared `children`.
+ * declared nested schema at that depth and offers the child keys. An integer-index step
+ * (`legs -> 0 -> …`) unwraps one array level instead of descending into a named child: the element of
+ * an `isArray` field is shaped like that same field's declared `children`, so the FieldDef reference
+ * doesn't change, only the "are we still inside the array" bookkeeping does. Returns null when not in
+ * that context or when the field (after unwrapping) has no declared `children`.
  */
 function jsonKeyContext(
   value: string,
@@ -254,17 +257,24 @@ function jsonKeyContext(
   byName: Map<string, SourceDefinition>,
   referencedSourceNames: string[],
 ): { candidates: Suggestion[]; wordStart: number; prefix: string } | null {
-  // base column ref, then zero or more completed `-> 'key'` segments, then the open segment being typed.
-  const m = /([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)((?:\s*->>?\s*'[^']*')*)\s*->>?\s*'([^']*)$/.exec(value.slice(0, caret))
+  // base column ref, then zero or more completed `-> 'key'` / `-> <index>` segments, then the open
+  // quoted segment being typed.
+  const m = /([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)((?:\s*->>?\s*(?:'[^']*'|\d+))*)\s*->>?\s*'([^']*)$/.exec(value.slice(0, caret))
   if (!m) return null
   const [, baseRef, completed, partial] = m
   let field = resolveFieldRef(baseRef, aliasIndex, byName, referencedSourceNames)
   if (!field || field.type !== 'Json') return null
-  // Descend through the already-completed keys to the current nesting level.
-  const keyRe = /'([^']*)'/g
-  let km: RegExpExecArray | null
-  while ((km = keyRe.exec(completed))) {
-    const child: FieldDef | undefined = field.children?.find((c) => c.name === km![1])
+  // Descend through the already-completed steps to the current nesting level.
+  const stepRe = /'([^']*)'|(\d+)/g
+  let sm: RegExpExecArray | null
+  while ((sm = stepRe.exec(completed))) {
+    if (sm[2] !== undefined) {
+      // Integer index: array-element access. Only valid on an array field; the element's shape is the
+      // same FieldDef's `children`, so there's nothing to descend into — just consume the step.
+      if (!field.isArray) return null
+      continue
+    }
+    const child: FieldDef | undefined = field.children?.find((c) => c.name === sm![1])
     if (!child || child.type !== 'Json') return null
     field = child
   }
