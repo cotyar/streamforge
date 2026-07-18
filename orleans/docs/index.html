@@ -217,6 +217,7 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <div class="navgap"></div>
   <a href="#tables">Materialized tables</a>
   <a href="#tables-search" class="sub">Row search</a>
+  <a href="#tables-parallel" class="sub">Parallel execution</a>
   <a href="#tables-history" class="sub">Row history</a>
   <a href="#tables-metadata" class="sub">Tags &amp; metadata</a>
   <a href="#rbac">Roles &amp; permissions</a>
@@ -411,6 +412,12 @@ cd web &amp;&amp; bun install &amp;&amp; bun run build &amp;&amp; cd ..
 <tr><td><b>Fuzzy</b></td><td>Trigram similarity with edit-distance ranking — typo-tolerant, results ranked by closeness.</td><td>Human input: <code>gogle</code> finds <code>GOOG</code>.</td></tr>
 </tbody></table></div>
 <p>The index updates incrementally with each delta, so results are always current. Search from the table page (results replace the live grid until cleared) or via <code>GET /api/tables/{id}/search?q=…</code>. Toggling the index or switching modes reindexes the table automatically.</p>
+
+<h3 id="tables-parallel">Parallel execution</h3>
+<p>By default a table runs single-partition. Editors can switch it to <b>parallel execution</b> (2–16 partitions) in the table's Execution card — the compiled plan's stages then deploy as a grid of partitioned operator grains (hash-exchanged on join/group keys, epoch-batched), so a hot stage blocks one partition, not the whole table. Under sustained load this bounds the latency tail: in our soak, p99 at 4 partitions came in at <b>0.70×</b> the single-partition baseline. Changing the setting restarts the table.</p>
+<p>The <b>dataflow panel</b> on the table page visualizes the running graph: one column per stage (real operator names — Join, FilterProject, Reduce, LatestBy…), one cell per partition showing its frontier epoch and delta rate, colored by frontier lag. <code>GET /api/tables/{id}/rows</code> gains <code>frontierEpoch</code> for parallel tables: the returned rows reflect <i>all</i> deltas up to that epoch and none beyond it — a real consistency guarantee, not a best-effort snapshot.</p>
+<p><b>Shared arrangements</b>: when several parallel tables join the same source on the same key, the indexed input state is built once and shared (reference-counted, checkpointed, garbage-collected when the last consumer detaches) — inspect live sets at <code>GET /api/meta/arrangements</code>.</p>
+<p><b>Late data</b>: events are epoch-stamped at <i>arrival</i> — no retro-dating, no watermark drops at the table layer. A business-time-late event simply lands in the current epoch and is processed like any other delta. The one query-level exception: <code>LATEST BY</code> ignores rows older (by their own timestamp) than the currently retained row — that's the ordering the query asked for, not a dataflow drop.</p>
 
 <h3 id="tables-history">Row history</h3>
 <p>Opt-in per table: keep the <b>version trail of each row</b> as its aggregates evolve. Enable it next to the search config (Editors), pick a retention mode, then click any row in the live grid to open its timeline — versions newest-first with changed fields highlighted, plus a retraction count.</p>
