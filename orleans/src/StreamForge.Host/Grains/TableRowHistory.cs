@@ -51,7 +51,13 @@ public static class TableGroupKeyExtractor
         if (fromIdx < 0) return null;
 
         var groupByIdx = FindGroupBy(sql);
-        if (groupByIdx < 0) return null; // no GROUP BY => no group identity; caller falls back to whole-row
+        if (groupByIdx < 0)
+        {
+            // No GROUP BY — a LATEST BY (col, ...) clause (plan 002) also defines a row identity: its key
+            // columns, which the engine requires to be plainly projected. Same best-effort contract: map
+            // each key to a SELECT output column, whole-row fallback on any ambiguity.
+            return ExtractLatestByIdentity(sql, afterSelect, fromIdx);
+        }
 
         var selectListText = sql.Substring(afterSelect, fromIdx - afterSelect);
         var groupByStart = groupByIdx + GroupByKeywordLength(sql, groupByIdx);
@@ -80,6 +86,42 @@ public static class TableGroupKeyExtractor
             }
             identity.Add(match.Alias);
         }
+        return identity;
+    }
+
+    private static List<string>? ExtractLatestByIdentity(string sql, int afterSelect, int fromIdx)
+    {
+        var latestIdx = FindWord(sql, "LATEST", fromIdx);
+        if (latestIdx < 0) return null;
+        var byIdx = FindWord(sql, "BY", latestIdx + "LATEST".Length);
+        if (byIdx < 0) return null;
+
+        var open = sql.IndexOf('(', byIdx);
+        if (open < 0) return null;
+        var close = sql.IndexOf(')', open);
+        if (close < 0) return null;
+
+        var keys = SplitTopLevel(sql[(open + 1)..close], ',')
+            .Select(Normalize)
+            .Where(s => s.Length > 0)
+            .ToList();
+        if (keys.Count == 0) return null;
+
+        var selectListText = sql.Substring(afterSelect, fromIdx - afterSelect);
+        var selectItems = SplitTopLevel(selectListText, ',')
+            .Select(s => s.Trim())
+            .Where(s => s.Length > 0)
+            .Select(ParseSelectItem)
+            .ToList();
+
+        var identity = new List<string>();
+        foreach (var k in keys)
+        {
+            var match = selectItems.FirstOrDefault(it => it.Alias is not null && Normalize(it.ExprText) == k);
+            if (match.Alias is null) return null;
+            identity.Add(match.Alias);
+        }
+
         return identity;
     }
 

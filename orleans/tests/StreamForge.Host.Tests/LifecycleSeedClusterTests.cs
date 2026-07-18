@@ -62,18 +62,30 @@ public sealed class LifecycleSeedClusterTests : IAsyncLifetime
         Assert.NotEmpty(orderStates.OutputFields);
         Assert.Contains(orderStates.OutputFields, f => f.Name == "order_id");
         Assert.Contains(orderStates.OutputFields, f => f.Name == "stage_rank");
-        Assert.Contains(orderStates.OutputFields, f => f.Name == "last_ts");
+        Assert.Contains(orderStates.OutputFields, f => f.Name == "stage");
+        Assert.Contains(orderStates.OutputFields, f => f.Name == "stage_ts");
         Assert.Contains(orderStates.OutputFields, f => f.Name == "filled_qty");
         Assert.Contains(orderStates.OutputFields, f => f.Name == "qty");
-        Assert.Contains(orderStates.OutputFields, f => f.Name == "events");
+        Assert.Contains(orderStates.OutputFields, f => f.Name == "px");
         Assert.True(orderStates.HistoryEnabled);
         Assert.Equal(TableHistoryMode.LastN, orderStates.HistoryMode);
         Assert.Equal(8, orderStates.HistoryLimit);
+
+        // The other new-grammar seeds must also have compiled and started clean.
+        var legExposure = tables.Single(t => t.Name == "leg_exposure");
+        Assert.Equal(PipelineStatus.Running, legExposure.Status);
+        Assert.Null(legExposure.Error);
+        Assert.Contains(legExposure.OutputFields, f => f.Name == "ccy");
+        Assert.Contains(legExposure.OutputFields, f => f.Name == "notional");
 
         var pipelines = await registry.GetPipelinesAsync();
         var fillRate = pipelines.Single(p => p.Name == "fill-rate-5s");
         Assert.Equal(PipelineStatus.Running, fillRate.Status);
         Assert.Null(fillRate.Error);
+
+        var nestedVwap = pipelines.Single(p => p.Name == "Hot symbol VWAP (nested)");
+        Assert.Equal(PipelineStatus.Running, nestedVwap.Status);
+        Assert.Null(nestedVwap.Error);
     }
 
     [Fact]
@@ -126,9 +138,10 @@ public sealed class LifecycleSeedClusterTests : IAsyncLifetime
 
         Assert.NotNull(row);
         Assert.Equal(4L, Convert.ToInt64(row!.Row["stage_rank"])); // converged to the latest (FILLED) stage
+        Assert.Equal("FILLED", row.Row["stage"]); // LATEST BY carries the real stage string
         Assert.Equal(1000L, Convert.ToInt64(row.Row["filled_qty"]));
         Assert.Equal(1000L, Convert.ToInt64(row.Row["qty"]));
-        Assert.Equal(5L, Convert.ToInt64(row.Row["events"])); // COUNT(*) across all 5 published events
+        Assert.Equal(101.9, Convert.ToDouble(row.Row["px"]), 3);
         Assert.Equal("AAPL", row.Row["symbol"]);
 
         // Derive the history-lookup key exactly the way TablesEndpoints.MapPost("/{id}/history/lookup")

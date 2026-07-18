@@ -705,22 +705,14 @@ public sealed class RegistryGrain(
             SearchMode = searchMode,
         };
 
-        // "order_states" (Phase L3): current state per order_id, honestly derived from "order_events"
-        // with MAX-only running aggregates — the pre-LATEST-BY pattern (plan 002 Phase L3 defers the
-        // `LATEST BY` sugar to a later engine wave). MAX is the *correct* "latest" here only because
-        // stage_rank/stage_ts/qty/filled_qty are all monotone non-decreasing per order_id by construction
-        // (see MarketDataProfiles' "lifecycle" profile) — symbol/side are MAX'd too, which is trivially
-        // honest since they're constant per order_id, not because they're monotone. Deliberately NOT
-        // MAX(stage): the stage *string* isn't ordered the way stage_rank is (alphabetically "ACK" <
-        // "CANCELED" < "FILLED" < "NEW" < "PART_FILL"), so MAX(stage) would silently give a wrong answer;
-        // callers derive the display stage from stage_rank instead.
+        // "order_states" (Phase L3): current state per order_id via LATEST BY (plan 002) — keeps the
+        // latest event row per key by _ts and emits retract/assert pairs as orders progress. The actual
+        // stage STRING rides along (no monotone-MAX workaround needed anymore).
         var orderStates = Make(
             "order_states",
-            "Current state per live order (Phase L3): one row per order_id, derived from order_events via " +
-            "monotone MAX aggregates (honest pre-LATEST-BY pattern — see plan 002 Phase L3).",
-            "SELECT order_id, MAX(symbol) AS symbol, MAX(side) AS side, MAX(stage_rank) AS stage_rank, " +
-            "MAX(stage_ts) AS last_ts, MAX(qty) AS qty, MAX(filled_qty) AS filled_qty, COUNT(*) AS events " +
-            "FROM order_events GROUP BY order_id",
+            "Current state per live order (Phase L3): the latest order_events row per order_id via LATEST BY.",
+            "SELECT order_id, symbol, side, stage, stage_rank, stage_ts, qty, filled_qty, px " +
+            "FROM order_events LATEST BY (order_id)",
             PipelineStatus.Running);
         // Row history mode: LastN(8), not MinBy/MaxBy — the demo goal is the STAGE TRAIL (NEW, ACK,
         // PART_FILL, PART_FILL, ..., FILLED/CANCELED) for a clicked order, i.e. the recent-versions trail,
@@ -751,6 +743,14 @@ public sealed class RegistryGrain(
                 "Symbols from 'positions' with more than 50 trades — table-over-table chaining demo.",
                 "SELECT p.symbol, p.trades, p.avg_price FROM positions p WHERE p.trades > 50",
                 PipelineStatus.Stopped),
+            Make(
+                "leg_exposure",
+                "Per-currency notional across all structure legs (plan 002 L2): UNNEST flattens each " +
+                "multileg instrument's legs array; SUM uses '->' (raw numeric node — '->>' is text and " +
+                "would not accumulate).",
+                "SELECT l ->> 'ccy' AS ccy, SUM(l -> 'notional') AS notional, COUNT(*) AS legs " +
+                "FROM structures s, UNNEST(s.legs) AS l GROUP BY l ->> 'ccy'",
+                PipelineStatus.Running),
             orderStates,
         ];
     }
@@ -787,6 +787,15 @@ public sealed class RegistryGrain(
                 "Joins BUY trades against the prevailing quote to compare trade price with the bid.",
                 "SELECT t.symbol, t.price, q.bid, q.ask, t.price - q.bid AS above_bid FROM trades t " +
                 "JOIN quotes q WITHIN 5 SECONDS ON t.symbol = q.symbol WHERE t.side = 'BUY'",
+                PipelineStatus.Running),
+            Make(
+                "Hot symbol VWAP (nested)",
+                "Plan 004 showcase: a WITH CTE finds busy symbols per 10s window; the outer query keeps " +
+                "only trades whose symbol is IN that rolling set, then computes 5s VWAP.",
+                "WITH hot AS (SELECT symbol FROM trades GROUP BY symbol WINDOW TUMBLING(SIZE 10 SECONDS)) " +
+                "SELECT t.symbol, SUM(t.price * t.qty) / SUM(t.qty) AS vwap, COUNT(*) AS trades FROM trades t " +
+                "WHERE t.symbol IN (SELECT symbol FROM hot) " +
+                "GROUP BY t.symbol WINDOW TUMBLING(SIZE 5 SECONDS)",
                 PipelineStatus.Running),
             Make(
                 "Order bursts (session)",
