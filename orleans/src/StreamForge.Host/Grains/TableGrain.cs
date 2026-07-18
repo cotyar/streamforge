@@ -77,6 +77,10 @@ public sealed class TableGrain(
     private int _coordinatorParallelism;
     private List<(int StageId, int PartitionCount)> _deployedStages = [];
     private List<string> _deployedInputs = [];
+    /// <summary>Plan 003 M3: every (arrangementGrainKey, consumerId) this table attached, one per
+    /// (arrangeable edge, partition) — used by StopAsync to detach cleanly and by GetMetricsAsync to fold
+    /// each arrangement's own Rebuilding into this table's and to report ArrangedInputs.</summary>
+    private List<(string ArrangementKey, string ConsumerId)> _deployedArrangements = [];
     private StreamSubscriptionHandle<List<TableDeltaDto>>? _coordinatorSub;
     /// <summary>Coordinator mode's own live consolidated Z-set (canonical row key -> (row, weight)) — the
     /// coordinator-mode analogue of TableExecutor's internal `_consolidated` (not reachable from Host —
@@ -212,7 +216,44 @@ public sealed class TableGrain(
             }
         }
 
-        _deployedInputs = compileResult.StreamInputs.Concat(compileResult.TableInputs).Distinct().ToList();
+        // Plan 003 M3: attach shared arrangements for every edge TableDataflowBuilder marked arrangeable —
+        // AFTER the TableStageGrains above are started (AttachAsync immediately pushes a seed snapshot to
+        // them — see ArrangementGrain's class doc) but BEFORE deploying private TableIngestGrains below, so
+        // an input whose every edge is arrangeable never gets a redundant ingest activation.
+        _deployedArrangements = [];
+        foreach (var edge in dataflow.ArrangeableExternalEdges)
+        {
+            var inputName = dataflow.ExternalInputNameOf(edge);
+            bool isTableInput = compileResult.TableInputs.Contains(inputName);
+            var keySpec = dataflow.KeySpecOf(edge);
+            var hash = ArrangementKeySpec.HashOf(keySpec);
+            int pcount = dataflow.PartitionCountOf(edge.ToStageId);
+
+            for (int p = 0; p < pcount; p++)
+            {
+                var arrangementKey = $"{inputName}:{hash}:{p}";
+                var consumerId = $"{def.Name}:{edge.EdgeId.Value}:{p}";
+                var targetGrainKey = $"{def.Name}:{edge.ToStageId}:{p}";
+                await GrainFactory.GetGrain<IArrangementGrain>(arrangementKey).AttachAsync(new ArrangementAttachRequest
+                {
+                    ConsumerId = consumerId,
+                    TargetGrainKey = targetGrainKey,
+                    TargetEdgeId = edge.EdgeId.Value,
+                    InputName = inputName,
+                    IsTableInput = isTableInput,
+                    KeyFields = edge.ArrangeKeyFields!.ToList(),
+                    KeySpec = keySpec,
+                    PartitionCount = pcount,
+                    Partition = p,
+                });
+                _deployedArrangements.Add((arrangementKey, consumerId));
+            }
+        }
+
+        _deployedInputs = compileResult.StreamInputs.Concat(compileResult.TableInputs).Distinct()
+            .Where(name => dataflow.EdgesForExternalInput(name)
+                .Any(e => e.Mode == TableEdgeMode.Broadcast || dataflow.OutEdgeOf(e.ToStageId).ArrangeKeyFields is null))
+            .ToList();
         foreach (var inputName in _deployedInputs)
         {
             await GrainFactory.GetGrain<ITableIngestGrain>($"{def.Name}:{inputName}").StartAsync(def, inputName);
@@ -249,6 +290,12 @@ public sealed class TableGrain(
 
         if (_coordinatorMode && _def is not null)
         {
+            // Detach arrangements FIRST — removes this table's consumer id from every attached arrangement's
+            // live-push list immediately, before the TableStageGrains it was pushing to are torn down below.
+            foreach (var (arrangementKey, consumerId) in _deployedArrangements)
+            {
+                try { await GrainFactory.GetGrain<IArrangementGrain>(arrangementKey).DetachAsync(consumerId); } catch { /* best-effort */ }
+            }
             foreach (var inputName in _deployedInputs)
             {
                 try { await GrainFactory.GetGrain<ITableIngestGrain>($"{_def.Name}:{inputName}").StopAsync(); } catch { /* best-effort */ }
@@ -261,6 +308,7 @@ public sealed class TableGrain(
                 }
             }
             try { await GrainFactory.GetGrain<ITableOutputGrain>(_def.Name).StopAsync(); } catch { /* best-effort */ }
+            _deployedArrangements = [];
             _deployedInputs = [];
             _deployedStages = [];
         }
@@ -302,12 +350,27 @@ public sealed class TableGrain(
     public async Task<TableMetrics> GetMetricsAsync()
     {
         List<TablePartitionMetrics>? partitions = null;
+        bool arrangementsRebuilding = false;
+        List<string>? arrangedInputs = null;
         if (_coordinatorMode && _def is not null)
         {
             var tasks = _deployedStages
                 .SelectMany(s => Enumerable.Range(0, s.PartitionCount)
                     .Select(p => GrainFactory.GetGrain<ITableStageGrain>($"{_def.Name}:{s.StageId}:{p}").GetMetricsAsync()));
             partitions = (await Task.WhenAll(tasks)).ToList();
+
+            if (_deployedArrangements.Count > 0)
+            {
+                // Plan 003 M3: fold every attached arrangement's own Rebuilding (checkpoint-not-yet-caught-up
+                // — see ArrangementGrain's class doc) into this table's — a table currently served by a
+                // still-rebuilding arrangement is itself honestly "rebuilding" (its join-side state is
+                // partly stale checkpoint data), even though its OWN _rebuilding flag (output-snapshot
+                // resume) may already be false.
+                var infoTasks = _deployedArrangements.Select(a => GrainFactory.GetGrain<IArrangementGrain>(a.ArrangementKey).GetInfoAsync());
+                var infos = await Task.WhenAll(infoTasks);
+                arrangementsRebuilding = infos.Any(i => i.Rebuilding);
+                arrangedInputs = _deployedArrangements.Select(a => a.ArrangementKey.Split(':')[0]).Distinct().ToList();
+            }
         }
 
         return new TableMetrics
@@ -318,8 +381,9 @@ public sealed class TableGrain(
             DeltasIn = _deltasIn,
             DeltasOut = _deltasOut,
             LastUpdateMs = _lastUpdateMs,
-            Rebuilding = _rebuilding,
+            Rebuilding = _rebuilding || arrangementsRebuilding,
             Partitions = partitions,
+            ArrangedInputs = arrangedInputs,
         };
     }
 

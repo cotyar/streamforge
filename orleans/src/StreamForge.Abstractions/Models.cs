@@ -215,6 +215,73 @@ public sealed class TableMetrics
     /// null/absent for every Parallelism==1 table, so this is additive-safe for existing consumers (REST
     /// JSON, gRPC, any client that ignores unknown fields).</summary>
     [Id(7)] public List<TablePartitionMetrics>? Partitions { get; set; }
+
+    /// <summary>Plan 003 M3: distinct raw input names (stream sources / upstream tables) this table reads
+    /// via a SHARED ArrangementGrain instead of a private per-table ingest — null/absent unless the table is
+    /// Parallelism &gt;= 2 AND at least one of its join edges qualified as arrangeable (see
+    /// StreamForge.Engine.Dataflow.TableDataflowBuilder's arrangeability rule). Purely informational; does
+    /// not affect Rebuilding (see that flag's own doc — an attached-but-still-rebuilding-from-checkpoint
+    /// arrangement is folded into THIS table's own Rebuilding instead).</summary>
+    [Id(8)] public List<string>? ArrangedInputs { get; set; }
+}
+
+/// <summary>
+/// Plan 003 M3: request payload for <see cref="IArrangementGrain.AttachAsync"/> — everything a fresh
+/// (refcount 0-&gt;1) arrangement activation needs to bootstrap itself (which raw input to subscribe to, the
+/// raw field(s) forming its key, its partition identity) PLUS the routing info the arrangement needs to push
+/// the atomic seed-then-live-deltas handshake directly to the attaching consumer's own ITableStageGrain (see
+/// IArrangementGrain's class doc for why the arrangement — not the coordinator — must be the one to deliver
+/// the snapshot, to avoid a snapshot/live-delta ordering race). Every field except <see cref="ConsumerId"/>/
+/// <see cref="TargetGrainKey"/>/<see cref="TargetEdgeId"/> is redundant across repeated attaches to the SAME
+/// arrangement (same keySpecHash ⇒ same InputName/KeyFields/KeySpec/PartitionCount/Partition by
+/// construction) — only the FIRST attach (refcount 0-&gt;1) actually consumes them to activate; later attaches
+/// trust the caller sent the same values (recompile-per-grain determinism — see GrainInterfaces.cs's M2
+/// design note, which applies identically here) rather than re-validating.
+/// </summary>
+[GenerateSerializer]
+public sealed class ArrangementAttachRequest
+{
+    /// <summary>Unique per (table, edge, partition) — e.g. "{tableName}:{edgeId}:{partition}". Used as the
+    /// key DetachAsync later removes.</summary>
+    [Id(0)] public string ConsumerId { get; set; } = "";
+    /// <summary>The ITableStageGrain key ("{tableName}:{stageId}:{partition}") this arrangement partition
+    /// pushes PushBatchAsync calls to.</summary>
+    [Id(1)] public string TargetGrainKey { get; set; } = "";
+    /// <summary>The EdgeId.Value the target's PushBatchAsync expects for this arrangement's contribution
+    /// (the Left or Right join edge id on the CONSUMER's own dataflow plan).</summary>
+    [Id(2)] public int TargetEdgeId { get; set; }
+    /// <summary>Real stream source or upstream table name this arrangement indexes.</summary>
+    [Id(3)] public string InputName { get; set; } = "";
+    /// <summary>True if InputName is an upstream TABLE (subscribes to TableDeltaNamespace) rather than a raw
+    /// stream SOURCE (SourcesNamespace).</summary>
+    [Id(4)] public bool IsTableInput { get; set; }
+    /// <summary>Raw field name(s), in order, forming this arrangement's key (see
+    /// StreamForge.Engine.Dataflow.ArrangementKeySpec).</summary>
+    [Id(5)] public List<string> KeyFields { get; set; } = [];
+    /// <summary>Human-readable canonical form of (KeyFields, PartitionCount) — carried for diagnostics/
+    /// GetInfoAsync; the grain KEY itself uses ArrangementKeySpec.HashOf(KeySpec) instead.</summary>
+    [Id(6)] public string KeySpec { get; set; } = "";
+    [Id(7)] public int PartitionCount { get; set; }
+    [Id(8)] public int Partition { get; set; }
+}
+
+/// <summary>Plan 003 M3: point-in-time view of one ArrangementGrain partition — backs GetInfoAsync and the
+/// GET /api/meta/arrangements endpoint.</summary>
+[GenerateSerializer]
+public sealed class ArrangementInfo
+{
+    [Id(0)] public string InputName { get; set; } = "";
+    [Id(1)] public string KeySpec { get; set; } = "";
+    [Id(2)] public int Partition { get; set; }
+    [Id(3)] public int PartitionCount { get; set; }
+    [Id(4)] public long RowCount { get; set; }
+    [Id(5)] public int ConsumerCount { get; set; }
+    /// <summary>True from (re)activation off a persisted checkpoint until this partition has processed at
+    /// least one live batch since — mirrors TableGrain's own restart-resume Rebuilding contract (see
+    /// ArrangementGrain's class doc).</summary>
+    [Id(6)] public bool Rebuilding { get; set; }
+    /// <summary>Last epoch this partition stamped (-1 if it has never flushed).</summary>
+    [Id(7)] public long Epoch { get; set; } = -1;
 }
 
 // ============================================================================

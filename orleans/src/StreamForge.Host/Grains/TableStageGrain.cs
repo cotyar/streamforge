@@ -49,6 +49,22 @@ public sealed class TableStageGrain : Grain, ITableStageGrain
         var upstreams = new List<UpstreamId>();
         foreach (var edge in _stage.InEdges)
         {
+            if (edge.ArrangeKeyFields is not null)
+            {
+                // Plan 003 M3: an arrangeable edge is fed by a shared ArrangementGrain SET, co-partitioned
+                // 1:1 with THIS stage (arrangement partition p pushes ONLY to stage partition p — see
+                // ArrangementGrain's class doc and TableGrain.StartCoordinatorAsync's attach loop, which
+                // attaches arrangement partition p to target grain key "{table}:{stageId}:{p}"). THIS
+                // activation (fixed at `partition`) therefore hears from exactly ONE arrangement partition —
+                // its own — never the other P-1 (those push to a DIFFERENT stage-partition activation
+                // entirely). Registering all P identities here (as if this were a single-partition-producer
+                // fan-in, like a private TableIngestGrain) would permanently starve the frontier: the P-1
+                // identities that can structurally never be observed on THIS activation would hold its
+                // combined Frontier at NegativeInfinity forever (see FrontierTracker's "silent upstream"
+                // invariant) — the exact bug this comment replaces.
+                upstreams.Add(new UpstreamId(edge.EdgeId, partition));
+                continue;
+            }
             int producerCount = edge.FromStageId == -1
                 ? (edge.Mode == TableEdgeMode.Broadcast ? Math.Max(1, edge.ExternalInputNames.Count) : 1)
                 : dataflow.PartitionCountOf(edge.FromStageId);

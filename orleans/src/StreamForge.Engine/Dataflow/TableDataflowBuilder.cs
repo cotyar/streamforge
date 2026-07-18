@@ -104,7 +104,18 @@ internal static class TableDataflowBuilder
                 var leftMode = isDerived
                     ? (producerIsIngest ? TableEdgeMode.HashPartition : TableEdgeMode.Local)
                     : TableEdgeMode.HashPartition;
-                var leftEdge = new TableEdgeDescriptor(NewEdge(), chainStage, stageId, "Left", leftMode, []);
+
+                // Plan 003 M3 arrangeability check (SCOPE — see this file's class doc addendum below): the
+                // Left side of THIS hop is a candidate for a shared arrangement only at i==0 (producerIsIngest
+                // — any later hop's "Left" is an already-computed multi-alias WorkingRow, not a raw input),
+                // and only when LeftKey is a BARE reference to the FROM alias's own field (no transform) —
+                // checked via compiled.Bindings (reference-equality keyed; a non-leaf/derived Expr node is
+                // never in Bindings at all, so this check doubles as "no pre-join transform").
+                IReadOnlyList<string>? leftArrangeFields = producerIsIngest && leftMode == TableEdgeMode.HashPartition
+                    && IsBareOwnFieldRef(j.LeftKey, compiled, fromAlias, out var leftField)
+                    ? [leftField]
+                    : null;
+                var leftEdge = new TableEdgeDescriptor(NewEdge(), chainStage, stageId, "Left", leftMode, [], leftArrangeFields);
                 edges.Add(leftEdge);
                 builds[chainStage].OutEdge = leftEdge;
                 if (isDerived && producerIsIngest)
@@ -130,7 +141,15 @@ internal static class TableDataflowBuilder
                     stages.Add(ingestStage);
                     builds[ingestStageId] = new StageBuild { Kind = TableStageKind.Ingest, Stage = ingestStage, OutEdge = ingestInEdge, Compiled = compiled };
 
-                    rightEdge = new TableEdgeDescriptor(NewEdge(), ingestStageId, stageId, "Right", TableEdgeMode.HashPartition, []);
+                    // Plan 003 M3: a non-derived join's Right side is ALWAYS fed by its own dedicated Ingest
+                    // stage (never a chained WorkingRow) — so its own outbound edge (this rightEdge) is
+                    // arrangeable whenever RightKey is a bare reference to the join alias's own field. This is
+                    // the common case the M3 task targets: two tables each joining the same raw input (e.g.
+                    // "trades") on the same raw field ("symbol") share ONE arrangement here.
+                    IReadOnlyList<string>? rightArrangeFields = IsBareOwnFieldRef(j.RightKey, compiled, j.Alias, out var rightField)
+                        ? [rightField]
+                        : null;
+                    rightEdge = new TableEdgeDescriptor(NewEdge(), ingestStageId, stageId, "Right", TableEdgeMode.HashPartition, [], rightArrangeFields);
                     builds[ingestStageId].OutEdge = rightEdge;
                 }
                 edges.Add(rightEdge);
@@ -281,5 +300,30 @@ internal static class TableDataflowBuilder
             TableStageKind.LatestBy => new LatestByStageExecutor(build, partition),
             _ => throw new NotSupportedException($"Unknown stage kind {build.Kind}."),
         };
+    }
+
+    /// <summary>
+    /// Plan 003 M3 arrangeability rule: <paramref name="expr"/> qualifies as "a bare reference to
+    /// <paramref name="alias"/>'s own raw field, with no pre-join transform" iff it is a leaf identifier node
+    /// (<see cref="Identifier"/> or <see cref="QualifiedIdentifier"/> — every OTHER Expr subtype represents a
+    /// computation over its children, e.g. BinaryExpr/FunctionCallExpr/JsonAccessExpr/UnaryExpr/a literal)
+    /// AND it is present in <paramref name="compiled"/>'s Bindings (a reference-equality-keyed dictionary the
+    /// validator populates ONLY for identifier leaves it resolves — see Sql/Validator.cs's
+    /// ResolveBareIdentifier/ResolveQualifiedIdentifier) resolving to exactly <paramref name="alias"/>. This
+    /// is the SCOPE boundary the M3 task calls for: "keyed directly by the join key (no pre-join transforms
+    /// other than ingest normalization) — anything fancier keeps the private per-table path" — e.g.
+    /// `t.symbol = q.symbol` qualifies on both sides, `UPPER(t.symbol) = q.symbol` does not (the Left key is
+    /// a FunctionCallExpr, never added to Bindings as a whole node), and `t.symbol = q.symbol` joined at hop
+    /// i&gt;1 (chained past the first join) does not qualify on the Left side either — not because of this
+    /// check, but because the caller only invokes it for the Left edge when producerIsIngest (i==0).
+    /// </summary>
+    private static bool IsBareOwnFieldRef(Expr? expr, CompiledTablePlan compiled, string alias, out string field)
+    {
+        field = "";
+        if (expr is not (Identifier or QualifiedIdentifier)) return false;
+        if (!compiled.Bindings.TryGetValue(expr, out var binding)) return false;
+        if (!string.Equals(binding.Alias, alias, StringComparison.Ordinal)) return false;
+        field = binding.Field;
+        return true;
     }
 }

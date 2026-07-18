@@ -54,13 +54,22 @@ public enum TableEdgeMode
 /// table's delta stream), named in <see cref="ExternalInputNames"/>, that a Host-side ingest grain
 /// subscribes to and routes in. <paramref name="ToStageId"/> == -1 means the edge is the table's terminal
 /// output (see <see cref="TableEdgeMode.Gather"/>).</summary>
+/// <param name="ArrangeKeyFields">Plan 003 M3 — non-null ONLY for an external-input (FromStageId == -1),
+/// HashPartition-mode edge whose key is a bare reference to the raw input's OWN field(s) with no pre-join
+/// transform (see TableDataflowBuilder's arrangeability check) — the raw field name(s), in order, that
+/// TableGrain's coordinator uses to attach a shared ArrangementGrain instead of deploying a private
+/// TableIngestGrain for this edge. Null for every other edge (including a non-arrangeable external-input
+/// edge, which still gets a private TableIngestGrain exactly as before M3 — see TableDataflowBuilder's class
+/// doc for the exact arrangeable-vs-not rule). Additive/optional so every pre-M3 positional construction of
+/// this record keeps compiling unchanged.</param>
 public sealed record TableEdgeDescriptor(
     EdgeId EdgeId,
     int FromStageId,
     int ToStageId,
     string Role,
     TableEdgeMode Mode,
-    IReadOnlyList<string> ExternalInputNames);
+    IReadOnlyList<string> ExternalInputNames,
+    IReadOnlyList<string>? ArrangeKeyFields = null);
 
 /// <summary>One node in a table's partitioned dataflow graph. <see cref="Alias"/> is the join/ingest
 /// alias this stage plays (empty for the single-per-plan FilterProject/Reduce/LatestBy stages, which are
@@ -169,6 +178,41 @@ public sealed class TableDataflowPlan
     /// graph shape (each op has one forward path; fan-out to multiple destinations for the same real input
     /// happens at the Ingest/external level via <see cref="EdgesForExternalInput"/>, not mid-graph).</summary>
     public TableEdgeDescriptor OutEdgeOf(int stageId) => _edges.Single(e => e.FromStageId == stageId);
+
+    /// <summary>Plan 003 M3: every edge TableDataflowBuilder marked arrangeable (see
+    /// <see cref="TableEdgeDescriptor.ArrangeKeyFields"/> and TableDataflowBuilder's class doc for the exact
+    /// rule) — the set of edges TableGrain's coordinator attaches a shared ArrangementGrain to instead of
+    /// deploying/routing through a private TableIngestGrain. By construction every such edge originates from
+    /// an Ingest-kind stage (its FromStageId is that stage's id, NOT -1 — mirrors TableIngestGrain's own "the
+    /// REAL routing decision is the Ingest stage's own outbound edge" pattern) — use
+    /// <see cref="ExternalInputNameOf"/> to recover the real source/table name it ultimately reads from.</summary>
+    public IReadOnlyList<TableEdgeDescriptor> ArrangeableExternalEdges =>
+        _edges.Where(e => e.ArrangeKeyFields is not null).ToList();
+
+    /// <summary>The real external input name (stream source or upstream table) an arrangeable edge
+    /// ultimately reads from — recovered from its producing Ingest-kind stage's own single inbound edge
+    /// (FromStageId == -1, ExternalInputNames singleton — see TableDataflowBuilder's class doc on Ingest
+    /// stage shape). Throws if <paramref name="edge"/> isn't arrangeable.</summary>
+    public string ExternalInputNameOf(TableEdgeDescriptor edge)
+    {
+        if (edge.ArrangeKeyFields is null)
+            throw new InvalidOperationException($"Edge {edge.EdgeId} is not arrangeable.");
+        var ingestStage = _stages.First(s => s.StageId == edge.FromStageId);
+        return ingestStage.InEdges[0].ExternalInputNames[0];
+    }
+
+    /// <summary>Canonical key-spec string for an arrangeable edge (see <see cref="ArrangementKeySpec"/>) —
+    /// throws if <paramref name="edge"/> isn't arrangeable. Bakes in the CONSUMING stage's partition count
+    /// (<see cref="PartitionCountOf"/> of the edge's target stage) so two tables only ever share an
+    /// arrangement when both the raw key field(s) AND the partition count match (an arrangement's partition
+    /// p is exchanged 1:1, unre-hashed, into its consuming join stage's own partition p — see this class's
+    /// doc — so a different partition count is a genuinely different physical index).</summary>
+    public string KeySpecOf(TableEdgeDescriptor edge)
+    {
+        if (edge.ArrangeKeyFields is null)
+            throw new InvalidOperationException($"Edge {edge.EdgeId} is not arrangeable; it has no ArrangeKeyFields.");
+        return ArrangementKeySpec.Canonicalize(edge.ArrangeKeyFields, PartitionCountOf(edge.ToStageId));
+    }
 
     /// <summary>Partition count a given stage runs at: 1 for Ingest (one instance per external input —
     /// routing/fan-out only, no per-partition state), <see cref="PartitionCount"/> for everything else.</summary>

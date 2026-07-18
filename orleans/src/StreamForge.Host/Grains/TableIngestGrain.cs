@@ -57,7 +57,17 @@ public sealed class TableIngestGrain : Grain, ITableIngestGrain
         var (compile, dataflow) = await TableDataflowFactory.BuildAsync(GrainFactory, def);
         _dataflow = dataflow;
         _isTableInput = compile.TableInputs.Contains(inputName);
-        _externalEdges = dataflow.EdgesForExternalInput(inputName).ToList();
+        // Plan 003 M3: an "In" edge whose Ingest-kind target stage's OWN outbound edge (the real routing
+        // decision — see this grain's class doc) was marked arrangeable is served by a shared
+        // ArrangementGrain instead (see TableGrain.StartCoordinatorAsync's arrangement-attach loop) — exclude
+        // it here so this ingest grain doesn't ALSO route to it (that would double-deliver, and the target
+        // TableStageGrain's upstream set no longer even reserves fromPartition==0 for this edge — see
+        // TableStageGrain.StartAsync's producerCount fix). An input with EVERY edge arrangeable ends up with
+        // an empty _externalEdges list; TableGrain doesn't even start this grain for such an input (see its
+        // _deployedInputs filter) — the check below is defense-in-depth.
+        _externalEdges = dataflow.EdgesForExternalInput(inputName)
+            .Where(e => e.Mode == TableEdgeMode.Broadcast || dataflow.OutEdgeOf(e.ToStageId).ArrangeKeyFields is null)
+            .ToList();
 
         var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
         if (_isTableInput)

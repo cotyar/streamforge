@@ -174,6 +174,56 @@ public interface ITableOutputGrain : IGrainWithStringKey
     Task PublishAsync(List<TableDeltaDto> deltas);
 }
 
+// ============================================================================
+// Plan 003 M3: shared arrangements. Key = "{inputName}:{keySpecHash}:{partition}" — keySpecHash is
+// StreamForge.Engine.Dataflow.ArrangementKeySpec.HashOf(canonicalKeySpec); two tables that each join the
+// SAME raw input on the SAME raw field(s), at the SAME consuming partition count, compute the IDENTICAL
+// keySpecHash and therefore land on the SAME ArrangementGrain activations — that's the whole sharing
+// mechanism, no separate directory/registry needed (mirrors the M2 "recompile-per-grain" philosophy: any
+// caller that recompiles the same table SQL deterministically arrives at the same key). One activation per
+// (input, keySpec, partition) — maintains that partition's consolidated Z-set index of the raw input,
+// subscribed to the input's stream directly (replacing what a private TableIngestGrain would do for the
+// join edges it covers — see TableDataflowBuilder's arrangeability rule for exactly which edges those are).
+//
+// LIFECYCLE is refcount-driven, not Start/Stop: AttachAsync/DetachAsync increment/decrement a consumer
+// count; 0->1 lazily activates (subscribes, and if a persisted checkpoint exists, seeds the index from it
+// and marks Rebuilding until live traffic confirms catch-up); ->0 clears all in-memory state AND the
+// persisted checkpoint (a stopped/deleted table's arrangement should rebuild fresh on next attach, not serve
+// another table's stale leftover data — "rebuild lazily on first attach" per the M3 plan).
+//
+// RACE-FREE SEED HANDOFF: AttachAsync itself (not a separate call) pushes the current consolidated snapshot
+// directly to the new consumer's ITableStageGrain (via TargetGrainKey/TargetEdgeId in the request) BEFORE
+// returning and BEFORE the consumer is added to the live-push list used by subsequent flushes — since this
+// all happens synchronously within one grain turn (Orleans serializes calls to one activation; nothing else
+// can interleave inside AttachAsync's own execution), the target's FrontierTracker is guaranteed to observe
+// the snapshot epoch strictly before any live-delta epoch for this arrangement partition's upstream identity
+// — no coordinator-mediated relay, no snapshot/live race. SnapshotAsync (separate, side-effect-free) exists
+// for read-only inspection (metrics, tests) without touching the live-push set.
+// ============================================================================
+
+/// <summary>See this section's class doc above. Every method receives plain/serializable info rather than
+/// StreamForge.Engine.Dataflow types (same InternalsVisibleTo-avoidance rule as ITableStageGrain).</summary>
+public interface IArrangementGrain : IGrainWithStringKey
+{
+    /// <summary>Refcount++ (lazily activates — subscribes to the input's stream, seeds from a persisted
+    /// checkpoint if present — on 0-&gt;1); atomically pushes the current consolidated snapshot to
+    /// <see cref="ArrangementAttachRequest.TargetGrainKey"/> and starts including this consumer in future
+    /// live-delta pushes. Idempotent-ish: re-attaching an already-attached consumerId just re-seeds it (safe,
+    /// if occasionally redundant, on a caller retry).</summary>
+    Task AttachAsync(ArrangementAttachRequest request);
+
+    /// <summary>Refcount-- ; removes consumerId from the live-push list. At refcount 0: unsubscribes, clears
+    /// the in-memory index AND the persisted checkpoint, and allows the grain to deactivate.</summary>
+    Task DetachAsync(string consumerId);
+
+    /// <summary>Read-only: the current consolidated index as a batch of assert-weight deltas. No side
+    /// effects on the live-push set (use AttachAsync for the race-free seed-then-subscribe handshake).</summary>
+    Task<List<TableDeltaDto>> SnapshotAsync();
+
+    /// <summary>Point-in-time metrics — backs TableGrain's Rebuilding fold-in and GET /api/meta/arrangements.</summary>
+    Task<ArrangementInfo> GetInfoAsync();
+}
+
 /// <summary>Singleton (key = StreamConstants.UsersKey).</summary>
 public interface IUserStoreGrain : IGrainWithStringKey
 {
