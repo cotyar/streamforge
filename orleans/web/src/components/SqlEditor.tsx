@@ -2,11 +2,14 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, KeyboardEvent, SyntheticEvent, UIEvent } from 'react'
 import type { FieldDef, FieldType, SourceDefinition, SqlDiagnostic } from '../api/types'
 import { cn } from '@/lib/utils'
+import { findCaretScope, innerProjection, parseCtes } from './sqlScope'
+import type { CteDef, ScopeFromItem } from './sqlScope'
 
 const KEYWORDS = new Set([
   'SELECT', 'FROM', 'WHERE', 'GROUP', 'BY', 'WINDOW', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER',
   'CROSS', 'ON', 'WITHIN', 'AS', 'EMIT', 'CHANGES', 'FINAL', 'TUMBLING', 'HOPPING', 'SESSION', 'SIZE',
   'ADVANCE', 'GAP', 'AND', 'OR', 'NOT', 'TRUE', 'FALSE', 'NULL', 'SECONDS', 'MILLISECONDS', 'MINUTES', 'HOURS',
+  'WITH',
 ])
 
 const AGGREGATE_FNS = new Set(['COUNT', 'SUM', 'AVG', 'MIN', 'MAX'])
@@ -106,7 +109,7 @@ const UNDERLINE_CLASS: Record<'Error' | 'Warning', string> = {
 // Autocomplete
 // ============================================================================
 
-type SuggestionKind = 'source' | 'column' | 'alias' | 'keyword' | 'function' | 'aggregate' | 'operator'
+type SuggestionKind = 'source' | 'column' | 'alias' | 'keyword' | 'function' | 'aggregate' | 'operator' | 'cte'
 
 interface Suggestion {
   kind: SuggestionKind
@@ -127,27 +130,6 @@ function significantTokens(tokens: Token[]): Token[] {
   return tokens.filter((t) => t.kind !== 'whitespace' && t.kind !== 'comment')
 }
 
-/** Scans the whole query (not just before the caret) for `FROM <source> [AS] <alias>` / `JOIN …` pairs. */
-function parseSourceRefs(sig: Token[]): SourceRef[] {
-  const refs: SourceRef[] = []
-  for (let i = 0; i < sig.length; i++) {
-    const t = sig[i]
-    const upper = t.text.toUpperCase()
-    if (t.kind !== 'keyword' || (upper !== 'FROM' && upper !== 'JOIN')) continue
-    const srcTok = sig[i + 1]
-    if (!srcTok || srcTok.kind !== 'identifier') continue
-    let idx = i + 2
-    let aliasTok = sig[idx]
-    if (aliasTok && aliasTok.kind === 'keyword' && aliasTok.text.toUpperCase() === 'AS') {
-      idx += 1
-      aliasTok = sig[idx]
-    }
-    const alias = aliasTok && aliasTok.kind === 'identifier' ? aliasTok.text : null
-    refs.push({ sourceName: srcTok.text, alias })
-  }
-  return refs
-}
-
 /** Maps every usable identifier (bare source name or explicit alias) to its canonical source name. */
 function buildAliasIndex(refs: SourceRef[]): Map<string, string> {
   const idx = new Map<string, string>()
@@ -156,6 +138,128 @@ function buildAliasIndex(refs: SourceRef[]): Map<string, string> {
     if (r.alias) idx.set(r.alias, r.sourceName)
   }
   return idx
+}
+
+/** A `FROM`/`JOIN` item, in the caret's current scope, that isn't a real source — either an
+ *  earlier CTE or a derived-table subquery. Resolved lazily (via `resolveDerivedColumns`) because
+ *  most keystrokes never need it. */
+interface DerivedTarget {
+  kind: 'cte' | 'derived'
+  /** Raw text of the inner `SELECT …`, in the coordinate space of the *full document* — always
+   *  sliced from `value`, since `ScopeInfo.fromItems` for the caret's own scope is built directly
+   *  against the document. */
+  bodyText: string
+  /** CTE name / derived alias, for the suggestion list's secondary text. */
+  label: string
+}
+
+/**
+ * Splits a scope's raw `ScopeFromItem[]` (from sqlScope.ts, which knows nothing about real
+ * sources) into: `refs`/`aliasIndex` for real-source items (feeding the pre-existing
+ * alias/column-suggestion machinery unchanged), and `derivedTargets` for everything else that
+ * resolves to an in-scope CTE. Names that match neither a real source nor a CTE (typos, or a
+ * source not yet declared) are silently dropped — no suggestion beats a wrong one.
+ */
+function buildScopeIndexes(
+  value: string,
+  fromItems: ScopeFromItem[],
+  ctes: CteDef[],
+  byName: Map<string, SourceDefinition>,
+) {
+  const refs: SourceRef[] = []
+  const derivedTargets = new Map<string, DerivedTarget>()
+  for (const item of fromItems) {
+    if (item.kind === 'named' && item.name) {
+      if (byName.has(item.name)) {
+        refs.push({ sourceName: item.name, alias: item.alias })
+        continue
+      }
+      const cte = ctes.find((c) => c.name.toLowerCase() === item.name!.toLowerCase())
+      if (cte) {
+        derivedTargets.set(item.alias ?? item.name, { kind: 'cte', bodyText: value.slice(cte.bodyStart, cte.bodyEnd), label: cte.name })
+      }
+    } else if (item.kind === 'derived' && item.alias && item.derivedStart !== undefined && item.derivedEnd !== undefined) {
+      derivedTargets.set(item.alias, { kind: 'derived', bodyText: value.slice(item.derivedStart, item.derivedEnd), label: item.alias })
+    }
+  }
+  const aliasIndex = buildAliasIndex(refs)
+  const referencedSourceNames = Array.from(new Set(refs.map((r) => r.sourceName)))
+  return { refs, aliasIndex, referencedSourceNames, derivedTargets }
+}
+
+/** A resolved derived/CTE projection column — `field` is the real `FieldDef` it maps to 1:1 when
+ *  determinable (drives the type meta tag and lets JSON `->`/`->>` chaining follow through). */
+interface ResolvedColumn {
+  name: string
+  field: FieldDef | null
+}
+
+/**
+ * Resolves a derived-table/CTE body's projected columns against real source fields where
+ * possible. `depth` caps recursion at one extra level (a derived table's `SELECT *` that itself
+ * reads from another derived table / CTE) — beyond that, columns from that nested item are simply
+ * omitted rather than guessed. `value` is the full document text, needed only to look up a nested
+ * CTE's body (CTEs are always declared at the top of the document, never inside a subquery).
+ */
+function resolveDerivedColumns(
+  bodyText: string,
+  value: string,
+  byName: Map<string, SourceDefinition>,
+  ctes: CteDef[],
+  depth: number,
+): ResolvedColumn[] | null {
+  const proj = innerProjection(bodyText)
+  if (!proj.ok) return null
+
+  const findItem = (qualifier?: string): ScopeFromItem | undefined => {
+    if (qualifier) return proj.fromItems.find((it) => (it.alias ?? (it.kind === 'named' ? it.name : undefined)) === qualifier)
+    return proj.fromItems.length === 1 ? proj.fromItems[0] : undefined
+  }
+
+  const expandItemFields = (item: ScopeFromItem): ResolvedColumn[] | null => {
+    if (item.kind === 'named' && item.name && byName.has(item.name)) {
+      return byName.get(item.name)!.fields.map((f) => ({ name: f.name, field: f }))
+    }
+    if (depth >= 1) return null // one level of recursion only — give up gracefully beyond that
+    if (item.kind === 'named' && item.name) {
+      const cte = ctes.find((c) => c.name.toLowerCase() === item.name!.toLowerCase())
+      if (!cte) return null
+      return resolveDerivedColumns(value.slice(cte.bodyStart, cte.bodyEnd), value, byName, ctes, depth + 1)
+    }
+    if (item.kind === 'derived' && item.derivedStart !== undefined && item.derivedEnd !== undefined) {
+      return resolveDerivedColumns(bodyText.slice(item.derivedStart, item.derivedEnd), value, byName, ctes, depth + 1)
+    }
+    return null
+  }
+
+  const resolveSingleField = (sourceField: string, qualifier?: string): FieldDef | null => {
+    const item = findItem(qualifier)
+    if (!item) return null
+    const expanded = expandItemFields(item)
+    return expanded?.find((c) => c.name === sourceField)?.field ?? null
+  }
+
+  const results: ResolvedColumn[] = []
+  const seen = new Set<string>()
+  const add = (name: string, field: FieldDef | null) => {
+    if (seen.has(name)) return
+    seen.add(name)
+    results.push({ name, field })
+  }
+
+  for (const col of proj.columns) {
+    if (col.kind === 'star' || col.kind === 'qualifiedStar') {
+      const item = findItem(col.qualifier)
+      if (!item) continue // ambiguous (multiple FROM items, no qualifier) or unresolved — skip
+      const expanded = expandItemFields(item)
+      if (!expanded) continue
+      for (const e of expanded) add(e.name, e.field)
+      continue
+    }
+    const field = col.sourceField ? resolveSingleField(col.sourceField, col.qualifier) : null
+    add(col.name, field)
+  }
+  return results
 }
 
 /** The word token under/immediately before the caret, or an empty insertion point if there is none. */
@@ -196,30 +300,16 @@ function resolveContext(sig: Token[], wordStart: number): Context {
   return { kind: 'default' }
 }
 
-/** Resolves the FieldType of the column reference that ends immediately before the caret, if any. */
-function resolveLastColumnType(
-  sig: Token[],
-  wordStart: number,
-  aliasIndex: Map<string, string>,
-  referencedSourceNames: string[],
-  byName: Map<string, SourceDefinition>,
-): FieldType | null {
+/** Resolves the FieldType of the column reference that ends immediately before the caret, if any.
+ *  `resolve` is the shared alias/derived-aware field resolver built in `computeAutocomplete`. */
+function resolveLastColumnType(sig: Token[], wordStart: number, resolve: (ref: string) => FieldDef | null): FieldType | null {
   const before = sig.filter((t) => t.end <= wordStart)
   const last = before.at(-1)
   if (!last || last.kind !== 'identifier') return null
   const dot = before.at(-2)
   const owner = before.at(-3)
-  if (dot && dot.kind === 'punct' && dot.text === '.' && owner && owner.kind === 'identifier') {
-    const srcName = aliasIndex.get(owner.text)
-    const src = srcName ? byName.get(srcName) : undefined
-    const field = src?.fields.find((f) => f.name === last.text)
-    return field?.type ?? null
-  }
-  for (const srcName of referencedSourceNames) {
-    const field = byName.get(srcName)?.fields.find((f) => f.name === last.text)
-    if (field) return field.type
-  }
-  return null
+  const ref = dot && dot.kind === 'punct' && dot.text === '.' && owner && owner.kind === 'identifier' ? `${owner.text}.${last.text}` : last.text
+  return resolve(ref)?.type ?? null
 }
 
 /** Resolves a column reference (`alias.col` or bare `col`) to its FieldDef, following alias/source resolution. */
@@ -253,16 +343,14 @@ function resolveFieldRef(
 function jsonKeyContext(
   value: string,
   caret: number,
-  aliasIndex: Map<string, string>,
-  byName: Map<string, SourceDefinition>,
-  referencedSourceNames: string[],
+  resolve: (ref: string) => FieldDef | null,
 ): { candidates: Suggestion[]; wordStart: number; prefix: string } | null {
   // base column ref, then zero or more completed `-> 'key'` / `-> <index>` segments, then the open
   // quoted segment being typed.
   const m = /([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)((?:\s*->>?\s*(?:'[^']*'|\d+))*)\s*->>?\s*'([^']*)$/.exec(value.slice(0, caret))
   if (!m) return null
   const [, baseRef, completed, partial] = m
-  let field = resolveFieldRef(baseRef, aliasIndex, byName, referencedSourceNames)
+  let field = resolve(baseRef)
   if (!field || field.type !== 'Json') return null
   // Descend through the already-completed steps to the current nesting level.
   const stepRe = /'([^']*)'|(\d+)/g
@@ -313,6 +401,35 @@ function buildDotSuggestions(identifier: string, aliasIndex: Map<string, string>
   return suggestions
 }
 
+/** In-scope CTE names for a `FROM`/`JOIN` position — those declared before the word being typed. */
+function buildCteSuggestions(ctes: CteDef[], wordStart: number): Suggestion[] {
+  return ctes
+    .filter((c) => c.nameStart < wordStart)
+    .map((c) => ({ kind: 'cte', label: c.name, insertText: c.name, secondary: 'CTE' }))
+}
+
+/** Dot-completion for an alias that binds to a CTE or derived table rather than a real source —
+ *  the columns come from `resolveDerivedColumns`' heuristic read of the inner SELECT list. */
+function buildDerivedDotSuggestions(
+  identifier: string,
+  derivedTargets: Map<string, DerivedTarget>,
+  value: string,
+  byName: Map<string, SourceDefinition>,
+  ctes: CteDef[],
+): Suggestion[] {
+  const target = derivedTargets.get(identifier)
+  if (!target) return []
+  const cols = resolveDerivedColumns(target.bodyText, value, byName, ctes, 0)
+  if (!cols) return []
+  return cols.map((c) => ({
+    kind: 'column',
+    label: c.name,
+    insertText: c.name,
+    meta: c.field?.type ?? (target.kind === 'cte' ? 'CTE' : 'derived'),
+    secondary: target.kind === 'cte' ? `CTE · ${target.label}` : `derived · ${target.label}`,
+  }))
+}
+
 function buildKeywordSuggestions(): Suggestion[] {
   return Array.from(KEYWORDS).map((k) => ({ kind: 'keyword', label: k, insertText: k, meta: 'kw' }))
 }
@@ -324,7 +441,7 @@ function buildFunctionSuggestions(): Suggestion[] {
   return fns
 }
 
-function buildExprSuggestions(refs: SourceRef[], sources: SourceDefinition[]): Suggestion[] {
+function buildExprSuggestions(refs: SourceRef[], sources: SourceDefinition[], derivedTargets: Map<string, DerivedTarget>): Suggestion[] {
   const byName = new Map(sources.map((s) => [s.name, s]))
   const aliasesForSource = new Map<string, string[]>()
   for (const r of refs) {
@@ -364,6 +481,14 @@ function buildExprSuggestions(refs: SourceRef[], sources: SourceDefinition[]): S
     seenAlias.add(r.alias)
     aliasSuggestions.push({ kind: 'alias', label: r.alias, insertText: r.alias, secondary: `alias of ${r.sourceName}` })
   }
+  for (const [alias, target] of derivedTargets) {
+    aliasSuggestions.push({
+      kind: 'alias',
+      label: alias,
+      insertText: alias,
+      secondary: target.kind === 'cte' ? `CTE · ${target.label}` : 'derived table',
+    })
+  }
 
   return [...columns, ...aliasSuggestions, ...buildFunctionSuggestions(), ...buildKeywordSuggestions()]
 }
@@ -386,12 +511,32 @@ function computeAutocomplete(
   const effectivePrefix = opts.ignorePrefix ? '' : prefix
 
   const byName = new Map(sources.map((s) => [s.name, s]))
-  const refs = parseSourceRefs(sig)
-  const aliasIndex = buildAliasIndex(refs)
-  const referencedSourceNames = Array.from(new Set(refs.map((r) => r.sourceName).filter((n) => byName.has(n))))
+
+  // Scope-aware source resolution: CTEs (from the whole document — their forward-reference
+  // restriction is enforced by the grammar, not re-checked here) plus the FROM/JOIN items visible
+  // from the caret's own `(SELECT …)` scope only. A derived table's own alias is invisible from
+  // inside its own parens, and vice versa — see sqlScope.ts's `findCaretScope` doc.
+  const ctes = parseCtes(value)
+  const scope = findCaretScope(value, caret)
+  const { refs, aliasIndex, referencedSourceNames, derivedTargets } = buildScopeIndexes(value, scope.fromItems, ctes, byName)
+
+  // Shared field resolver: real source/alias first (existing behavior), then — only for qualified
+  // `alias.col` refs — an in-scope CTE/derived-table alias, followed one level through
+  // `resolveDerivedColumns`. Bare (unqualified) names never attempt derived resolution, since a
+  // derived/CTE column reference is always written qualified in this grammar.
+  const resolve = (ref: string): FieldDef | null => {
+    const direct = resolveFieldRef(ref, aliasIndex, byName, referencedSourceNames)
+    if (direct) return direct
+    const dot = ref.indexOf('.')
+    if (dot < 0) return null
+    const target = derivedTargets.get(ref.slice(0, dot))
+    if (!target) return null
+    const cols = resolveDerivedColumns(target.bodyText, value, byName, ctes, 0)
+    return cols?.find((c) => c.name === ref.slice(dot + 1))?.field ?? null
+  }
 
   // JSON key completion: caret inside an open `-> '…'` path → suggest the declared nested keys.
-  const jsonKey = jsonKeyContext(value, caret, aliasIndex, byName, referencedSourceNames)
+  const jsonKey = jsonKeyContext(value, caret, resolve)
   if (jsonKey) {
     const needle = opts.ignorePrefix ? '' : jsonKey.prefix.toLowerCase()
     const filtered = needle === '' ? jsonKey.candidates : jsonKey.candidates.filter((c) => c.label.toLowerCase().startsWith(needle))
@@ -403,19 +548,23 @@ function computeAutocomplete(
 
   let candidates: Suggestion[]
   if (context.kind === 'fromJoin') {
-    candidates = buildSourceSuggestions(sources)
+    candidates = [...buildSourceSuggestions(sources), ...buildCteSuggestions(ctes, wordStart)]
   } else if (context.kind === 'dot') {
     candidates = buildDotSuggestions(context.identifier!, aliasIndex, byName)
+    if (candidates.length === 0) {
+      candidates = buildDerivedDotSuggestions(context.identifier!, derivedTargets, value, byName, ctes)
+    }
   } else if (context.kind === 'expr') {
-    candidates = buildExprSuggestions(refs, sources)
+    candidates = buildExprSuggestions(refs, sources, derivedTargets)
   } else {
     candidates = buildKeywordSuggestions()
   }
 
   // JSON bonus: once the caret sits right after a reference to a `Json` column, offer the
-  // Postgres-style path operators as extra insertable snippets.
+  // Postgres-style path operators as extra insertable snippets. Works through a derived/CTE alias
+  // too, via the shared `resolve`.
   if (context.kind === 'expr' || context.kind === 'default') {
-    const lastType = resolveLastColumnType(sig, wordStart, aliasIndex, referencedSourceNames, byName)
+    const lastType = resolveLastColumnType(sig, wordStart, resolve)
     if (lastType === 'Json') {
       candidates = [
         { kind: 'operator', label: "-> '…'", insertText: "-> '", secondary: 'JSON field (object)', meta: 'op' },
@@ -451,6 +600,7 @@ const SUGGESTION_KIND_LABEL: Record<SuggestionKind, string> = {
   function: 'function',
   aggregate: 'aggregate',
   operator: 'operator',
+  cte: 'CTE',
 }
 
 export function SqlEditor({
