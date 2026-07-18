@@ -48,6 +48,7 @@ public static class TablesEndpoints
                     HistoryWindowMs = req.HistoryWindowMs,
                     Tags = req.Tags ?? [],
                     Metadata = req.Metadata ?? [],
+                    Parallelism = req.Parallelism,
                 };
                 var created = await Registry(client).CreateTableAsync(def);
                 return Results.Created($"/api/tables/{created.Id}", created);
@@ -79,6 +80,7 @@ public static class TablesEndpoints
             existing.HistoryWindowMs = req.HistoryWindowMs;
             existing.Tags = req.Tags ?? existing.Tags;
             existing.Metadata = req.Metadata ?? existing.Metadata;
+            existing.Parallelism = req.Parallelism;
 
             try
             {

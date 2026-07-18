@@ -341,6 +341,7 @@ public sealed class RegistryGrain(
     public async Task<TableDefinition> CreateTableAsync(TableDefinition def)
     {
         ValidateUniqueTableName(def.Name, excludeTableId: null);
+        ValidateParallelism(def.Parallelism);
 
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         def.Id = Guid.NewGuid().ToString("n");
@@ -376,6 +377,7 @@ public sealed class RegistryGrain(
         {
             ValidateUniqueTableName(def.Name, excludeTableId: existing.Id);
         }
+        ValidateParallelism(def.Parallelism);
 
         // Compile + validate against the *prospective* SQL/history config before mutating `existing` at
         // all, so a rejected update (bad name, bad historyByField) never leaves partially-applied state
@@ -385,6 +387,11 @@ public sealed class RegistryGrain(
 
         var sqlChanged = existing.Sql != def.Sql;
         var searchChanged = existing.SearchEnabled != def.SearchEnabled || existing.SearchMode != def.SearchMode;
+        // Plan 003 M2: a Parallelism change (1->N, N->1, or N->M) changes which grain topology the table's
+        // grain(s) run as (classic vs. coordinator mode, or a differently-shaped partitioned graph) — mirror
+        // the search-config restart semantics below so it takes effect immediately on a Running table
+        // instead of only on the next manual stop/start.
+        var parallelismChanged = existing.Parallelism != def.Parallelism;
         var historyConfigChanged =
             existing.HistoryEnabled != def.HistoryEnabled ||
             existing.HistoryMode != def.HistoryMode ||
@@ -405,14 +412,16 @@ public sealed class RegistryGrain(
         existing.HistoryWindowMs = def.HistoryWindowMs;
         existing.Tags = def.Tags;
         existing.Metadata = def.Metadata;
+        existing.Parallelism = def.Parallelism;
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         ApplyCompileResult(existing, compileResult);
 
-        // A running table's grain only picks up SQL/search config changes on (re)StartAsync — mirror the
-        // SQL-changed restart below for search config too, so toggling SearchEnabled/SearchMode on a
-        // Running table takes effect immediately instead of only on the next manual stop/start.
-        if ((sqlChanged || searchChanged) && wasRunning)
+        // A running table's grain only picks up SQL/search config/parallelism changes on (re)StartAsync —
+        // mirror the SQL-changed restart below for search config and parallelism too, so toggling
+        // SearchEnabled/SearchMode/Parallelism on a Running table takes effect immediately instead of only
+        // on the next manual stop/start.
+        if ((sqlChanged || searchChanged || parallelismChanged) && wasRunning)
         {
             var tableGrain = GrainFactory.GetGrain<ITableGrain>(existing.Name);
             try
@@ -550,6 +559,18 @@ public sealed class RegistryGrain(
         if (state.State.Tables.Any(t => t.Id != excludeTableId && string.Equals(t.Name, name, StringComparison.Ordinal)))
         {
             throw new InvalidOperationException($"Name '{name}' is already used by another table");
+        }
+    }
+
+    /// <summary>Plan 003 M2: 409-style guard (same pattern as ValidateUniqueTableName) — Parallelism must be
+    /// in [1, 16] (see TableDefinition.Parallelism's doc comment: 1 = classic path, 2..16 deploys the
+    /// partitioned dataflow graph; the upper bound documents the grain-explosion ceiling from plan
+    /// 003's risk section).</summary>
+    private static void ValidateParallelism(int parallelism)
+    {
+        if (parallelism is < 1 or > 16)
+        {
+            throw new InvalidOperationException($"Parallelism must be between 1 and 16 (got {parallelism}).");
         }
     }
 

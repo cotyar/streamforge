@@ -177,6 +177,14 @@ public sealed class TableGrain(
         _coordinatorMode = true;
         _coordinatorParallelism = def.Parallelism;
 
+        // _coordinatorSnapshot (unlike _executor above) is a grain-instance field that outlives a single
+        // StartAsync/StopAsync cycle — the grain activation itself isn't torn down on StopAsync, only its
+        // subscriptions/sub-grains are. Without clearing it here, a restart-resume would silently resurrect
+        // pre-restart rows into the freshly-reset state.State.Snapshot on the next flush, breaking the same
+        // "rebuild purely from live traffic" contract the classic path gets for free by allocating a brand
+        // new (empty) TableExecutor on every StartClassicAsync call.
+        _coordinatorSnapshot.Clear();
+
         if (state.State.Snapshot.Count > 0)
         {
             _rebuilding = true;
