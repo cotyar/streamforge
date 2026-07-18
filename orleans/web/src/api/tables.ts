@@ -27,6 +27,9 @@ export interface CreateTableRequest {
   historyWindowMs?: number
   tags?: Tags
   metadata?: Metadata
+  /** Plan 003 M5: 1 (default) = classic single-grain execution; 2..16 = partitioned dataflow.
+   * Changing it on an existing table restarts it. */
+  parallelism?: number
 }
 
 export type UpdateTableRequest = CreateTableRequest

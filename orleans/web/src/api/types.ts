@@ -173,6 +173,9 @@ export interface TableDefinition {
   historyWindowMs: number
   tags: Tags
   metadata: Metadata
+  /** Plan 003 M5: 1 (default) = classic single-grain execution; 2..16 deploys the partitioned
+   * dataflow graph (see TableMetrics.partitions). Changing it restarts the table. */
+  parallelism: number
 }
 
 export interface TableRowDto {
@@ -195,6 +198,21 @@ export interface TableSearchResponse {
   total: number
 }
 
+// Plan 003 M5: one partition's contribution to a parallelized table's aggregate TableMetrics —
+// confirmed empirically against a live P=4 table (curl, editor/editor123!). stageId identifies which
+// TableStageGrain this is (numbering is plan-internal — the backend does not expose the stage's
+// operator kind/alias, e.g. "Reduce" vs "FilterProject" — see DataflowPanel's doc comment for how the
+// UI copes with that).
+export interface TablePartitionMetrics {
+  stageId: number
+  partition: number
+  deltasIn: number
+  deltasOut: number
+  /** -1 = never advanced yet. */
+  frontierEpoch: number
+  lastUpdateMs: number
+}
+
 export interface TableMetrics {
   tableId: string
   status: TableStatus
@@ -203,6 +221,9 @@ export interface TableMetrics {
   deltasOut: number
   lastUpdateMs: number
   rebuilding?: boolean
+  /** Plan 003 M5: per-partition detail, present only for a parallelism >= 2 table — absent for every
+   * parallelism == 1 table. */
+  partitions?: TablePartitionMetrics[] | null
 }
 
 export interface TableOutputField {

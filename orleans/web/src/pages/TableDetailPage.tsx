@@ -29,6 +29,7 @@ import { SqlEditor } from '../components/SqlEditor'
 import { RoleGate } from '../components/RoleGate'
 import { MetadataEditor } from '../components/MetadataEditor'
 import { RowHistorySheet } from '../components/RowHistorySheet'
+import { DataflowPanel } from '../components/DataflowPanel'
 import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -207,6 +208,8 @@ function MaterializedView({ table, onRowClick }: { table: TableDefinition; onRow
         <Stat label="Last update" value={metrics ? formatClock(metrics.lastUpdateMs) : '—'} />
       </div>
 
+      <DataflowPanel table={table} metrics={metrics} />
+
       {sortedRows.length > 500 && (
         <p className="text-xs text-muted-foreground">
           Showing 500 of {sortedRows.length.toLocaleString()} rows.
@@ -278,6 +281,15 @@ function SearchAndView({
   const [historyDraftWindowMs, setHistoryDraftWindowMs] = useState(table.historyWindowMs)
   const [historyApplying, setHistoryApplying] = useState(false)
   const [historyRow, setHistoryRow] = useState<ResultRow | null>(null)
+
+  // Execution (parallelism) config draft — same resync-on-fresh-definition pattern as the search/
+  // history drafts above.
+  const [parallelismDraft, setParallelismDraft] = useState(table.parallelism)
+  const [parallelismApplying, setParallelismApplying] = useState(false)
+
+  useEffect(() => {
+    setParallelismDraft(table.parallelism)
+  }, [table.parallelism])
 
   useEffect(() => {
     setHistoryDraftEnabled(table.historyEnabled)
@@ -354,7 +366,22 @@ function SearchAndView({
       historyWindowMs: table.historyWindowMs,
       tags: table.tags,
       metadata: table.metadata,
+      parallelism: table.parallelism,
       ...overrides,
+    }
+  }
+
+  async function applyParallelism(next: number) {
+    setParallelismDraft(next)
+    setParallelismApplying(true)
+    try {
+      const saved = await tablesApi.update(table.id, fullUpdateBody({ parallelism: next }))
+      onTableChange(saved)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update execution settings.')
+      setParallelismDraft(table.parallelism)
+    } finally {
+      setParallelismApplying(false)
     }
   }
 
@@ -621,6 +648,76 @@ function SearchAndView({
         </CardContent>
       </Card>
 
+      <Card>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Execution</h3>
+            <Badge variant="outline">{table.parallelism === 1 ? 'Single' : `${table.parallelism}-way parallel`}</Badge>
+          </div>
+
+          {!canEdit && (
+            <span className="text-xs text-muted-foreground">
+              {table.parallelism === 1
+                ? 'This table runs single-partitioned.'
+                : `This table runs partitioned across ${table.parallelism} partitions.`}
+            </span>
+          )}
+
+          <RoleGate min="Editor">
+            <div className="flex flex-wrap items-center gap-3 border-t border-border pt-3">
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                size="sm"
+                value={parallelismDraft === 1 ? 'single' : 'parallel'}
+                disabled={parallelismApplying}
+                onValueChange={(v) => {
+                  if (!v) return
+                  if (v === 'single') void applyParallelism(1)
+                  else if (parallelismDraft === 1) void applyParallelism(2)
+                }}
+                aria-label="Execution mode"
+              >
+                <ToggleGroupItem value="single">Single (1)</ToggleGroupItem>
+                <ToggleGroupItem value="parallel">Parallel</ToggleGroupItem>
+              </ToggleGroup>
+
+              {parallelismDraft > 1 && (
+                <Select
+                  value={String(parallelismDraft)}
+                  disabled={parallelismApplying}
+                  onValueChange={(v) => void applyParallelism(Number(v))}
+                >
+                  <SelectTrigger className="w-20" aria-label="Partition count">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {Array.from({ length: 15 }, (_, i) => i + 2).map((n) => (
+                        <SelectItem key={n} value={String(n)}>
+                          {n}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              )}
+
+              {parallelismApplying && (
+                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Spinner className="size-3.5" /> Restarting…
+                </span>
+              )}
+            </div>
+
+            <p className="text-[11px] text-muted-foreground">
+              Single runs the whole table on one grain. Parallel deploys a partitioned dataflow graph (2–16
+              partitions) so a hot stage no longer blocks the rest of the table. Changing this restarts the table.
+            </p>
+          </RoleGate>
+        </CardContent>
+      </Card>
+
       {isSearching ? (
         searchNotEnabled ? (
           <Empty className="border border-dashed">
@@ -813,7 +910,8 @@ export function TableDetailPage() {
     try {
       // History config isn't editable from this form (see the right-panel "Row history" card, which
       // applies its own changes immediately) — carry the currently-persisted values through so a
-      // plain Save never resets them back to the request DTO's defaults (history-off).
+      // plain Save never resets them back to the request DTO's defaults (history-off). Same for
+      // parallelism, editable only via the right-panel "Execution" card.
       const body = {
         name: name.trim(),
         description,
@@ -827,6 +925,7 @@ export function TableDetailPage() {
         historyWindowMs: table?.historyWindowMs ?? 0,
         tags,
         metadata,
+        parallelism: table?.parallelism ?? 1,
       }
       let saved: TableDefinition
       if (isNew) {
