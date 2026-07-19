@@ -40,8 +40,16 @@ public static class JsonValueNormalizer
         _ => throw new ArgumentOutOfRangeException(nameof(element), element.ValueKind, "Unknown JSON value kind"),
     };
 
-    private static object NormalizeNumber(JsonElement element) =>
-        element.TryGetInt64(out var l) ? l : element.GetDouble();
+    private static object NormalizeNumber(JsonElement element)
+    {
+        // Not a ternary: long/double branches would unify to double and box every integer as double.
+        if (element.TryGetInt64(out var l))
+        {
+            return l;
+        }
+
+        return element.GetDouble();
+    }
 
     private static Dictionary<string, object?> NormalizeObject(JsonElement element)
     {
