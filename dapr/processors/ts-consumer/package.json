@@ -1,0 +1,12 @@
+{
+  "name": "sf-ts-consumer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "StreamForge polyglot pub/sub consumer (plan 005, wave W8-B) — bun + Bun.serve, zero deps.",
+  "module": "main.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun run main.ts",
+    "dev": "bun --watch run main.ts"
+  }
+}
