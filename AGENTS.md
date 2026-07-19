@@ -37,7 +37,8 @@ cd web && bun run build
 cd dapr && ./tools/run.sh                                      # :5399 (needs `dapr init` done once)
 ```
 Local skills (root `.claude/skills/`, `sf-` prefix) wrap the common workflows: `/sf-run` (both
-flavors), `/sf-verify` (both flavors), `/sf-sql`, `/sf-client-gen`.
+flavors), `/sf-verify` (both flavors), `/sf-sql`, `/sf-client-gen`, `/sf-config` (catalog
+export/import).
 
 **Dapr flavor extras**: `dapr/tools/run.sh` starts the sidecar'd host on 5399 (sidecar 3599/4599);
 `dapr/tools/reset.sh` SCANs and deletes this app's Redis keys to reseed (the Dapr-flavor equivalent

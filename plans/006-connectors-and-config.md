@@ -1,6 +1,31 @@
 # 006 — Ingestion Connectors + Config Import/Export
 
-Status: **IN PROGRESS** (P committed; waves pending).
+Status: **DONE** (W0–W7 all landed). Results summary: four real connector kinds (`url`/`file`/
+`folder`/`grpc`-subscribe) and shared config import/export are live on both flavors, driven by a
+pure, runtime-free connector core (`shared/StreamForge.AppCore/Connectors/**`) with thin Orleans
+(`ConnectorGrain`) and Dapr (`ConnectorActor`) drivers. W6 end-to-end evidence: URL polling with
+exact dedup (**50 items emitted, 50 served** across repeated polls of the same payload); an
+OpenAPI-derived schema exercised end to end through the pass-through mapping path; failure backoff
+observed doubling **30s → 60s** on repeated failures, then recovering on the next success; folder
+polling showing at-least-once re-emission semantics as documented; the file/folder name+mtime
+ledger surviving a process restart intact (**9 known files → 9 known files**, Orleans
+`[PersistentState]`). **Headline — cross-runtime federation**: the Dapr flavor instance (`:5399`)
+subscribed the Orleans flavor's `positions` table **by id** over gRPC, successfully via both the
+reflection and proto-text schema paths, with real rows flowing cross-runtime
+(`eventsEmittedTotal` climbed **418 → 498** in 10 s of live traffic, `SELECT * FROM fed` showing
+real position rows in a Dapr-flavor table). One genuine defect was found and fixed live during W6:
+`GrpcSubscriberCore` built the v1alpha `FileContainingSymbol` request from a `table:{id}`/
+`pipeline:{id}` entity key's opaque id PascalCased — correct only for `source:{name}` keys, always
+wrong for id-keyed ones, since `DynamicDescriptorSet` registers messages under entity display
+**names**, not ids. Fix: `ResolveMessageIdentAsync` resolves id → name via a REST GET against the
+remote's `RestAddress` before asking reflection for the symbol (commit `6182d90`). Config
+import/export: a cross-flavor merge (Orleans export → Dapr import) landed **18 entities skipped
+(already identical), 4 created**, and a reverse `validate` pass confirmed **zero mutation** — the
+byte-equal `export → reset → import → re-export` round trip (D-I) held throughout. Final suites:
+**orleans 877 / dapr 181**, `bun run build` green — roughly **350 new tests** added across W1–W6
+against the pre-006 baseline (511 / ~153). The parity matrix below did not materially diverge from
+plan: Dapr gRPC *serving* stays a permanent descope (plan 005 D-F), everything else landed on both
+flavors.
 
 **Hard gate (every commit):** `~/.dotnet/dotnet test orleans/StreamForge.sln` (511 pre-existing tests)
 AND `~/.dotnet/dotnet test dapr/StreamForge.Dapr.sln` (~153) — all green with pre-existing test `.cs`
@@ -182,7 +207,7 @@ full orleans suite green (with the new test), live `tableDelta`/`pipelineResult`
 isolated port — before building waves on top. If that session stalls without committing, this
 orchestrator reviews and lands its working-tree changes as W0 instead.
 **Acceptance:** fix + regression test in `master`; 511(+1) green; live SignalR delivery observed;
-docs no longer claim an open bug.
+docs no longer claim an open bug. **Done** (commit `5f3d1e5`).
 
 ### W1 — Contracts + deps pinned (orchestrator, serial)
 AppCore csproj: add Cronos, YamlDotNet, Grpc.Net.Client, Grpc.Reflection. Contracts additions
@@ -192,6 +217,7 @@ AppCore csproj: add Cronos, YamlDotNet, Grpc.Net.Client, Grpc.Reflection. Contra
 (`MappingValidateRequest/Result`, `SchemaDeriveRequest/Result`, `RemoteSchemaRequest/Result`,
 `ConfigImportReport` + entry). `web/src/api/types.ts` mirrored additively (same shapes, doc
 comments per house style). **Acceptance:** both suites green (types dormant), bun build green.
+**Done** (commit `f4869ae`).
 
 ### W2 — Pure connector core (5 parallel agents, disjoint AppCore subfolders + own new test files)
 - **2A Scheduling + poll policy** — `Connectors/Scheduling/` (ScheduleSpec parse: cron via Cronos
@@ -222,7 +248,7 @@ comments per house style). **Acceptance:** both suites green (types dormant), bu
   export). Tests: merge-rule matrix, include chains + cycle rejection, plan diffs, canonical
   stability.
 **Acceptance per agent:** both suites green; new tests green; no csproj edits; no file outside the
-assigned subfolders.
+assigned subfolders. **Done** (commit `e21bb79` — all 5 sub-agents landed).
 
 ### W3 — Runtime drivers ∥ config endpoints (3 parallel agents)
 - **3A Orleans** (owns `orleans/src/**` touched files) — `IConnectorGrain` (additive in
@@ -241,7 +267,7 @@ assigned subfolders.
   multipart set; D-I/D-J semantics via `ICatalogFacade` + Engine compile; secrets masked per D-H.
 **Acceptance:** both suites green. 3A/3B: live smoke — isolated instance, create a `url` source
 against a scratch local HTTP endpoint, rows visible via REST. 3C: live export→import round-trip on
-an isolated Orleans instance.
+an isolated Orleans instance. **Done** (commits `6cb6507` pre-stub + `b4d3e59`, all 3 sub-agents).
 
 ### W4 — Sources API surface (1 agent, serial; owns SourcesEndpoints.cs + new source-schema endpoint file)
 Masking + `***`-merge on sources GET/list/POST/PUT (D-H); kind-aware validation on create/update
@@ -249,7 +275,7 @@ Masking + `***`-merge on sources GET/list/POST/PUT (D-H); kind-aware validation 
 (IConnectorStatusFacade); helper endpoints for the UI: `POST /api/sources/schema/mapping-validate`,
 `POST /api/sources/schema/derive-openapi`, `POST /api/sources/schema/from-remote` (gRPC target →
 fields, Editor-only since it dials out). **Acceptance:** suites green; live curl checks of every
-endpoint on isolated instances of **both** flavors.
+endpoint on isolated instances of **both** flavors. **Done** (commit `24c15d1`).
 
 ### W5 — SPA (2 parallel agents)
 - **5A Sources page** (owns `SourcesPage.tsx` + new `components/sources/*`, `api/sources.ts`) —
@@ -263,7 +289,7 @@ endpoint on isolated instances of **both** flavors.
   (created/updated/deleted/skipped/error + per-entity diagnostics). Editor/Viewer gating via
   `RoleGate`; tokens only; both themes.
 **Acceptance:** `bun run build` green; live click-through against both flavors (create a URL source
-end-to-end from the UI; export/import round trip from the UI).
+end-to-end from the UI; export/import round trip from the UI). **Done** (commit `1504343`).
 
 ### W6 — End-to-end verification (orchestrator + 1 agent, serial)
 Scripted, all on isolated ports, everything killed after:
@@ -281,7 +307,12 @@ Scripted, all on isolated ports, everything killed after:
    running entity (stop-then-replace observed); cycle rejection.
 Both full suites; fixes as needed land here.
 **Acceptance:** every connector kind exercised live; the four numbered checks pass and are recorded
-in the plan's results summary.
+in the plan's results summary. **Done** (commit `6182d90` — includes the live-found
+`ResolveMessageIdentAsync` federation-by-id fix; see the Status line above for the full evidence:
+URL dedup 50/50, backoff 30s→60s, folder ledger restart-survival 9→9, headline federation
+`eventsEmittedTotal` 418→498 in 10s over both reflection AND proto-text schema paths, config merge
+18 skipped/4 created + reverse validate no-mutation, suites orleans 877 / dapr 181 / bun build
+green).
 
 ### W7 — Docs + skill + close (1 agent + orchestrator)
 `orleans/docs/index.html`: Connectors section (kinds, schedule/backoff, mapping doc format,
@@ -289,9 +320,14 @@ OpenAPI ceiling, secrets ceiling, federation) + Config section (document format,
 compose rules**, modes, round-trip guarantee); both `ARCHITECTURE.md`s; parity matrix finalized
 here; `plans/README.md` row; new root skill **`/sf-config`** (export/import workflow: curl
 examples, compose patterns, mode semantics). Final full sweep both flavors + `bun run build`.
-Plan status → DONE with results summary.
+Plan status → DONE with results summary. **Done** — this wave: two new sidebar-linked sections in
+`orleans/docs/index.html` (`#connectors`, `#config`); an "Ingestion connectors (plan 006)" section
+in both `orleans/ARCHITECTURE.md` and `dapr/ARCHITECTURE.md`; the `/sf-config` skill; this plan's
+Status line and phase list; `plans/README.md`'s 006 row; `AGENTS.md`'s skills line. The parity
+matrix below did not need to change — reality matched the target throughout (Dapr gRPC serving was
+always the one deliberate, permanent descope).
 
-## Parity matrix (target)
+## Parity matrix (achieved — matches the original target; verified W6)
 
 | Capability | Orleans | Dapr |
 |---|---|---|

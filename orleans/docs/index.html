@@ -226,6 +226,19 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#grpc-reflection" class="sub">Dynamic reflection</a>
   <a href="#grpc-codegen" class="sub">Typed client codegen</a>
   <a href="#realtime">Realtime events</a>
+  <div class="navgap"></div>
+  <a href="#connectors">Ingestion connectors</a>
+  <a href="#connectors-schedule" class="sub">Scheduling &amp; backoff</a>
+  <a href="#connectors-mapping" class="sub">Mapping documents</a>
+  <a href="#connectors-openapi" class="sub">OpenAPI derivation</a>
+  <a href="#connectors-files" class="sub">File &amp; folder sources</a>
+  <a href="#connectors-grpc" class="sub">gRPC federation</a>
+  <a href="#connectors-secrets" class="sub">Secrets-lite</a>
+  <a href="#config">Configuration import/export</a>
+  <a href="#config-format" class="sub">Document format</a>
+  <a href="#config-compose" class="sub">Compose &amp; merge rules</a>
+  <a href="#config-import" class="sub">Import modes</a>
+  <div class="navgap"></div>
   <a href="#architecture">Architecture</a>
   <a href="#limits">Limitations</a>
   <div class="navgap"></div>
@@ -525,6 +538,175 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 <tr><td><code>subscribeSource(name)</code></td><td><code>sourceEvent</code></td><td>raw source events (sampled) for the live tape</td></tr>
 <tr><td><code>SubscribeTable(name)</code></td><td><code>tableDelta</code></td><td><code>(tableName, deltas[{row, weight}], seq)</code> — Z-set deltas</td></tr>
 </tbody></table></div>
+</section>
+
+<section id="connectors">
+<h2>Ingestion connectors</h2>
+<p>Alongside synthetic <code>generator</code> sources, a source's <code>kind</code> can be <code>url</code>, <code>file</code>, <code>folder</code>, or <code>grpc</code> — real ingestion from the outside world. Every kind still declares a schema (<code>fields</code>) up front, same as a generator source; a <code>connector</code> object carries the kind-specific configuration. Non-<code>grpc</code> kinds are <b>polled</b> on a schedule; <code>grpc</code> is a <b>persistent subscription</b> to another StreamForge instance (federation). Whatever a connector emits flows through the exact same door a generator does — onto the source's stream — so pipelines, tables, SignalR, and the SPA all work unchanged.</p>
+<pre><code>{
+  "name": "weather",
+  "kind": "url",
+  "fields": [
+    { "name": "city", "type": "String" },
+    { "name": "tempC", "type": "Double" }
+  ],
+  "connector": {
+    "schedule": { "intervalMs": 30000 },
+    "url": {
+      "url": "https://api.example.com/weather",
+      "headers": { "Authorization": "Bearer &lt;secret&gt;" }
+    },
+    "mapping": {
+      "itemsPath": "$.data[*]",
+      "dedupKeyField": "city",
+      "timestampField": "observedAt",
+      "fields": [
+        { "sourcePath": "city",   "field": { "name": "city",   "type": "String" } },
+        { "sourcePath": "tempC",  "field": { "name": "tempC",  "type": "Double" } }
+      ]
+    }
+  }
+}</code></pre>
+<p>A connector with no hand-written <code>mapping</code> falls back to a pass-through: <code>itemsPath: "$"</code>, one field per declared schema field of the same name — the shape an OpenAPI-derived schema (below) produces on its own.</p>
+
+<h3 id="connectors-schedule">Scheduling &amp; backoff</h3>
+<p><code>connector.schedule</code> is exactly one of <code>cron</code> (5- or 6-field, UTC, parsed by Cronos — the field count is detected by whitespace-token count, not guessed) or <code>intervalMs</code> (fixed interval; <b>1&nbsp;s floor</b> — no hot-looping a live endpoint). Omitting <code>schedule</code> entirely defaults to a 30&nbsp;s interval. A shorthand <code>"every 30s"</code> / <code>"every 5m"</code> / <code>"every 2h"</code> parses to the equivalent <code>intervalMs</code>.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Example</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>{ "intervalMs": 5000 }</code></td><td>Poll every 5 seconds.</td></tr>
+<tr><td><code>{ "cron": "0 */5 * * * *" }</code></td><td>Every 5 minutes, UTC (6-field, leading seconds).</td></tr>
+<tr><td><code>{ "cron": "0 9 * * 1-5" }</code></td><td>09:00 UTC on weekdays (5-field, standard).</td></tr>
+</tbody></table></div>
+<p><b>Failure backoff</b> — after <i>k</i> consecutive failures, the next attempt is delayed <code>min(30s &times; 2<sup>k&minus;1</sup>, 15&nbsp;min)</code>: 30s, 60s, 120s, … capped at 15 minutes. A cron source doesn't retry mid-interval — it skips straight to the first natural occurrence at or after the backoff point. Success resets the streak to zero immediately. Runtime status is polled by the SPA (2 s) and exposed at <code>GET /api/sources/{name}/status</code> → <code>{ nextRunMs, lastRunMs, lastStatus, lastError, consecutiveFailures, eventsEmittedTotal, lastBatchCount }</code> (204 for generator-kind sources, which don't track this).</p>
+
+<h3 id="connectors-mapping">Mapping documents</h3>
+<p>A mapping document (JSON or YAML — one model, two encodings, one editor) tells the connector how to turn a fetched payload into rows. Paths use a deliberately tiny, closed <b>JSONPath-lite</b> subset:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Syntax</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>$</code></td><td>The root itself.</td></tr>
+<tr><td><code>.name</code></td><td>Property access (a bare leading identifier with no <code>$</code>/<code>.</code> also works).</td></tr>
+<tr><td><code>['name']</code> / <code>["name"]</code></td><td>Quoted property access, for names that don't fit a bare identifier.</td></tr>
+<tr><td><code>[n]</code></td><td>Zero-based array index.</td></tr>
+<tr><td><code>[*]</code></td><td>Every element of an array.</td></tr>
+</tbody></table></div>
+<p>Nothing else — recursive descent (<code>..</code>), key wildcards (<code>.*</code>), filters, slices, and negative indices are all rejected with a diagnostic naming the offending token. A missing segment (absent property, out-of-range index, wildcard on a non-array) yields no match rather than an error — only bad <i>syntax</i> throws.</p>
+<pre><code>{
+  "itemsPath": "$.data.trades[*]",
+  "dedupKeyField": "tradeId",
+  "timestampField": "tradeTime",
+  "fields": [
+    { "sourcePath": "tradeId",   "field": { "name": "tradeId",   "type": "String" } },
+    { "sourcePath": "price",     "field": { "name": "price",     "type": "Double" } },
+    { "sourcePath": "user.tier", "field": { "name": "tier",      "type": "String" } }
+  ]
+}</code></pre>
+<p><code>dedupKeyField</code> names an <i>emitted</i> field whose value dedups re-polled items — the tracker remembers up to <b>10,000 keys, FIFO</b>; beyond that bound the oldest key is forgotten and could in principle be re-emitted (documented ceiling: at-least-once, not exactly-once — omit <code>dedupKeyField</code> and every poll re-emits everything it sees, deliberately, if that's not acceptable for the source, don't set one and dedupe downstream). <code>timestampField</code> names the emitted field holding the event time (epoch-ms or ISO-8601) that becomes the row's <code>_ts</code>; omit it and <code>_ts</code> is arrival time. Try a mapping against a sample payload before saving: <code>POST /api/sources/schema/mapping-validate</code> with <code>{ document, sample }</code> → <code>{ ok, mapping, diagnostics, previewRows }</code> (first 10 rows).</p>
+
+<h3 id="connectors-openapi">OpenAPI derivation</h3>
+<p>Rather than hand-write a schema, a <code>url</code> source can derive one from an OpenAPI v3 document (JSON or YAML, by URL or pasted inline): <code>POST /api/sources/schema/derive-openapi</code> with <code>{ openApi: { docUrl | docInline, operationId | schemaPointer } }</code> → <code>{ fields, diagnostics }</code> for the UI to review and confirm. Selection: an explicit <code>schemaPointer</code> (<code>"#/…"</code>) wins; otherwise <code>operationId</code> picks an operation across every path/method, and its response schema is chosen by trying <code>200</code>, <code>201</code>, <code>2XX</code>, <code>default</code> in order, then the first <code>application/json*</code> media type.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>OpenAPI schema</th><th>Derived field</th></tr></thead>
+<tbody>
+<tr><td><code>string</code></td><td><code>String</code> (<code>format: date-time|date</code> → <code>Timestamp</code>)</td></tr>
+<tr><td><code>number</code> / <code>integer</code> / <code>boolean</code></td><td><code>Double</code> / <code>Long</code> / <code>Bool</code></td></tr>
+<tr><td><code>object</code> with <code>properties</code></td><td><code>Json</code> with declared <code>Children</code></td></tr>
+<tr><td><code>object</code> without <code>properties</code></td><td><code>Json</code> (schemaless, free-form)</td></tr>
+<tr><td><code>array</code></td><td>The item mapping, with <code>isArray: true</code></td></tr>
+<tr><td><code>allOf</code></td><td>Best-effort shallow property merge across subschemas (later entries win); a diagnostic notes it happened</td></tr>
+<tr><td><code>oneOf</code> / <code>anyOf</code> / <code>not</code></td><td>Schemaless <code>Json</code> + a diagnostic — not derivable</td></tr>
+</tbody></table></div>
+<p><b>Resolution ceiling</b>: only internal <code>"#/…"</code> <code>$ref</code>s are followed (cycle-safe — a ref already on the current resolution path becomes schemaless <code>Json</code> + a diagnostic instead of recursing forever); any external or relative <code>$ref</code> is rejected outright the same way, never fetched. The response root, when itself an array, is treated as the items list (its <code>items</code> schema drives field derivation) — pair the derived fields with <code>itemsPath: "$[*]"</code> or an equivalent mapping. Derivation never throws for a malformed document; every failure becomes a diagnostic on a 200 response.</p>
+
+<h3 id="connectors-files">File &amp; folder sources</h3>
+<p><b>File</b> (<code>connector.file: { path, format }</code>) polls one file on the schedule; the whole file is <b>re-parsed</b> whenever its mtime changes — there is no tailing, no append-detection, just "did this file change since I last read it." <b>Folder</b> (<code>connector.folder: { path, format, glob? }</code>) polls a directory (no recursion); each file whose name+mtime isn't already in the ledger is parsed once and remembered. Formats: <code>ndjson</code>, <code>json</code> (a JSON array), <code>csv</code> (RFC-4180, header row required).</p>
+<p>The name+mtime ledger is persisted per flavor (Orleans: grain <code>[PersistentState]</code>; Dapr: actor state in Redis) — <b>restart-safe</b>: a source that has already seen 9 files still shows 9 known files after a process restart, verified live. Like the dedup tracker, the ledger is bounded at 10,000 entries, FIFO. Because re-parse is whole-file and dedup is at-least-once beyond the bound, there is <b>no cross-restart exactly-once guarantee</b> — pair a file/folder source with <code>mapping.dedupKeyField</code> when the upstream can repeat content across restarts.</p>
+
+<h3 id="connectors-grpc">gRPC federation</h3>
+<p>A <code>grpc</code>-kind source subscribes to <b>another StreamForge instance's</b> <code>DynamicStreamService/SubscribeEntity</code> — the federation story. <code>connector.grpc</code>:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>address</code></td><td>Remote gRPC address, e.g. <code>http://localhost:5299</code> (h2c).</td></tr>
+<tr><td><code>entityKey</code></td><td><code>source:{name}</code> | <code>pipeline:{id}</code> | <code>table:{id}</code> on the remote.</td></tr>
+<tr><td><code>username</code>/<code>password</code> <i>or</i> <code>token</code></td><td>Login credentials (re-login on expiry) or a static bearer token (no re-login possible with a static token).</td></tr>
+<tr><td><code>restAddress</code></td><td>The remote's REST base for login and (for <code>table</code>/<code>pipeline</code> keys) id→name resolution — required whenever <code>username</code> is set; never guessed from <code>address</code>.</td></tr>
+<tr><td><code>schemaSource</code></td><td><code>"reflection"</code> (default, v1alpha reflection walk) or <code>"proto"</code> (parses <code>protoText</code>).</td></tr>
+</tbody></table></div>
+<p>The remote schema is fetched <b>once per (re)connect</b> — a snapshot, not a live watch: an edit to the remote entity's schema is picked up only on the next reconnect. Reconnection is forever, with the same backoff formula as scheduled polling; an <code>UNAUTHENTICATED</code> response gets one immediate re-login-and-retry (when logging in, not a static token) before falling back to the normal backoff. A <code>table</code>-keyed subscription has <b>insert-only</b> source semantics: delta frames with <code>weight &le; 0</code> (Z-set retractions) are silently dropped — a source can only grow, retraction-aware federation is out of scope.</p>
+<p>Try a target before saving: <code>POST /api/sources/schema/from-remote</code> with <code>{ grpc }</code> → <code>{ fields, fieldNumbersJson, diagnostics }</code> (Editor-only — it dials out). For <code>table</code>/<code>pipeline</code> entity keys, the ident in <code>entityKey</code> is an opaque id, not the remote's generated proto message name (which is derived from the entity's display <b>name</b>) — the reflection path resolves id→name first via a REST GET against <code>restAddress</code> before asking reflection for the symbol; a <code>source:{name}</code> key needs no such lookup, since the ident already is the name.</p>
+<div class="callout"><b>Dapr can subscribe, not serve.</b> The Dapr flavor can run a <code>grpc</code>-kind source against any StreamForge instance (Orleans or Dapr, wherever gRPC serving is live). Being a federation <i>server</i> — accepting <code>SubscribeEntity</code> calls — stays Orleans-only (<code>:5299</code>); the Dapr flavor's gRPC port (<code>:5499</code>) remains reserved, unserved.</div>
+
+<h3 id="connectors-secrets">Secrets-lite</h3>
+<p>The two secret slots on a connector — URL header <i>values</i> and gRPC <code>password</code>/<code>token</code> — follow a deliberately honest, minimal ceiling: stored <b>plaintext at rest</b> in each flavor's own store (Orleans JSON file / Dapr Redis — the same posture as JWT signing config today), <b>no KMS, no encryption</b>. Every read path (GET one, list, export) masks a non-empty secret as <code>"***"</code>. Writing back a literal <code>"***"</code> means <b>"keep the stored value"</b> — this is what makes the SPA's GET (masked) → edit → PUT (whole object) cycle safe: it never clobbers a real secret with the mask string. <code>GET /api/config/export</code> omits real secret values unless the caller is Admin and passes <code>includeSecrets=true</code>.</p>
+</section>
+
+<section id="config">
+<h2>Configuration import/export</h2>
+<p>The catalog — source, pipeline, and table <i>definitions</i> — can be exported to a portable document and imported back, including across the two runtime flavors: export from Orleans, import into Dapr (or the reverse), or version the document in git and promote it between environments. What travels is configuration only: <b>no ids, no users/credentials, no runtime state</b> (dedup ledgers, connector status, pipeline/table row data never leave the process this way).</p>
+
+<h3 id="config-format">Document format</h3>
+<p>One canonical shape, two encodings — canonical JSON or YAML, both accepted on import; export offers either. <code>GET /api/config/export?format=json|yaml&amp;includeSecrets=true</code> (Viewer; <code>includeSecrets</code> additionally requires Admin, per the secrets-lite ceiling above).</p>
+<pre><code>{
+  "version": 1,
+  "sources": [
+    {
+      "name": "weather", "kind": "url",
+      "fields": [ { "name": "city", "type": "String" }, { "name": "tempC", "type": "Double" } ],
+      "connector": {
+        "schedule": { "intervalMs": 30000 },
+        "url": { "url": "https://api.example.com/weather", "headers": { "Authorization": "***" } }
+      }
+    }
+  ],
+  "pipelines": [
+    { "name": "hot_weather", "sql": "SELECT city, tempC FROM weather WHERE tempC > 30", "running": true }
+  ],
+  "tables": [
+    { "name": "latest_by_city", "sql": "SELECT * FROM weather LATEST BY (city)", "running": true,
+      "searchEnabled": false, "searchMode": "Exact", "historyEnabled": false, "historyMode": "All",
+      "historyLimit": 10, "historyWindowMs": 0, "parallelism": 1 }
+  ]
+}</code></pre>
+<p>Pipelines/tables carry <code>running</code> as <b>desired</b> state, not the live <code>Status</code> enum — a pipeline that's currently <code>Failed</code> exports as <code>running: true</code> (it was asked to run and never told to stop; only <code>Stopped</code> maps to <code>false</code>). A top-level <code>include</code> array names other documents (relative paths) to compose in before this one — see below. Canonical JSON export is deterministic: 2-space indent, camelCase, entities sorted by name, fixed property order, empty/null fields omitted — so <code>export → reset → import → re-export</code> is <b>byte-identical</b> (verified live, wave 3C and again end-to-end in W6).</p>
+
+<h3 id="config-compose">Compose &amp; merge rules</h3>
+<p>Multiple documents combine into one before anything is applied. Precise rules:</p>
+<ul>
+<li>A document's own <code>include</code> list resolves <b>depth-first, in order</b>, before the document itself — so "the includer always wins over everything it includes," recursively for nested includes.</li>
+<li>Across the resulting ordered sequence, <b>later documents win per entity</b>, matched by <code>(kind, name)</code>.</li>
+<li>The merge is a <b>shallow field override</b>: a property present in the later entity replaces the earlier value <i>entirely</i> — arrays and objects replace whole, never element-merged or deep-merged.</li>
+<li>An explicit JSON <code>null</code> for an optional field <b>clears</b> it (distinct from the field being absent, which leaves the earlier value untouched).</li>
+<li>An include <b>cycle</b> or a <b>missing</b> include is fatal — a diagnostic naming the path/chain, no partial composition.</li>
+</ul>
+<p>Includes resolve two ways depending on how the import arrives: an ordered multi-document JSON array composes directly (no filesystem involved — later element wins, same rules); a <b>multipart file-set upload</b> resolves each document's <code>include</code> entries by exact file <b>name</b> within the uploaded set only — <b>the server never reads its own filesystem</b> for an include, by construction (no path traversal possible). A single document with a non-empty <code>include</code> list is rejected outside a multipart upload — there's nothing on the server for it to resolve against.</p>
+
+<h3 id="config-import">Import modes</h3>
+<p><code>POST /api/config/import?mode=validate|merge|replace</code> — body is a single document, an ordered JSON array, or a multipart file set (detected by Content-Type).</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Mode</th><th>Role</th><th>Behavior</th></tr></thead>
+<tbody>
+<tr><td><code>validate</code></td><td><span class="pill editor">E</span></td><td>Report only — every entity is diffed and every pipeline/table SQL compiled through the real Engine compiler against the composed catalog, but nothing is written.</td></tr>
+<tr><td><code>merge</code></td><td><span class="pill editor">E</span></td><td><b>Default.</b> Upsert by name — entities in the document are created or updated; entities absent from the document are left alone.</td></tr>
+<tr><td><code>replace</code></td><td><span class="pill admin">A</span></td><td>Like merge, plus catalog entities <i>absent</i> from the document are <b>deleted</b> — running ones are stopped first.</td></tr>
+</tbody></table></div>
+<p><b>Ordering matters and is fixed.</b> Apply order: sources → tables (topologically sorted so a table's input table lands before it) → pipelines. <code>replace</code>-mode deletions run last, in <i>reverse</i> dependency order: pipelines → tables (reverse-topo) → sources — a running entity is stopped before it's deleted, mirroring the same stop-then-replace discipline as any other dependency-respecting shutdown. Every imported pipeline/table SQL is recompiled through the real Engine compiler against the composed post-import catalog; a compile failure marks that one entity <code>error</code> in the report without aborting the rest of the import (<code>validate</code> reports every entity's outcome the same way; apply modes simply skip the failed one).</p>
+<p>The response is a per-entity report: <code>{ mode, ok, entries: [{ kind, name, action, diagnostics[] }] }</code>, <code>action</code> one of <code>created</code> | <code>updated</code> | <code>deleted</code> | <code>skipped</code> | <code>error</code>.</p>
+<pre><code># export (JSON, secrets masked)
+curl -s localhost:5199/api/config/export -H "Authorization: Bearer $VIEWER_TOKEN" -o export.json
+
+# validate first, then merge for real
+curl -s -X POST "localhost:5199/api/config/import?mode=validate" \
+  -H "Authorization: Bearer $EDITOR_TOKEN" -H 'Content-Type: application/json' --data @export.json
+curl -s -X POST "localhost:5199/api/config/import?mode=merge" \
+  -H "Authorization: Bearer $EDITOR_TOKEN" -H 'Content-Type: application/json' --data @export.json
+
+# multipart include set — base.json includes overlay.json by file name
+curl -s -X POST "localhost:5199/api/config/import?mode=merge" \
+  -H "Authorization: Bearer $EDITOR_TOKEN" \
+  -F "base.json=@base.json" -F "overlay.json=@overlay.json"</code></pre>
+<p>Auth summary: export is Viewer (Admin for <code>includeSecrets=true</code>); import is Editor; <code>replace</code> additionally requires Admin. Whole-import atomicity is <b>not</b> promised — each entity applies through the same serialized catalog registry (grain/actor turn-based), so per-entity writes are atomic but a failure partway through an import leaves earlier entities in this run already applied (the report shows exactly what happened, entity by entity).</p>
 </section>
 
 <section id="architecture">

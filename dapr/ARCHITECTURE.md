@@ -578,6 +578,64 @@ delta's row — proven by round-tripping an already-normalized envelope through 
 serializer configuration in `TableHistoryApplicationTests.cs`, the same technique
 `PipelineActorWireNormalizationTests.cs` uses for `sf-sources`.
 
+## Ingestion connectors (plan 006)
+
+Plan [`../plans/006-connectors-and-config.md`](../plans/006-connectors-and-config.md) adds real
+ingestion (`url`/`file`/`folder`/`grpc`-subscribe source kinds) and config import/export on top of
+this flavor, sharing the exact same core the Orleans flavor uses: `AppCore/Connectors/**` (schedule/
+backoff, JSONPath-lite mapping, format parsers, OpenAPI derivation, `GrpcSubscriberCore`) and
+`ConnectorPollCycle` — the pure step function neither flavor duplicates. `RegistryActor`'s
+`CatalogStore` no longer decides start/stop directly for connector-kind sources;
+`DaprLifecycleOrchestrator` dispatches on `SourceDefinition.Kind` via `SourceKindDispatch.Classify`
+(null/empty/`"generator"` → `ActorKind.Generator`, the pre-006 `GeneratorActor` path; everything
+else → `ActorKind.Connector`) and **always stops the other kind's actor too, idempotently** — a
+source's `Kind` can change on an update (e.g. `generator` → `url`), so both paths get an
+unconditional stop before the correct one starts, rather than tracking the previous `Kind`
+separately.
+
+`ConnectorActor` (`dapr/src/StreamForge.Dapr.Host/Actors/ConnectorActor.cs`, actor type
+`"ConnectorActor"`, key = source name) is the Dapr counterpart of `ConnectorGrain`: url/file/folder
+kinds are a **one-shot actor timer**, re-armed after every fire at the freshly computed next-due
+time (Dapr's actor timer treats `period == Timeout.InfiniteTimeSpan` as a genuine one-shot); `grpc`
+is a persistent background `Task` running `GrpcSubscriberCore.RunAsync` for the actor's lifetime,
+with no timer at all. State (`ConnectorActorState` — `Def`, `Running`, dedup/ledger snapshots, every
+`ConnectorRuntimeStatus` field) is fully persisted because, exactly like `GeneratorActor`, Dapr actor
+timers do **not** survive deactivation/reactivation; `OnActivateAsync` self-resumes — re-arms the
+poll timer from the persisted `NextRunMs` (clamped to "now" if already past), or relaunches the gRPC
+subscriber task. `GeneratorSupervisorService`'s periodic sweep remains the safety net for a
+connector-kind source whose actor was never activated at all.
+
+**Acyclic by construction, with one carefully-scoped exception**: `ConnectorActor` never resolves
+`ICatalogFacade`/an `IRegistryActor` proxy/any other actor from inside its own turn — same discipline
+as `GeneratorActor`/`PipelineActor` (see the reentrancy decision above). The gRPC kind's background
+subscriber task calls back into **this same actor type** via a fresh `IConnectorActor` proxy
+(`RecordSubscriberBatchAsync`) to record each batch/status — that happens on an independent
+background thread, not from inside an in-flight turn, so from the Dapr runtime's perspective it is an
+ordinary new inbound invocation, not a reentrant self-call.
+
+**Config export/import** (`shared/StreamForge.Api/Endpoints/ConfigEndpoints.cs` — see the Orleans
+architecture doc for the full compose/merge/apply-order contract) is byte-identical code on this
+flavor too, reached through the same `ICatalogFacade`; connector *definitions* travel via export/
+import like any other source, but runtime state — dedup ledgers, connector counters/status — is
+never exported and stays entirely per-flavor (Redis actor state here, a JSON grain-state file on
+Orleans), verified W6.
+
+**Statestore scoping caveat**: the shared `dapr/components/statestore.yaml` pins `keyPrefix: appid`
+and `scopes: [streamforge-dapr]` (see "Decisions made this wave" above) — every actor's state,
+`ConnectorActor` included, is reachable only under app-id `streamforge-dapr`. An isolated-app-id test
+instance (a different `--app-id` for test isolation, the pattern AGENTS.md documents for Orleans'
+arbitrary-port instances) has no statestore component in scope for actors at all, which panics the
+1.18 sidecar rather than degrading gracefully — a known environmental limitation, not a StreamForge
+bug: connector/actor-level tests on this flavor run against the shared fixed-port `streamforge-dapr`
+instance (reset via `tools/reset.sh` first for a clean slate), never an isolated app-id.
+
+**Federation**: this flavor can run a `grpc`-kind source subscribing to *any* StreamForge instance's
+`DynamicStreamService` — including the Orleans flavor's, proven live in W6 (Dapr `:5399` subscribed
+the Orleans flavor's `positions` table by id, over both gRPC reflection and proto-text schema paths;
+`eventsEmittedTotal` climbed 418→498 in 10 s of real cross-runtime traffic). Being a federation
+*server* stays Orleans-only — see "gRPC serving" below; this flavor's gRPC port (`:5499`) still only
+serves proto downloads, never `SubscribeEntity`.
+
 ## What's NOT here yet (by design — permanent descopes, not later waves)
 
 Every wave through W8 has landed (Generators W5, Pipelines W6, Tables W7-A, Row history W7-B,

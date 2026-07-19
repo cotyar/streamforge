@@ -123,6 +123,65 @@ flowchart LR
   UI & C -->|REST + gRPC control plane| R[RegistryGrain]
 ```
 
+## Ingestion connectors (plan 006)
+
+A source's `Kind` (`generator | url | file | folder | grpc`, default `generator`) selects a thin
+driver, dispatched by `RegistryGrain` (`IsGeneratorKind` — `null`/empty/`"generator"` keeps the
+pre-006 `IGeneratorGrain` path; every other kind goes to `IConnectorGrain`). All the real logic —
+scheduling, backoff, mapping/format parsing, OpenAPI derivation, dedup/ledger tracking, gRPC
+subscribing — lives in `shared/StreamForge.AppCore/Connectors/**`, pure and runtime-free (no
+Orleans types), unit-tested directly. `ConnectorPollCycle` (`Connectors/ConnectorPollCycle.cs`) is
+the shared step function for the three polled kinds (`url`/`file`/`folder`):
+`FormatParsers`/`RecordExtractor` (via `JsonPathLite` + `MappingSpec`) turn a fetched payload into
+rows, `DedupTracker`/`FileLedger` (bounded 10 000 keys/entries, FIFO — plan 006 D-D) decide what's
+new, `ScheduleCalc`/`BackoffPolicy` (Cronos cron or fixed interval, `min(30s·2^(k−1), 15 min)`
+failure backoff) decide when the next cycle runs. `grpc` is not a poll — `GrpcSubscriberCore`
+(`Connectors/Grpc/`) is a persistent reconnecting subscription against a remote's
+`DynamicStreamService`, decoding frames with the new `ProtoWireDecoder` (the encoder's exact
+counterpart, `AppCore/Protocol/ProtoWireDecoder.cs`).
+
+`ConnectorGrain` (`orleans/src/StreamForge.Host/Grains/ConnectorGrain.cs`, key = source name) is
+the thin driver: `[PersistentState("connector", …)]` holds `SourceDefinition`, `Running`, the
+dedup/ledger trackers' persistable snapshots, and every `ConnectorRuntimeStatus` field. url/file/
+folder kinds run on a **one-shot grain timer** re-armed after every fire at the freshly computed
+next-due time (cron correctness requires recomputing after each fire, not a fixed period); `grpc`
+launches `GrpcSubscriberCore.RunAsync` as a background `Task` for the grain's lifetime. The
+subscriber's `onRows`/`onStatus` callbacks run off the grain's turn (a background thread, not
+grain-context), so they route back through a captured **self-reference** —
+`this.AsReference<IConnectorGrain>()` for `EmitRowsAsync`, plus a grain-internal
+`IConnectorStatusSink.ReportStatusAsync` for status transitions — a normal, safely-serialized grain
+call from outside, never a direct touch of `state`. `OnActivateAsync` self-resumes (re-arms the
+timer / restarts the subscriber) when persisted `Running` is true, mirroring
+`RegistryGrain.EnsureInitializedAsync`'s boot-resume for generators/pipelines/tables. Emission goes
+through the same door `GeneratorGrain` uses — one `EventRecord` per row onto
+`(StreamConstants.SourcesNamespace, sourceName)` — so pipelines/tables/SignalR/SPA all work
+unchanged for a connector-kind source.
+
+**Config import/export** (`shared/StreamForge.Api/Endpoints/ConfigEndpoints.cs` +
+`ConfigImportService.cs`, `shared/StreamForge.AppCore/Config/**`) is one implementation shared by
+both flavors through `ICatalogFacade` only: `ConfigComposer` resolves `include` chains and merges
+documents (later wins per `(kind, name)` entity, shallow field override — D-I), `ImportPlanner`
+diffs a composed document against the live catalog into an apply-ordered plan (sources → tables
+topo → pipelines; deletions last, reverse order), and `ConfigImportService.RunImportAsync` walks
+that plan, recompiling every pipeline/table SQL through the real `SqlCompiler` against the
+post-import world before writing anything. `SecretsMasker` masks URL header values and gRPC
+password/token as `"***"` on every read/export and merges a written `"***"` back to the stored real
+value on write — the same masking logic backs both `SourcesEndpoints` (per-entity CRUD) and
+`ConfigEndpoints` (bulk export/import). See `orleans/docs/index.html`'s "Ingestion connectors" and
+"Configuration import/export" sections for the user-facing contract (scheduling/backoff formula,
+JSONPath-lite subset, OpenAPI type map, merge rules, import modes) — this section is structure only.
+
+**Federation**: a `grpc`-kind source subscribing to `DynamicStreamService/SubscribeEntity` on
+*another* StreamForge instance (Orleans or Dapr) is how one instance's table/pipeline/source becomes
+another's source. Being a federation *server* (accepting `SubscribeEntity` calls) stays Orleans-only
+(`:5299`) — the Dapr flavor has no gRPC serving (plan 005 D-F stands); it can only be the
+*subscriber* side. `GrpcSubscriberCore.ResolveMessageIdentAsync` resolves a `table:{id}`/
+`pipeline:{id}` entity key's opaque id to the remote's display name (the actual basis for its
+generated proto message name) via a REST GET against `GrpcSubConfig.RestAddress` before asking
+v1alpha reflection for the symbol — a W6 fix (`ProtoTextSchemaParser`/`ReflectionSchemaWalker` both
+key off names, never ids); `source:{name}` keys need no such lookup, since the ident already is the
+name.
+
 ## Build / run / verify
 
 ```bash
