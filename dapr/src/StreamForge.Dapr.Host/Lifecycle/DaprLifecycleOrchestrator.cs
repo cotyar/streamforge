@@ -54,26 +54,63 @@ public sealed partial class DaprLifecycleOrchestrator(
     Streaming.TableEventRouter tableRouter,
     ILogger<DaprLifecycleOrchestrator> logger) : ILifecycleOrchestrator
 {
+    /// <summary>Plan 006 (ingestion connectors) W3-B: dispatches on <see cref="SourceDefinition.Kind"/>
+    /// via <see cref="SourceKindDispatch.Classify"/> — generator-kind (null/""/"generator") goes to
+    /// <see cref="IGeneratorActor"/>, everything else (url/file/folder/grpc) to
+    /// <see cref="IConnectorActor"/>, exactly as decision D-C specifies ("RegistryGrain/
+    /// DaprLifecycleOrchestrator dispatch on Kind: generator → existing path, else connector").
+    ///
+    /// <para><b>Always stops the OTHER kind's actor too, idempotently.</b> A source's Kind can change on
+    /// an update (<c>CatalogStore.UpsertSourceAsync</c> calls this on every upsert, including edits to an
+    /// existing source — see that method's doc comment), and this method has no cheap way to know
+    /// in-line whether THIS particular call is such a kind-change (that would mean reading the previous
+    /// definition back — the exact kind of registry-turn read-back the reentrancy decision forbids). Both
+    /// <see cref="IGeneratorActor.StopAsync"/> and <see cref="IConnectorActor.StopAsync"/> are already
+    /// documented idempotent (safe on an actor that was never started, or already stopped), so
+    /// unconditionally stopping the counterpart kind on every call is simply a no-op extra Dapr call in
+    /// the common case (Kind unchanged) and the correct cleanup in the kind-changed case — with no branch
+    /// needed to tell the two apart.</para></summary>
     public async Task NotifySourceChangedAsync(SourceDefinition def)
     {
-        var actor = GeneratorActorProxy(def.Name);
-        if (def.Enabled)
+        if (SourceKindDispatch.Classify(def.Kind) == SourceKindDispatch.ActorKind.Generator)
         {
-            await actor.StartAsync(def);
+            await ConnectorActorProxy(def.Name).StopAsync();
+            var actor = GeneratorActorProxy(def.Name);
+            if (def.Enabled)
+            {
+                await actor.StartAsync(def);
+            }
+            else
+            {
+                await actor.StopAsync();
+            }
         }
         else
         {
-            await actor.StopAsync();
+            await GeneratorActorProxy(def.Name).StopAsync();
+            var actor = ConnectorActorProxy(def.Name);
+            if (def.Enabled)
+            {
+                await actor.StartAsync(def);
+            }
+            else
+            {
+                await actor.StopAsync();
+            }
         }
     }
 
     public async Task NotifySourceRemovedAsync(string name)
     {
         await GeneratorActorProxy(name).StopAsync();
+        await ConnectorActorProxy(name).StopAsync();
     }
 
     private static IGeneratorActor GeneratorActorProxy(string sourceName) =>
         ActorProxy.Create<IGeneratorActor>(new ActorId(sourceName), nameof(GeneratorActor), ActorProxyDefaults.Options);
+
+    private static IConnectorActor ConnectorActorProxy(string sourceName) =>
+        ActorProxy.Create<IConnectorActor>(new ActorId(sourceName), nameof(ConnectorActor), ActorProxyDefaults.Options);
 
     /// <summary>Compiles (inside <see cref="PipelineActor.StartAsync"/>, not here — see the class doc's
     /// "acyclic by construction" note) and starts <paramref name="def"/>'s pipeline actor, then registers
@@ -160,4 +197,29 @@ public sealed partial class DaprLifecycleOrchestrator(
             TimestampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         });
     }
+}
+
+/// <summary>
+/// Plan 006 (ingestion connectors) W3-B: the pure "which actor type owns this source" classification
+/// behind <see cref="DaprLifecycleOrchestrator.NotifySourceChangedAsync"/>'s kind dispatch, extracted into
+/// its own framework-free static class specifically so it is unit-testable without a live Dapr sidecar
+/// (every <see cref="DaprLifecycleOrchestrator"/> method itself requires one — see
+/// dapr/tests/StreamForge.Dapr.Tests/GeneratorLifecycleOrchestratorTests.cs's class doc for that finding
+/// and dapr/tests/StreamForge.Dapr.Tests/ConnectorLifecycleOrchestratorTests.cs for the tests against this
+/// class).
+/// </summary>
+public static class SourceKindDispatch
+{
+    public enum ActorKind { Generator, Connector }
+
+    /// <summary>Null/empty/"generator" → <see cref="ActorKind.Generator"/> (the pre-006 default —
+    /// existing sources with no <see cref="SourceDefinition.Kind"/> set at all deserialize with an empty
+    /// string before the additive default kicks in, so empty is treated identically to "generator", not
+    /// as an error). Every other value (url/file/folder/grpc, or any future kind) →
+    /// <see cref="ActorKind.Connector"/> — this dispatch is deliberately NOT an exhaustive switch over
+    /// <see cref="SourceKinds"/>' known constants, so a not-yet-invented connector kind still routes to
+    /// <see cref="IConnectorActor"/> (which is itself responsible for rejecting a kind it doesn't know how
+    /// to run) rather than silently falling through to the generator path.</summary>
+    public static ActorKind Classify(string? kind) =>
+        string.IsNullOrEmpty(kind) || kind == SourceKinds.Generator ? ActorKind.Generator : ActorKind.Connector;
 }

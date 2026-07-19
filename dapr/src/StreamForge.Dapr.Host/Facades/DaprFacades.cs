@@ -20,6 +20,11 @@ namespace StreamForge.Dapr.Host.Facades;
 //   - ITableReadFacade / ITableHistoryFacade / IArrangementMetaFacade: stubbed in this wave (see
 //     StubFacades.cs) — TableActor/TableHistoryActor don't exist until W7, and partitioned execution
 //     (arrangements) is Orleans-only (decision D-F).
+//
+// Plan 006 (ingestion connectors) W3-B addendum: IConnectorStatusFacade's real implementation,
+// DaprConnectorStatusFacade, is defined below (next to DaprPipelineReadFacade — same per-call proxy-
+// resolution shape) but registered by Actors/ConnectorRuntimeSetup.cs's AddServices, not by
+// AddDaprFacades() above — see that method's own doc comment for why.
 // ============================================================================
 
 public static class DaprFacadesExtensions
@@ -113,6 +118,36 @@ internal sealed class DaprPipelineReadFacade : IPipelineReadFacade
 
     private static IPipelineActor PipelineActorProxy(string pipelineId) =>
         ActorProxy.Create<IPipelineActor>(new ActorId(pipelineId), nameof(PipelineActor), ActorProxyDefaults.Options);
+}
+
+/// <summary>Plan 006 (ingestion connectors) W3-B: real <see cref="IConnectorStatusFacade"/> — resolves the
+/// source via <see cref="ICatalogFacade"/> first (an actor-proxy call into the singleton
+/// <c>RegistryActor</c>, exactly like <see cref="DaprCatalogFacade"/> itself), and only then, for a
+/// non-generator kind, resolves a per-source <see cref="IConnectorActor"/> proxy — same per-call
+/// resolution style as <see cref="DaprPipelineReadFacade"/> (a connector actor's id varies per source, so
+/// there is no single proxy instance to cache in a field). Registered by
+/// <see cref="Actors.ConnectorRuntimeSetup.AddServices"/>, not here — see that method's doc comment for
+/// why.</summary>
+internal sealed class DaprConnectorStatusFacade(ICatalogFacade catalog) : IConnectorStatusFacade
+{
+    public async Task<ConnectorRuntimeStatus?> GetStatusAsync(string sourceName)
+    {
+        var def = await catalog.GetSourceAsync(sourceName);
+        if (def is null || IsGeneratorKind(def.Kind))
+        {
+            return null;
+        }
+
+        var actor = ActorProxy.Create<IConnectorActor>(new ActorId(sourceName), nameof(ConnectorActor), ActorProxyDefaults.Options);
+        return await actor.GetStatusAsync();
+    }
+
+    /// <summary>Same null/empty/"generator" classification as
+    /// <see cref="Lifecycle.DaprLifecycleOrchestrator"/>'s own <c>SourceKindDispatch.Classify</c> — kept
+    /// as an independent one-liner here rather than shared, since the two call sites live in different
+    /// wave-owned files (Facades/ vs Lifecycle/) and the rule is a single, stable, one-line string
+    /// comparison unlikely to drift.</summary>
+    private static bool IsGeneratorKind(string? kind) => string.IsNullOrEmpty(kind) || kind == SourceKinds.Generator;
 }
 
 internal sealed class DaprUserStoreFacade : IUserStoreFacade

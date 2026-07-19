@@ -92,7 +92,16 @@ public sealed class RegistryGrain(
         {
             try
             {
-                await GrainFactory.GetGrain<IGeneratorGrain>(src.Name).StartAsync(src);
+                // Plan 006 D-C: Kind dispatch. "generator" (or unset — pre-006 seeds/sources) keeps the
+                // pre-existing IGeneratorGrain path unchanged; every other Kind goes to IConnectorGrain.
+                if (IsGeneratorKind(src.Kind))
+                {
+                    await GrainFactory.GetGrain<IGeneratorGrain>(src.Name).StartAsync(src);
+                }
+                else
+                {
+                    await GrainFactory.GetGrain<IConnectorGrain>(src.Name).StartAsync(src);
+                }
             }
             catch
             {
@@ -173,14 +182,29 @@ public sealed class RegistryGrain(
 
         await state.WriteStateAsync();
 
+        // Plan 006 D-C: Kind dispatch. On an update where Kind CHANGED (e.g. generator -> url), the
+        // grain for the OLD kind is still activated and would otherwise keep polling/ticking forever —
+        // so both StopAsync calls always run (cheap/idempotent no-ops on whichever kind wasn't actually
+        // running) rather than tracking the previous Kind separately just to target one Stop call.
         var generator = GrainFactory.GetGrain<IGeneratorGrain>(def.Name);
+        var connector = GrainFactory.GetGrain<IConnectorGrain>(def.Name);
         if (def.Enabled)
         {
-            await generator.StartAsync(def);
+            if (IsGeneratorKind(def.Kind))
+            {
+                await generator.StartAsync(def);
+                await connector.StopAsync();
+            }
+            else
+            {
+                await connector.StartAsync(def);
+                await generator.StopAsync();
+            }
         }
         else
         {
             await generator.StopAsync();
+            await connector.StopAsync();
         }
     }
 
@@ -193,9 +217,17 @@ public sealed class RegistryGrain(
         }
 
         await state.WriteStateAsync();
+        // Stop both kinds unconditionally — see UpsertSourceAsync's dispatch comment (cheap/idempotent).
         await GrainFactory.GetGrain<IGeneratorGrain>(name).StopAsync();
+        await GrainFactory.GetGrain<IConnectorGrain>(name).StopAsync();
         return true;
     }
+
+    /// <summary>Plan 006 D-C: "generator" (the SourceDefinition.Kind default) or an unset/empty value
+    /// (pre-006 persisted sources, seeds) both mean "use IGeneratorGrain" — anything else dispatches to
+    /// IConnectorGrain instead.</summary>
+    private static bool IsGeneratorKind(string? kind) =>
+        string.IsNullOrEmpty(kind) || kind == SourceKinds.Generator;
 
     public Task<List<PipelineDefinition>> GetPipelinesAsync() => Task.FromResult(state.State.Pipelines.ToList());
 

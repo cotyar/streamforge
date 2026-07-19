@@ -232,3 +232,29 @@ public interface IUserStoreGrain : IUserStoreFacade, IGrainWithStringKey
     /// <summary>Seeds admin/editor/viewer on first run.</summary>
     Task EnsureInitializedAsync();
 }
+
+// ============================================================================
+// Plan 006 (ingestion connectors), W3A: the connector driver. New interface (frozen-fake constraint,
+// D-C) rather than an extension of IGeneratorGrain/ICatalogFacade — FakeRegistryGrain (test fixture)
+// implements IRegistryGrain : ICatalogFacade, so any change to those would force a test-file edit.
+// See ConnectorGrain (orleans/src/StreamForge.Host/Grains/ConnectorGrain.cs) for the implementation
+// and RegistryGrain's Kind dispatch (UpsertSourceAsync/DeleteSourceAsync/EnsureInitializedAsync).
+// ============================================================================
+
+/// <summary>Key = source name. Drives one connector-kind source ("url" | "file" | "folder" | "grpc" —
+/// see SourceKinds; "generator"-kind sources use IGeneratorGrain instead, never this interface).
+/// url/file/folder poll on a schedule (Cronos cron or fixed interval, D-E backoff on failure); grpc is
+/// a persistent subscription to a remote StreamForge instance (D-G federation) fed by a background
+/// task whose callbacks marshal back through <see cref="EmitRowsAsync"/> (grain-safe re-entry — the
+/// callbacks run off this grain's turn and must not touch grain state directly).</summary>
+public interface IConnectorGrain : IGrainWithStringKey
+{
+    Task StartAsync(SourceDefinition def);
+    Task StopAsync();
+    /// <summary>Keep-alive; timers alone don't extend activation lifetime (mirrors IGeneratorGrain).</summary>
+    Task PingAsync();
+    Task<ConnectorRuntimeStatus> GetStatusAsync();
+    /// <summary>gRPC-subscriber callback entry: rows decoded off this grain's turn are handed back here
+    /// via a captured self-reference so publishing/counter updates happen inside a normal grain call.</summary>
+    Task EmitRowsAsync(List<Dictionary<string, object?>> rows, long remoteSeq);
+}

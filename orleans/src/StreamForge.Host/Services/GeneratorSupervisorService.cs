@@ -3,7 +3,8 @@ using StreamForge.Abstractions;
 
 namespace StreamForge.Host.Services;
 
-/// <summary>Every 15s, pings enabled generators to keep them activated (or reactivate them if evicted).</summary>
+/// <summary>Every 15s, pings enabled generators AND connector-kind sources (plan 006 D-C) to keep them
+/// activated (or reactivate them if evicted).</summary>
 public sealed class GeneratorSupervisorService(IClusterClient client, IHostApplicationLifetime lifetime) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -21,7 +22,17 @@ public sealed class GeneratorSupervisorService(IClusterClient client, IHostAppli
                 {
                     try
                     {
-                        await client.GetGrain<IGeneratorGrain>(src.Name).PingAsync();
+                        // Plan 006 D-C: Kind dispatch, mirroring RegistryGrain's UpsertSourceAsync/
+                        // EnsureInitializedAsync — "generator" (or unset) pings IGeneratorGrain,
+                        // everything else pings IConnectorGrain.
+                        if (string.IsNullOrEmpty(src.Kind) || src.Kind == SourceKinds.Generator)
+                        {
+                            await client.GetGrain<IGeneratorGrain>(src.Name).PingAsync();
+                        }
+                        else
+                        {
+                            await client.GetGrain<IConnectorGrain>(src.Name).PingAsync();
+                        }
                     }
                     catch
                     {

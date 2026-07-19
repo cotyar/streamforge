@@ -36,6 +36,7 @@ public static class OrleansFacadesExtensions
         services.AddSingleton<ITableReadFacade, OrleansTableReadFacade>();
         services.AddSingleton<ITableHistoryFacade, OrleansTableHistoryFacade>();
         services.AddSingleton<IArrangementMetaFacade, OrleansArrangementMetaFacade>();
+        services.AddSingleton<IConnectorStatusFacade, OrleansConnectorStatusFacade>();
         return services;
     }
 }
@@ -77,6 +78,24 @@ internal sealed class OrleansTableHistoryFacade(IClusterClient client) : ITableH
 
     public Task<TableHistoryStats> GetStatsAsync(string tableName) =>
         client.GetGrain<ITableHistoryGrain>(tableName).GetStatsAsync();
+}
+
+/// <summary>Plan 006, D-C: connector runtime status. Generator-kind sources (Kind unset/"generator") and
+/// unknown source names both return null — mirroring RegistryGrain's own Kind-dispatch rule (see
+/// RegistryGrain.IsGeneratorKind) so this facade never spins up an IConnectorGrain activation for a
+/// source that was never a connector in the first place.</summary>
+internal sealed class OrleansConnectorStatusFacade(IClusterClient client) : IConnectorStatusFacade
+{
+    public async Task<ConnectorRuntimeStatus?> GetStatusAsync(string sourceName)
+    {
+        var registry = client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+        var def = await registry.GetSourceAsync(sourceName);
+        if (def is null || string.IsNullOrEmpty(def.Kind) || def.Kind == SourceKinds.Generator)
+        {
+            return null;
+        }
+        return await client.GetGrain<IConnectorGrain>(sourceName).GetStatusAsync();
+    }
 }
 
 internal sealed class OrleansArrangementMetaFacade(IClusterClient client) : IArrangementMetaFacade

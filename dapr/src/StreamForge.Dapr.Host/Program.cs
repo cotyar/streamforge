@@ -35,6 +35,7 @@ builder.Services.AddActors(options =>
     options.Actors.RegisterActor<RegistryActor>();
     options.Actors.RegisterActor<UserStoreActor>();
     GeneratorRuntimeSetup.RegisterActors(options);
+    ConnectorRuntimeSetup.RegisterActors(options);
     PipelineRuntimeSetup.RegisterActors(options);
     TableRuntimeSetup.RegisterActors(options);
     TableHistoryRuntimeSetup.RegisterActors(options);
@@ -47,8 +48,12 @@ builder.Services.AddSingleton<ILifecycleOrchestrator, NoopLifecycleOrchestrator>
 builder.Services.AddDaprFacades();
 builder.Services.AddHostedService<CatalogInitializationService>();
 // Wave seams (see the *RuntimeSetup classes) — registered after the Noop orchestrator so a real
-// ILifecycleOrchestrator registered inside wins.
+// ILifecycleOrchestrator registered inside wins. ConnectorRuntimeSetup.AddServices also registers the
+// real IConnectorStatusFacade (see that method's doc comment for why it isn't in AddDaprFacades above) —
+// order relative to the other *RuntimeSetup calls doesn't matter (it doesn't override anything), placed
+// right after GeneratorRuntimeSetup since both are source-lifecycle wave seams.
 GeneratorRuntimeSetup.AddServices(builder.Services);
+ConnectorRuntimeSetup.AddServices(builder.Services);
 StreamingRuntimeSetup.AddServices(builder.Services);
 PipelineRuntimeSetup.AddServices(builder.Services);
 TableRuntimeSetup.AddServices(builder.Services);
