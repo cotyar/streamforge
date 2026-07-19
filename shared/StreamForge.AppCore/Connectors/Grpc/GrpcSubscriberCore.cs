@@ -230,6 +230,72 @@ public sealed class GrpcSubscriberCore
         return (fields, numbers);
     }
 
+    // ------------------------------------------------------------------
+    // One-shot schema fetch (plan 006 W4 — POST /api/sources/schema/from-remote). NOT the
+    // reconnecting subscribe loop above: a single attempt, never throws (every failure — bad
+    // entity key, dial failure, reflection error, malformed proto text — becomes a diagnostic so
+    // the endpoint can answer 200-with-diagnostics rather than 5xx, matching the from-remote
+    // contract). Additive: does not alter any existing member's behavior.
+    // ------------------------------------------------------------------
+
+    /// <summary>Fetches <c>(fields, numbers)</c> for <paramref name="config"/> once — the "proto"
+    /// <see cref="GrpcSubConfig.SchemaSource"/> just parses <see cref="GrpcSubConfig.ProtoText"/>
+    /// (already inline, no network); "reflection" dials the remote's v1alpha reflection service.
+    /// When <see cref="GrpcSubConfig.Username"/> is set, this logs in first (mirroring
+    /// <see cref="RunAsync"/>'s connect sequence, D-G parity) purely to surface a bad
+    /// Username/Password/RestAddress as an early diagnostic — the resulting token is NOT attached
+    /// to the reflection call itself, since this codebase's reflection surface is anonymous
+    /// (<c>DynamicReflectionService</c> is <c>[AllowAnonymous]</c>), same as the reconnect loop
+    /// above. Returns (null, null, diagnostics) on any failure — never throws.</summary>
+    public static async Task<(List<FieldDef>? Fields, FieldNumberMap? Numbers, IReadOnlyList<string> Diagnostics)>
+        FetchSchemaOnceAsync(GrpcSubConfig config, CancellationToken ct)
+    {
+        if (string.Equals(config.SchemaSource, "proto", StringComparison.OrdinalIgnoreCase))
+        {
+            var (protoFields, protoNumbers, protoDiagnostics) = ProtoTextSchemaParser.Parse(config.ProtoText ?? "");
+            return (protoFields, protoNumbers, protoDiagnostics);
+        }
+
+        try
+        {
+            if (string.IsNullOrEmpty(config.Token) && !string.IsNullOrEmpty(config.Username))
+            {
+                var probe = new GrpcSubscriberCore(config, static (_, _) => Task.CompletedTask, static (_, _) => { });
+                await probe.LoginAsync(ct).ConfigureAwait(false);
+            }
+
+            using var channel = CreateChannel(config.Address);
+            var client = new ServerReflection.ServerReflectionClient(channel);
+            using var call = client.ServerReflectionInfo(cancellationToken: ct);
+
+            var (_, ident) = ParseEntityKey(config.EntityKey);
+            var messageSymbol = $"{DescriptorFactory.PackageName}.{DescriptorFactory.ToPascalCase(ident)}";
+
+            await call.RequestStream.WriteAsync(new ServerReflectionRequest { Host = "", FileContainingSymbol = messageSymbol }).ConfigureAwait(false);
+            if (!await call.ResponseStream.MoveNext(ct).ConfigureAwait(false))
+            {
+                return (null, null, [$"No reflection response received for symbol '{messageSymbol}'."]);
+            }
+            var response = call.ResponseStream.Current;
+            await call.RequestStream.CompleteAsync().ConfigureAwait(false);
+
+            if (response.ErrorResponse is not null)
+            {
+                return (null, null, [$"Reflection FileContainingSymbol('{messageSymbol}') failed: {response.ErrorResponse.ErrorMessage}"]);
+            }
+
+            var files = response.FileDescriptorResponse.FileDescriptorProto
+                .Select(bytes => FileDescriptorProto.Parser.ParseFrom(bytes))
+                .ToList();
+
+            return ReflectionSchemaWalker.FromDescriptors(files, config.EntityKey);
+        }
+        catch (Exception ex)
+        {
+            return (null, null, [$"{ex.GetType().Name}: {ex.Message}"]);
+        }
+    }
+
     private static (string Kind, string Ident) ParseEntityKey(string entityKey)
     {
         var idx = entityKey.IndexOf(':');
