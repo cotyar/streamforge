@@ -34,18 +34,35 @@ public class CatalogStoreTests
     }
 
     [Fact]
-    public void EnsureInitialized_ForcesAllSeededPipelinesAndTablesToStopped()
+    public void EnsureInitialized_ForcesAllSeededTablesToStopped()
     {
-        // Plan 005 W4 "seed status" decision: SeedCatalog marks several pipelines/tables Running (the
-        // Orleans flavor resumes them for real on boot) — on Dapr there is no runtime yet, so a seeded
-        // "Running" badge with zero rows ever arriving would be dishonest. CatalogStore must override
-        // every seeded status to Stopped regardless of what SeedCatalog says.
+        // Plan 005 W4 "seed status" decision (STILL true for tables — W7 hasn't landed): SeedCatalog
+        // marks several tables Running (the Orleans flavor resumes them for real on boot) — on Dapr
+        // there is no table runtime yet, so a seeded "Running" badge with zero rows ever arriving would
+        // be dishonest. CatalogStore must override every seeded table status to Stopped regardless of
+        // what SeedCatalog says.
         var (state, store, _) = NewStore();
 
         store.EnsureInitialized();
 
-        Assert.All(state.Pipelines, p => Assert.Equal(PipelineStatus.Stopped, p.Status));
         Assert.All(state.Tables, t => Assert.Equal(PipelineStatus.Stopped, t.Status));
+    }
+
+    [Fact]
+    public void EnsureInitialized_KeepsSeededPipelineStatusesAsSeedCatalogDeclaresThem()
+    {
+        // Plan 005 W6 UPDATE to the W4 "seed status" decision: PipelineActor now exists, and
+        // PipelineSupervisorService's boot sweep resumes every seeded Running pipeline for real — a
+        // seeded "Running" pipeline is no longer force-stopped, mirroring Orleans' own
+        // RegistryGrain.EnsureInitializedAsync resume-on-boot behavior. SeedCatalog.Pipelines() seeds a
+        // mix of Running and Stopped pipelines (see that method's doc comment) — both statuses must
+        // survive EnsureInitialized untouched.
+        var (state, store, _) = NewStore();
+
+        store.EnsureInitialized();
+
+        Assert.Contains(state.Pipelines, p => p.Status == PipelineStatus.Running);
+        Assert.Contains(state.Pipelines, p => p.Status == PipelineStatus.Stopped);
     }
 
     [Fact]
@@ -265,6 +282,62 @@ public class CatalogStoreTests
         var result = await store.SetPipelineStatusAsync("missing", PipelineStatus.Running);
 
         Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task SetPipelineStatusAsync_Start_PassesFullSourceListToOrchestrator()
+    {
+        // Plan 005 W6: CatalogStore already holds state.Sources in full at this call site (no facade
+        // lookup needed — see ILifecycleOrchestrator.StartPipelineAsync's W6 signature-change doc
+        // comment) and must pass ALL of it through, not just the pipeline's own dependencies — mirrors
+        // PipelineGrain.StartAsync building schemas from every registered source before compiling.
+        var (state, store, orchestrator) = NewStore();
+        state.Sources.Add(new SourceDefinition { Name = "trades", Fields = [new FieldDef("qty", FieldType.Long)] });
+        state.Sources.Add(new SourceDefinition { Name = "quotes", Fields = [new FieldDef("bid", FieldType.Double)] });
+        var created = await store.CreatePipelineAsync(new PipelineDefinition { Name = "p1", Sql = "SELECT 1 FROM trades" });
+
+        await store.SetPipelineStatusAsync(created.Id, PipelineStatus.Running);
+
+        Assert.Contains($"StartPipeline:{created.Id}:2", orchestrator.Calls);
+    }
+
+    [Fact]
+    public async Task SetPipelineStatusAsync_StartWithOrchestratorFailure_SetsFailedStatusAndError()
+    {
+        var (state, store, orchestrator) = NewStore();
+        var created = await store.CreatePipelineAsync(new PipelineDefinition { Name = "p1", Sql = "SELECT 1" });
+        orchestrator.FailStarts = true;
+        orchestrator.FailureMessage = "compile failed";
+
+        var result = await store.SetPipelineStatusAsync(created.Id, PipelineStatus.Running);
+
+        Assert.Equal(PipelineStatus.Failed, result!.Status);
+        Assert.Equal("compile failed", result.Error);
+    }
+
+    [Fact]
+    public async Task SetPipelineStatusAsync_StartSucceeds_SetsRunningAndClearsError()
+    {
+        var (_, store, _) = NewStore();
+        var created = await store.CreatePipelineAsync(new PipelineDefinition { Name = "p1", Sql = "SELECT 1" });
+
+        var result = await store.SetPipelineStatusAsync(created.Id, PipelineStatus.Running);
+
+        Assert.Equal(PipelineStatus.Running, result!.Status);
+        Assert.Null(result.Error);
+    }
+
+    [Fact]
+    public async Task SetPipelineStatusAsync_Stop_CallsOrchestratorStopPipeline()
+    {
+        var (_, store, orchestrator) = NewStore();
+        var created = await store.CreatePipelineAsync(new PipelineDefinition { Name = "p1", Sql = "SELECT 1" });
+        await store.SetPipelineStatusAsync(created.Id, PipelineStatus.Running);
+
+        var result = await store.SetPipelineStatusAsync(created.Id, PipelineStatus.Stopped);
+
+        Assert.Equal(PipelineStatus.Stopped, result!.Status);
+        Assert.Contains($"StopPipeline:{created.Id}", orchestrator.Calls);
     }
 
     [Fact]

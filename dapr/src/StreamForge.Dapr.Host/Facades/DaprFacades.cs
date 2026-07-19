@@ -15,9 +15,11 @@ namespace StreamForge.Dapr.Host.Facades;
 //     actor's request records and unwrapping ActorResult<T> failures into a thrown
 //     InvalidOperationException (see ActorResult<T>'s class doc for why this boundary uses an explicit
 //     result type rather than relying on Dapr's own actor-exception marshaling).
-//   - IPipelineReadFacade / ITableReadFacade / ITableHistoryFacade / IArrangementMetaFacade: stubbed in
-//     this wave (see StubFacades.cs) — PipelineActor/TableActor/TableHistoryActor don't exist until
-//     W6/W7, and partitioned execution (arrangements) is Orleans-only (decision D-F).
+//   - IPipelineReadFacade: real as of W6 (DaprPipelineReadFacade below) — forwards to the pipeline's
+//     PipelineActor.
+//   - ITableReadFacade / ITableHistoryFacade / IArrangementMetaFacade: stubbed in this wave (see
+//     StubFacades.cs) — TableActor/TableHistoryActor don't exist until W7, and partitioned execution
+//     (arrangements) is Orleans-only (decision D-F).
 // ============================================================================
 
 public static class DaprFacadesExtensions
@@ -26,7 +28,7 @@ public static class DaprFacadesExtensions
     {
         services.AddSingleton<ICatalogFacade, DaprCatalogFacade>();
         services.AddSingleton<IUserStoreFacade, DaprUserStoreFacade>();
-        services.AddSingleton<IPipelineReadFacade, StubPipelineReadFacade>();
+        services.AddSingleton<IPipelineReadFacade, DaprPipelineReadFacade>();
         services.AddSingleton<ITableReadFacade, StubTableReadFacade>();
         services.AddSingleton<ITableHistoryFacade, StubTableHistoryFacade>();
         services.AddSingleton<IArrangementMetaFacade, EmptyArrangementMetaFacade>();
@@ -90,6 +92,27 @@ internal sealed class DaprCatalogFacade : ICatalogFacade
 
     public Task<string> EnsureFieldNumbersAsync(string entityKey, List<FieldDef> fields) =>
         _actor.EnsureFieldNumbersAsync(new EnsureFieldNumbersRequest(entityKey, fields));
+}
+
+/// <summary>Plan 005 W6: real <see cref="IPipelineReadFacade"/> — resolves a fresh
+/// <see cref="IPipelineActor"/> proxy per call (same per-call-resolution style as
+/// <see cref="Lifecycle.DaprLifecycleOrchestrator"/>'s own actor proxies; unlike the singleton
+/// catalog/user-store actors, a pipeline actor's id varies per call, so there is no single proxy instance
+/// to cache in a field). Backs <c>GET /api/pipelines/{id}/results|metrics</c>. A pipeline id that was
+/// never started (or doesn't exist) still answers cleanly — <see cref="PipelineActor"/>'s own
+/// <c>OnActivateAsync</c> finds no persisted state, so <c>GetRecentResultsAsync</c>/<c>GetMetricsAsync</c>
+/// return the same "nothing has run yet" empty/zeroed shape <see cref="StubTableReadFacade"/> still
+/// returns for tables.</summary>
+internal sealed class DaprPipelineReadFacade : IPipelineReadFacade
+{
+    public Task<List<ResultEnvelope>> GetRecentResultsAsync(string pipelineId, int limit) =>
+        PipelineActorProxy(pipelineId).GetRecentResultsAsync(limit);
+
+    public Task<PipelineMetrics> GetMetricsAsync(string pipelineId) =>
+        PipelineActorProxy(pipelineId).GetMetricsAsync();
+
+    private static IPipelineActor PipelineActorProxy(string pipelineId) =>
+        ActorProxy.Create<IPipelineActor>(new ActorId(pipelineId), nameof(PipelineActor), ActorProxyDefaults.Options);
 }
 
 internal sealed class DaprUserStoreFacade : IUserStoreFacade

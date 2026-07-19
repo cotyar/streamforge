@@ -35,8 +35,8 @@ doesn't care which runtime called it), the console SPA served at `/`, `/scalar` 
 |---|---|---|
 | `RegistryGrain` (`"catalog"`) | `RegistryActor` (`"catalog"`) | Catalog CRUD/validation logic factored into `Catalog/CatalogStore.cs` — a plain, actor-framework-free class the actor delegates to (unit-tested directly, no sidecar needed: `dapr/tests/StreamForge.Dapr.Tests/CatalogStoreTests.cs`). |
 | `UserStoreGrain` (`"users"`) | `UserStoreActor` (`"users"`) | Same PBKDF2 credential store (shared `PasswordHasher`), same seed data (shared `SeedCatalog.Users`). |
-| `GeneratorGrain` | *(not yet — W5)* | `ILifecycleOrchestrator.NotifySourceChangedAsync` currently just logs. |
-| `PipelineGrain` | *(not yet — W6)* | `IPipelineReadFacade` is stubbed (empty results, zeroed metrics); `ILifecycleOrchestrator.StartPipelineAsync` currently just logs and reports success. |
+| `GeneratorGrain` | `GeneratorActor` (key = source name) | Batched-tick synthetic event publisher — see "Generators (W5-A)" below. |
+| `PipelineGrain` | `PipelineActor` (key = pipeline id) | Compiles + runs the pipeline's streaming SQL via the shared Engine, publishes `sf-pipeline-out`/`sf-metrics` — see "Pipelines (W6)" below. |
 | `TableGrain` / `TableIngestGrain` / `TableStageGrain` / `TableOutputGrain` | *(not yet — W7; partitioned variants are Orleans-only, decision D-F)* | `ITableReadFacade` is stubbed; `ILifecycleOrchestrator.StartTableAsync` currently just logs and reports success. |
 | `TableHistoryGrain` | *(not yet — W7)* | `ITableHistoryFacade` is stubbed. |
 | `ArrangementGrain` | *(never — Orleans-only, decision D-F)* | `IArrangementMetaFacade` always returns `[]`. |
@@ -111,29 +111,33 @@ stage-grid dataflow) is Orleans-only. `ITableReadFacade.GetSnapshotFrontierEpoch
 `null` and `IArrangementMetaFacade.GetArrangementsAsync` always returns `[]`, independent of whether
 `TableActor` has landed (W7) — these are permanent, not W-something stubs.
 
-### Seed status: seeded pipelines/tables are forced to `Stopped` — sources are the exception (W5-A)
+### Seed status: seeded TABLES are forced to `Stopped` — sources and pipelines are the exceptions (W5-A, W6)
 
 `shared/StreamForge.AppCore/SeedCatalog` marks several demo pipelines/tables `Running` (the Orleans flavor
 resumes them for real on boot, per `RegistryGrain.EnsureInitializedAsync`). On the Dapr flavor through W4,
 **no runtime at all** existed behind a Running status — no generator publishing events, no pipeline/table
-actually computing anything. Serving a seeded "Running" badge with zero rows ever arriving would be a UI
-lie, so `CatalogStore.EnsureInitialized` explicitly overrides every seeded pipeline/table to `Stopped`
-regardless of what `SeedCatalog` says, before persisting. Verified live: a fresh seed shows
-`GET /api/tables` / `GET /api/pipelines` with every entity `Stopped`. **This still applies to
-pipelines/tables** (W6/W7 haven't landed) — nothing in this paragraph changes for them.
+actually computing anything, so `CatalogStore.EnsureInitialized` overrode every seeded pipeline/table to
+`Stopped` regardless of what `SeedCatalog` said. **This still applies to TABLES** (W7 hasn't landed) —
+`GET /api/tables` on a fresh seed still shows every table `Stopped`.
 
-**Sources are different as of W5-A**, because a real runtime (`GeneratorActor`, see the new "Generators"
-section below) now exists behind them: `SeedCatalog.Sources()` marks every seeded source `Enabled = true`
-(see `shared/StreamForge.AppCore/Generators/MarketDataProfiles.cs`'s `SeedSources()`), and
-`CatalogStore.EnsureInitialized` does **not** override that — a seeded, enabled source is honestly
-`Enabled` because it will, in fact, start generating (within one `GeneratorSupervisorService` sweep of
-boot, typically well under 15s — see that class). This is the Dapr flavor catching up to parity with
-Orleans' own boot behavior (`RegistryGrain.EnsureInitializedAsync` starts a `GeneratorGrain` for every
-enabled source synchronously at boot); the only observable difference is Dapr's few-seconds-to-15s startup
-lag versus Orleans' instant start, a direct consequence of the periodic-sweep design (see "Generators").
+**Sources (W5-A) and pipelines (W6) are no longer force-stopped**, because a real runtime now exists
+behind each: `SeedCatalog.Sources()` marks every seeded source `Enabled = true` and `CatalogStore.
+EnsureInitialized` does **not** override that (a seeded, enabled source starts generating within one
+`GeneratorSupervisorService` sweep of boot — see "Generators" below); `SeedCatalog.Pipelines()` marks
+several pipelines `Running` and, as of W6, `CatalogStore.EnsureInitialized` no longer overrides *that*
+either — a seeded Running pipeline starts producing real windowed rows within one `PipelineSupervisorService`
+sweep of boot (see "Pipelines" below), mirroring Orleans' own `RegistryGrain.EnsureInitializedAsync`
+resume-on-boot loop. Verified live (W6): a fresh seed's four `Running`-seeded pipelines (VWAP, trade/quote
+spread join, the nested-CTE hot-symbol VWAP, and `fill-rate-5s`) show nonzero `totalEventsIn`/`totalRowsOut`
+in `GET /api/pipelines/{id}/metrics` within seconds of boot, with **no** `POST .../start` call ever issued
+— and killing + restarting the whole host (Redis-backed catalog/actor state survives) reproduces the same
+resume with no REST call either time. The only observable difference from Orleans' instant start is Dapr's
+few-seconds-to-15s startup lag, a direct consequence of the periodic-sweep design (see "Generators"/
+"Pipelines").
 
 A user can still manually `POST .../start` on a seeded/created pipeline or table today — see the next
-decision for what that does (and does not) do.
+decision for what that does (tables: still bookkeeping-only, W7 hasn't landed; pipelines: a real start,
+same as boot-resume).
 
 ### The `ILifecycleOrchestrator` seam — and the reentrancy decision
 
@@ -141,14 +145,13 @@ Every place `RegistryGrain` reaches into another grain to actually start/stop a 
 (`GeneratorGrain.StartAsync/StopAsync`, `PipelineGrain.StartAsync/StopAsync`, `TableGrain.StartAsync/
 StopAsync`, `ITableHistoryGrain.ResetAsync/DisableAsync`, plus the lifecycle-stream publish) is routed,
 in `CatalogStore`, through `Lifecycle/ILifecycleOrchestrator` instead of a direct actor-to-actor call.
-W4's implementation, `NoopLifecycleOrchestrator`, logs a warning ("no runtime yet (W5/W6/W7)") and
-reports **success** for every start call — so `POST /api/pipelines/{id}/start` /
-`POST /api/tables/{id}/start` do flip the catalog status to `Running` and persist it (verified live), they
-just don't yet start anything real. This is "Running-but-inert" for anything a user starts by hand after
-boot, alongside the "seeded-Stopped" default above — two different, both-documented answers to the same
-honesty question for two different triggers (seed vs. explicit user action), chosen because an explicit
-`/start` call is the user asking for exactly this bookkeeping-only behavior today, whereas a seed silently
-claiming "Running" for something nobody asked to start would not be.
+W4's implementation, `NoopLifecycleOrchestrator`, logs a warning ("no runtime yet") and reports
+**success** for every start call. As of W6, `DaprLifecycleOrchestrator`'s `StartPipelineAsync`/
+`StopPipelineAsync` are real (see "Pipelines" below); `StartTableAsync`/`StopTableAsync`/
+`ResetTableHistoryAsync`/`DisableTableHistoryAsync` are still W4's warn-and-succeed no-op (W7 replaces
+them) — so `POST /api/tables/{id}/start` still only flips the catalog status to `Running` and persists it
+without starting anything real ("Running-but-inert"), while `POST /api/pipelines/{id}/start` now does the
+real thing end-to-end.
 
 **Why a seam instead of direct actor-to-actor calls at all — the reentrancy decision itself:** none of
 `GeneratorActor`/`PipelineActor`/`TableActor`/`TableHistoryActor` exist yet, but more importantly, this
@@ -226,13 +229,89 @@ string format is unchanged: `"NotifySourceChanged:{name}:{enabled}"`, now built 
 `sf-lifecycle` is now published for real too: `DaprLifecycleOrchestrator.PublishLifecycleAsync` calls
 `DaprClient.PublishEventAsync` where `NoopLifecycleOrchestrator` only logged.
 
+## Pipelines (W6)
+
+One `PipelineActor` per running pipeline (actor type `"PipelineActor"`, key = the pipeline's `Id`) —
+compiles the pipeline's streaming SQL via the shared `StreamForge.Engine` (same compile path
+`PipelineGrain.StartAsync` uses: build a schema dictionary from every known source, `SqlCompiler.Compile`),
+executes it against batches of routed events, and publishes emitted rows + periodic metrics to Dapr
+pub/sub — a byte-for-byte mirror of `PipelineGrain`'s watermark-tick/publish cadence
+(`orleans/src/StreamForge.Host/Grains/PipelineGrain.cs`), translated from Orleans streams to the fixed-topic
+transport (decision D-D). `Actors/PipelineActor.cs`; `Actors/IPipelineActor.cs`.
+
+**Acyclic by construction (same discipline as `GeneratorActor`).** `PipelineActor` never resolves
+`ICatalogFacade`, an `IRegistryActor` proxy, or any other actor — everything it needs arrives once, either
+as `StartAsync`'s `PipelineStartRequest` (the `PipelineDefinition` plus **every** known `SourceDefinition`,
+not just the ones the SQL references — exactly what `PipelineGrain.StartAsync` builds schemas from after
+its own `GetSourcesAsync()` call) or per-batch via `ProcessEventsAsync`. It only ever talks outward, to Dapr
+pub/sub (`sf-pipeline-out`, `sf-metrics`).
+
+**Routing: `Streaming/PipelineEventRouter.cs`.** Dapr's fixed `sf-sources` topic (decision D-D) means
+`PipelineActor` can't subscribe per-source itself the way `PipelineGrain` subscribes Orleans stream handles
+— instead `PipelineEventRouter` registers as a second `ISourceEventsSink` alongside `DaprStreamBridge`
+(`Streaming/StreamingRuntimeSetup.AddServices`), maintains an in-memory `{sourceName → {pipelineId}}` table,
+and forwards every `sf-sources` envelope to `IPipelineActor.ProcessEventsAsync` on every pipeline subscribed
+to that source. The table is deliberately **not** persisted (a pure routing cache, rebuilt from actor state
+on demand) and is maintained from two places:
+- `Lifecycle/DaprLifecycleOrchestrator.StartPipelineAsync`/`StopPipelineAsync` — every explicit start/stop
+  registers/unregisters it, using the source names `PipelineActor.StartAsync` itself resolved (returned in
+  its `ActorResult<List<string>>`, so there is no second compile in the orchestrator).
+- `Services/PipelineSupervisorService`'s boot-resume sweep repairs it for a `PipelineActor` that self-healed
+  on reactivation without going through either of the calls above (see next paragraph).
+
+**Boot resume (`Services/PipelineSupervisorService.cs`) — seeded `Running` pipelines now boot running.**
+This *changes* the W4/W5 decision: `CatalogStore.EnsureInitialized` no longer force-stops seeded pipelines
+(see the updated "Seed status" decision above) — mirroring Orleans' own one-shot
+`RegistryGrain.EnsureInitializedAsync` boot-resume loop, but as a periodic (~15s) sweep for the same
+sidecar-readiness reason `GeneratorSupervisorService` is periodic rather than one-shot. Unlike that
+generator sweep (which unconditionally calls `GeneratorActor.StartAsync` every tick — harmless, since
+Generator has no accumulated user-visible state to lose), this sweep checks `IPipelineActor.IsRunningAsync()`
+first: an already-running actor (self-healed via `PipelineActor.OnActivateAsync` recompiling from persisted
+state on any reactivation, exactly like `GeneratorActor`'s own self-heal) is left alone except for a
+router-table repair (`GetSourceNamesAsync()`, a cheap in-memory read, no recompile) — restarting it would
+discard in-flight window/join state and reset nothing else (Orleans doesn't reset pipeline counters on a
+mere restart either — see `PipelineActor`'s class doc), a needless disruption to a pipeline that's simply
+been running fine. A NOT-yet-running one goes through `ICatalogFacade.SetPipelineStatusAsync(id, Running)`
+— the exact same code path `POST /api/pipelines/{id}/start` uses.
+
+**Read surface: `Facades/DaprPipelineReadFacade.cs`** replaces the W4/W5 `StubPipelineReadFacade` —
+`GET /api/pipelines/{id}/results|metrics` now forward to the pipeline's own `PipelineActor`
+(`GetRecentResultsAsync`/`GetMetricsAsync`). Results are a bounded in-memory ring, capacity 100 (same as
+`PipelineGrain`), extracted as the pure, unit-tested `PipelineResultRing` (append/evict + "last N" read);
+compile-to-executor is likewise extracted as `PipelineCompilation.TryCompile` for the same reason —
+testable without any actor/timer/Dapr-sidecar machinery (mirrors `GeneratorBatching`'s own extraction).
+
+**JsonElement crosses the actor wire too — an important, non-obvious finding.** Decision D-D's
+normalization requirement ("`JsonElement` values are normalized at every topic ingress") is satisfied once,
+at the `sf-sources` pub/sub endpoint, before `PipelineEventRouter` ever sees an envelope — so by the time
+the router calls `ProcessEventsAsync`, every event dictionary already holds plain CLR values. It would be
+reasonable to assume `PipelineActor.ProcessEventsAsync` therefore never needs to normalize again — **that
+assumption is wrong**. The Dapr actor-invocation call (`ActorProxy.Create<IPipelineActor>(...)
+.ProcessEventsAsync(envelope)`) is not an in-process method call; it round-trips through System.Text.Json
+via `ActorProxyOptions.UseJsonSerialization`, and System.Text.Json has no static type information for a
+`Dictionary<string, object?>` value at deserialization time — so every value, even ones that started as
+plain CLR on the publish side, comes back out as a `JsonElement` again once it lands inside the actor's
+method body. `PipelineActor.ProcessEventsAsync` therefore re-normalizes (`JsonValueNormalizer.NormalizeInPlace`)
+before constructing an `EventRecord`; skipping this would silently break every pipeline, since
+`PipelineEventRouter` is the only path events ever reach a running `PipelineActor`. Proven explicitly by
+round-tripping an already-normalized envelope through the actor wire's own serializer configuration:
+`dapr/tests/StreamForge.Dapr.Tests/PipelineActorWireNormalizationTests.cs`.
+
+**Live-verified (see the wave's report for the full transcript):** a fresh seed's four `Running` pipelines
+(a single-source tumbling-window VWAP, a two-source `WITHIN`-join spread, a nested-CTE hot-symbol VWAP, and
+a `WHERE`-filtered fill-rate aggregate) all produce real windowed rows and growing `totalEventsIn`/
+`totalRowsOut` within seconds of boot — **no `POST .../start` call issued** — visible over both REST
+(`GET /api/pipelines/{id}/results|metrics`) and SignalR (`pipelineResult`, `pipelineStatus` on
+start/stop). Explicit `POST .../start` and `.../stop` both work identically (stop makes `totalEventsIn`
+stop growing, confirmed by re-polling metrics after the stop response). Killing and restarting the whole
+host reproduces the same boot-resume with no REST call either time, proving the Redis-backed
+`PipelineActorState` self-heal path, not just the initial-boot path.
+
 ## What's NOT here yet (by design — later waves)
 
-- **Generators** (W5): sources have no synthetic event publisher; `Enabled` is stored but inert.
-- **Pipelines** (W6): no SQL execution; results/metrics endpoints return empty/zeroed shapes
-  (`Facades/StubFacades.cs`, each marked with a `W6 replaces this` comment).
+- **Generators** (W5) and **Pipelines** (W6) have both landed — see their own sections above/below.
 - **Tables/history** (W7): no Z-set execution, no rows, no search, no history
-  (`Facades/StubFacades.cs`, each marked with a `W6/W7 replaces this` comment).
+  (`Facades/StubFacades.cs`, each marked with a `W7 replaces this` comment).
 - **gRPC serving** (phase 2, decision D-F): `:5499` is reserved but nothing listens on it yet;
   `GET /api/meta/grpc` reports it with an empty static-service list (shape preserved).
 - **`/docs`**: not mapped on this flavor (`StreamForgeApiOptions.DocsFilePath` is `null`) — stays
@@ -255,7 +334,9 @@ dapr stop --app-id streamforge-dapr
 ./tools/reset.sh                     # wipes this app's Redis keys (scoped SCAN, see above)
 ./tools/run.sh                       # next boot reseeds from empty state
 
-~/.dotnet/dotnet test dapr/StreamForge.Dapr.sln     # 36 tests (JsonValueNormalizer + CatalogStore)
+~/.dotnet/dotnet test dapr/StreamForge.Dapr.sln     # 102 tests as of W6 (JsonValueNormalizer, CatalogStore,
+                                                     # streaming dispatch/normalization, generator batching,
+                                                     # pipeline compilation/result-ring/router/actor-wire)
 ```
 
 Logins: `admin/admin123!`, `editor/editor123!`, `viewer/viewer123!` — same as the Orleans flavor (shared

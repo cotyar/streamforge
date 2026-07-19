@@ -8,33 +8,43 @@ using StreamForge.Dapr.Host.Streaming;
 namespace StreamForge.Dapr.Host.Lifecycle;
 
 /// <summary>
-/// Plan 005 (Dapr sibling runtime) W5-A: replaces <see cref="NoopLifecycleOrchestrator"/> as the real
-/// <see cref="ILifecycleOrchestrator"/> once <see cref="GeneratorActor"/> exists — registered in
-/// <c>Actors/GeneratorRuntimeSetup.cs</c>'s <c>AddServices</c>, which runs AFTER Program.cs's Noop
-/// registration, so this implementation wins.
+/// Plan 005 (Dapr sibling runtime) W5-A/W6: replaces <see cref="NoopLifecycleOrchestrator"/> as the real
+/// <see cref="ILifecycleOrchestrator"/> once <see cref="GeneratorActor"/>/<see cref="PipelineActor"/>
+/// exist — registered in <c>Actors/GeneratorRuntimeSetup.cs</c>'s <c>AddServices</c>, which runs AFTER
+/// Program.cs's Noop registration, so this implementation wins.
 ///
-/// <para><b>Sources are real; pipelines/tables/history are still W4's no-op behavior.</b> This wave only
-/// builds the generator runtime, so <see cref="StartPipelineAsync"/>/<see cref="StartTableAsync"/>/
-/// <see cref="ResetTableHistoryAsync"/>/etc. are copied verbatim from <see cref="NoopLifecycleOrchestrator"/>
-/// (log a warning, report success) — W6/W7 replace them; the <see cref="LifecycleOutcome"/> contract is
-/// unchanged.</para>
+/// <para><b>Sources and pipelines are real; tables/history are still W4's no-op behavior.</b>
+/// <see cref="StartTableAsync"/>/<see cref="ResetTableHistoryAsync"/>/etc. are copied verbatim from
+/// <see cref="NoopLifecycleOrchestrator"/> (log a warning, report success) — W7 replaces them; the
+/// <see cref="LifecycleOutcome"/> contract is unchanged.</para>
 ///
 /// <para><b>Acyclic by construction (see dapr/ARCHITECTURE.md's reentrancy decision).</b> This class is
 /// invoked synchronously, inline, from <see cref="Catalog.CatalogStore"/>'s methods — which themselves run
 /// inside <see cref="Actors.RegistryActor"/>'s own (non-reentrant) actor turn. The hazard that decision
 /// guards against is a CYCLE: RegistryActor's turn blocked waiting on a call chain that loops back into
-/// that same still-in-flight turn. Calling into <see cref="IGeneratorActor"/> from here is NOT such a
-/// cycle — <see cref="GeneratorActor"/> never calls RegistryActor, <c>ICatalogFacade</c>, or any other
-/// actor (see that class's own doc comment: everything it needs arrives as the <c>StartAsync</c>
-/// parameter). It is a pure leaf in the call graph, so a synchronous actor-to-actor call to it can never
-/// deadlock — there is nothing to make fire-and-forget here. Awaiting it inline (exactly like Orleans'
-/// <c>RegistryGrain</c> awaiting <c>GeneratorGrain.StartAsync</c>/<c>StopAsync</c> directly) is both
-/// simpler and sufficient. <b>Rule for whoever builds W6/W7's pipeline/table orchestration on this same
-/// seam:</b> that only holds because GeneratorActor is a leaf — a worker actor that reads back from the
-/// registry (directly or via a facade) would reintroduce the exact cycle this design avoids, and MUST
-/// go through fire-and-forget pub/sub or an equivalent non-blocking path instead.</para>
+/// that same still-in-flight turn. Calling into <see cref="IGeneratorActor"/>/<see cref="IPipelineActor"/>
+/// from here is NOT such a cycle — neither <see cref="GeneratorActor"/> nor <see cref="PipelineActor"/>
+/// ever calls RegistryActor, <c>ICatalogFacade</c>, or any other actor (see each class's own doc comment:
+/// everything either needs arrives as a method parameter). Both are pure leaves in the call graph, so a
+/// synchronous actor-to-actor call to either can never deadlock — there is nothing to make
+/// fire-and-forget here. Awaiting inline (exactly like Orleans' <c>RegistryGrain</c> awaiting
+/// <c>GeneratorGrain.StartAsync</c>/<c>PipelineGrain.StartAsync</c> directly) is both simpler and
+/// sufficient. <b>Rule for whoever builds W7's table orchestration on this same seam:</b> that only holds
+/// because GeneratorActor/PipelineActor are leaves — a worker actor that reads back from the registry
+/// (directly or via a facade) would reintroduce the exact cycle this design avoids, and MUST go through
+/// fire-and-forget pub/sub or an equivalent non-blocking path instead.</para>
+///
+/// <para><b><see cref="Streaming.PipelineEventRouter"/> bookkeeping (W6):</b> every successful
+/// <see cref="StartPipelineAsync"/> registers the router's routing table with the source names
+/// <see cref="PipelineActor.StartAsync"/> itself resolved (no second compile here); every
+/// <see cref="StopPipelineAsync"/> (and a failed start) unregisters it. This is the ONLY place besides
+/// <see cref="Services.PipelineSupervisorService"/>'s boot-resume sweep that mutates the router — see that
+/// service's doc comment for why a sweep-side repair is still needed for a self-healed actor.</para>
 /// </summary>
-public sealed class DaprLifecycleOrchestrator(DaprClient daprClient, ILogger<DaprLifecycleOrchestrator> logger) : ILifecycleOrchestrator
+public sealed class DaprLifecycleOrchestrator(
+    DaprClient daprClient,
+    Streaming.PipelineEventRouter pipelineRouter,
+    ILogger<DaprLifecycleOrchestrator> logger) : ILifecycleOrchestrator
 {
     public async Task NotifySourceChangedAsync(SourceDefinition def)
     {
@@ -57,22 +67,42 @@ public sealed class DaprLifecycleOrchestrator(DaprClient daprClient, ILogger<Dap
     private static IGeneratorActor GeneratorActorProxy(string sourceName) =>
         ActorProxy.Create<IGeneratorActor>(new ActorId(sourceName), nameof(GeneratorActor), ActorProxyDefaults.Options);
 
-    // ------------------------------------------------------------------
-    // Pipelines/tables/history: W6/W7 replace these. Logic copied verbatim from
-    // NoopLifecycleOrchestrator — see that class's doc comment.
-    // ------------------------------------------------------------------
-
-    public Task<LifecycleOutcome> StartPipelineAsync(PipelineDefinition def)
+    /// <summary>Compiles (inside <see cref="PipelineActor.StartAsync"/>, not here — see the class doc's
+    /// "acyclic by construction" note) and starts <paramref name="def"/>'s pipeline actor, then registers
+    /// <see cref="Streaming.PipelineEventRouter"/> with the source names the actor's own compile
+    /// resolved. On a compile/start failure, unregisters the router (defensive — a pipeline that failed
+    /// to start must not be left routable) and turns the actor's error message into a
+    /// <see cref="LifecycleOutcome.Failure"/> for <c>CatalogStore</c> to record as
+    /// <c>Status=Failed</c>/<c>Error</c>, mirroring <c>PipelineGrain.StartAsync</c>'s thrown-exception
+    /// outcome without letting an exception cross the Dapr actor-invocation boundary (see
+    /// <see cref="ActorResult{T}"/>'s class doc).</summary>
+    public async Task<LifecycleOutcome> StartPipelineAsync(PipelineDefinition def, IReadOnlyList<SourceDefinition> sources)
     {
-        WarnNoRuntime("StartPipeline", def.Id);
-        return Task.FromResult(LifecycleOutcome.Success);
+        var actor = PipelineActorProxy(def.Id);
+        var result = await actor.StartAsync(new PipelineStartRequest(def, sources.ToList()));
+        if (!result.Ok)
+        {
+            pipelineRouter.Unregister(def.Id);
+            return LifecycleOutcome.Failure(result.Error ?? "pipeline failed to start");
+        }
+
+        pipelineRouter.Register(def.Id, result.Value ?? []);
+        return LifecycleOutcome.Success;
     }
 
-    public Task StopPipelineAsync(string pipelineId)
+    public async Task StopPipelineAsync(string pipelineId)
     {
-        WarnNoRuntime("StopPipeline", pipelineId);
-        return Task.CompletedTask;
+        await PipelineActorProxy(pipelineId).StopAsync();
+        pipelineRouter.Unregister(pipelineId);
     }
+
+    private static IPipelineActor PipelineActorProxy(string pipelineId) =>
+        ActorProxy.Create<IPipelineActor>(new ActorId(pipelineId), nameof(PipelineActor), ActorProxyDefaults.Options);
+
+    // ------------------------------------------------------------------
+    // Tables/history: W7 replaces these. Logic copied verbatim from NoopLifecycleOrchestrator — see
+    // that class's doc comment.
+    // ------------------------------------------------------------------
 
     public Task<LifecycleOutcome> StartTableAsync(TableDefinition def)
     {
@@ -99,7 +129,7 @@ public sealed class DaprLifecycleOrchestrator(DaprClient daprClient, ILogger<Dap
     }
 
     private void WarnNoRuntime(string action, string id) =>
-        logger.LogWarning("{Action}({Id}): no runtime yet (W6/W7) — catalog status updated, no process started.", action, id);
+        logger.LogWarning("{Action}({Id}): no runtime yet (W7) — catalog status updated, no process started.", action, id);
 
     /// <summary>Real publish to the <c>sf-lifecycle</c> topic (decision D-D) — the one W4 left as a log
     /// line only (see <see cref="NoopLifecycleOrchestrator.PublishLifecycleAsync"/>). Publishing here is

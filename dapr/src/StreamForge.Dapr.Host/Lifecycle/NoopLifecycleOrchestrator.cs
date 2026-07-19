@@ -27,7 +27,7 @@ public sealed class NoopLifecycleOrchestrator(ILogger<NoopLifecycleOrchestrator>
         return Task.CompletedTask;
     }
 
-    public Task<LifecycleOutcome> StartPipelineAsync(PipelineDefinition def)
+    public Task<LifecycleOutcome> StartPipelineAsync(PipelineDefinition def, IReadOnlyList<SourceDefinition> sources)
     {
         WarnNoRuntime("StartPipeline", def.Id);
         return Task.FromResult(LifecycleOutcome.Success);

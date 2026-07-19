@@ -49,8 +49,19 @@ public interface ILifecycleOrchestrator
     Task NotifySourceRemovedAsync(string name);
 
     /// <summary>Start (or restart) a pipeline. Mirrors PipelineGrain.StartAsync's outcome contract: success
-    /// or a human-readable error CatalogStore turns into Status=Failed/Error (never throws).</summary>
-    Task<LifecycleOutcome> StartPipelineAsync(PipelineDefinition def);
+    /// or a human-readable error CatalogStore turns into Status=Failed/Error (never throws).
+    ///
+    /// <para><b>Plan 005 W6 signature change</b> (was <c>StartPipelineAsync(PipelineDefinition def)</c>):
+    /// the real Dapr implementation (<c>DaprLifecycleOrchestrator</c>) needs every known source's schema
+    /// to compile the pipeline's SQL (same schema-building <c>PipelineGrain.StartAsync</c> does via
+    /// <c>IRegistryGrain.GetSourcesAsync()</c>) — fetching that INSIDE this call via
+    /// <c>ICatalogFacade.GetSourcesAsync</c> would be a self-call while <c>RegistryActor</c>'s own turn
+    /// (the one that invoked this orchestrator method from inside <c>CatalogStore</c>) is still in-flight:
+    /// the exact reentrancy deadlock this plan's reentrancy decision exists to prevent (same rationale as
+    /// <see cref="NotifySourceChangedAsync"/>'s earlier W5-A signature change). <c>CatalogStore</c> already
+    /// holds <c>state.Sources</c> in full at every call site, so passing it through needs no such
+    /// call.</para></summary>
+    Task<LifecycleOutcome> StartPipelineAsync(PipelineDefinition def, IReadOnlyList<SourceDefinition> sources);
 
     Task StopPipelineAsync(string pipelineId);
 

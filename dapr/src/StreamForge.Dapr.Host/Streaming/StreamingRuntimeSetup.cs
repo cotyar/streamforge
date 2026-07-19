@@ -36,6 +36,15 @@ public static class StreamingRuntimeSetup
         // endpoints below — no special-cased dispatch path for it there.
         services.AddSingleton<ISourceEventsSink>(sp => sp.GetRequiredService<DaprStreamBridge>());
         services.AddSingleton<ITableDeltaSink>(sp => sp.GetRequiredService<DaprStreamBridge>());
+
+        // Plan 005 W6: PipelineEventRouter registers as a SECOND ISourceEventsSink alongside the bridge
+        // above — exactly what Sinks.cs's class doc anticipated ("W6's PipelineActor routes matching
+        // sources into SQL execution... both register an extra sink, they don't replace this one"). It's
+        // also injected directly by Lifecycle/DaprLifecycleOrchestrator.cs and
+        // Services/PipelineSupervisorService.cs to maintain its routing table, so it's registered as its
+        // own concrete singleton (not just behind the sink interface) here.
+        services.AddSingleton<PipelineEventRouter>();
+        services.AddSingleton<ISourceEventsSink>(sp => sp.GetRequiredService<PipelineEventRouter>());
     }
 
     public static void MapTopicEndpoints(WebApplication app)

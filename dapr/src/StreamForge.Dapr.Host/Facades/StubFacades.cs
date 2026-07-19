@@ -2,21 +2,10 @@ using StreamForge.Abstractions;
 
 namespace StreamForge.Dapr.Host.Facades;
 
-/// <summary>W6 replaces this: PipelineActor doesn't exist yet, so there is no live pipeline output to
-/// read. Returns the same "nothing has run yet" shape a freshly-created (never-started) Orleans pipeline
-/// grain would return — an empty results list and zeroed metrics — so the shared endpoints/SPA render a
-/// coherent empty state rather than erroring.</summary>
-public sealed class StubPipelineReadFacade : IPipelineReadFacade
-{
-    public Task<List<ResultEnvelope>> GetRecentResultsAsync(string pipelineId, int limit) =>
-        Task.FromResult(new List<ResultEnvelope>());
-
-    public Task<PipelineMetrics> GetMetricsAsync(string pipelineId) =>
-        Task.FromResult(new PipelineMetrics { PipelineId = pipelineId, Status = PipelineStatus.Stopped });
-}
-
-/// <summary>W6/W7 replaces this: TableActor doesn't exist yet, so there are no rows/deltas to read.
-/// Zeroed/empty shapes, same rationale as <see cref="StubPipelineReadFacade"/>.</summary>
+/// <summary>W7 replaces this: TableActor doesn't exist yet, so there are no rows/deltas to read.
+/// Zeroed/empty shapes — same rationale W4 gave for the (now-replaced, see
+/// <see cref="DaprPipelineReadFacade"/>) pipeline stub: a freshly-created/never-started entity should
+/// render a coherent empty state, not an error.</summary>
 public sealed class StubTableReadFacade : ITableReadFacade
 {
     public Task<List<TableRowDto>> GetRowsAsync(string tableName, int limit, int offset) =>

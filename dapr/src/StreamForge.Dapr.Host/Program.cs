@@ -35,6 +35,7 @@ builder.Services.AddActors(options =>
     options.Actors.RegisterActor<RegistryActor>();
     options.Actors.RegisterActor<UserStoreActor>();
     GeneratorRuntimeSetup.RegisterActors(options);
+    PipelineRuntimeSetup.RegisterActors(options);
     // See Actors/ActorProxyDefaults.cs for the client-side half of this decision — both sides of every
     // actor call in this project must agree on System.Text.Json, not the SDK's legacy DataContract default.
     options.UseJsonSerialization = true;
@@ -43,10 +44,11 @@ builder.Services.AddActors(options =>
 builder.Services.AddSingleton<ILifecycleOrchestrator, NoopLifecycleOrchestrator>();
 builder.Services.AddDaprFacades();
 builder.Services.AddHostedService<CatalogInitializationService>();
-// Wave seams (see the two *RuntimeSetup classes) — registered after the Noop orchestrator so a real
+// Wave seams (see the *RuntimeSetup classes) — registered after the Noop orchestrator so a real
 // ILifecycleOrchestrator registered inside wins.
 GeneratorRuntimeSetup.AddServices(builder.Services);
 StreamingRuntimeSetup.AddServices(builder.Services);
+PipelineRuntimeSetup.AddServices(builder.Services);
 
 var app = builder.Build();
 
@@ -73,9 +75,9 @@ app.MapStreamForgeApi(apiOptions);
 // Dapr actor HTTP endpoints the sidecar calls for activation/deactivation/method-invocation.
 app.MapActorsHandlers();
 
-// Pub/sub subscription handshake (the sidecar GETs /dapr/subscribe on startup) — no topic subscriptions
-// are declared yet in W4 (returns an empty list); W5 adds the sf-sources/egress topic endpoints (decision
-// D-D) behind this same call.
+// Pub/sub subscription handshake (the sidecar GETs /dapr/subscribe on startup) — the five fixed envelope
+// topics (decision D-D) are mapped by StreamingRuntimeSetup.MapTopicEndpoints (W5-B) ahead of this call,
+// so MapSubscribeHandler's discovery pass picks them all up.
 app.UseCloudEvents();
 StreamingRuntimeSetup.MapTopicEndpoints(app);
 app.MapSubscribeHandler();

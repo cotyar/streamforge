@@ -26,9 +26,9 @@ public sealed class TestLifecycleOrchestrator : ILifecycleOrchestrator
         return Task.CompletedTask;
     }
 
-    public Task<LifecycleOutcome> StartPipelineAsync(PipelineDefinition def)
+    public Task<LifecycleOutcome> StartPipelineAsync(PipelineDefinition def, IReadOnlyList<SourceDefinition> sources)
     {
-        Calls.Add($"StartPipeline:{def.Id}");
+        Calls.Add($"StartPipeline:{def.Id}:{sources.Count}");
         return Task.FromResult(FailStarts ? LifecycleOutcome.Failure(FailureMessage) : LifecycleOutcome.Success);
     }
 

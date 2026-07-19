@@ -35,11 +35,15 @@ namespace StreamForge.Dapr.Host.Catalog;
 public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orchestrator)
 {
     /// <summary>Seeds defaults on first run (shared <see cref="SeedCatalog"/> — same demo world as the
-    /// Orleans flavor). Plan 005 W4 "seed status" decision (see dapr/ARCHITECTURE.md): seeded
-    /// pipelines/tables are forced to <see cref="PipelineStatus.Stopped"/> here regardless of what
-    /// <see cref="SeedCatalog"/> marks them as, because nothing on this flavor can actually run one yet
-    /// (W5/W6/W7) — a seeded "Running" badge with zero rows ever arriving would be a lie the UI tells the
-    /// user. Returns true if anything was seeded (caller persists only then).</summary>
+    /// Orleans flavor). Plan 005 W4 "seed status" decision (see dapr/ARCHITECTURE.md), UPDATED by W6 for
+    /// pipelines: tables are still forced to <see cref="PipelineStatus.Stopped"/> here regardless of what
+    /// <see cref="SeedCatalog"/> marks them as, because no table runtime exists yet (W7) — a seeded
+    /// "Running" badge with zero rows ever arriving would be a lie the UI tells the user. Pipelines are NO
+    /// LONGER force-stopped: <see cref="Actors.PipelineActor"/> now exists, and
+    /// <see cref="Services.PipelineSupervisorService"/>'s boot sweep resumes every seeded Running pipeline
+    /// for real, exactly mirroring Orleans' own <c>RegistryGrain.EnsureInitializedAsync</c> resume-on-boot
+    /// behavior (see that method) — a seeded Running pipeline is now honestly Running, same as sources
+    /// have been since W5-A. Returns true if anything was seeded (caller persists only then).</summary>
     public bool EnsureInitialized()
     {
         var dirty = false;
@@ -52,12 +56,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
         if (state.Pipelines.Count == 0)
         {
-            var seeds = SeedCatalog.Pipelines();
-            foreach (var p in seeds)
-            {
-                p.Status = PipelineStatus.Stopped;
-            }
-            state.Pipelines.AddRange(seeds);
+            state.Pipelines.AddRange(SeedCatalog.Pipelines());
             dirty = true;
         }
 
@@ -171,7 +170,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         if (sqlChanged && wasRunning)
         {
             await orchestrator.StopPipelineAsync(existing.Id);
-            var outcome = await orchestrator.StartPipelineAsync(existing);
+            var outcome = await orchestrator.StartPipelineAsync(existing, state.Sources);
             if (outcome.Ok)
             {
                 existing.Status = PipelineStatus.Running;
@@ -216,7 +215,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
         if (status == PipelineStatus.Running)
         {
-            var outcome = await orchestrator.StartPipelineAsync(existing);
+            var outcome = await orchestrator.StartPipelineAsync(existing, state.Sources);
             if (outcome.Ok)
             {
                 existing.Status = PipelineStatus.Running;
