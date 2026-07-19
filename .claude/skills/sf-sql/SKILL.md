@@ -1,0 +1,70 @@
+---
+name: sf-sql
+description: StreamForge streaming-SQL dialect cheatsheet — grammar, pipeline vs table mode, and the semantic gotchas (-> vs ->>, windowed-subquery rule, LATEST BY). Use when writing or debugging pipeline/table SQL, seeds, or SQL-touching tests.
+---
+
+# sf-sql — dialect quick reference
+
+Full user docs: `orleans/docs/index.html` (§ Streaming SQL reference). Engine:
+`orleans/src/StreamForge.Engine` (tokenizer → parser → validator → planner; positioned
+diagnostics, never exceptions). Validate cheaply via `POST /api/pipelines/validate` or
+`/api/tables/validate` (`{sql}` → diagnostics with line/col).
+
+## Grammar (one screen)
+
+```sql
+[WITH name AS (SELECT …), …]                       -- CTEs; earlier-only refs; NO recursion
+SELECT expr [AS alias], … | * | alias.*
+FROM source | (SELECT …) alias [, UNNEST(expr) AS l …]
+  [ [INNER|LEFT|RIGHT|FULL [OUTER]] JOIN source|(SELECT …) alias WITHIN dur ON expr
+  | CROSS JOIN source WITHIN dur | [CROSS] JOIN UNNEST(expr) AS l ] …
+[WHERE expr]          -- may contain [NOT] IN (SELECT…), [NOT] EXISTS(…), scalar (SELECT agg…)
+[GROUP BY expr, … | LATEST BY (col, …)]            -- LATEST BY: tables only
+[WINDOW TUMBLING(SIZE d) | HOPPING(SIZE d, ADVANCE BY d) | SESSION(GAP d)]   -- pipelines only
+[EMIT CHANGES | EMIT FINAL]
+-- durations: N MILLISECONDS|SECONDS|MINUTES|HOURS · comments: -- · GROUP BY repeats the
+-- exact expression (no alias sugar) · aggregates: COUNT/SUM/AVG/MIN/MAX · fns: ABS/ROUND/
+-- UPPER/LOWER/COALESCE · JSON: expr -> 'key' (raw) / expr ->> 'key' (text) / -> 0 (index)
+```
+
+## Pipeline vs table mode
+
+| | Pipeline | Table (materialized view) |
+|---|---|---|
+| Windows / EMIT / WITHIN | yes | **no** — running aggregates, retract/assert deltas |
+| Joins | interval (WITHIN, all 5 kinds) | relational INNER equi over current state |
+| Inputs | stream sources | streams AND other tables (chaining) |
+| LATEST BY | ✗ (diagnostic) | ✓ latest row per key by event ts |
+
+## Gotchas that will bite you (all tested, all deliberate)
+
+1. **`SUM(l ->> 'x')` returns 0** — `->>` is always text; aggregate the raw node: `SUM(l -> 'x')`.
+2. **Pipeline-mode subqueries must be windowed** (IN/EXISTS/scalar): value = rolling snapshot
+   replaced at each inner window close. Tables have no such restriction.
+3. **`NOT IN` ignores subquery NULLs** (documented deviation from 3-valued SQL).
+4. **`LATEST BY`**: older-`_ts` arrivals ignored; upstream retraction drops the key (no fallback
+   to prior versions — use row history for trails). Mutually exclusive with GROUP BY/aggregates.
+5. **UNNEST**: element binds as a JSON value — address with `l ->> 'field'`, never `l.field`
+   (diagnostic). Args reference real sources only (no UNNEST-of-UNNEST). Empty/NULL → zero rows.
+6. **Windows-in-windows**: inner emissions carry the inner window's END timestamp outward.
+7. **Correlated subqueries**: equality-only (decorrelated to a GROUP-BY join); anything else →
+   "rewrite as a JOIN" diagnostic. Recursive CTEs rejected by design (see DESIGN.md §D3).
+8. Bare `*`/`alias.*` are rejected with GROUP BY/aggregates; multi-input stars prefix as `t_col`.
+9. Reserved row fields: `_ts` (epoch ms), `_source`.
+
+## Working examples (live seeds — copy as templates)
+
+```sql
+-- nested CTE + semi-join + windows (seed: "Hot symbol VWAP (nested)")
+WITH hot AS (SELECT symbol FROM trades GROUP BY symbol WINDOW TUMBLING(SIZE 10 SECONDS))
+SELECT t.symbol, SUM(t.price*t.qty)/SUM(t.qty) AS vwap, COUNT(*) AS trades FROM trades t
+WHERE t.symbol IN (SELECT symbol FROM hot) GROUP BY t.symbol WINDOW TUMBLING(SIZE 5 SECONDS)
+
+-- UNNEST over multileg legs (seed table: leg_exposure)
+SELECT l ->> 'ccy' AS ccy, SUM(l -> 'notional') AS notional, COUNT(*) AS legs
+FROM structures s, UNNEST(s.legs) AS l GROUP BY l ->> 'ccy'
+
+-- LATEST BY current-state view (seed table: order_states)
+SELECT order_id, symbol, side, stage, stage_rank, stage_ts, qty, filled_qty, px
+FROM order_events LATEST BY (order_id)
+```
