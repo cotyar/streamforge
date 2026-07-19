@@ -1,6 +1,5 @@
 using StreamForge.Abstractions;
 using StreamForge.Engine;
-using StreamForge.Host.Grpc;
 
 namespace StreamForge.Host.Grpc.Dynamic;
 
@@ -38,7 +37,7 @@ public sealed class DynamicDescriptorSet(ICatalogFacade registry)
         var streamSchemas = new Dictionary<string, SourceSchema>();
         foreach (var src in sources)
         {
-            var fields = src.Fields.ToDictionary(f => f.Name, f => ProtoMappers.MapFieldKind(f.Type));
+            var fields = src.Fields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type));
             streamSchemas[src.Name] = new SourceSchema(src.Name, fields);
         }
 
@@ -108,4 +107,18 @@ public sealed class DynamicDescriptorSet(ICatalogFacade registry)
 
         return plan;
     }
+
+    /// <summary>Inlined equivalent of <c>StreamForge.Host.Grpc.ProtoMappers.MapFieldKind(FieldType)</c> —
+    /// that type also carries a generated-proto (<c>V1</c>) dependency that is Host-only, so rather than
+    /// move the whole file, this tiny Orleans-free enum mapping is duplicated here (plan 005 W2).</summary>
+    private static FieldKind MapFieldKind(FieldType type) => type switch
+    {
+        FieldType.String => FieldKind.String,
+        FieldType.Double => FieldKind.Double,
+        FieldType.Long => FieldKind.Long,
+        FieldType.Bool => FieldKind.Bool,
+        FieldType.Timestamp => FieldKind.Timestamp,
+        FieldType.Json => FieldKind.Json,
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown field type"),
+    };
 }

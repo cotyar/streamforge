@@ -1,6 +1,7 @@
 using Orleans;
 using Orleans.Runtime;
 using StreamForge.Abstractions;
+using StreamForge.AppCore;
 using StreamForge.Host.Auth;
 
 namespace StreamForge.Host.Grains;
@@ -22,9 +23,11 @@ public sealed class UserStoreGrain(
             return;
         }
 
-        AddUser("admin", "Administrator", "Admin", "admin123!");
-        AddUser("editor", "Editor", "Editor", "editor123!");
-        AddUser("viewer", "Viewer", "Viewer", "viewer123!");
+        foreach (var seed in SeedCatalog.Users)
+        {
+            AddUser(seed.Username, seed.DisplayName, seed.Role, seed.Password);
+        }
+
         await state.WriteStateAsync();
     }
 
