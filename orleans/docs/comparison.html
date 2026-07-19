@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StreamForge — Orleans vs Dapr</title>
+<style>
+/* ===== Tokens — identical to orleans/docs/index.html (the client brand) ===== */
+:root {
+  --bg: #f7f9f8; --panel: #ffffff; --ink: #14231c; --muted: #55665d;
+  --brand: #008755; --brand-deep: #007348; --brand-tint: #39a87b;
+  --border: #dce5e0; --code-bg: #eef3f0; --amber: #8a5a00; --red: #c6453c;
+  --kbd-bg: #e1eee6; --shadow: 0 1px 3px rgba(20, 35, 28, 0.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a0f0d; --panel: #10161a; --ink: #e7ece9; --muted: #93a39c;
+    --brand: #39a87b; --brand-deep: #6abb97; --brand-tint: #39a87b;
+    --border: rgba(255,255,255,0.09); --code-bg: #121a17; --amber: #e6a93c; --red: #e4574d;
+    --kbd-bg: #1b2a22; --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0a0f0d; --panel: #10161a; --ink: #e7ece9; --muted: #93a39c;
+  --brand: #39a87b; --brand-deep: #6abb97; --brand-tint: #39a87b;
+  --border: rgba(255,255,255,0.09); --code-bg: #121a17; --amber: #e6a93c; --red: #e4574d;
+  --kbd-bg: #1b2a22; --shadow: none;
+}
+:root[data-theme="light"] {
+  --bg: #f7f9f8; --panel: #ffffff; --ink: #14231c; --muted: #55665d;
+  --brand: #008755; --brand-deep: #007348; --brand-tint: #39a87b;
+  --border: #dce5e0; --code-bg: #eef3f0; --amber: #8a5a00; --red: #c6453c;
+  --kbd-bg: #e1eee6; --shadow: 0 1px 3px rgba(20, 35, 28, 0.06);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.6 'IBM Plex Sans', -apple-system, 'Segoe UI', system-ui, sans-serif;
+}
+code, pre, kbd, .mono { font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ===== Shell: fixed sidebar + content ===== */
+.shell { display: flex; min-height: 100vh; }
+nav.side {
+  position: sticky; top: 0; align-self: flex-start; height: 100vh; overflow-y: auto;
+  width: 250px; flex-shrink: 0; padding: 24px 14px; border-right: 1px solid var(--border);
+  background: var(--panel); display: flex; flex-direction: column; gap: 4px;
+}
+.wordmark { padding: 0 10px 14px; }
+.wordmark .co { font-size: 10px; font-weight: 600; letter-spacing: 0.18em; color: var(--muted); }
+.wordmark .prod { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+.wordmark .prod b { color: var(--brand); }
+.wordmark .doc-tag { font-size: 11px; color: var(--muted); margin-top: 2px; }
+nav.side a {
+  display: block; padding: 6px 10px; border-radius: 8px; color: var(--muted);
+  text-decoration: none; font-size: 13.5px; font-weight: 500;
+}
+nav.side a:hover { color: var(--ink); background: var(--code-bg); }
+nav.side a.active { color: var(--brand-deep); background: var(--kbd-bg); }
+nav.side .navgap { height: 8px; }
+nav.side a.back { font-size: 12.5px; color: var(--brand-deep); font-weight: 600; }
+.side-foot { margin-top: auto; padding: 12px 10px 0; display: flex; align-items: center; gap: 8px; }
+#themebtn {
+  font: inherit; font-size: 12.5px; padding: 6px 12px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--panel); color: var(--ink);
+}
+#themebtn:hover { background: var(--code-bg); }
+#themebtn:focus-visible { outline: 2px solid var(--brand); }
+
+main { flex: 1; min-width: 0; padding: 48px clamp(24px, 6vw, 96px) 96px; }
+.content { max-width: 920px; }
+
+/* ===== Typography (identical to index.html) ===== */
+h1 { font-size: 34px; line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 8px; text-wrap: balance; }
+.lede { font-size: 17.5px; color: var(--muted); max-width: 68ch; margin: 0 0 12px; }
+h2 {
+  font-size: 23px; letter-spacing: -0.01em; margin: 64px 0 12px; padding-top: 20px;
+  border-top: 1px solid var(--border); text-wrap: balance;
+}
+section:first-of-type h2 { border-top: none; margin-top: 28px; padding-top: 0; }
+h3 { font-size: 16.5px; margin: 28px 0 8px; }
+p, li { max-width: 74ch; }
+p { margin: 10px 0; }
+a { color: var(--brand-deep); }
+.eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--brand); margin: 0 0 4px; }
+
+/* ===== Blocks (identical to index.html) ===== */
+pre {
+  position: relative; background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.55; margin: 12px 0;
+}
+code { font-size: 0.92em; }
+p code, li code, td code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
+pre code { background: none; border: none; padding: 0; }
+
+table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+th { text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+th, td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.tablewrap { overflow-x: auto; }
+tbody tr:hover { background: var(--code-bg); }
+td.num, .tabular { font-variant-numeric: tabular-nums; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 16px 0; }
+.card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px 18px; box-shadow: var(--shadow);
+}
+.card h4 { margin: 0 0 6px; font-size: 15px; }
+.card h4 span { color: var(--brand); }
+.card p { font-size: 13.5px; color: var(--muted); margin: 0; }
+
+.callout {
+  border: 1px solid var(--border); border-left: 3px solid var(--brand);
+  background: var(--panel); border-radius: 10px; padding: 12px 16px; margin: 14px 0; font-size: 14.5px;
+}
+.callout.warn { border-left-color: var(--amber); }
+.callout.bad { border-left-color: var(--red); }
+.callout b:first-child { color: var(--brand-deep); }
+.callout.warn b:first-child { color: var(--amber); }
+.callout.bad b:first-child { color: var(--red); }
+
+/* ===== Architecture diagram (pure HTML/CSS, identical primitives to index.html) ===== */
+.arch { display: flex; flex-direction: column; gap: 10px; margin: 18px 0; font-size: 13px; }
+.arch-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.arch-box {
+  flex: 1; min-width: 150px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 14px; box-shadow: var(--shadow);
+}
+.arch-box.brand { border-color: var(--brand); }
+.arch-box.amber { border-color: var(--amber); }
+.arch-box b { display: block; font-size: 13.5px; }
+.arch-box span { color: var(--muted); font-size: 12px; }
+.arch-flow { text-align: center; color: var(--brand); font-size: 15px; line-height: 1; }
+
+/* ===== Page-specific: side-by-side compare grid + verdict badges ===== */
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 16px 0; }
+@media (max-width: 700px) { .compare { grid-template-columns: 1fr; } }
+.compare > div {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px;
+}
+.compare h4 { margin: 0 0 10px; font-size: 14.5px; letter-spacing: 0.01em; }
+.compare h4.orleans { color: var(--brand-deep); }
+.compare h4.dapr { color: var(--amber); }
+.verdict { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.verdict.good { color: var(--brand-deep); }
+.verdict.caution { color: var(--amber); }
+.verdict.avoid { color: var(--red); }
+.stat-row { display: flex; justify-content: space-between; gap: 12px; font-size: 13.5px; padding: 5px 0; border-bottom: 1px solid var(--border); }
+.stat-row:last-child { border-bottom: none; }
+.stat-row .n { font-variant-numeric: tabular-nums; font-weight: 600; }
+.barwrap { background: var(--code-bg); border-radius: 6px; overflow: hidden; height: 10px; margin-top: 4px; }
+.bar { height: 100%; background: var(--brand); }
+.bar.dapr-bar { background: var(--amber); }
+
+mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0 2px; }
+
+@media (max-width: 760px) {
+  nav.side { display: none; }
+  main { padding: 28px 20px 64px; }
+}
+</style>
+</head>
+<body>
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('sf.theme'); /* shared with the StreamForge console + docs */
+    if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
+  } catch (e) { /* default: follow OS */ }
+})();
+</script>
+
+<div class="shell">
+<nav class="side" aria-label="Orleans vs Dapr comparison">
+  <div class="wordmark">
+    <div class="co">CORPORATE</div>
+    <div class="prod">Stream<b>Forge</b></div>
+    <div class="doc-tag">Runtime comparison</div>
+  </div>
+  <a class="back" href="index.html">&larr; User documentation</a>
+  <div class="navgap"></div>
+  <a href="#summary">Executive summary</a>
+  <a href="#architecture">Architecture side-by-side</a>
+  <a href="#latency">Measured latency</a>
+  <a href="#semantics">Delivery semantics</a>
+  <a href="#reuse">Reuse scorecard</a>
+  <a href="#polyglot">Polyglot processing</a>
+  <a href="#operations">Operational story</a>
+  <a href="#parity">Parity matrix</a>
+  <div class="side-foot">
+    <button id="themebtn" type="button">Toggle theme</button>
+  </div>
+</nav>
+
+<main><div class="content">
+
+<p class="eyebrow">Plan 005 · Dapr sibling runtime</p>
+<h1>Orleans vs Dapr</h1>
+<p class="lede">Same platform, two runtimes. StreamForge's SQL engine, contracts, application logic, REST/SignalR API, and console SPA (<a href="#reuse">~70% of the codebase</a>) are shared verbatim between an in-process Microsoft Orleans silo and a sidecar'd Dapr deployment — only the actor/grain runtime and the transport underneath differ. This page is the honest answer to "why Orleans and not Dapr, or vice versa": measured latency, delivery-semantics tradeoffs, and the decision matrix for which building blocks fit which constraints.</p>
+
+<section id="summary">
+<h2>Executive summary</h2>
+<p>Architecturally, Orleans should win on raw latency — in-process grain calls and in-memory streams put the whole pipeline inside one process with no serialization or network hop between stages — and Dapr should trade that latency for reach: any sidecar'd process in any language can publish into or subscribe out of the platform's pub/sub topics, with building blocks (actors, pub/sub, state store) that map directly onto k8s-native primitives an ops team already runs. <b>What this wave actually measured contradicts the latency half of that story</b>: the Orleans flavor's primary <code>tableDelta</code> SignalR relay turned out to be live-broken (zero samples — see <a href="#latency">Measured latency</a>), and a supplementary measurement that <i>did</i> work showed Dapr faster, not slower. Typed single-runtime performance and polyglot reach remain the two poles worth choosing between — but read the latency row below as "what we found," not "what the architecture diagrams predict." Neither runtime is "better" in the abstract — the table is the actual decision function.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>If your team is&hellip;</th><th>Orleans flavor</th><th>Dapr flavor</th></tr></thead>
+<tbody>
+<tr><td>.NET-only, one deploy unit</td><td><span class="verdict good">&#10003; natural fit</span> — no sidecar, no extra moving parts</td><td><span class="verdict caution">works, but pays sidecar overhead for nothing</span></td></tr>
+<tr><td>under a polyglot mandate (Java/Kotlin/Python/TS teams need to write processors)</td><td><span class="verdict avoid">closed door</span> — streams are a .NET-internal transport</td><td><span class="verdict good">&#10003; the point</span> — <code>sf-sources</code> ingress + <code>sf-source-{name}</code> egress, any language</td></tr>
+<tr><td>latency-critical (single-digit-ms tails matter)</td><td><span class="verdict caution">architecturally favored, NOT what was measured this wave</span> — primary metric hit a live relay bug (0 samples); supplementary metric measured 30&times; <i>slower</i> than Dapr — see <a href="#latency">Measured latency</a></td><td><span class="verdict good">&#10003; measured real, low (p50 2&ndash;7 ms)</span> on both signals actually collected this wave</td></tr>
+<tr><td>under a k8s-native ops mandate (sidecars, building blocks, no custom clustering)</td><td><span class="verdict caution">Orleans clustering is its own operational model</span></td><td><span class="verdict good">&#10003; natural fit</span> — actors/pub/sub/state store are k8s-shaped primitives</td></tr>
+<tr><td>needing partitioned scaling of one hot table (2&ndash;16 partitions, frontier-consistent reads)</td><td><span class="verdict good">&#10003; full support</span> — see plan 003</td><td><span class="verdict avoid">descoped by design</span> — rejected with a clear 409; sidecar hops invert the economics at this scale (decision D-F)</td></tr>
+<tr><td>needing typed gRPC streams to external consumers today</td><td><span class="verdict good">&#10003; full</span> — static + dynamic reflection, typed client codegen</td><td><span class="verdict caution">reserved, not yet serving</span> (:5499, phase 2) — REST/SignalR + pub/sub are the Dapr-flavor integration points meanwhile</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="architecture">
+<h2>Architecture side-by-side</h2>
+<p>Both flavors compile the identical streaming SQL via the identical <code>StreamForge.Engine</code>, seed the identical demo world (<code>SeedCatalog</code>), and serve the identical REST/SignalR contract (<code>shared/StreamForge.Api</code>) — see the <a href="#reuse">reuse scorecard</a>. What differs is everything below that surface: how an entity's state and timers are hosted, and how events move between entities.</p>
+<div class="compare">
+<div>
+<h4 class="orleans">Orleans — in-process grains + memory streams</h4>
+<div class="arch">
+  <div class="arch-row"><div class="arch-box brand"><b>GeneratorGrain</b><span>per-event grain timer</span></div></div>
+  <div class="arch-flow">&#9660; in-process stream push</div>
+  <div class="arch-row">
+    <div class="arch-box brand"><b>PipelineGrain</b><span>subscribes stream directly</span></div>
+    <div class="arch-box brand"><b>TableGrain</b><span>subscribes stream directly</span></div>
+  </div>
+  <div class="arch-flow">&#9660; in-process stream push (table-delta)</div>
+  <div class="arch-row"><div class="arch-box"><b>StreamBridgeService</b><span>same process &rarr; SignalR</span></div></div>
+  <div class="arch-row"><div class="arch-box brand"><b>One process</b><span>silo + web server, one machine hop total: process &rarr; browser</span></div></div>
+</div>
+</div>
+<div>
+<h4 class="dapr">Dapr — sidecar'd actors + Redis pub/sub</h4>
+<div class="arch">
+  <div class="arch-row"><div class="arch-box amber"><b>GeneratorActor</b><span>batched timer (200ms tick)</span></div></div>
+  <div class="arch-flow">&#9660; sidecar publish (HTTP/gRPC)</div>
+  <div class="arch-row"><div class="arch-box"><b>Redis pub/sub</b><span><code>sf-sources</code> topic</span></div></div>
+  <div class="arch-flow">&#9660; sidecar deliver &rarr; host subscription endpoint</div>
+  <div class="arch-row">
+    <div class="arch-box amber"><b>PipelineActor</b><span>via PipelineEventRouter</span></div>
+    <div class="arch-box amber"><b>TableActor</b><span>via TableEventRouter</span></div>
+  </div>
+  <div class="arch-flow">&#9660; sidecar publish &rarr; Redis &rarr; sidecar deliver (table-delta)</div>
+  <div class="arch-row"><div class="arch-box"><b>DaprStreamBridge</b><span>subscription endpoint &rarr; SignalR</span></div></div>
+  <div class="arch-row"><div class="arch-box amber"><b>App + sidecar, two processes</b><span>every hop crosses a sidecar; polyglot processes attach at the Redis pub/sub layer</span></div></div>
+</div>
+</div>
+</div>
+<p>Structurally, Orleans' path is <i>function calls inside one process</i>; Dapr's path is <i>app &rarr; sidecar &rarr; Redis &rarr; sidecar &rarr; app</i>, repeated at every stage boundary (decision D-D: fixed envelope topics, since per-entity topics can't be subscribed without a restart). That structural difference is the intuitive explanation for why Dapr should be slower — see <a href="#latency">Measured latency</a> for what this wave actually found, which does not confirm that intuition.</p>
+</section>
+
+<section id="latency">
+<h2>Measured latency</h2>
+<p><b>Methodology.</b> Same seeded table (<code>order_states</code> — <code>SELECT order_id, symbol, side, stage, stage_rank, stage_ts, qty, filled_qty, px FROM order_events LATEST BY (order_id)</code>), same machine, same clock (no skew to correct for), one runtime at a time (never concurrently, so both get the full machine's CPU). A bun script (<code>tools/bench/latency.ts</code>) subscribes the SignalR <code>tableDelta</code> event over <code>/hubs/stream</code> and, for every <b>ASSERT</b> row (Z-set weight <code>+1</code> — the RETRACT half of each LATEST BY update is skipped, or every measurement would be doubled), computes <code>latency_ms = client wall clock at delta arrival &minus; row.stage_ts</code>. <code>stage_ts</code> is confirmed as the source event's own generation timestamp by reading the generator profile: <code>shared/StreamForge.AppCore/Generators/MarketDataProfiles.cs</code> sets <code>evt["stage_ts"] = evt[EventRecord.TimestampField]</code> — i.e. it's copied verbatim from <code>_ts</code>, itself stamped with <code>DateTimeOffset.UtcNow</code> at the exact moment the synthetic event is generated. The number is therefore genuinely end-to-end: generation &rarr; ingress &rarr; the table's <code>LATEST BY</code> operator &rarr; delta publish &rarr; SignalR relay &rarr; this script's handler. First 10 seconds of each run are discarded as warmup, and any row whose <code>stage_ts</code> predates the run's own start is discarded (a backlog/rebuild artifact, not steady-state latency). Each run collects &ge;500 samples or runs 90 seconds, whichever comes first. Orchestrated end-to-end by <code>tools/bench/run-bench.sh</code>: fresh isolated Orleans instance (temp <code>--DataDir</code>, ports 6199/6299) &rarr; run &rarr; full teardown &rarr; <code>dapr/tools/reset.sh</code> + <code>dapr/tools/run.sh</code> (5399/3599/4599) &rarr; run &rarr; full teardown.</p>
+
+<div class="callout bad">
+<b>The primary measurement hit a live bug — reported here, not fixed (out of this wave's scope).</b> Running this benchmark against a freshly booted Orleans instance found that its SignalR <code>tableDelta</code> relay (and, observed the same session, <code>pipelineResult</code>) never delivers to a subscribed client: <b>zero</b> events over repeated 15&ndash;90s windows across three different seeded tables (<code>order_states</code>, <code>positions</code>, <code>leg_exposure</code>), while the same tables' REST <code>/api/tables/{id}/metrics</code> shows <code>deltasIn</code>/<code>deltasOut</code> growing continuously the whole time, and a real browser against the same instance shows rows never updating live. <code>sourceEvent</code> and <code>pipelineMetrics</code> (both single-object SignalR arguments, vs. <code>tableDelta</code>/<code>pipelineResult</code>'s <code>List&lt;T&gt;</code>-of-DTO arguments) work correctly in the same session — see <code>dapr/ARCHITECTURE.md</code>'s "Known live bug" section for the full repro. Net effect: the table below shows <b>real Dapr numbers and zero Orleans samples</b> for the primary metric — not a benchmark artifact, the live system's actual current behavior.</div>
+
+<div class="tablewrap"><table>
+<thead><tr><th>Runtime</th><th>Signal</th><th>Samples</th><th>p50</th><th>p90</th><th>p99</th><th>max</th><th>mean</th></tr></thead>
+<tbody>
+<tr><td>Orleans</td><td><code>tableDelta</code> (primary, <code>order_states</code>)</td><td class="num tabular">0 / 500</td><td colspan="4" style="color:var(--red)">no samples delivered — see bug above</td><td class="num tabular">&mdash;</td></tr>
+<tr><td>Dapr</td><td><code>tableDelta</code> (primary, <code>order_states</code>)</td><td class="num tabular">397 (446 asserts seen)</td><td class="num tabular">7 ms</td><td class="num tabular">9 ms</td><td class="num tabular">14 ms</td><td class="num tabular">22 ms</td><td class="num tabular">6.8 ms</td></tr>
+</tbody></table></div>
+
+<p>Because the primary metric returned no usable Orleans number, a <b>supplementary</b> measurement was added: <code>--signal sourceEvent</code> on the raw <code>order_events</code> source (<code>latency_ms = client wall clock at sourceEvent arrival &minus; evt._ts</code>) — the generator-tick&rarr;SignalR-relay hop only, <i>not</i> the full table-processing pipeline, but real and unaffected by the bug above, so it gives an honest, comparable number on both runtimes:</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>Runtime</th><th>Signal</th><th>Samples</th><th>p50</th><th>p90</th><th>p99</th><th>max</th><th>mean</th></tr></thead>
+<tbody>
+<tr><td>Orleans</td><td><code>sourceEvent</code> (supplementary, <code>order_events</code>)</td><td class="num tabular">395 (444 asserts seen)</td><td class="num tabular">60 ms</td><td class="num tabular">97 ms</td><td class="num tabular">111 ms</td><td class="num tabular">115 ms</td><td class="num tabular">55.8 ms</td></tr>
+<tr><td>Dapr</td><td><code>sourceEvent</code> (supplementary, <code>order_events</code>)</td><td class="num tabular">396 (444 asserts seen)</td><td class="num tabular">2 ms</td><td class="num tabular">3 ms</td><td class="num tabular">7 ms</td><td class="num tabular">13 ms</td><td class="num tabular">1.9 ms</td></tr>
+</tbody></table></div>
+
+<div class="callout warn">
+<b>The honest surprise: Dapr measured FASTER on both signals actually collected, contradicting this plan's own a-priori assumption.</b> The plan going in expected Orleans to win on latency by a wide margin (in-process grain calls, no sidecar hops) and Dapr to lose 10&ndash;40&times; to batching cadence and sidecar round-trips. That is not what was measured. Dapr's real <code>tableDelta</code> path — generator batch tick &rarr; publish &rarr; Redis &rarr; deliver &rarr; <code>TableActor</code> (itself a sidecar round-trip even for the actor invocation, per <code>ActorProxyOptions.UseJsonSerialization</code>) &rarr; publish &rarr; Redis &rarr; deliver &rarr; SignalR — came in at a real p50 of 7&nbsp;ms on localhost; Dapr's <code>sourceEvent</code> path (generator batch tick &rarr; publish &rarr; Redis &rarr; deliver &rarr; SignalR, one fewer hop) at p50 2&nbsp;ms. Orleans' <code>sourceEvent</code> path — supposedly the simplest possible hop, a grain timer pushing straight into an in-process stream a hosted service already holds a subscription on — measured p50 <b>60&nbsp;ms</b>, roughly 30&times; slower than Dapr's equivalent hop. This wave did not root-cause that gap (out of scope — report, don't fix), but two honest observations: (1) <code>stage_ts</code>/<code>_ts</code> is stamped at the moment the generator code actually runs, so batching-induced "held event" time is invisible to this metric on the Dapr side by construction — it isn't that Dapr's batching cost nothing, it's that this metric can't see it, since the timestamp itself is stamped after any batching delay already happened; (2) the Orleans number may reflect grain-timer scheduling granularity and/or turn-based dispatch contention on this specific single-silo local topology rather than an inherent property of in-process actor systems — a plausible starting point for whoever investigates the <code>tableDelta</code> bug next, since both symptoms live in the same <code>StreamBridgeService</code>/grain-timer machinery. <b>The honest conclusion this wave can support: real numbers, on this benchmark, on this machine, showed Dapr at least as fast as Orleans and the Orleans path measurably slower where it could be measured at all</b> — which is the opposite of this plan's working assumption, and exactly why "run it for real" beats "assume the architecture diagram tells you the answer."</div>
+</section>
+
+<section id="semantics">
+<h2>Delivery semantics</h2>
+<div class="compare">
+<div>
+<h4 class="orleans">Orleans memory streams</h4>
+<p style="font-size:13.5px;margin:0 0 8px">In-process, single-silo delivery — effectively exactly-once <i>within a silo lifetime</i>: a stream push is a direct in-memory handoff to the subscribing grain, no broker, no redelivery mechanism to misfire. The tradeoff is the flip side of the same coin: it's a .NET-internal transport (the closed door the Dapr flavor's polyglot pub/sub opens) and doesn't survive a full silo restart mid-stream (no durable log to replay from — grain state persistence is separate from stream delivery).</p>
+</div>
+<div>
+<h4 class="dapr">Dapr pub/sub, at-least-once</h4>
+<p style="font-size:13.5px;margin:0 0 8px">Redis pub/sub is at-least-once by nature — a message can be redelivered (network blip, subscriber restart mid-processing, sidecar retry). This is the transport's honest nature, not papered over here: <code>dapr/POLYGLOT.md</code> documents that every ingress endpoint always returns <code>200 OK</code> even on a malformed payload specifically because a non-2xx response is Dapr's redelivery trigger — an unconditional 200 avoids a poison message looping forever, but it also means the app itself, not the transport, is the only thing standing between "delivered twice" and "processed twice."</p>
+</div>
+</div>
+<div class="callout bad">
+<b>The idempotency gap — thought through honestly, not glossed over.</b> A redelivered <code>sf-table-delta</code> envelope would double-apply its Z-set deltas: a retract(&minus;1)/assert(+1) pair replayed a second time doesn't cancel out (Z-set weights aren't idempotent against replay — they're only correct under <i>exactly-once</i> application of each delta). Concretely: a duplicate delivery of a <code>positions</code> delta would apply the same quantity retraction/assertion twice, corrupting the running aggregate. <b>Today this is mitigated only by Redis pub/sub's happy-path behavior</b> (in practice, redelivery is rare absent an actual failure/restart mid-delivery) — there is no explicit dedup/idempotency key on any envelope in this plan. This is flagged here as a real production consideration for anyone taking the Dapr flavor further, not a solved problem: a production hardening pass would need per-envelope sequence-based dedup (the envelopes already carry monotonic <code>seq</code> fields that a consumer-side "last applied seq" check could use) before this flavor should sit in front of anything that can't tolerate an occasional double-applied delta.</div>
+</section>
+
+<section id="reuse">
+<h2>Reuse scorecard</h2>
+<p>Counted with a plain line-count pass (<code>find … | xargs cat | wc -l</code>) over each project's non-generated <code>.cs</code>/<code>.ts</code>/<code>.tsx</code> source, excluding <code>obj/</code>/<code>bin/</code>. This is a rough proxy for "how much of the platform is one codebase, not two" — not a precision metric, but the shape is unambiguous.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Component</th><th>Lines</th><th>Shared?</th><th>Role</th></tr></thead>
+<tbody>
+<tr><td><code>shared/StreamForge.Engine</code></td><td class="num tabular">~7,750</td><td><span class="verdict good">&#10003; shared</span></td><td>SQL compiler, both executors, Z-set ops, dataflow primitives</td></tr>
+<tr><td><code>shared/StreamForge.Contracts</code></td><td class="num tabular">~620</td><td><span class="verdict good">&#10003; shared</span></td><td>DTOs + facade interfaces + pub/sub envelopes</td></tr>
+<tr><td><code>shared/StreamForge.AppCore</code></td><td class="num tabular">~2,740</td><td><span class="verdict good">&#10003; shared</span></td><td>Dynamic protobuf, search index, generator profiles, history retention, seed catalog</td></tr>
+<tr><td><code>shared/StreamForge.Api</code></td><td class="num tabular">~1,120</td><td><span class="verdict good">&#10003; shared</span></td><td>REST endpoints, SignalR hub, JWT, CORS/OpenAPI wiring</td></tr>
+<tr><td><code>web/</code> (console SPA)</td><td class="num tabular">~10,920</td><td><span class="verdict good">&#10003; shared</span></td><td>React 19 console — same <code>web/dist</code> served by both hosts</td></tr>
+<tr><td><code>orleans/src/StreamForge.Abstractions</code></td><td class="num tabular">~240</td><td><span class="verdict avoid">Orleans-only</span></td><td>Grain interfaces (inherit the shared facades)</td></tr>
+<tr><td><code>orleans/src/StreamForge.Host</code></td><td class="num tabular">~4,890</td><td><span class="verdict avoid">Orleans-only</span></td><td>Grains, Orleans facade adapters, <code>Program.cs</code></td></tr>
+<tr><td><code>dapr/src/StreamForge.Dapr.Host</code></td><td class="num tabular">~5,190</td><td><span class="verdict caution">Dapr-only</span></td><td>Actors, routers, supervisors, Dapr facade adapters, <code>Program.cs</code></td></tr>
+</tbody></table></div>
+<div class="stat-row"><span>Shared server-side code (Engine+Contracts+AppCore+Api) vs. total server-side (shared + both runtime-specific projects)</span><span class="n">~12,230 / ~22,550 &asymp; 54%</span></div>
+<div class="barwrap"><div class="bar" style="width:54%"></div></div>
+<div class="stat-row" style="margin-top:10px"><span>Shared code including the SPA vs. everything (server + SPA)</span><span class="n">~23,150 / ~33,470 &asymp; 69%</span></div>
+<div class="barwrap"><div class="bar" style="width:69%"></div></div>
+<p style="margin-top:14px">Runtime-specific code is close to parity in size (Orleans ~5,130 total incl. Abstractions vs. Dapr ~5,190) — the Dapr flavor isn't a thin shim over the Orleans one, it's a genuinely separate actor/routing/supervisor implementation of the same contract, which is exactly what "same platform, two runtimes" is supposed to cost.</p>
+</section>
+
+<section id="polyglot">
+<h2>Polyglot processing</h2>
+<p>The Orleans flavor's only door for a non-.NET participant is the typed-gRPC client path — consume-only, and the client itself is .NET-toolchain-generated even though the wire format (proto3) is language-neutral. The Dapr flavor's pub/sub topics are the actual door: <code>sf-sources</code> is a plain HTTP/gRPC publish to the sidecar, JSON body, no .NET-specific serialization anywhere on the wire (<code>dapr/POLYGLOT.md</code> is the frozen contract). Three working processors prove this isn't theoretical:</p>
+<div class="cards">
+<div class="card"><h4><span>Python</span> — enricher</h4><p><code>dapr/processors/python-enricher</code> (~240 lines): subscribes <code>sf-source-trades</code> via its own sidecar, derives an enriched view, registers and publishes a brand-new source back into <code>sf-sources</code> — the derived source shows up in the console exactly like any seeded one.</p></div>
+<div class="card"><h4><span>TypeScript</span> — bun consumer</h4><p><code>dapr/processors/ts-consumer</code> (~180 lines): subscribes <code>sf-table-delta</code>/<code>sf-pipeline-out</code> directly — no .NET runtime anywhere in this process.</p></div>
+<div class="card"><h4><span>Java</span> — consumer</h4><p><code>dapr/processors/java-consumer</code> (~260 lines): buildable sample (gradle/maven), proving the contract is genuinely runtime-agnostic, not "Dapr .NET SDK plus a Python special case."</p></div>
+</div>
+<p>What this unlocks in a client conversation: a Java/Kotlin risk-analytics team, a Python data-science team, and a TypeScript tooling team can each attach a processor to the same running platform without touching the .NET codebase or waiting on a .NET release — they read/write plain JSON over a documented topic contract with frozen envelope shapes (additive evolution only, exactly like every other DTO in this project).</p>
+</section>
+
+<section id="operations">
+<h2>Operational story</h2>
+<div class="compare">
+<div>
+<h4 class="orleans">Orleans</h4>
+<ul style="font-size:13.5px;padding-left:18px;margin:0">
+<li><b>Clustering &amp; placement:</b> Orleans' own membership/placement provider — a well-understood but Orleans-specific operational model (this demo runs localhost clustering; production multi-silo would swap clustering/stream/storage providers, per the docs' Limitations section).</li>
+<li><b>Local dev footprint:</b> <code>dotnet run</code>. One process, nothing else to install or start.</li>
+<li><b>State:</b> one JSON file per grain under <code>data/</code> — human-readable, <code>rm -rf data/</code> to reseed.</li>
+</ul>
+</div>
+<div>
+<h4 class="dapr">Dapr</h4>
+<ul style="font-size:13.5px;padding-left:18px;margin:0">
+<li><b>Sidecar + placement + scheduler:</b> every instance runs with a Dapr sidecar; actor placement and reminders/timers are separate k8s-shaped services (<code>dapr_placement</code>, <code>dapr_scheduler</code> containers in local dev) — building blocks an ops team running Kubernetes already has patterns for.</li>
+<li><b>Local dev footprint:</b> <code>dapr init</code> (Redis + placement + scheduler containers) once, then <code>dapr/tools/run.sh</code> — heavier first-time setup, same one-command inner loop after.</li>
+<li><b>State:</b> Redis (<code>state.redis</code>, <code>actorStateStore: true</code>, <code>keyPrefix: appid</code> scoping) — <code>dapr/tools/reset.sh</code> SCANs and deletes this app's keys to reseed, the Dapr-flavor equivalent of deleting the Orleans <code>data/</code> directory.</li>
+</ul>
+</div>
+</div>
+<p>Ports, for anyone reproducing this: Orleans owns <code>5199</code> (REST/SignalR/SPA) + <code>5299</code> (gRPC); Dapr owns app <code>5399</code>, gRPC reserved <code>5499</code> (not yet serving), sidecar HTTP <code>3599</code> / gRPC <code>4599</code>. The two flavors never share a port and can run side by side on one machine, which is exactly how this page's benchmark was produced (sequentially, not concurrently, for CPU fairness).</p>
+</section>
+
+<section id="parity">
+<h2>Parity matrix (final, plan 005)</h2>
+<div class="tablewrap"><table>
+<thead><tr><th>Capability</th><th>Orleans</th><th>Dapr v1</th></tr></thead>
+<tbody>
+<tr><td>REST CRUD + validate + rows/search/metrics + proto download</td><td>full</td><td><b>full (same shared endpoints)</b></td></tr>
+<tr><td>JWT auth + RBAC + user admin</td><td>full</td><td>full (shared)</td></tr>
+<tr><td>SignalR live events (all 6)</td><td>full</td><td>full (DaprStreamBridge)</td></tr>
+<tr><td>Console SPA (same <code>web/dist</code>)</td><td>:5199</td><td>:5399</td></tr>
+<tr><td>Generators (6 profiles)</td><td>full</td><td>full (shared profiles; batched ticks)</td></tr>
+<tr><td>Pipelines (windowed SQL, EMIT, nested queries)</td><td>full</td><td>full (shared Engine)</td></tr>
+<tr><td>Tables classic P=1 (Z-sets, search, snapshots)</td><td>full</td><td>full</td></tr>
+<tr><td>Row history</td><td>full</td><td><b>full</b></td></tr>
+<tr><td>Parallelism 2&ndash;16 / frontiers / arrangements</td><td>full</td><td><b>descoped</b> — rejected with clear error; <code>frontierEpoch</code> null; <code>/api/meta/arrangements</code> <code>[]</code></td></tr>
+<tr><td>gRPC static + dynamic reflection + typed streams</td><td>full (:5299)</td><td><b>phase 2</b> (:5499 reserved; <code>/api/meta/grpc</code> shape kept, empty service list)</td></tr>
+<tr><td><code>/docs</code></td><td>full</td><td>descoped (links to this Orleans-served page; see below)</td></tr>
+<tr><td>Persistence / reseed</td><td>JSON files / delete <code>data/</code></td><td>Redis / <code>reset.sh</code></td></tr>
+<tr><td>Polyglot pub/sub participation</td><td>&mdash;</td><td><b>the point</b>: <code>sf-sources</code> ingress + <code>sf-source-{name}</code> egress</td></tr>
+</tbody></table></div>
+<p style="font-size:13px;color:var(--muted)">"Row history" moved from a W7 stub to <b>full</b> in this final pass — <code>TableHistoryActor</code> mirrors <code>TableHistoryGrain</code>'s retention math field-for-field (see <code>dapr/ARCHITECTURE.md</code>'s "Row history (W7-B)" section). This comparison page itself is served only as a static file today — see the callout below.</p>
+<div class="callout">
+<b>On this page's own serving.</b> <code>/docs</code> maps exactly one file (<code>docs/index.html</code>) via <code>StreamForgeApiOptions.DocsFilePath</code> — there is no directory-serving behind that route, so this file is <b>not</b> reachable at <code>/docs/comparison.html</code> or any other host-served URL today. It's linked from the docs sidebar as a same-directory relative link (<code>comparison.html</code>) and works when opened directly from the repo (a local file open, or any static file server pointed at <code>orleans/docs/</code>) — wiring an actual route is a one-line addition to <code>shared/StreamForge.Api</code> that this plan deliberately leaves to a future change, per this wave's src-untouched scope.</div>
+</section>
+
+</div></main>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var btn = document.getElementById('themebtn');
+  function current() {
+    var explicit = document.documentElement.dataset.theme;
+    if (explicit) return explicit;
+    return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  btn.addEventListener('click', function () {
+    var next = current() === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('sf.theme', next); } catch (e) { /* ignore */ }
+  });
+
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav.side a[href^="#"]'));
+  var byId = {};
+  links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+  var observed = document.querySelectorAll('section[id]');
+  var active = null;
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (!e.isIntersecting) return;
+      var link = byId[e.target.id];
+      if (!link) return;
+      if (active) active.classList.remove('active');
+      link.classList.add('active'); active = link;
+    });
+  }, { rootMargin: '-10% 0px -70% 0px' });
+  observed.forEach(function (el) { io.observe(el); });
+})();
+</script>
+</body>
+</html>
