@@ -38,9 +38,9 @@ public sealed class TestLifecycleOrchestrator : ILifecycleOrchestrator
         return Task.CompletedTask;
     }
 
-    public Task<LifecycleOutcome> StartTableAsync(TableDefinition def)
+    public Task<LifecycleOutcome> StartTableAsync(TableDefinition def, IReadOnlyList<SourceDefinition> sources, IReadOnlyList<TableDefinition> tables)
     {
-        Calls.Add($"StartTable:{def.Name}");
+        Calls.Add($"StartTable:{def.Name}:{sources.Count}:{tables.Count}");
         return Task.FromResult(FailStarts ? LifecycleOutcome.Failure(FailureMessage) : LifecycleOutcome.Success);
     }
 

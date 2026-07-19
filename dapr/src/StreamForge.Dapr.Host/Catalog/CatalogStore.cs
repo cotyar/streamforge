@@ -35,15 +35,17 @@ namespace StreamForge.Dapr.Host.Catalog;
 public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orchestrator)
 {
     /// <summary>Seeds defaults on first run (shared <see cref="SeedCatalog"/> — same demo world as the
-    /// Orleans flavor). Plan 005 W4 "seed status" decision (see dapr/ARCHITECTURE.md), UPDATED by W6 for
-    /// pipelines: tables are still forced to <see cref="PipelineStatus.Stopped"/> here regardless of what
-    /// <see cref="SeedCatalog"/> marks them as, because no table runtime exists yet (W7) — a seeded
-    /// "Running" badge with zero rows ever arriving would be a lie the UI tells the user. Pipelines are NO
-    /// LONGER force-stopped: <see cref="Actors.PipelineActor"/> now exists, and
-    /// <see cref="Services.PipelineSupervisorService"/>'s boot sweep resumes every seeded Running pipeline
-    /// for real, exactly mirroring Orleans' own <c>RegistryGrain.EnsureInitializedAsync</c> resume-on-boot
-    /// behavior (see that method) — a seeded Running pipeline is now honestly Running, same as sources
-    /// have been since W5-A. Returns true if anything was seeded (caller persists only then).</summary>
+    /// Orleans flavor). Plan 005 W4 "seed status" decision (see dapr/ARCHITECTURE.md), updated by W6 for
+    /// pipelines and by W7-A for tables: neither is force-stopped anymore. <see cref="Actors.TableActor"/>
+    /// now exists, and <see cref="Services.TableSupervisorService"/>'s boot sweep resumes every seeded
+    /// Running table for real (compiling its SQL, arming its flush timer, registering
+    /// <see cref="Streaming.TableEventRouter"/>) exactly mirroring Orleans' own
+    /// <c>RegistryGrain.EnsureInitializedAsync</c> resume-on-boot behavior — a seeded Running table is now
+    /// honestly Running, same as sources (W5-A) and pipelines (W6) already are. The one remaining
+    /// defensive override, below, is a compile FAILURE forcing <see cref="PipelineStatus.Stopped"/>
+    /// regardless of what <see cref="SeedCatalog"/> requested — a table that doesn't compile can never
+    /// validly be Running on either flavor. Returns true if anything was seeded (caller persists only
+    /// then).</summary>
     public bool EnsureInitialized()
     {
         var dirty = false;
@@ -78,12 +80,12 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
                 else
                 {
                     t.Error = string.Join("; ", result.Diagnostics.Select(d => $"{d.Line}:{d.Column} {d.Message}"));
+                    // A table that failed to compile can never validly be Running — force Stopped
+                    // regardless of what SeedCatalog requested (see this method's doc comment; mirrors the
+                    // same rule CreateTableAsync/UpdateTableAsync apply: Status is never set Running off a
+                    // failed compile).
+                    t.Status = PipelineStatus.Stopped;
                 }
-
-                // Dapr flavor: always Stopped on seed (see this method's doc comment) — Orleans seeds a
-                // few of these Running (resumed by EnsureInitializedAsync's boot loop); here there is no
-                // boot loop because there is no runtime to resume onto yet.
-                t.Status = PipelineStatus.Stopped;
             }
             state.Tables.AddRange(seeds);
             dirty = true;
@@ -324,7 +326,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         if ((sqlChanged || searchChanged || parallelismChanged) && wasRunning)
         {
             await orchestrator.StopTableAsync(existing.Name);
-            var outcome = await orchestrator.StartTableAsync(existing);
+            var outcome = await orchestrator.StartTableAsync(existing, state.Sources, state.Tables);
             if (outcome.Ok)
             {
                 existing.Status = PipelineStatus.Running;
@@ -391,7 +393,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
                 return existing;
             }
 
-            var outcome = await orchestrator.StartTableAsync(existing);
+            var outcome = await orchestrator.StartTableAsync(existing, state.Sources, state.Tables);
             if (outcome.Ok)
             {
                 existing.Status = PipelineStatus.Running;

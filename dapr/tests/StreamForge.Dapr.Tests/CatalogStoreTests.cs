@@ -34,18 +34,22 @@ public class CatalogStoreTests
     }
 
     [Fact]
-    public void EnsureInitialized_ForcesAllSeededTablesToStopped()
+    public void EnsureInitialized_KeepsSeededTableStatusesAsSeedCatalogDeclaresThem()
     {
-        // Plan 005 W4 "seed status" decision (STILL true for tables — W7 hasn't landed): SeedCatalog
-        // marks several tables Running (the Orleans flavor resumes them for real on boot) — on Dapr
-        // there is no table runtime yet, so a seeded "Running" badge with zero rows ever arriving would
-        // be dishonest. CatalogStore must override every seeded table status to Stopped regardless of
-        // what SeedCatalog says.
+        // Plan 005 W7-A UPDATE to the W4 "seed status" decision (same update W6 already made for
+        // pipelines — see EnsureInitialized_KeepsSeededPipelineStatusesAsSeedCatalogDeclaresThem):
+        // TableActor now exists, and TableSupervisorService's boot sweep resumes every seeded Running
+        // table for real — a seeded "Running" table is no longer force-stopped. SeedCatalog.Tables()
+        // seeds a mix of Running ("positions", "leg_exposure", "order_states") and Stopped
+        // ("gold_tier_orders", "hot_symbols" — the latter deliberately, so starting a table-over-table
+        // chain is a user action, not an implicit boot race) — both statuses must survive
+        // EnsureInitialized untouched.
         var (state, store, _) = NewStore();
 
         store.EnsureInitialized();
 
-        Assert.All(state.Tables, t => Assert.Equal(PipelineStatus.Stopped, t.Status));
+        Assert.Contains(state.Tables, t => t.Status == PipelineStatus.Running);
+        Assert.Contains(state.Tables, t => t.Status == PipelineStatus.Stopped);
     }
 
     [Fact]

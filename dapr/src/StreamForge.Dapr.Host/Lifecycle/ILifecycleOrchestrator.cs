@@ -65,8 +65,19 @@ public interface ILifecycleOrchestrator
 
     Task StopPipelineAsync(string pipelineId);
 
-    /// <summary>Start (or restart) a table. Mirrors TableGrain.StartAsync's outcome contract.</summary>
-    Task<LifecycleOutcome> StartTableAsync(TableDefinition def);
+    /// <summary>Start (or restart) a table. Mirrors TableGrain.StartAsync's outcome contract.
+    ///
+    /// <para><b>Plan 005 W7-A signature change from W4</b> (was <c>StartTableAsync(TableDefinition def)</c>):
+    /// the real Dapr implementation (<c>DaprLifecycleOrchestrator</c>) needs every known source's AND
+    /// table's schema to compile the table's SQL (same schema-building <c>TableGrain.StartClassicAsync</c>
+    /// does via <c>IRegistryGrain.GetSourcesAsync()</c>/<c>GetTablesAsync()</c>) — fetching that INSIDE this
+    /// call via <c>ICatalogFacade.GetSourcesAsync</c>/<c>GetTablesAsync</c> would be a self-call while
+    /// <c>RegistryActor</c>'s own turn (the one that invoked this orchestrator method from inside
+    /// <c>CatalogStore</c>) is still in-flight: the exact reentrancy deadlock this plan's reentrancy
+    /// decision exists to prevent (same rationale as <see cref="StartPipelineAsync"/>'s earlier W6
+    /// signature change). <c>CatalogStore</c> already holds <c>state.Sources</c>/<c>state.Tables</c> in
+    /// full at every call site, so passing them through needs no such call.</para></summary>
+    Task<LifecycleOutcome> StartTableAsync(TableDefinition def, IReadOnlyList<SourceDefinition> sources, IReadOnlyList<TableDefinition> tables);
 
     Task StopTableAsync(string tableName);
 

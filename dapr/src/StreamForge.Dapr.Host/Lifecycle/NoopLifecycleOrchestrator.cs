@@ -39,7 +39,7 @@ public sealed class NoopLifecycleOrchestrator(ILogger<NoopLifecycleOrchestrator>
         return Task.CompletedTask;
     }
 
-    public Task<LifecycleOutcome> StartTableAsync(TableDefinition def)
+    public Task<LifecycleOutcome> StartTableAsync(TableDefinition def, IReadOnlyList<SourceDefinition> sources, IReadOnlyList<TableDefinition> tables)
     {
         WarnNoRuntime("StartTable", def.Name);
         return Task.FromResult(LifecycleOutcome.Success);

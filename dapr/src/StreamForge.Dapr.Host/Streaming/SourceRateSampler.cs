@@ -22,6 +22,20 @@ namespace StreamForge.Dapr.Host.Streaming;
 /// batch would either (a) send/drop the entire batch together, which is a materially different
 /// admission curve than per-event sampling once ticks batch more than one event, or (b) require an
 /// arbitrary "one representative event per batch" rule with no Orleans equivalent to justify it.</para>
+///
+/// <para><b>Thread safety (found live, W7-A):</b> <see cref="DaprStreamBridge"/> is a DI singleton, so a
+/// single <see cref="SourceRateSampler"/> instance is shared across every concurrent <c>sf-sources</c>
+/// pub/sub HTTP callback the Dapr sidecar delivers — and with W7-A's <c>TableActor</c>/<c>TableEventRouter</c>
+/// landing alongside W6's pipeline routing, enough sources tick concurrently that overlapping requests are
+/// no longer rare in practice. Plain <see cref="Dictionary{TKey, TValue}"/> is not thread-safe: concurrent
+/// <see cref="ShouldRelay"/> calls racing on the same key corrupted the dictionary's internal bucket array
+/// under load, observed live as an intermittent <c>IndexOutOfRangeException</c> inside
+/// <c>Dictionary.set_Item</c> that took the whole <c>sf-sources</c> dispatch down for that request (see
+/// <c>StreamingRuntimeSetup.DispatchSourceEventsAsync</c>'s un-guarded <c>foreach</c> — one sink throwing
+/// stops every LATER-registered sink, including <c>PipelineEventRouter</c>/<c>TableEventRouter</c>, from
+/// ever seeing that batch). Fixed with a single lock around the read-then-write below — contention is
+/// negligible (the critical section is a dictionary lookup/assignment, not I/O) and correctness matters far
+/// more than lock-free cleverness here.</para>
 /// </summary>
 public sealed class SourceRateSampler(Func<DateTime>? clock = null)
 {
@@ -30,6 +44,7 @@ public sealed class SourceRateSampler(Func<DateTime>? clock = null)
 
     private readonly Func<DateTime> _now = clock ?? (() => DateTime.UtcNow);
     private readonly Dictionary<string, DateTime> _lastRelayed = new();
+    private readonly object _gate = new();
 
     /// <summary>Returns true if a send for <paramref name="key"/> should happen now — and, only in that
     /// case, records this instant as the new "last relayed" timestamp for <paramref name="key"/>.
@@ -38,12 +53,15 @@ public sealed class SourceRateSampler(Func<DateTime>? clock = null)
     public bool ShouldRelay(string key)
     {
         var now = _now();
-        if (_lastRelayed.TryGetValue(key, out var last) && (now - last).TotalMilliseconds < MinIntervalMs)
+        lock (_gate)
         {
-            return false;
-        }
+            if (_lastRelayed.TryGetValue(key, out var last) && (now - last).TotalMilliseconds < MinIntervalMs)
+            {
+                return false;
+            }
 
-        _lastRelayed[key] = now;
-        return true;
+            _lastRelayed[key] = now;
+            return true;
+        }
     }
 }

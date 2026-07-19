@@ -1,65 +1,43 @@
 using Dapr.Client;
 using Microsoft.Extensions.Logging.Abstractions;
-using StreamForge.Abstractions;
 using StreamForge.Dapr.Host.Lifecycle;
 using Xunit;
 
 namespace StreamForge.Dapr.Tests;
 
 /// <summary>
-/// Plan 005 (Dapr sibling runtime) W5-A/W6: unit tests for the parts of
-/// <see cref="DaprLifecycleOrchestrator"/> that are "orchestrator routing decisions ... factorable
-/// without a live sidecar" — the table/history methods, which this wave still keeps as W4's warn+no-op
-/// behavior verbatim (W7 replaces them) and whose <see cref="LifecycleOutcome"/> contract must not
-/// regress.
-///
-/// <para>Deliberately NOT covered here: <see cref="DaprLifecycleOrchestrator.NotifySourceChangedAsync"/>,
-/// <see cref="DaprLifecycleOrchestrator.NotifySourceRemovedAsync"/>,
-/// <see cref="DaprLifecycleOrchestrator.PublishLifecycleAsync"/>, and — as of W6 —
+/// Plan 005 (Dapr sibling runtime) W5-A/W6/W7: as of W7, every <see cref="DaprLifecycleOrchestrator"/>
+/// method (<see cref="DaprLifecycleOrchestrator.NotifySourceChangedAsync"/>/
+/// <see cref="DaprLifecycleOrchestrator.NotifySourceRemovedAsync"/>/
+/// <see cref="DaprLifecycleOrchestrator.PublishLifecycleAsync"/>,
 /// <see cref="DaprLifecycleOrchestrator.StartPipelineAsync"/>/<see cref="DaprLifecycleOrchestrator.StopPipelineAsync"/>
-/// — all five now make a real Dapr call (an actor-proxy invocation or a pub/sub publish) that requires a
-/// live sidecar to complete; live verification is covered by this wave's scripted live-check log, not a
-/// unit test. Constructing a <see cref="DaprClient"/> itself does no I/O (the gRPC channel is lazy),
-/// which is what makes constructing <see cref="DaprLifecycleOrchestrator"/> itself safe in a unit
-/// test.</para>
+/// (W6), <see cref="DaprLifecycleOrchestrator.StartTableAsync"/>/<see cref="DaprLifecycleOrchestrator.StopTableAsync"/>
+/// (W7-A), and <see cref="DaprLifecycleOrchestrator.ResetTableHistoryAsync"/>/
+/// <see cref="DaprLifecycleOrchestrator.DisableTableHistoryAsync"/> (W7-B, see
+/// <c>Lifecycle/DaprLifecycleOrchestrator.History.cs</c>)) now makes a real Dapr call (an actor-proxy
+/// invocation or a pub/sub publish) that requires a live sidecar to complete — invoking any of them here
+/// throws <c>HttpRequestException</c> ("Connection refused (localhost:3500)"), the same finding
+/// <see cref="TableHistoryDeltaSinkTests"/>'s own doc comment references for the analogous table-history
+/// actor calls. Live verification for all of them is covered by each wave's scripted live-check log, not a
+/// unit test — this file used to hold "CompletesWithoutThrowing" tests for the table/history pair
+/// specifically because THOSE were still W4's no-op stub through W6; W7 made every remaining method real,
+/// so there is nothing left here to unit-test beyond the one invariant below.
+///
+/// <para>Constructing a <see cref="DaprClient"/> itself does no I/O (the gRPC channel is lazy), which is
+/// what makes constructing <see cref="DaprLifecycleOrchestrator"/> itself — with NO method invoked — safe
+/// in a unit test.</para>
 /// </summary>
 public class GeneratorLifecycleOrchestratorTests
 {
-    private static DaprLifecycleOrchestrator NewOrchestrator() =>
-        new(new DaprClientBuilder().Build(), new StreamForge.Dapr.Host.Streaming.PipelineEventRouter(NullLogger<StreamForge.Dapr.Host.Streaming.PipelineEventRouter>.Instance), NullLogger<DaprLifecycleOrchestrator>.Instance);
+    private static DaprLifecycleOrchestrator NewOrchestrator() => new(
+        new DaprClientBuilder().Build(),
+        new StreamForge.Dapr.Host.Streaming.PipelineEventRouter(NullLogger<StreamForge.Dapr.Host.Streaming.PipelineEventRouter>.Instance),
+        new StreamForge.Dapr.Host.Streaming.TableEventRouter(NullLogger<StreamForge.Dapr.Host.Streaming.TableEventRouter>.Instance),
+        NullLogger<DaprLifecycleOrchestrator>.Instance);
 
     [Fact]
-    public async Task StartTableAsync_ReturnsSuccess_NoRuntimeYet()
+    public void Construction_DoesNoIoAndDoesNotThrow()
     {
-        var orchestrator = NewOrchestrator();
-
-        var outcome = await orchestrator.StartTableAsync(new TableDefinition { Name = "t1", Sql = "SELECT 1" });
-
-        Assert.True(outcome.Ok);
-        Assert.Null(outcome.Error);
-    }
-
-    [Fact]
-    public async Task StopTableAsync_CompletesWithoutThrowing()
-    {
-        var orchestrator = NewOrchestrator();
-
-        await orchestrator.StopTableAsync("t1");
-    }
-
-    [Fact]
-    public async Task ResetTableHistoryAsync_CompletesWithoutThrowing()
-    {
-        var orchestrator = NewOrchestrator();
-
-        await orchestrator.ResetTableHistoryAsync(new TableDefinition { Name = "t1", Sql = "SELECT 1" });
-    }
-
-    [Fact]
-    public async Task DisableTableHistoryAsync_CompletesWithoutThrowing()
-    {
-        var orchestrator = NewOrchestrator();
-
-        await orchestrator.DisableTableHistoryAsync("t1");
+        NewOrchestrator();
     }
 }
