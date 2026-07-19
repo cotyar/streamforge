@@ -5,6 +5,7 @@ using StreamForge.Dapr.Host.Actors;
 using StreamForge.Dapr.Host.Facades;
 using StreamForge.Dapr.Host.Lifecycle;
 using StreamForge.Dapr.Host.Services;
+using StreamForge.Dapr.Host.Streaming;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -33,6 +34,7 @@ builder.Services.AddActors(options =>
 {
     options.Actors.RegisterActor<RegistryActor>();
     options.Actors.RegisterActor<UserStoreActor>();
+    GeneratorRuntimeSetup.RegisterActors(options);
     // See Actors/ActorProxyDefaults.cs for the client-side half of this decision — both sides of every
     // actor call in this project must agree on System.Text.Json, not the SDK's legacy DataContract default.
     options.UseJsonSerialization = true;
@@ -41,6 +43,10 @@ builder.Services.AddActors(options =>
 builder.Services.AddSingleton<ILifecycleOrchestrator, NoopLifecycleOrchestrator>();
 builder.Services.AddDaprFacades();
 builder.Services.AddHostedService<CatalogInitializationService>();
+// Wave seams (see the two *RuntimeSetup classes) — registered after the Noop orchestrator so a real
+// ILifecycleOrchestrator registered inside wins.
+GeneratorRuntimeSetup.AddServices(builder.Services);
+StreamingRuntimeSetup.AddServices(builder.Services);
 
 var app = builder.Build();
 
@@ -71,6 +77,7 @@ app.MapActorsHandlers();
 // are declared yet in W4 (returns an empty list); W5 adds the sf-sources/egress topic endpoints (decision
 // D-D) behind this same call.
 app.UseCloudEvents();
+StreamingRuntimeSetup.MapTopicEndpoints(app);
 app.MapSubscribeHandler();
 
 app.Run();
