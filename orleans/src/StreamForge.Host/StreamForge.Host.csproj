@@ -15,7 +15,10 @@
     <PackageReference Include="Scalar.AspNetCore" Version="2.16.15" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\StreamForge.Engine\StreamForge.Engine.csproj" />
+    <ProjectReference Include="..\..\..\shared\StreamForge.Engine\StreamForge.Engine.csproj" />
+    <ProjectReference Include="..\..\..\shared\StreamForge.Contracts\StreamForge.Contracts.csproj" />
+    <ProjectReference Include="..\..\..\shared\StreamForge.AppCore\StreamForge.AppCore.csproj" />
+    <ProjectReference Include="..\..\..\shared\StreamForge.Api\StreamForge.Api.csproj" />
     <ProjectReference Include="..\StreamForge.Abstractions\StreamForge.Abstractions.csproj" />
   </ItemGroup>
   <ItemGroup>

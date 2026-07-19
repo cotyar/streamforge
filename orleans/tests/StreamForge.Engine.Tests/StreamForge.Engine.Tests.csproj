@@ -13,7 +13,7 @@
     <PackageReference Include="Microsoft.Orleans.TestingHost" Version="10.2.1" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\StreamForge.Engine\StreamForge.Engine.csproj" />
+    <ProjectReference Include="..\..\..\shared\StreamForge.Engine\StreamForge.Engine.csproj" />
     <ProjectReference Include="..\..\src\StreamForge.Abstractions\StreamForge.Abstractions.csproj" />
     <ProjectReference Include="..\..\src\StreamForge.Host\StreamForge.Host.csproj" />
   </ItemGroup>

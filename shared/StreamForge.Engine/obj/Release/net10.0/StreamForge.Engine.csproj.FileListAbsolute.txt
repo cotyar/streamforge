@@ -1,0 +1,11 @@
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Engine/bin/Release/net10.0/StreamForge.Engine.deps.json
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Engine/bin/Release/net10.0/StreamForge.Engine.dll
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Engine/bin/Release/net10.0/StreamForge.Engine.pdb
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Engine/obj/Release/net10.0/StreamForge.Engine.GeneratedMSBuildEditorConfig.editorconfig
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Engine/obj/Release/net10.0/StreamForge.Engine.AssemblyInfoInputs.cache
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Engine/obj/Release/net10.0/StreamForge.Engine.AssemblyInfo.cs
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Engine/obj/Release/net10.0/StreamForge.Engine.csproj.CoreCompileInputs.cache
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Engine/obj/Release/net10.0/StreamForge.Engine.dll
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Engine/obj/Release/net10.0/refint/StreamForge.Engine.dll
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Engine/obj/Release/net10.0/StreamForge.Engine.pdb
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Engine/obj/Release/net10.0/ref/StreamForge.Engine.dll
