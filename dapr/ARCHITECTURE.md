@@ -1,44 +1,57 @@
-# StreamForge — Architecture (Dapr implementation, W4 snapshot)
+# StreamForge — Architecture (Dapr implementation, W9 / final snapshot)
 
-Plan [`../plans/005-dapr-port.md`](../plans/005-dapr-port.md), wave W4 ("Dapr host skeleton"). This
-document describes what exists **after W4** — the Dapr flavor's registry/user-catalog skeleton, serving
-the same shared REST/SignalR/SPA surface as the Orleans flavor (`orleans/`) on a different port, backed
-by Dapr actors instead of Orleans grains. Generators (W5), pipelines (W6), and tables/history (W7) are
-not built yet — see "What's NOT here yet" below for exactly what that means in practice today.
+Plan [`../plans/005-dapr-port.md`](../plans/005-dapr-port.md) — this document describes the Dapr
+flavor as it exists at the plan's final wave (W9): a full sibling runtime of the Orleans flavor
+(`orleans/`), serving the same shared REST/SignalR/SPA surface on a different port, backed by Dapr
+actors instead of Orleans grains. Generators (W5), pipelines (W6), tables (W7-A), and row history
+(W7-B) have all landed and are live; see "What's NOT here yet" below for the (short) list of what
+remains genuinely out of scope for this flavor, by design.
 
-## What exists after W4
+## What exists
 
 ```
 StreamForge.Dapr.Host (:5399)                    Dapr sidecar (3599 HTTP / 4599 gRPC)
 ├─ shared/StreamForge.Api                         ├─ statestore (Redis, actorStateStore, keyPrefix=appid)
-│  (AddStreamForgeApi/MapStreamForgeApi —          └─ pubsub (Redis) — unused until W5
-│   REST/SignalR/SPA, JWT, RBAC, byte-identical
+│  (AddStreamForgeApi/MapStreamForgeApi —          └─ pubsub (Redis, topics: sf-sources, sf-pipeline-out,
+│   REST/SignalR/SPA, JWT, RBAC, byte-identical       sf-table-delta, sf-lifecycle, sf-metrics)
 │   to the Orleans flavor)
 ├─ Actors/
-│  ├─ RegistryActor  (id "catalog")  ── CatalogStore (pure logic, unit-tested)
-│  └─ UserStoreActor (id "users")
-├─ Facades/  (Dapr-side ICatalogFacade/IUserStoreFacade adapters + stubs for
-│             IPipelineReadFacade/ITableReadFacade/ITableHistoryFacade/IArrangementMetaFacade)
-├─ Lifecycle/ILifecycleOrchestrator (seam — see Reentrancy decision below)
-└─ Services/CatalogInitializationService (boot-time seed, mirrors Orleans' InitializeGrainsAsync)
+│  ├─ RegistryActor       (id "catalog")  ── CatalogStore (pure logic, unit-tested)
+│  ├─ UserStoreActor      (id "users")
+│  ├─ GeneratorActor      (key = source name)     — see "Generators (W5-A)"
+│  ├─ PipelineActor       (key = pipeline id)     — see "Pipelines (W6)"
+│  ├─ TableActor          (key = table name)      — see "Tables (W7-A)"
+│  └─ TableHistoryActor   (key = table name)      — see "Row history (W7-B)"
+├─ Facades/  (Dapr-side ICatalogFacade/IUserStoreFacade/IPipelineReadFacade/DaprTableReadFacade/
+│             DaprTableHistoryFacade adapters; IArrangementMetaFacade stays a permanent stub — D-F)
+├─ Streaming/  (PipelineEventRouter, TableEventRouter, TableHistoryDeltaSink, DaprStreamBridge,
+│               SourceRateSampler — sf-sources/sf-table-delta ingress routing + SignalR relay)
+├─ Lifecycle/ILifecycleOrchestrator + DaprLifecycleOrchestrator (seam — see Reentrancy decision below)
+└─ Services/ (CatalogInitializationService boot-time seed; GeneratorSupervisorService,
+              PipelineSupervisorService, TableSupervisorService, TableHistorySupervisorService —
+              periodic ~15s self-healing sweeps, one per actor kind, mirroring Orleans'
+              resume-on-boot loop for a sidecar-readiness-tolerant topology)
 ```
 
 Live today: login (admin/editor/viewer), full source/pipeline/table CRUD + validate, table
 `Parallelism > 1` rejection (409), user admin CRUD + self-delete rejection, `/api/meta/grpc` +
 `/api/meta/protos/static` + `/api/meta/arrangements` (shape-correct, empty), pipeline/table/source
 `.proto` downloads (real proto text — the shared descriptor machinery in `shared/StreamForge.AppCore`
-doesn't care which runtime called it), the console SPA served at `/`, `/scalar` (OpenAPI/Scalar UI).
+doesn't care which runtime called it), the console SPA served at `/`, `/scalar` (OpenAPI/Scalar UI),
+seeded generators/pipelines/tables running for real (not just catalog entries) with live SignalR
+events, and row history. See each numbered section below for the wave that landed it.
 
 ## Actor mapping (Orleans grain → Dapr actor)
 
-| Orleans grain | Dapr actor (W4) | Notes |
+| Orleans grain | Dapr actor | Notes |
 |---|---|---|
 | `RegistryGrain` (`"catalog"`) | `RegistryActor` (`"catalog"`) | Catalog CRUD/validation logic factored into `Catalog/CatalogStore.cs` — a plain, actor-framework-free class the actor delegates to (unit-tested directly, no sidecar needed: `dapr/tests/StreamForge.Dapr.Tests/CatalogStoreTests.cs`). |
 | `UserStoreGrain` (`"users"`) | `UserStoreActor` (`"users"`) | Same PBKDF2 credential store (shared `PasswordHasher`), same seed data (shared `SeedCatalog.Users`). |
-| `GeneratorGrain` | `GeneratorActor` (key = source name) | Batched-tick synthetic event publisher — see "Generators (W5-A)" below. |
-| `PipelineGrain` | `PipelineActor` (key = pipeline id) | Compiles + runs the pipeline's streaming SQL via the shared Engine, publishes `sf-pipeline-out`/`sf-metrics` — see "Pipelines (W6)" below. |
-| `TableGrain` / `TableIngestGrain` / `TableStageGrain` / `TableOutputGrain` | *(not yet — W7; partitioned variants are Orleans-only, decision D-F)* | `ITableReadFacade` is stubbed; `ILifecycleOrchestrator.StartTableAsync` currently just logs and reports success. |
-| `TableHistoryGrain` | *(not yet — W7)* | `ITableHistoryFacade` is stubbed. |
+| `GeneratorGrain` | `GeneratorActor` (key = source name) | Batched-tick synthetic event publisher, real and live — see "Generators (W5-A)" below. |
+| `PipelineGrain` | `PipelineActor` (key = pipeline id) | Compiles + runs the pipeline's streaming SQL via the shared Engine, publishes `sf-pipeline-out`/`sf-metrics`, real and live — see "Pipelines (W6)" below. |
+| `TableGrain` classic path (`Parallelism == 1`) | `TableActor` (key = table name) | Same shared Engine Z-set execution, real and live — see "Tables (W7-A)" below. |
+| `TableGrain` / `TableIngestGrain` / `TableStageGrain` / `TableOutputGrain` partitioned path (`Parallelism 2–16`) | *(never — Orleans-only, decision D-F)* | `CatalogStore.ValidateParallelism` rejects anything but `1`; `ITableReadFacade.GetSnapshotFrontierEpochAsync` always returns `null`. |
+| `TableHistoryGrain` | `TableHistoryActor` (key = table name) | Same shared retention math (`TableGroupKeyExtractor`/`RowKeyCodec`/`TableRowHistoryRetention`), real and live — see "Row history (W7-B)" below. |
 | `ArrangementGrain` | *(never — Orleans-only, decision D-F)* | `IArrangementMetaFacade` always returns `[]`. |
 
 ## Decisions made this wave
@@ -565,19 +578,46 @@ delta's row — proven by round-tripping an already-normalized envelope through 
 serializer configuration in `TableHistoryApplicationTests.cs`, the same technique
 `PipelineActorWireNormalizationTests.cs` uses for `sf-sources`.
 
-## What's NOT here yet (by design — later waves)
+## What's NOT here yet (by design — permanent descopes, not later waves)
 
-- **Generators** (W5) and **Pipelines** (W6) have both landed — see their own sections above/below.
-- **Tables/history** (W7): no Z-set execution, no rows, no search, no history
-  (`Facades/StubFacades.cs`, each marked with a `W7 replaces this` comment).
+Every wave through W8 has landed (Generators W5, Pipelines W6, Tables W7-A, Row history W7-B,
+polyglot processors W8 — see `../dapr/POLYGLOT.md` and `../plans/005-dapr-port.md`'s parity matrix).
+What remains unbuilt on this flavor is, as of W9, a short, deliberate, permanent list — not a backlog:
+
+- **Partitioned table execution** (`Parallelism 2–16`, frontier-consistent reads, shared
+  arrangements): **Orleans-only forever**, decision D-F — sidecar hops invert the economics of the
+  stage-grid design at this scale. `CatalogStore.ValidateParallelism` rejects anything but `1` with a
+  clear 409; `/api/meta/arrangements` always returns `[]`; `frontierEpoch` is always `null`.
 - **gRPC serving** (phase 2, decision D-F): `:5499` is reserved but nothing listens on it yet;
-  `GET /api/meta/grpc` reports it with an empty static-service list (shape preserved).
+  `GET /api/meta/grpc` reports it with an empty static-service list (shape preserved). `/proto`
+  downloads work today regardless (the shared descriptor machinery in `shared/StreamForge.AppCore`
+  doesn't care which runtime called it) — only the live gRPC *serving* endpoint is phase 2.
 - **`/docs`**: not mapped on this flavor (`StreamForgeApiOptions.DocsFilePath` is `null`) — stays
-  Orleans-served, per decision D-F. (Note: an unmapped `/docs` still falls through to the SPA's
-  client-side-routing fallback and returns the console app shell with HTTP 200, not a REST-style 404 —
-  same as any other unrecognized non-`/api` path; this is normal SPA-hosting behavior, not a bug.)
-- **Pub/sub topics**: `components/pubsub.yaml` exists but nothing subscribes yet — `MapSubscribeHandler()`
-  in Program.cs currently reports an empty subscription list to the sidecar.
+  Orleans-served, per decision D-F. `orleans/docs/comparison.html` (plan 005 W9) links back to it.
+  (Note: an unmapped `/docs` still falls through to the SPA's client-side-routing fallback and
+  returns the console app shell with HTTP 200, not a REST-style 404 — same as any other unrecognized
+  non-`/api` path; this is normal SPA-hosting behavior, not a bug.)
+
+## Known live bug found during W9 benchmarking (reported, not fixed — out of this wave's scope)
+
+Running plan 005 W9's latency benchmark (`tools/bench/`) against a freshly booted Orleans-flavor
+instance (not the Dapr flavor covered by the rest of this document — flagged here because it was
+discovered while proving out the SAME benchmark harness against both flavors, and it materially
+affects how to read the comparison numbers) surfaced a live defect: the Orleans flavor's SignalR
+`tableDelta` relay (and, observed the same session, `pipelineResult`) never delivers to a subscribed
+client — zero events over repeated 15–90s windows across three different seeded tables (`order_states`,
+`positions`, `leg_exposure`), while the SAME tables' REST `/api/tables/{id}/metrics` shows
+`deltasIn`/`deltasOut` growing continuously throughout, and a real browser against the same instance
+shows "rows never update live" (row count and cell values static) for the same tables. `sourceEvent`
+and `pipelineMetrics` (both single-object SignalR arguments) work correctly in the same session — the
+distinguishing factor appears to be a `List<T>`-of-DTO SignalR argument (`tableDelta`'s `deltas`,
+`pipelineResult`'s `rows`) versus a single object, though this wave did not root-cause it further
+(AGENTS.md hard rule #4 flags dictionary-subclass Orleans stream serialization as a known sharp edge,
+which is a plausible starting point for a future investigation). This bug is **specific to the Orleans
+flavor's `StreamBridgeService`** (`orleans/src/StreamForge.Host/Services/StreamBridgeService.cs`) — the
+Dapr flavor's equivalent (`DaprStreamBridge`) was exercised in the same benchmarking session and
+delivered `tableDelta` correctly. See `orleans/docs/comparison.html`'s "Measured latency" section and
+this wave's report for the full repro and its effect on the benchmark's Orleans-side numbers.
 
 ## How to run
 

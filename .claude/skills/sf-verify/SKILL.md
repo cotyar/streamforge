@@ -9,19 +9,22 @@ Run ALL of it; partial verification has repeatedly hidden real bugs here (stop-f
 loss, JsonElement key mismatch, frontier starvation were all caught by the live/cluster layers,
 not by builds).
 
-## 1. Build + tests (the baseline: 511 green)
+## 1. Build + tests (the baseline: 511 Orleans + ~153 Dapr green)
 
 ```bash
 cd /Users/yuriyhabarov/work/crates-foundation
 ~/.dotnet/dotnet build orleans/StreamForge.sln          # 0 errors
 ~/.dotnet/dotnet test  orleans/StreamForge.sln          # Engine ~393 + Host ~118, all green
+~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln        # 0 errors
+~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln        # ~153 tests, all green
 cd web && bun run build                                 # tsc + vite clean (bun, never npm)
 ```
 
 Rules: pre-existing tests must pass **unmodified** — if your change requires editing an existing
 test's expectations, that's a behavior change to justify explicitly, not a fix. Host.Tests include
 real Orleans TestCluster integration tests (seeds, partitioned tables, arrangements, frontiers) —
-they are slower but non-negotiable.
+they are slower but non-negotiable. `ClusterSmokeTest` flake rule: if it's the *sole* failure, rerun
+it in isolation before concluding red.
 
 ## 2. Live sweep (isolated instance, fresh temp DataDir so seeds exist)
 
@@ -43,7 +46,39 @@ After ~15 s, as editor (`editor/editor123!`) via curl, confirm at minimum:
 
 Kill the instance and confirm the ports are free.
 
-## 3. Verdict discipline
+## 3. Dapr live sweep (fixed ports — reset for a clean seed first)
+
+Unlike Orleans, the Dapr flavor doesn't have a convenient arbitrary-port isolated-instance mode (it
+needs its sidecar + the shared dev Redis) — verify against its normal fixed ports, reset first for a
+clean seed:
+
+```bash
+bash dapr/tools/reset.sh
+bash dapr/tools/run.sh &   # :5399 app, :3599/:4599 sidecar; never touches 5199/5299/9xxx
+```
+
+After ~20s (periodic supervisor sweeps, not a one-shot boot gate — allow longer than Orleans' ~15s),
+as admin (`admin/admin123!`) via curl, confirm at minimum:
+- `/api/tables` — seeded tables `Running` with no `POST .../start` call issued (`positions`,
+  `leg_exposure`, `order_states`; `gold_tier_orders`/`hot_symbols` stay `Stopped` as seeded). Note:
+  `/api/tables/{id}` resolves by the table's REST **id** (a GUID from the list response), not its
+  name.
+- `/api/tables/{id}/metrics` — `deltasIn`/`deltasOut` growing tick over tick for a Running table.
+- `/api/pipelines` — seeded `Running` pipelines show growing `totalEventsIn`/`totalRowsOut` via
+  `/api/pipelines/{id}/metrics`, no explicit start needed.
+- `POST /api/tables` with `parallelism: 4` → `409` (Dapr flavor is classic-path only, decision D-F).
+- SignalR: subscribing `table:{name}` and `source:{name}` over `/hubs/stream` should show live
+  `tableDelta`/`sourceEvent` traffic — **known issue**: as of plan 005 W9, the *Orleans* flavor's
+  `tableDelta`/`pipelineResult` SignalR relay was found live-broken (0 events delivered despite REST
+  metrics growing continuously) — verify the flavor you're testing isn't silently hitting the same
+  symptom; see `dapr/ARCHITECTURE.md`'s "Known live bug" section for the repro. The Dapr flavor's
+  relay (`DaprStreamBridge`) was confirmed working in that same investigation.
+
+Kill the instance (`dapr stop --app-id streamforge-dapr` + explicit process kill if the plain
+`dotnet run` process outlives the sidecar teardown — a known Dapr CLI quirk) and confirm
+5399/3599/4599 are free.
+
+## 4. Verdict discipline
 
 Report actual numbers/output, not "should work". If any layer is red, stop and fix before
 committing — never commit a red suite, never mark work complete with a failing gate.

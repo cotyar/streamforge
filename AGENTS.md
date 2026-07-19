@@ -1,10 +1,13 @@
 # crates-foundation — Agent Instructions
 
 Streaming-SQL platform ("StreamForge") in two runtime flavors: `orleans/` (complete — Microsoft
-Orleans 10) and `dapr/` (in progress — Dapr, for polyglot processing). Runtime-agnostic core is
-being extracted to `shared/`. Execution plans with acceptance criteria: [`plans/`](plans/README.md).
-Architecture: [`orleans/ARCHITECTURE.md`](orleans/ARCHITECTURE.md) · rationale:
-[`orleans/DESIGN.md`](orleans/DESIGN.md).
+Orleans 10) and `dapr/` (complete — Dapr, for polyglot processing and runtime comparison). Both
+flavors share one runtime-agnostic core (`shared/`): Engine, Contracts, AppCore, Api, and the `web/`
+SPA. Execution plans with acceptance criteria: [`plans/`](plans/README.md). Architecture:
+[`orleans/ARCHITECTURE.md`](orleans/ARCHITECTURE.md) · [`dapr/ARCHITECTURE.md`](dapr/ARCHITECTURE.md)
+· rationale: [`orleans/DESIGN.md`](orleans/DESIGN.md) · runtime comparison + measured latency:
+[`orleans/docs/comparison.html`](orleans/docs/comparison.html) (opened directly from the repo — see
+its own note on why `/docs` doesn't serve it automatically).
 
 ## Environment — non-negotiables
 
@@ -27,11 +30,24 @@ Architecture: [`orleans/ARCHITECTURE.md`](orleans/ARCHITECTURE.md) · rationale:
 ```bash
 ~/.dotnet/dotnet build orleans/StreamForge.sln
 ~/.dotnet/dotnet test  orleans/StreamForge.sln     # 511 tests — the whole suite must be green
+~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln
+~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # ~153 tests — the whole suite must be green
 cd web && bun run build
-~/.dotnet/dotnet run --project orleans/src/StreamForge.Host
+~/.dotnet/dotnet run --project orleans/src/StreamForge.Host   # :5199 + :5299
+cd dapr && ./tools/run.sh                                      # :5399 (needs `dapr init` done once)
 ```
-Local skills (root `.claude/skills/`, `sf-` prefix) wrap the common workflows: `/sf-run`,
-`/sf-verify`, `/sf-sql`, `/sf-client-gen`.
+Local skills (root `.claude/skills/`, `sf-` prefix) wrap the common workflows: `/sf-run` (both
+flavors), `/sf-verify` (both flavors), `/sf-sql`, `/sf-client-gen`.
+
+**Dapr flavor extras**: `dapr/tools/run.sh` starts the sidecar'd host on 5399 (sidecar 3599/4599);
+`dapr/tools/reset.sh` SCANs and deletes this app's Redis keys to reseed (the Dapr-flavor equivalent
+of deleting Orleans' `data/`); `dapr stop --app-id streamforge-dapr` stops it. Polyglot processors
+(`dapr/processors/{python-enricher,ts-consumer,java-consumer}/`, each with its own `README.md` and
+own sidecar/ports) prove the pub/sub contract (`dapr/POLYGLOT.md`) works from outside .NET:
+`dapr run --app-id sf-enricher --app-port 8399 --dapr-http-port 3899 --dapr-grpc-port 4899
+--resources-path dapr/components -- python3 main.py` (python-enricher), analogous `dapr run`
+invocations with their own ports for `ts-consumer` (`bun run main.ts`) and `java-consumer`
+(`gradle --no-daemon run`) — see each processor's README for exact ports/env vars.
 
 ## Hard rules (learned the expensive way)
 

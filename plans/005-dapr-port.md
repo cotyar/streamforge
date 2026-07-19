@@ -1,8 +1,17 @@
 # 005 — Dapr Sibling Runtime (shared core extraction + polyglot processing)
 
-Status: **APPROVED** — restructure waves (W0–W3) touch `orleans/` under the hard gate below; Dapr
-waves (W4–W9) are additive. Supersedes any notion of "fork the Host and edit" — the two runtimes
-share one semantic core and one API surface, or the port is not worth doing.
+Status: **DONE** (W0–W9 all landed). Results summary: Dapr flavor live on :5399 with full parity
+except partitioned execution and gRPC serving (both permanent, documented descopes — see parity
+matrix); measured `order_states` `tableDelta` latency (`tools/bench/`, real seeded pipeline, both
+runtimes) — Dapr p50/p90/p99/max = **7 / 9 / 13 / 16 ms** (397 samples); the same measurement on
+Orleans collected **0 samples**, surfacing a live Orleans-flavor SignalR relay bug found during this
+wave (`tableDelta`/`pipelineResult` never deliver to subscribers — reported in
+`dapr/ARCHITECTURE.md` and `orleans/docs/comparison.html`, not fixed per this wave's no-src-changes
+scope); a supplementary `sourceEvent`-based measurement (generator-tick → SignalR-relay hop only,
+unaffected by that bug) gives a real comparable number on both runtimes instead — see
+`orleans/docs/comparison.html` for the full numbers and methodology. Restructure waves (W0–W3)
+touched `orleans/` under the hard gate below; Dapr waves (W4–W9) were additive. Supersedes any
+notion of "fork the Host and edit" — the two runtimes share one semantic core and one API surface.
 
 **Hard gate (every commit):** `~/.dotnet/dotnet test orleans/StreamForge.sln` — all 511 tests green
 with test `.cs` files **unmodified** (`git diff --stat orleans/tests -- '*.cs'` empty). Test
@@ -216,7 +225,7 @@ Update ARCHITECTURE.md/AGENTS.md; parity matrix finalized; plan status → DONE.
 | Row history | full | full |
 | Parallelism 2–16 / frontiers / arrangements | full | **descoped** — rejected with clear error; `frontierEpoch` null; `/api/meta/arrangements` `[]` |
 | gRPC static + dynamic reflection + typed streams | full (:5299) | **phase 2** (:5499 reserved; `/api/meta/grpc` shape kept, empty service list) |
-| `/docs` | full | descoped (links to Orleans flavor) |
+| `/docs` | full | descoped — `/docs` maps only `docs/index.html` (not a directory), so `orleans/docs/comparison.html` is not auto-served on either flavor; it's linked from the Orleans `/docs` sidebar as a same-directory relative file and opened directly from the repo (confirmed live, W9) |
 | Persistence / reseed | JSON files / delete `data/` | Redis / `reset.sh` |
 | Polyglot pub/sub participation | — | **the point**: `sf-sources` ingress + `sf-source-{name}` egress |
 
