@@ -15,12 +15,34 @@ public enum FieldType { String, Double, Long, Bool, Timestamp, Json }
 /// IsArray + Type == Json + no Children = a repeated schemaless value — DescriptorFactory emits
 /// repeated google.protobuf.Struct. Orthogonal to Type/Children, so every existing combination keeps
 /// its current (non-array) meaning.</para></summary>
+// NOTE (005-W1): written as a record with body-declared properties (plain `set`) rather than the
+// original positional-record shorthand (which synthesizes `init`-only properties). Orleans'
+// cross-assembly codegen path (GenerateCodeForDeclaringAssembly, used because this type now lives in
+// shared/StreamForge.Contracts while the generator runs in StreamForge.Abstractions) resolves
+// property accessors purely from metadata and doesn't recognize `init` as settable there (ORLEANS0101:
+// "does not have an accessible setter") — the same constructor-matching heuristic that lets same-
+// assembly codegen use positional records apparently isn't available across that boundary. Equality/
+// ToString/deconstruction/`with` all still work identically (records synthesize those from every
+// public instance property regardless of positional-vs-body declaration); only init-vs-set changed,
+// which Orleans serialization never observed either way. No caller depends on init-only-ness (verified:
+// every construction site uses `new FieldDef(...)`, none use object-initializer-only patterns that
+// require init).
 [GenerateSerializer]
-public sealed record FieldDef(
-    [property: Id(0)] string Name,
-    [property: Id(1)] FieldType Type,
-    [property: Id(2)] List<FieldDef>? Children = null,
-    [property: Id(3)] bool IsArray = false);
+public sealed record FieldDef
+{
+    [Id(0)] public string Name { get; set; }
+    [Id(1)] public FieldType Type { get; set; }
+    [Id(2)] public List<FieldDef>? Children { get; set; }
+    [Id(3)] public bool IsArray { get; set; }
+
+    public FieldDef(string Name, FieldType Type, List<FieldDef>? Children = null, bool IsArray = false)
+    {
+        this.Name = Name;
+        this.Type = Type;
+        this.Children = Children;
+        this.IsArray = IsArray;
+    }
+}
 
 /// <summary>A stream source: schema + synthetic generator settings.</summary>
 [GenerateSerializer]
@@ -310,11 +332,22 @@ public sealed class ArrangementInfo
 /// plus a per-table monotonic sequence number (assigned from every delta the history grain observes,
 /// assertion or retraction, so gaps between consecutive Seq values indicate retractions happened
 /// in-between) for stable ordering.</summary>
+// NOTE (005-W1): body-declared properties (plain `set`) instead of positional-record shorthand —
+// see FieldDef's identical note above (ORLEANS0101 under cross-assembly codegen).
 [GenerateSerializer]
-public sealed record HistoryVersion(
-    [property: Id(0)] Dictionary<string, object?> Row,
-    [property: Id(1)] long TsMs,
-    [property: Id(2)] long Seq);
+public sealed record HistoryVersion
+{
+    [Id(0)] public Dictionary<string, object?> Row { get; set; }
+    [Id(1)] public long TsMs { get; set; }
+    [Id(2)] public long Seq { get; set; }
+
+    public HistoryVersion(Dictionary<string, object?> Row, long TsMs, long Seq)
+    {
+        this.Row = Row;
+        this.TsMs = TsMs;
+        this.Seq = Seq;
+    }
+}
 
 /// <summary>Retention state for one row identity (see TableHistoryGrain / TableGroupKeyExtractor for how
 /// the identity key is derived). Versions holds the retained ASSERTION history per the table's configured
