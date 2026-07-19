@@ -68,11 +68,12 @@ as admin (`admin/admin123!`) via curl, confirm at minimum:
   `/api/pipelines/{id}/metrics`, no explicit start needed.
 - `POST /api/tables` with `parallelism: 4` → `409` (Dapr flavor is classic-path only, decision D-F).
 - SignalR: subscribing `table:{name}` and `source:{name}` over `/hubs/stream` should show live
-  `tableDelta`/`sourceEvent` traffic — **known issue**: as of plan 005 W9, the *Orleans* flavor's
-  `tableDelta`/`pipelineResult` SignalR relay was found live-broken (0 events delivered despite REST
-  metrics growing continuously) — verify the flavor you're testing isn't silently hitting the same
-  symptom; see `dapr/ARCHITECTURE.md`'s "Known live bug" section for the repro. The Dapr flavor's
-  relay (`DaprStreamBridge`) was confirmed working in that same investigation.
+  `tableDelta`/`sourceEvent` traffic on **both** flavors. (History: plan 005 W9 found the Orleans
+  relay delivering 0 `tableDelta`/`pipelineResult` events on fresh boots — a startup race between
+  `StreamBridgeService` and registry seeding, fixed in commit `134b5cc` with regression test
+  `StreamBridgeServiceStartupRaceTests`; see `dapr/ARCHITECTURE.md` "Known live bug … — FIXED". If
+  you ever see 0 events with growing REST metrics again, suspect a fresh-boot subscription race
+  first.)
 
 Kill the instance (`dapr stop --app-id streamforge-dapr` + explicit process kill if the plain
 `dotnet run` process outlives the sidecar teardown — a known Dapr CLI quirk) and confirm

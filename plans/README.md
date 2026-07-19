@@ -9,5 +9,6 @@ Written against commit `49d6979` by the improve skill (focused `plan` invocation
 | 003 | [Materialize territory: partitioned differential dataflow](003-materialize-territory.md) | DONE (M0–M5; soak p99 0.70× vs single-grain) | superseded interim sharding idea |
 | 004 | [Nested queries (non-recursive)](004-nested-queries.md) | DONE (N1–N4 + scope-aware editor autocomplete) | — |
 | 005 | [Dapr sibling runtime (shared core + polyglot)](005-dapr-port.md) | DONE (W0–W9; Dapr p50 7ms / Orleans p50 122ms, order_states tableDelta — a live Orleans SignalR-relay startup race found during this wave was root-caused and fixed post-wave, pre-dates 005, see plan status) | 001–004 (ports the platform they built) |
+| 006 | [Ingestion connectors + config import/export](006-connectors-and-config.md) | IN PROGRESS (P committed; W0 verified the 005 relay fix) | 005 (shared core + both flavors) |
 
 Design tokens source of truth: `orleans/design-system/streamforge/MASTER.md`.
