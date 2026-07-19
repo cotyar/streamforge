@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Plan 005 W4: latest stable line matching the initialized Dapr runtime (1.18.1 — see
+         dapr/ARCHITECTURE.md). -->
+    <PackageReference Include="Dapr.AspNetCore" Version="1.18.4" />
+    <PackageReference Include="Dapr.Actors.AspNetCore" Version="1.18.4" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.*" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
+    <PackageReference Include="Scalar.AspNetCore" Version="2.16.15" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\shared\StreamForge.Engine\StreamForge.Engine.csproj" />
+    <ProjectReference Include="..\..\..\shared\StreamForge.Contracts\StreamForge.Contracts.csproj" />
+    <ProjectReference Include="..\..\..\shared\StreamForge.AppCore\StreamForge.AppCore.csproj" />
+    <ProjectReference Include="..\..\..\shared\StreamForge.Api\StreamForge.Api.csproj" />
+  </ItemGroup>
+</Project>

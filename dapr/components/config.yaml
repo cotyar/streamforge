@@ -1,0 +1,16 @@
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: streamforge-dapr-config
+spec:
+  tracing:
+    samplingRate: "0"
+  # Actor reentrancy is deliberately NOT enabled here. Plan 005 W4's reentrancy decision (see
+  # dapr/ARCHITECTURE.md): RegistryActor never calls into another actor (or itself) from inside one of
+  # its own turns — every "start the runtime for X" side effect goes through the in-process
+  # ILifecycleOrchestrator seam instead of an actor-to-actor call, so there is no A->B->A cycle for
+  # Dapr's default (non-reentrant) turn-based concurrency to deadlock on. Enabling reentrancy is extra
+  # surface (per-actor-type opt-in, plus this Configuration's own `spec.reentrancy` block) this plan
+  # chooses to avoid entirely rather than lean on, mirroring the lesson from Orleans'
+  # RegistryGrain [MayInterleave] allowlist (AGENTS.md hard rule #3) — see ARCHITECTURE.md for what
+  # later waves (W5-W7) must preserve to keep this true.

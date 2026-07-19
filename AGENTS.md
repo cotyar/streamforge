@@ -11,8 +11,11 @@ Architecture: [`orleans/ARCHITECTURE.md`](orleans/ARCHITECTURE.md) · rationale:
 - **dotnet**: `~/.dotnet/dotnet` (SDK 10.0.3xx). It is **NOT on PATH** — always use the full path.
 - **JS tooling**: **bun only, never npm** (build: `bun run build` in the web folder).
 - **Ports**: Orleans dev server owns `5199` (REST/SignalR/SPA) + `5299` (gRPC h2c) and is often
-  running — never bind or kill it. Dapr flavor: `5399`/`5499`. Test instances: pick 6xxx–9xxx via
-  `--Http:Port … --Grpc:Port … --DataDir <temp>` and kill them when done.
+  running — never bind or kill it. Dapr flavor: app `5399` (REST/SignalR/SPA), gRPC reserved `5499`
+  (not yet served — phase 2), sidecar HTTP `3599` / gRPC `4599`; run via `dapr/tools/run.sh` (dapr
+  runtime 1.18.x, containers `dapr_redis`/`dapr_placement`/`dapr_scheduler` from `dapr init`), reseed
+  via `dapr/tools/reset.sh` + restart, stop via `dapr stop --app-id streamforge-dapr`. Test instances:
+  pick 6xxx–9xxx via `--Http:Port … --Grpc:Port … --DataDir <temp>` and kill them when done.
 - Seeds apply only to an **empty data dir** (`orleans/src/StreamForge.Host/data/`; delete to
   reseed). Logins: `admin/admin123!`, `editor/editor123!`, `viewer/viewer123!`.
 - Git: remote `origin` = private `github.com/cotyar/crates-foundation`, branch `master`. Commit

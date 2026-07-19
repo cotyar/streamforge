@@ -1,0 +1,24 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: localhost:6379
+    - name: redisPassword
+      value: ""
+    # This state store also backs Dapr Actors (RegistryActor "catalog" state, UserStoreActor "users"
+    # state) — required for actors to use it at all.
+    - name: actorStateStore
+      value: "true"
+    # Scopes every key under this app's id (streamforge-dapr) rather than the bare state-store/actor
+    # keys Redis would otherwise use — see dapr/tools/reset.sh, which SCANs "streamforge-dapr*" to wipe
+    # only this app's data. (Dapr's redis component keyPrefix options are none|appid|name; "appid" is
+    # the one that actually achieves per-app key scoping — see dapr/ARCHITECTURE.md's state-store note.)
+    - name: keyPrefix
+      value: appid
+scopes:
+  - streamforge-dapr

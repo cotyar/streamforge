@@ -1,0 +1,19 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: pubsub
+spec:
+  type: pubsub.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: localhost:6379
+    - name: redisPassword
+      value: ""
+scopes:
+  - streamforge-dapr
+# Not yet consumed in W4 (no topic subscriptions are declared — MapSubscribeHandler() in Program.cs
+# reports an empty subscription list to the sidecar). W5 (decision D-D) adds the fixed envelope topics
+# (sf-sources, sf-pipeline-out, sf-table-delta, sf-lifecycle, sf-metrics) plus per-source egress topics
+# (sf-source-{name}) on this same component. Present now so tools/run.sh's --resources-path directory is
+# already complete and doesn't need editing again in W5.

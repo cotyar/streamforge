@@ -1,0 +1,70 @@
+using StreamForge.Abstractions;
+
+namespace StreamForge.Dapr.Host.Lifecycle;
+
+/// <summary>
+/// Plan 005 (Dapr sibling runtime) W4: every side effect <c>RegistryGrain</c> drives by calling straight
+/// into a worker grain (GeneratorGrain.StartAsync/StopAsync, PipelineGrain.StartAsync/StopAsync,
+/// TableGrain.StartAsync/StopAsync, ITableHistoryGrain.ResetAsync/DisableAsync, and the lifecycle stream
+/// publish) is routed through this seam instead, on the Dapr flavor.
+///
+/// <para><b>Why a seam and not direct actor-to-actor calls:</b> none of GeneratorActor (W5),
+/// PipelineActor (W6), TableActor/TableHistoryActor (W7) exist yet — but more importantly, the REENTRANCY
+/// DECISION for this plan (see dapr/ARCHITECTURE.md) is that <c>RegistryActor</c> must never call
+/// directly into a worker actor from inside one of its own turns. Orleans' RegistryGrain needed a
+/// <c>[MayInterleave]</c> allowlist to avoid exactly this shape of cycle (a worker grain's own StartAsync
+/// reads back from RegistryGrain while RegistryGrain's own turn that triggered the start is still
+/// in-flight) — Dapr actor turns are similarly non-reentrant by default, and enabling reentrancy is extra
+/// configuration surface this plan chooses to avoid entirely (see the ARCHITECTURE.md note) by keeping
+/// orchestration ACYCLIC instead: RegistryActor talks to this interface, never to another actor's proxy,
+/// so there is no call path back into RegistryActor to deadlock on.</para>
+///
+/// <para><b>W4 behavior:</b> <see cref="NoopLifecycleOrchestrator"/> logs a warning ("no runtime yet") and
+/// reports success for every Start call — catalog status bookkeeping (Running/Stopped) therefore works
+/// end-to-end today, it just doesn't yet drive any real generator/pipeline/table process. W5 (generators),
+/// W6 (pipelines), W7 (tables/history) replace this with an implementation that publishes to Dapr pub/sub
+/// topics and/or invokes the relevant actor via a NON-reentrant path (e.g. fire-and-forget pub/sub message
+/// rather than an inline actor-to-actor method call) — RegistryActor and CatalogStore need no further
+/// changes when that lands.</para>
+/// </summary>
+public interface ILifecycleOrchestrator
+{
+    /// <summary>A source was created/updated. <paramref name="enabled"/> mirrors SourceDefinition.Enabled —
+    /// true means "a generator should be publishing for this source".</summary>
+    Task NotifySourceChangedAsync(string name, bool enabled);
+
+    /// <summary>A source was deleted — stop/tear down its generator, if any.</summary>
+    Task NotifySourceRemovedAsync(string name);
+
+    /// <summary>Start (or restart) a pipeline. Mirrors PipelineGrain.StartAsync's outcome contract: success
+    /// or a human-readable error CatalogStore turns into Status=Failed/Error (never throws).</summary>
+    Task<LifecycleOutcome> StartPipelineAsync(PipelineDefinition def);
+
+    Task StopPipelineAsync(string pipelineId);
+
+    /// <summary>Start (or restart) a table. Mirrors TableGrain.StartAsync's outcome contract.</summary>
+    Task<LifecycleOutcome> StartTableAsync(TableDefinition def);
+
+    Task StopTableAsync(string tableName);
+
+    /// <summary>Mirrors ITableHistoryGrain.ResetAsync — (re)configure row-history collection for a table
+    /// that was just created, or whose SQL/history config just changed.</summary>
+    Task ResetTableHistoryAsync(TableDefinition def);
+
+    /// <summary>Mirrors ITableHistoryGrain.DisableAsync — called on table delete.</summary>
+    Task DisableTableHistoryAsync(string tableName);
+
+    /// <summary>Mirrors RegistryGrain.PublishLifecycleAsync (the Orleans "lifecycle" stream). W5 replaces
+    /// this with a real publish to the sf-lifecycle pub/sub topic (decision D-D).</summary>
+    Task PublishLifecycleAsync(string entityId, string kind, PipelineStatus status);
+}
+
+/// <summary>Outcome of a start attempt — mirrors the try/catch-and-record-Failed pattern
+/// RegistryGrain.SetPipelineStatusAsync/SetTableStatusAsync use around a worker grain's StartAsync, without
+/// requiring the orchestrator to throw across the actor boundary (see CatalogStore's doc comment on why
+/// actor-boundary calls prefer result types over thrown exceptions).</summary>
+public readonly record struct LifecycleOutcome(bool Ok, string? Error)
+{
+    public static LifecycleOutcome Success { get; } = new(true, null);
+    public static LifecycleOutcome Failure(string error) => new(false, error);
+}
