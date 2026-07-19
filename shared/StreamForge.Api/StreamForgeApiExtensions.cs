@@ -144,6 +144,17 @@ public static class StreamForgeApiExtensions
         if (options.DocsFilePath is not null && File.Exists(options.DocsFilePath))
         {
             app.MapGet("/docs", () => Results.File(options.DocsFilePath, "text/html"));
+
+            // Sibling pages next to index.html (e.g. comparison.html, linked from its sidebar) are
+            // served under /docs/{page}.html from the same directory — nothing else.
+            var docsDir = Path.GetDirectoryName(options.DocsFilePath)!;
+            app.MapGet("/docs/{page}.html", (string page) =>
+            {
+                var file = Path.Combine(docsDir, page + ".html");
+                return Path.GetDirectoryName(Path.GetFullPath(file)) == Path.GetFullPath(docsDir) && File.Exists(file)
+                    ? Results.File(file, "text/html")
+                    : Results.NotFound();
+            });
         }
 
         // Serve the built SPA (repo-root web/dist) if present, without swallowing /api or /hubs routes.
