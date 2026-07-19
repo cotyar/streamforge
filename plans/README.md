@@ -8,5 +8,6 @@ Written against commit `49d6979` by the improve skill (focused `plan` invocation
 | 002 | [Multileg & multistage instruments](002-multileg-multistage-instruments.md) | DONE (L1+L2+L3, incl. LATEST BY) | — |
 | 003 | [Materialize territory: partitioned differential dataflow](003-materialize-territory.md) | DONE (M0–M5; soak p99 0.70× vs single-grain) | superseded interim sharding idea |
 | 004 | [Nested queries (non-recursive)](004-nested-queries.md) | DONE (N1–N4 + scope-aware editor autocomplete) | — |
+| 005 | [Dapr sibling runtime (shared core + polyglot)](005-dapr-port.md) | APPROVED | 001–004 (ports the platform they built) |
 
 Design tokens source of truth: `orleans/design-system/streamforge/MASTER.md`.
