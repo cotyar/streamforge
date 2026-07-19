@@ -41,7 +41,7 @@ namespace StreamForge.Dapr.Host.Lifecycle;
 /// <see cref="Services.PipelineSupervisorService"/>'s boot-resume sweep that mutates the router — see that
 /// service's doc comment for why a sweep-side repair is still needed for a self-healed actor.</para>
 /// </summary>
-public sealed class DaprLifecycleOrchestrator(
+public sealed partial class DaprLifecycleOrchestrator(
     DaprClient daprClient,
     Streaming.PipelineEventRouter pipelineRouter,
     ILogger<DaprLifecycleOrchestrator> logger) : ILifecycleOrchestrator
@@ -113,18 +113,6 @@ public sealed class DaprLifecycleOrchestrator(
     public Task StopTableAsync(string tableName)
     {
         WarnNoRuntime("StopTable", tableName);
-        return Task.CompletedTask;
-    }
-
-    public Task ResetTableHistoryAsync(TableDefinition def)
-    {
-        WarnNoRuntime("ResetTableHistory", def.Name);
-        return Task.CompletedTask;
-    }
-
-    public Task DisableTableHistoryAsync(string tableName)
-    {
-        WarnNoRuntime("DisableTableHistory", tableName);
         return Task.CompletedTask;
     }
 

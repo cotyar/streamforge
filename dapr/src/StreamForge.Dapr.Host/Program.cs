@@ -36,6 +36,8 @@ builder.Services.AddActors(options =>
     options.Actors.RegisterActor<UserStoreActor>();
     GeneratorRuntimeSetup.RegisterActors(options);
     PipelineRuntimeSetup.RegisterActors(options);
+    TableRuntimeSetup.RegisterActors(options);
+    TableHistoryRuntimeSetup.RegisterActors(options);
     // See Actors/ActorProxyDefaults.cs for the client-side half of this decision — both sides of every
     // actor call in this project must agree on System.Text.Json, not the SDK's legacy DataContract default.
     options.UseJsonSerialization = true;
@@ -49,6 +51,8 @@ builder.Services.AddHostedService<CatalogInitializationService>();
 GeneratorRuntimeSetup.AddServices(builder.Services);
 StreamingRuntimeSetup.AddServices(builder.Services);
 PipelineRuntimeSetup.AddServices(builder.Services);
+TableRuntimeSetup.AddServices(builder.Services);
+TableHistoryRuntimeSetup.AddServices(builder.Services);
 
 var app = builder.Build();
 
