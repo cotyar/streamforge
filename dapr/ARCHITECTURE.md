@@ -598,26 +598,54 @@ What remains unbuilt on this flavor is, as of W9, a short, deliberate, permanent
   returns the console app shell with HTTP 200, not a REST-style 404 — same as any other unrecognized
   non-`/api` path; this is normal SPA-hosting behavior, not a bug.)
 
-## Known live bug found during W9 benchmarking (reported, not fixed — out of this wave's scope)
+## Known live bug found during W9 benchmarking — FIXED
 
 Running plan 005 W9's latency benchmark (`tools/bench/`) against a freshly booted Orleans-flavor
 instance (not the Dapr flavor covered by the rest of this document — flagged here because it was
 discovered while proving out the SAME benchmark harness against both flavors, and it materially
 affects how to read the comparison numbers) surfaced a live defect: the Orleans flavor's SignalR
-`tableDelta` relay (and, observed the same session, `pipelineResult`) never delivers to a subscribed
-client — zero events over repeated 15–90s windows across three different seeded tables (`order_states`,
-`positions`, `leg_exposure`), while the SAME tables' REST `/api/tables/{id}/metrics` shows
-`deltasIn`/`deltasOut` growing continuously throughout, and a real browser against the same instance
-shows "rows never update live" (row count and cell values static) for the same tables. `sourceEvent`
-and `pipelineMetrics` (both single-object SignalR arguments) work correctly in the same session — the
-distinguishing factor appears to be a `List<T>`-of-DTO SignalR argument (`tableDelta`'s `deltas`,
-`pipelineResult`'s `rows`) versus a single object, though this wave did not root-cause it further
-(AGENTS.md hard rule #4 flags dictionary-subclass Orleans stream serialization as a known sharp edge,
-which is a plausible starting point for a future investigation). This bug is **specific to the Orleans
-flavor's `StreamBridgeService`** (`orleans/src/StreamForge.Host/Services/StreamBridgeService.cs`) — the
-Dapr flavor's equivalent (`DaprStreamBridge`) was exercised in the same benchmarking session and
-delivered `tableDelta` correctly. See `orleans/docs/comparison.html`'s "Measured latency" section and
-this wave's report for the full repro and its effect on the benchmark's Orleans-side numbers.
+`tableDelta` relay (and, observed the same session, `pipelineResult`) never delivered to a subscribed
+client on a freshly booted instance — zero events over repeated 15–90s windows across three different
+seeded tables (`order_states`, `positions`, `leg_exposure`), while the SAME tables' REST
+`/api/tables/{id}/metrics` showed `deltasIn`/`deltasOut` growing continuously throughout. `sourceEvent`
+and `pipelineMetrics` worked correctly in the same session.
+
+**Root cause (confirmed by direct repro + git-bisect against `ad7652d`, the pre-005 commit): a
+startup race, present on both sides of the 005 restructure — not a 005 regression.**
+`orleans/src/StreamForge.Host/Program.cs` kicks off registry seeding
+(`RegistryGrain.EnsureInitializedAsync`, which both seeds the catalog *and* starts every
+already-`Running` pipeline/table grain) from a fire-and-forget `ApplicationStarted` callback. That
+callback races `StreamBridgeService.ExecuteAsync`'s own `ApplicationStarted`-gated enumeration of
+`GetPipelinesAsync()`/`GetTablesAsync()`. On a *fresh* boot (no persisted catalog yet — exactly what
+`tools/bench/run-bench.sh` and a first-ever install both do), `StreamBridgeService` can easily query
+the registry before seeding has populated it, see an empty catalog, and subscribe to nothing.
+Source subscriptions self-heal (a 30s timer re-scans `GetSourcesAsync()`), but pipeline/table
+subscriptions are enumerated exactly once at boot with no retry — so a lost race meant `tableDelta`/
+`pipelineResult` were subscribed to *never*, for the lifetime of the process, even though the
+underlying grains kept producing deltas the whole time (matching the observed REST-metrics-vs-SignalR
+mismatch exactly). Empirically: a **warm** boot (persisted catalog already on disk) never loses this
+race — `RegistryGrain.OnActivateAsync` loads persisted state synchronously as part of activation,
+before `EnsureInitializedAsync` is ever called — which is why this had gone unnoticed in ordinary
+manual testing (SPA load + a few seconds' delay before subscribing) and only showed up under the
+benchmark's fresh-instance-then-immediately-measure methodology. Confirmed identical on `ad7652d`
+(pre-005) with the exact same fresh-boot repro (0 samples for `tableDelta`/`pipelineResult`,
+warm-boot fully working) — so the originally-suspected cross-assembly Orleans serializer codegen
+(W1, `List<TableDeltaDto>`/`List<ResultEnvelope>` payloads) was **not** the cause; a warm-boot test at
+master delivering both signals correctly independently rules that theory out too.
+
+**Fix**: `StreamBridgeService.ExecuteAsync` now awaits `registry.EnsureInitializedAsync()` itself
+before enumerating pipelines/tables/sources, instead of trusting that Program.cs's fire-and-forget
+call got there first. `EnsureInitializedAsync` is idempotent and Orleans serializes both callers'
+calls to it (not `[MayInterleave]`), so whichever caller's turn runs first does the real seed+start
+and the other is a fast no-op — the race becomes harmless. This bug is specific to the Orleans
+flavor's `StreamBridgeService` (`orleans/src/StreamForge.Host/Services/StreamBridgeService.cs`); the
+Dapr flavor's equivalent (`DaprStreamBridge`) was never affected (no equivalent race — see
+`dapr/src/StreamForge.Dapr.Host` startup sequencing) and delivered `tableDelta` correctly throughout.
+Regression coverage: `orleans/tests/StreamForge.Host.Tests/StreamBridgeServiceStartupRaceTests.cs`
+(a `TestCluster`-based test that starts `StreamBridgeService` before anything has seeded the
+registry — the losing side of the race — and asserts `tableDelta`/`pipelineResult` still relay).
+See `orleans/docs/comparison.html`'s "Measured latency" section for the re-measured, now-real Orleans
+`tableDelta` numbers.
 
 ## How to run
 

@@ -3,15 +3,26 @@
 Status: **DONE** (W0–W9 all landed). Results summary: Dapr flavor live on :5399 with full parity
 except partitioned execution and gRPC serving (both permanent, documented descopes — see parity
 matrix); measured `order_states` `tableDelta` latency (`tools/bench/`, real seeded pipeline, both
-runtimes) — Dapr p50/p90/p99/max = **7 / 9 / 13 / 16 ms** (397 samples); the same measurement on
-Orleans collected **0 samples**, surfacing a live Orleans-flavor SignalR relay bug found during this
-wave (`tableDelta`/`pipelineResult` never deliver to subscribers — reported in
-`dapr/ARCHITECTURE.md` and `orleans/docs/comparison.html`, not fixed per this wave's no-src-changes
-scope); a supplementary `sourceEvent`-based measurement (generator-tick → SignalR-relay hop only,
-unaffected by that bug) gives a real comparable number on both runtimes instead — see
-`orleans/docs/comparison.html` for the full numbers and methodology. Restructure waves (W0–W3)
-touched `orleans/` under the hard gate below; Dapr waves (W4–W9) were additive. Supersedes any
-notion of "fork the Host and edit" — the two runtimes share one semantic core and one API surface.
+runtimes) — Dapr p50/p90/p99/max = **7 / 9 / 13 / 16 ms** (397 samples). The same measurement on
+Orleans originally collected **0 samples**, surfacing a live Orleans-flavor SignalR relay bug found
+during this wave (`tableDelta`/`pipelineResult` never delivered to subscribers on a freshly booted
+instance). **Post-wave addendum (2026-07-19): root-caused and fixed.** Root cause was a startup race
+in `orleans/src/StreamForge.Host/Services/StreamBridgeService.cs` — its one-time enumeration of
+Running pipelines/tables at boot could run before `Program.cs`'s fire-and-forget registry-seeding
+callback populated the catalog, permanently starving those two subscriptions (sources self-heal via
+a 30s refresh; pipelines/tables never did). Confirmed via git-bisect against `ad7652d` (pre-005) that
+this race predates plan 005 entirely — it is not a restructure regression, and a warm-boot test at
+master ruled out the originally-suspected cross-assembly Orleans serializer codegen (W1) as the
+cause. Fix: `StreamBridgeService` now awaits `registry.EnsureInitializedAsync()` itself before
+enumerating, making the race harmless (idempotent call, Orleans serializes both callers' turns).
+Regression test: `orleans/tests/StreamForge.Host.Tests/StreamBridgeServiceStartupRaceTests.cs`. With
+the fix, Orleans `tableDelta` now measures p50/p90/p99/max = **122 / 209 / 499 / 608 ms** (379
+samples, `tools/bench/results/latest.json`) — real numbers, not the supplementary `sourceEvent`
+proxy this wave originally had to fall back on; see `dapr/ARCHITECTURE.md`'s bug section and
+`orleans/docs/comparison.html`'s "Measured latency" section for the full writeup and both runtimes'
+numbers side by side. Restructure waves (W0–W3) touched `orleans/` under the hard gate below; Dapr
+waves (W4–W9) were additive. Supersedes any notion of "fork the Host and edit" — the two runtimes
+share one semantic core and one API surface.
 
 **Hard gate (every commit):** `~/.dotnet/dotnet test orleans/StreamForge.sln` — all 511 tests green
 with test `.cs` files **unmodified** (`git diff --stat orleans/tests -- '*.cs'` empty). Test
