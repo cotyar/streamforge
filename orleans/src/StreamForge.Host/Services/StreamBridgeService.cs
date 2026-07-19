@@ -41,6 +41,21 @@ public sealed class StreamBridgeService(
 
         var registry = client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
 
+        // Program.cs also kicks off registry seeding (EnsureInitializedAsync) from a fire-and-forget
+        // ApplicationStarted callback, racing this service's own ApplicationStarted wait above — on a
+        // fresh boot (no persisted catalog yet) this call can easily win the race, i.e. run BEFORE that
+        // seeding has populated Sources/Pipelines/Tables and started the already-"Running" grains.
+        // EnsureInitializedAsync is idempotent (no-ops once state is non-empty) and Orleans serializes
+        // both callers' calls to it (RegistryGrain isn't [MayInterleave] for this method), so awaiting it
+        // here — instead of just trusting Program.cs got there first — makes the race harmless: whichever
+        // caller's turn runs first does the real seed+start, the other is a fast no-op, and by the time we
+        // reach RefreshSourceSubscriptionsAsync/GetPipelinesAsync/GetTablesAsync below the catalog and the
+        // Running grains are guaranteed to exist. Without this, Sources eventually self-heal via the 30s
+        // refresh loop below, but Pipelines/Tables never do (they're only enumerated once, right here) —
+        // so a losing race meant tableDelta/pipelineResult permanently never subscribed, hence never
+        // relayed, for any table/pipeline that was already Running at boot.
+        await registry.EnsureInitializedAsync();
+
         await RefreshSourceSubscriptionsAsync(registry);
         foreach (var pipeline in await registry.GetPipelinesAsync())
         {
