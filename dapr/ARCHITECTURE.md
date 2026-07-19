@@ -111,15 +111,26 @@ stage-grid dataflow) is Orleans-only. `ITableReadFacade.GetSnapshotFrontierEpoch
 `null` and `IArrangementMetaFacade.GetArrangementsAsync` always returns `[]`, independent of whether
 `TableActor` has landed (W7) — these are permanent, not W-something stubs.
 
-### Seed status: seeded pipelines/tables are forced to `Stopped`
+### Seed status: seeded pipelines/tables are forced to `Stopped` — sources are the exception (W5-A)
 
 `shared/StreamForge.AppCore/SeedCatalog` marks several demo pipelines/tables `Running` (the Orleans flavor
-resumes them for real on boot, per `RegistryGrain.EnsureInitializedAsync`). On the Dapr flavor, W4 has
-**no runtime at all** behind a Running status — no generator publishing events, no pipeline/table actually
-computing anything. Serving a seeded "Running" badge with zero rows ever arriving would be a UI lie, so
-`CatalogStore.EnsureInitialized` explicitly overrides every seeded pipeline/table to `Stopped` regardless
-of what `SeedCatalog` says, before persisting. Verified live: a fresh seed shows `GET /api/tables` /
-`GET /api/pipelines` with every entity `Stopped`.
+resumes them for real on boot, per `RegistryGrain.EnsureInitializedAsync`). On the Dapr flavor through W4,
+**no runtime at all** existed behind a Running status — no generator publishing events, no pipeline/table
+actually computing anything. Serving a seeded "Running" badge with zero rows ever arriving would be a UI
+lie, so `CatalogStore.EnsureInitialized` explicitly overrides every seeded pipeline/table to `Stopped`
+regardless of what `SeedCatalog` says, before persisting. Verified live: a fresh seed shows
+`GET /api/tables` / `GET /api/pipelines` with every entity `Stopped`. **This still applies to
+pipelines/tables** (W6/W7 haven't landed) — nothing in this paragraph changes for them.
+
+**Sources are different as of W5-A**, because a real runtime (`GeneratorActor`, see the new "Generators"
+section below) now exists behind them: `SeedCatalog.Sources()` marks every seeded source `Enabled = true`
+(see `shared/StreamForge.AppCore/Generators/MarketDataProfiles.cs`'s `SeedSources()`), and
+`CatalogStore.EnsureInitialized` does **not** override that — a seeded, enabled source is honestly
+`Enabled` because it will, in fact, start generating (within one `GeneratorSupervisorService` sweep of
+boot, typically well under 15s — see that class). This is the Dapr flavor catching up to parity with
+Orleans' own boot behavior (`RegistryGrain.EnsureInitializedAsync` starts a `GeneratorGrain` for every
+enabled source synchronously at boot); the only observable difference is Dapr's few-seconds-to-15s startup
+lag versus Orleans' instant start, a direct consequence of the periodic-sweep design (see "Generators").
 
 A user can still manually `POST .../start` on a seeded/created pipeline or table today — see the next
 decision for what that does (and does not) do.
@@ -160,6 +171,60 @@ on" (fire-and-forget publish, not an inline synchronous actor-to-actor RPC that 
 choice, not an oversight. **Rule for W5-W7:** any new actor type must not call back into `RegistryActor`
 synchronously from inside a method `RegistryActor` itself invoked; route data the callee needs as
 parameters on the original call, or via pub/sub, instead.
+
+## Generators (W5-A)
+
+One `GeneratorActor` per source (actor type `"GeneratorActor"`, key = the source's name) — a Dapr
+timer-driven synthetic event publisher built on the same `MarketDataProfiles` used by Orleans'
+`GeneratorGrain`. `Actors/GeneratorActor.cs`; the batching math is a separately unit-tested pure function,
+`Actors/GeneratorBatching.NextBatchCount` (`dapr/tests/StreamForge.Dapr.Tests/GeneratorBatchingTests.cs`).
+
+**Batched ticks, not per-event (decision D-E).** Every actor timer fire and every pub/sub publish is a
+sidecar round-trip, unlike Orleans' in-silo grain timer + in-process stream push. `GeneratorActor` ticks on
+a fixed 200ms period (well inside D-E's "≤20Hz" ceiling) and each tick publishes
+`round(EventsPerSecond × elapsed)` events — elapsed measured from actual wall-clock time since the previous
+tick, not the nominal period, with the fractional remainder carried forward tick-to-tick so a low-EPS
+source still converges on its configured rate rather than rounding down to zero forever — as ONE
+`SourceEventsEnvelope` to both `sf-sources` (the in-host router) and `sf-source-{name}` (the publish-only
+polyglot egress copy; nothing in this process subscribes to it).
+
+**State is persisted, unlike Orleans' in-memory `GeneratorGrain`.** `GeneratorActor` persists its last
+`SourceDefinition` and running flag (state name `"generator"`) specifically because Dapr actor timers do
+NOT survive deactivation/reactivation — on any reactivation, `OnActivateAsync` re-arms the timer
+immediately from persisted state if it was last `Running`, instead of waiting for the next
+`GeneratorSupervisorService` sweep. The supervisor (`Services/GeneratorSupervisorService.cs`, hosted
+service) remains the safety net for the one case self-healing can't cover: a source whose actor has never
+been activated at all — every ~15s it lists sources via `ICatalogFacade` and idempotently calls
+`StartAsync` on each enabled one's `GeneratorActor`, mirroring Orleans' own `GeneratorSupervisorService`
+(which pings to keep grains alive/reactivated).
+
+**Acyclic by construction.** `GeneratorActor` never resolves `ICatalogFacade`, an `IRegistryActor` proxy, or
+any other actor — everything it needs arrives once as the `StartAsync` parameter. `Lifecycle/
+DaprLifecycleOrchestrator` (replacing `NoopLifecycleOrchestrator` — registered by
+`Actors/GeneratorRuntimeSetup.cs`, which now also registers `GeneratorActor` and a `DaprClient`) calls
+straight into `GeneratorActor.StartAsync`/`StopAsync` **synchronously, inline**, from
+`RegistryActor`'s own turn (via `CatalogStore`). This refines this document's earlier, more conservative
+W4 reentrancy note ("fire-and-forget publish, not an inline synchronous actor-to-actor RPC that could call
+back in"): the actual hazard that note guards against is a call-graph CYCLE, not synchrony per se, and an
+inline call to a genuine leaf actor cannot deadlock. This is also the byte-identical-behavior choice —
+Orleans' `RegistryGrain.UpsertSourceAsync` awaits `GeneratorGrain.StartAsync`/`StopAsync` inline too, and
+`CatalogStore`'s contract (shared endpoint code, decision D-B) is unchanged either way. **The rule for
+W6/W7 stands as originally written**: this only holds because `GeneratorActor` is a leaf with no path back
+to `RegistryActor`; a worker actor that reads back from the registry (directly or via a facade) would
+reintroduce the exact cycle this design avoids and must use fire-and-forget pub/sub or an equivalent
+non-blocking path instead.
+
+**`ILifecycleOrchestrator.NotifySourceChangedAsync` signature changed** from `(string name, bool enabled)`
+to `(SourceDefinition def)` — the real implementation needs the source's generator profile/EventsPerSecond/
+field schema to start `GeneratorActor`, and fetching that from inside the call (e.g. via `ICatalogFacade`,
+which resolves to an actor-proxy call back into `RegistryActor`) would be exactly the self-call-while-
+mid-turn deadlock the reentrancy decision exists to prevent. `CatalogStore` already has the full definition
+in hand at every call site, so no lookup is needed with the new signature. `NoopLifecycleOrchestrator` and
+the test double `TestLifecycleOrchestrator` were updated to match; no test assertions changed (the log/call
+string format is unchanged: `"NotifySourceChanged:{name}:{enabled}"`, now built from `def.Name`/`def.Enabled`).
+
+`sf-lifecycle` is now published for real too: `DaprLifecycleOrchestrator.PublishLifecycleAsync` calls
+`DaprClient.PublishEventAsync` where `NoopLifecycleOrchestrator` only logged.
 
 ## What's NOT here yet (by design — later waves)
 

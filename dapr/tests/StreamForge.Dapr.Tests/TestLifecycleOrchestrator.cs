@@ -14,9 +14,9 @@ public sealed class TestLifecycleOrchestrator : ILifecycleOrchestrator
 
     public string FailureMessage { get; set; } = "forced failure";
 
-    public Task NotifySourceChangedAsync(string name, bool enabled)
+    public Task NotifySourceChangedAsync(SourceDefinition def)
     {
-        Calls.Add($"NotifySourceChanged:{name}:{enabled}");
+        Calls.Add($"NotifySourceChanged:{def.Name}:{def.Enabled}");
         return Task.CompletedTask;
     }
 

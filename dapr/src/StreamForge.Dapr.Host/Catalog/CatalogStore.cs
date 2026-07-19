@@ -113,7 +113,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             state.Sources.Add(def);
         }
 
-        await orchestrator.NotifySourceChangedAsync(def.Name, def.Enabled);
+        await orchestrator.NotifySourceChangedAsync(def);
     }
 
     public async Task<bool> DeleteSourceAsync(string name)

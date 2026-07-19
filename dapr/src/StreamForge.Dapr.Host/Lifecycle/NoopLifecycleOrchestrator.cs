@@ -15,9 +15,9 @@ public sealed class NoopLifecycleOrchestrator(ILogger<NoopLifecycleOrchestrator>
     private void WarnNoRuntime(string action, string id) =>
         logger.LogWarning("{Action}({Id}): no runtime yet (W5/W6/W7) — catalog status updated, no process started.", action, id);
 
-    public Task NotifySourceChangedAsync(string name, bool enabled)
+    public Task NotifySourceChangedAsync(SourceDefinition def)
     {
-        WarnNoRuntime(enabled ? "StartGenerator" : "StopGenerator", name);
+        WarnNoRuntime(def.Enabled ? "StartGenerator" : "StopGenerator", def.Name);
         return Task.CompletedTask;
     }
 
