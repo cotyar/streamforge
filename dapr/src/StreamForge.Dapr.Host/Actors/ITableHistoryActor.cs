@@ -50,6 +50,27 @@ public interface ITableHistoryActor : IActor
     /// <c>ITableHistoryGrain.DisableAsync</c>. Call on table delete.</summary>
     Task DisableAsync();
 
+    /// <summary>Idempotent configure — mirrors <c>ITableHistoryGrain.ResumeAsync</c>'s "survives a restart
+    /// without losing accumulated history" contract (see that method's doc comment:
+    /// "Re-subscribe history grains for every table with HistoryEnabled ... uses ResumeAsync (not
+    /// ResetAsync) so previously accumulated history survives a silo restart"), adapted to this actor's
+    /// idempotent-by-comparison shape rather than Orleans' idempotent-by-construction one (a grain
+    /// reactivation always re-subscribes regardless; here <see cref="Services.TableHistorySupervisorService"/>
+    /// calls this on every sweep tick, including ones where nothing changed, so it must be safe to call
+    /// repeatedly with no effect).
+    ///
+    /// <para><b>No-op (preserves <c>Entries</c>) when <paramref name="def"/>'s history-relevant config
+    /// already matches this actor's current configuration</b> (HistoryEnabled/Mode/Limit/ByField/WindowMs,
+    /// and the identity-column mapping derived from <paramref name="def"/>.Sql) — this is what makes a host
+    /// restart safe: <see cref="TableHistoryActor.OnActivateAsync"/> reloads the actor's persisted,
+    /// already-correctly-configured state from Redis, and a subsequent sweep call here must not clobber
+    /// it. Otherwise behaves exactly like <see cref="ResetAsync"/> (first-ever configuration for a table
+    /// this actor has never seen a Reset/EnsureConfigured call for — e.g. a SEEDED table, whose definition
+    /// never goes through <c>Catalog/CatalogStore.cs</c>'s <c>CreateTableAsync</c> at all — or a genuine
+    /// config/SQL change that reached this actor via the sweep instead of
+    /// <see cref="Lifecycle.DaprLifecycleOrchestrator.ResetTableHistoryAsync"/>).</para></summary>
+    Task EnsureConfiguredAsync(TableDefinition def);
+
     /// <summary>Applies one batch of table deltas — mirrors <c>TableHistoryGrain.OnDeltaBatchAsync</c>'s
     /// stream handler, fed here by <c>Streaming.TableHistoryDeltaSink</c> instead of a direct stream
     /// subscription (Dapr's fixed-topic transport, decision D-D). A cheap no-op if history isn't currently

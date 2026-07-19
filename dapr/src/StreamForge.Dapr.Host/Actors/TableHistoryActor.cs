@@ -82,6 +82,13 @@ public sealed class TableHistoryActor(ActorHost host) : Actor(host), ITableHisto
         }
     }
 
+    /// <summary>See <see cref="ITableHistoryActor.EnsureConfiguredAsync"/>'s doc comment for the full
+    /// rationale — a no-op (preserving <see cref="_state"/> untouched, including its accumulated
+    /// <c>Entries</c>) when <paramref name="def"/>'s history config already matches, otherwise delegates
+    /// to <see cref="ResetAsync"/> exactly like a genuine config change would.</summary>
+    public Task EnsureConfiguredAsync(TableDefinition def) =>
+        TableHistoryApplication.ConfigMatches(_state, def) ? Task.CompletedTask : ResetAsync(def);
+
     public async Task DisableAsync()
     {
         await DisarmFlushTimerIfArmedAsync();
@@ -215,6 +222,53 @@ public static class TableHistoryApplication
         Entries = [],
         Seq = 0,
     };
+
+    /// <summary>Mirrors <c>ITableHistoryActor.EnsureConfiguredAsync</c>'s decision, as a pure function of
+    /// (current state, target definition) so it's testable without any actor machinery — see
+    /// dapr/tests/StreamForge.Dapr.Tests/TableHistoryEnsureConfiguredTests.cs. Returns <paramref name="state"/>
+    /// UNCHANGED (same reference, <c>Entries</c> untouched — the restart-safe, don't-lose-history case)
+    /// when <see cref="ConfigMatches"/> says the config already matches; otherwise returns a freshly
+    /// <see cref="Reset"/> state, exactly like a genuine config change would produce.</summary>
+    public static TableHistoryActorState EnsureConfigured(TableHistoryActorState state, TableDefinition def) =>
+        ConfigMatches(state, def) ? state : Reset(def);
+
+    /// <summary>True when <paramref name="state"/>'s current history configuration already matches
+    /// <paramref name="def"/>'s current settings — i.e. nothing for <see cref="EnsureConfigured"/> to do.
+    /// When both agree history is OFF, mode/limit/byField/windowMs/identity-columns are irrelevant (a
+    /// disabled actor's leftover fields from a previous configuration, or <see cref="DisableAsync"/>'s own
+    /// zeroed defaults, never matter) — so this only compares those when <paramref name="def"/>.HistoryEnabled
+    /// is true. Identity columns are compared by re-deriving them from <paramref name="def"/>.Sql (the same
+    /// pure <c>TableGroupKeyExtractor.ExtractIdentityColumns</c> call <see cref="Reset"/> itself makes) —
+    /// covers a SQL change that altered the GROUP BY identity without necessarily changing any of the
+    /// other History* fields.</summary>
+    public static bool ConfigMatches(TableHistoryActorState state, TableDefinition def)
+    {
+        if (state.HistoryEnabled != def.HistoryEnabled)
+        {
+            return false;
+        }
+
+        if (!def.HistoryEnabled)
+        {
+            return true;
+        }
+
+        return state.HistoryMode == def.HistoryMode
+            && state.HistoryLimit == def.HistoryLimit
+            && state.HistoryByField == def.HistoryByField
+            && state.HistoryWindowMs == def.HistoryWindowMs
+            && IdentityColumnsEqual(state.IdentityColumns, TableGroupKeyExtractor.ExtractIdentityColumns(def.Sql));
+    }
+
+    private static bool IdentityColumnsEqual(List<string>? a, List<string>? b)
+    {
+        if (a is null || b is null)
+        {
+            return a is null && b is null;
+        }
+
+        return a.SequenceEqual(b, StringComparer.Ordinal);
+    }
 
     /// <summary>Applies one <c>sf-table-delta</c> batch to <paramref name="state"/> in place — mirrors
     /// <c>TableHistoryGrain.OnDeltaBatchAsync</c> exactly, including the actor-wire JsonElement

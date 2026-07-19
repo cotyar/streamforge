@@ -1,6 +1,7 @@
 using Dapr.Actors.Runtime;
 using StreamForge.Abstractions;
 using StreamForge.Dapr.Host.Facades;
+using StreamForge.Dapr.Host.Services;
 using StreamForge.Dapr.Host.Streaming;
 
 namespace StreamForge.Dapr.Host.Actors;
@@ -12,13 +13,16 @@ namespace StreamForge.Dapr.Host.Actors;
 /// real <see cref="ITableHistoryFacade"/> (last registration wins over
 /// <c>Facades/DaprFacades.cs</c>'s <see cref="StubTableHistoryFacade"/> — Program.cs calls
 /// <c>AddDaprFacades()</c> before this method), the shared
-/// <see cref="TableHistoryEnabledMap"/> singleton, and <see cref="TableHistoryDeltaSink"/>'s
+/// <see cref="TableHistoryEnabledMap"/> singleton, <see cref="TableHistoryDeltaSink"/>'s
 /// <see cref="ITableDeltaSink"/> registration (an ADDITIONAL registration alongside
 /// <c>Streaming/StreamingRuntimeSetup.cs</c>'s own <see cref="DaprStreamBridge"/> one — see
 /// <c>Streaming/Sinks.cs</c>'s class doc: "no change to this file [Sinks.cs] beyond what's already
 /// declared", and no change to <c>StreamingRuntimeSetup.cs</c> either, since <c>IEnumerable&lt;T&gt;</c>
 /// DI resolution fans out across every setup method that registers one, regardless of which file it's
-/// registered from).
+/// registered from), and (post-live-verification fix) <see cref="TableHistorySupervisorService"/> — the
+/// boot/periodic sweep that catches the seed path and host-restart gaps
+/// <see cref="Lifecycle.ILifecycleOrchestrator"/>-only wiring can't cover (see that service's own doc
+/// comment for the full writeup).
 /// </summary>
 public static class TableHistoryRuntimeSetup
 {
@@ -37,5 +41,7 @@ public static class TableHistoryRuntimeSetup
         // dependency this wave), so TableHistoryDeltaSink must be handed that SAME instance, not a second one.
         services.AddSingleton(TableHistoryEnabledMap.Instance);
         services.AddSingleton<ITableDeltaSink, TableHistoryDeltaSink>();
+
+        services.AddHostedService<TableHistorySupervisorService>();
     }
 }
