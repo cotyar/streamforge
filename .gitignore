@@ -5,3 +5,4 @@ data/
 *.user
 .DS_Store
 *.tsbuildinfo
+dist/

@@ -15,7 +15,7 @@ not by builds).
 cd /Users/yuriyhabarov/work/crates-foundation
 ~/.dotnet/dotnet build orleans/StreamForge.sln          # 0 errors
 ~/.dotnet/dotnet test  orleans/StreamForge.sln          # Engine ~393 + Host ~118, all green
-cd orleans/web && bun run build                         # tsc + vite clean (bun, never npm)
+cd web && bun run build                                 # tsc + vite clean (bun, never npm)
 ```
 
 Rules: pre-existing tests must pass **unmodified** — if your change requires editing an existing

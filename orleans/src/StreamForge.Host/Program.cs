@@ -178,8 +178,13 @@ if (File.Exists(docsFile))
     app.MapGet("/docs", () => Results.File(docsFile, "text/html"));
 }
 
-// Serve the built SPA (web/dist) if present, without swallowing /api or /hubs routes.
-var spaDist = Path.Combine(app.Environment.ContentRootPath, "..", "..", "web", "dist");
+// Serve the built SPA (repo-root web/dist) if present, without swallowing /api or /hubs routes.
+// "Web:Dist" is configurable (relative to ContentRootPath) so the Dapr host can point at the same
+// directory from its own content root; default is the path from orleans/src/StreamForge.Host up to
+// repo-root web/dist.
+var spaDist = Path.GetFullPath(Path.Combine(
+    app.Environment.ContentRootPath,
+    app.Configuration["Web:Dist"] ?? Path.Combine("..", "..", "..", "web", "dist")));
 if (Directory.Exists(spaDist))
 {
     var spaFiles = new PhysicalFileProvider(spaDist);

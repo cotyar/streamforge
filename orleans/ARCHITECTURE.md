@@ -117,7 +117,7 @@ flowchart LR
 
 ```bash
 ~/.dotnet/dotnet test orleans/StreamForge.sln          # 511 tests
-cd orleans/web && bun run build                        # SPA (bun only, never npm)
+cd web && bun run build                                # SPA (bun only, never npm)
 ~/.dotnet/dotnet run --project orleans/src/StreamForge.Host   # :5199 + :5299
 # config: --Http:Port --Grpc:Port --DataDir   ·  logins: admin/editor/viewer + "123!"
 ```

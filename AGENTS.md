@@ -24,7 +24,7 @@ Architecture: [`orleans/ARCHITECTURE.md`](orleans/ARCHITECTURE.md) · rationale:
 ```bash
 ~/.dotnet/dotnet build orleans/StreamForge.sln
 ~/.dotnet/dotnet test  orleans/StreamForge.sln     # 511 tests — the whole suite must be green
-cd orleans/web && bun run build
+cd web && bun run build
 ~/.dotnet/dotnet run --project orleans/src/StreamForge.Host
 ```
 Local skills (root `.claude/skills/`, `sf-` prefix) wrap the common workflows: `/sf-run`,
