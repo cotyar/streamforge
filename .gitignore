@@ -1,0 +1,7 @@
+bin/
+obj/
+node_modules/
+data/
+*.user
+.DS_Store
+*.tsbuildinfo
