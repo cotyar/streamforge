@@ -136,6 +136,7 @@ public static class StreamForgeApiExtensions
         app.MapPipelinesEndpoints();
         app.MapTablesEndpoints();
         app.MapUsersEndpoints();
+        app.MapConfigEndpoints();
         app.MapMetaEndpoints(options);
         app.MapHub<StreamHub>("/hubs/stream");
 
