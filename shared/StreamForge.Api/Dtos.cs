@@ -1,6 +1,6 @@
 using StreamForge.Abstractions;
 
-namespace StreamForge.Host.Api;
+namespace StreamForge.Api;
 
 // ============================================================================
 // REST DTOs — must match web/src/api/types.ts exactly (camelCase via default

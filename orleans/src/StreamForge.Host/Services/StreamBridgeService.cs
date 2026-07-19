@@ -4,7 +4,7 @@ using Orleans.Runtime;
 using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
-using StreamForge.Host.Hubs;
+using StreamForge.Api.Hubs;
 
 namespace StreamForge.Host.Services;
 

@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 
-namespace StreamForge.Host.Hubs;
+namespace StreamForge.Api.Hubs;
 
 [Authorize(Policy = "Viewer")]
 public sealed class StreamHub : Hub

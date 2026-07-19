@@ -1,9 +1,10 @@
 using System.Text;
-using Orleans;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
 using StreamForge.Host.Grpc.Dynamic;
 
-namespace StreamForge.Host.Api;
+namespace StreamForge.Api;
 
 public static class SourcesEndpoints
 {
@@ -11,23 +12,22 @@ public static class SourcesEndpoints
     {
         var group = app.MapGroup("/api/sources");
 
-        group.MapGet("/", async (IClusterClient client) =>
-            Results.Ok(await Registry(client).GetSourcesAsync())
+        group.MapGet("/", async (ICatalogFacade registry) =>
+            Results.Ok(await registry.GetSourcesAsync())
         ).RequireAuthorization("Viewer");
 
-        group.MapGet("/{name}", async (string name, IClusterClient client) =>
+        group.MapGet("/{name}", async (string name, ICatalogFacade registry) =>
         {
-            var src = await Registry(client).GetSourceAsync(name);
+            var src = await registry.GetSourceAsync(name);
             return src is null ? Results.NotFound() : Results.Ok(src);
         }).RequireAuthorization("Viewer");
 
         // Downloadable, self-contained .proto for this source: DescriptorFactory's schema plus the
         // DynamicStreamService streaming contract, ready for a client to compile standalone (see
-        // tools/generate-client.sh). Field numbers always come from IRegistryGrain.EnsureFieldNumbersAsync
+        // tools/generate-client.sh). Field numbers always come from ICatalogFacade.EnsureFieldNumbersAsync
         // so they stay identical to what the dynamic gRPC reflection surface uses.
-        group.MapGet("/{name}/proto", async (string name, IClusterClient client) =>
+        group.MapGet("/{name}/proto", async (string name, ICatalogFacade registry) =>
         {
-            var registry = Registry(client);
             var src = await registry.GetSourceAsync(name);
             if (src is null)
             {
@@ -42,7 +42,7 @@ public static class SourcesEndpoints
             return Results.File(Encoding.UTF8.GetBytes(protoText), "text/plain; charset=utf-8", schema.FileProto.Name);
         }).RequireAuthorization("Viewer");
 
-        group.MapPost("/", async (SourceDefinition def, IClusterClient client) =>
+        group.MapPost("/", async (SourceDefinition def, ICatalogFacade registry) =>
         {
             if (string.IsNullOrWhiteSpace(def.Name))
             {
@@ -59,7 +59,6 @@ public static class SourcesEndpoints
                 return Results.BadRequest(new ErrorResponse("eventsPerSecond must be > 0"));
             }
 
-            var registry = Registry(client);
             if (await registry.GetSourceAsync(def.Name) is not null)
             {
                 return Results.BadRequest(new ErrorResponse("source name already exists"));
@@ -69,9 +68,8 @@ public static class SourcesEndpoints
             return Results.Created($"/api/sources/{def.Name}", def);
         }).RequireAuthorization("Editor");
 
-        group.MapPut("/{name}", async (string name, SourceDefinition def, IClusterClient client) =>
+        group.MapPut("/{name}", async (string name, SourceDefinition def, ICatalogFacade registry) =>
         {
-            var registry = Registry(client);
             if (await registry.GetSourceAsync(name) is null)
             {
                 return Results.NotFound();
@@ -92,13 +90,10 @@ public static class SourcesEndpoints
             return Results.Ok(def);
         }).RequireAuthorization("Editor");
 
-        group.MapDelete("/{name}", async (string name, IClusterClient client) =>
+        group.MapDelete("/{name}", async (string name, ICatalogFacade registry) =>
         {
-            var removed = await Registry(client).DeleteSourceAsync(name);
+            var removed = await registry.DeleteSourceAsync(name);
             return removed ? Results.NoContent() : Results.NotFound();
         }).RequireAuthorization("Editor");
     }
-
-    private static IRegistryGrain Registry(IClusterClient client) =>
-        client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
 }

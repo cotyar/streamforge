@@ -1,10 +1,11 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
 using StreamForge.Abstractions;
 
-namespace StreamForge.Host.Auth;
+namespace StreamForge.Api.Auth;
 
 /// <summary>Issues HS256 JWTs for authenticated users. 12h expiry.</summary>
 public sealed class JwtTokenService(IConfiguration config)

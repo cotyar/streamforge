@@ -1,11 +1,12 @@
 using System.Security.Claims;
 using System.Text;
-using Orleans;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
 using StreamForge.Host.Grpc.Dynamic;
 
-namespace StreamForge.Host.Api;
+namespace StreamForge.Api;
 
 public static class PipelinesEndpoints
 {
@@ -13,24 +14,22 @@ public static class PipelinesEndpoints
     {
         var group = app.MapGroup("/api/pipelines");
 
-        group.MapGet("/", async (IClusterClient client) =>
-            Results.Ok(await Registry(client).GetPipelinesAsync())
+        group.MapGet("/", async (ICatalogFacade registry) =>
+            Results.Ok(await registry.GetPipelinesAsync())
         ).RequireAuthorization("Viewer");
 
-        group.MapGet("/{id}", async (string id, IClusterClient client) =>
+        group.MapGet("/{id}", async (string id, ICatalogFacade registry) =>
         {
-            var p = await Registry(client).GetPipelineAsync(id);
+            var p = await registry.GetPipelineAsync(id);
             return p is null ? Results.NotFound() : Results.Ok(p);
         }).RequireAuthorization("Viewer");
 
-        group.MapPost("/", async (CreatePipelineRequest req, ClaimsPrincipal principal, IClusterClient client) =>
+        group.MapPost("/", async (CreatePipelineRequest req, ClaimsPrincipal principal, ICatalogFacade registry) =>
         {
             if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Sql))
             {
                 return Results.BadRequest(new ErrorResponse("name and sql are required"));
             }
-
-            var registry = Registry(client);
 
             // Compile-check for diagnostics; draft-friendly — never blocks creation beyond the empty check above.
             var schemas = await BuildSchemasAsync(registry);
@@ -49,9 +48,8 @@ public static class PipelinesEndpoints
             return Results.Created($"/api/pipelines/{created.Id}", created);
         }).RequireAuthorization("Editor");
 
-        group.MapPut("/{id}", async (string id, CreatePipelineRequest req, IClusterClient client) =>
+        group.MapPut("/{id}", async (string id, CreatePipelineRequest req, ICatalogFacade registry) =>
         {
-            var registry = Registry(client);
             var existing = await registry.GetPipelineAsync(id);
             if (existing is null)
             {
@@ -67,27 +65,27 @@ public static class PipelinesEndpoints
             return updated is null ? Results.NotFound() : Results.Ok(updated);
         }).RequireAuthorization("Editor");
 
-        group.MapDelete("/{id}", async (string id, IClusterClient client) =>
+        group.MapDelete("/{id}", async (string id, ICatalogFacade registry) =>
         {
-            var removed = await Registry(client).DeletePipelineAsync(id);
+            var removed = await registry.DeletePipelineAsync(id);
             return removed ? Results.NoContent() : Results.NotFound();
         }).RequireAuthorization("Editor");
 
-        group.MapPost("/{id}/start", async (string id, IClusterClient client) =>
+        group.MapPost("/{id}/start", async (string id, ICatalogFacade registry) =>
         {
-            var updated = await Registry(client).SetPipelineStatusAsync(id, PipelineStatus.Running);
+            var updated = await registry.SetPipelineStatusAsync(id, PipelineStatus.Running);
             return updated is null ? Results.NotFound() : Results.Ok(updated);
         }).RequireAuthorization("Editor");
 
-        group.MapPost("/{id}/stop", async (string id, IClusterClient client) =>
+        group.MapPost("/{id}/stop", async (string id, ICatalogFacade registry) =>
         {
-            var updated = await Registry(client).SetPipelineStatusAsync(id, PipelineStatus.Stopped);
+            var updated = await registry.SetPipelineStatusAsync(id, PipelineStatus.Stopped);
             return updated is null ? Results.NotFound() : Results.Ok(updated);
         }).RequireAuthorization("Editor");
 
-        group.MapPost("/validate", async (ValidateRequest req, IClusterClient client) =>
+        group.MapPost("/validate", async (ValidateRequest req, ICatalogFacade registry) =>
         {
-            var schemas = await BuildSchemasAsync(Registry(client));
+            var schemas = await BuildSchemasAsync(registry);
             var result = SqlCompiler.Compile(req.Sql, schemas);
             return Results.Ok(new ValidateResponse(
                 result.Ok,
@@ -99,9 +97,8 @@ public static class PipelinesEndpoints
         // Downloadable, self-contained .proto for this pipeline: PipelineDefinition doesn't persist an
         // output schema (unlike TableDefinition), so its SQL is recompiled here to get one. 409 with
         // compile diagnostics if the SQL doesn't currently compile.
-        group.MapGet("/{id}/proto", async (string id, IClusterClient client) =>
+        group.MapGet("/{id}/proto", async (string id, ICatalogFacade registry) =>
         {
-            var registry = Registry(client);
             var def = await registry.GetPipelineAsync(id);
             if (def is null)
             {
@@ -132,19 +129,16 @@ public static class PipelinesEndpoints
             return Results.File(Encoding.UTF8.GetBytes(protoText), "text/plain; charset=utf-8", schema.FileProto.Name);
         }).RequireAuthorization("Viewer");
 
-        group.MapGet("/{id}/results", async (string id, int? limit, IClusterClient client) =>
-            Results.Ok(await client.GetGrain<IPipelineGrain>(id).GetRecentResultsAsync(limit ?? 100))
+        group.MapGet("/{id}/results", async (string id, int? limit, IPipelineReadFacade pipelines) =>
+            Results.Ok(await pipelines.GetRecentResultsAsync(id, limit ?? 100))
         ).RequireAuthorization("Viewer");
 
-        group.MapGet("/{id}/metrics", async (string id, IClusterClient client) =>
-            Results.Ok(await client.GetGrain<IPipelineGrain>(id).GetMetricsAsync())
+        group.MapGet("/{id}/metrics", async (string id, IPipelineReadFacade pipelines) =>
+            Results.Ok(await pipelines.GetMetricsAsync(id))
         ).RequireAuthorization("Viewer");
     }
 
-    private static IRegistryGrain Registry(IClusterClient client) =>
-        client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
-
-    private static async Task<Dictionary<string, SourceSchema>> BuildSchemasAsync(IRegistryGrain registry)
+    private static async Task<Dictionary<string, SourceSchema>> BuildSchemasAsync(ICatalogFacade registry)
     {
         var sources = await registry.GetSourcesAsync();
         var schemas = new Dictionary<string, SourceSchema>();

@@ -1,12 +1,13 @@
 using System.Security.Claims;
 using System.Text;
-using Orleans;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
 using StreamForge.Host.Grains;
 using StreamForge.Host.Grpc.Dynamic;
 
-namespace StreamForge.Host.Api;
+namespace StreamForge.Api;
 
 public static class TablesEndpoints
 {
@@ -14,17 +15,17 @@ public static class TablesEndpoints
     {
         var group = app.MapGroup("/api/tables");
 
-        group.MapGet("/", async (IClusterClient client) =>
-            Results.Ok(await Registry(client).GetTablesAsync())
+        group.MapGet("/", async (ICatalogFacade registry) =>
+            Results.Ok(await registry.GetTablesAsync())
         ).RequireAuthorization("Viewer");
 
-        group.MapGet("/{id}", async (string id, IClusterClient client) =>
+        group.MapGet("/{id}", async (string id, ICatalogFacade registry) =>
         {
-            var t = await Registry(client).GetTableAsync(id);
+            var t = await registry.GetTableAsync(id);
             return t is null ? Results.NotFound() : Results.Ok(t);
         }).RequireAuthorization("Viewer");
 
-        group.MapPost("/", async (CreateTableRequest req, ClaimsPrincipal principal, IClusterClient client) =>
+        group.MapPost("/", async (CreateTableRequest req, ClaimsPrincipal principal, ICatalogFacade registry) =>
         {
             if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Sql))
             {
@@ -50,7 +51,7 @@ public static class TablesEndpoints
                     Metadata = req.Metadata ?? [],
                     Parallelism = req.Parallelism,
                 };
-                var created = await Registry(client).CreateTableAsync(def);
+                var created = await registry.CreateTableAsync(def);
                 return Results.Created($"/api/tables/{created.Id}", created);
             }
             catch (InvalidOperationException ex)
@@ -59,9 +60,8 @@ public static class TablesEndpoints
             }
         }).RequireAuthorization("Editor");
 
-        group.MapPut("/{id}", async (string id, CreateTableRequest req, IClusterClient client) =>
+        group.MapPut("/{id}", async (string id, CreateTableRequest req, ICatalogFacade registry) =>
         {
-            var registry = Registry(client);
             var existing = await registry.GetTableAsync(id);
             if (existing is null)
             {
@@ -93,11 +93,11 @@ public static class TablesEndpoints
             }
         }).RequireAuthorization("Editor");
 
-        group.MapDelete("/{id}", async (string id, IClusterClient client) =>
+        group.MapDelete("/{id}", async (string id, ICatalogFacade registry) =>
         {
             try
             {
-                var removed = await Registry(client).DeleteTableAsync(id);
+                var removed = await registry.DeleteTableAsync(id);
                 return removed ? Results.NoContent() : Results.NotFound();
             }
             catch (InvalidOperationException ex)
@@ -106,11 +106,11 @@ public static class TablesEndpoints
             }
         }).RequireAuthorization("Editor");
 
-        group.MapPost("/{id}/start", async (string id, IClusterClient client) =>
+        group.MapPost("/{id}/start", async (string id, ICatalogFacade registry) =>
         {
             try
             {
-                var updated = await Registry(client).SetTableStatusAsync(id, PipelineStatus.Running);
+                var updated = await registry.SetTableStatusAsync(id, PipelineStatus.Running);
                 return updated is null ? Results.NotFound() : Results.Ok(updated);
             }
             catch (InvalidOperationException ex)
@@ -119,11 +119,11 @@ public static class TablesEndpoints
             }
         }).RequireAuthorization("Editor");
 
-        group.MapPost("/{id}/stop", async (string id, IClusterClient client) =>
+        group.MapPost("/{id}/stop", async (string id, ICatalogFacade registry) =>
         {
             try
             {
-                var updated = await Registry(client).SetTableStatusAsync(id, PipelineStatus.Stopped);
+                var updated = await registry.SetTableStatusAsync(id, PipelineStatus.Stopped);
                 return updated is null ? Results.NotFound() : Results.Ok(updated);
             }
             catch (InvalidOperationException ex)
@@ -132,9 +132,8 @@ public static class TablesEndpoints
             }
         }).RequireAuthorization("Editor");
 
-        group.MapPost("/validate", async (ValidateRequest req, IClusterClient client) =>
+        group.MapPost("/validate", async (ValidateRequest req, ICatalogFacade registry) =>
         {
-            var registry = Registry(client);
             var streamSchemas = await BuildStreamSchemasAsync(registry);
             var tableSchemas = await BuildTableSchemasAsync(registry);
             var result = SqlCompiler.CompileTable(req.Sql, streamSchemas, tableSchemas);
@@ -147,40 +146,38 @@ public static class TablesEndpoints
                 result.OutputSchema?.Fields.Select(f => new FieldDefDto(f.Key, f.Value.ToString())).ToList() ?? []));
         }).RequireAuthorization("Editor");
 
-        group.MapGet("/{id}/rows", async (string id, int? limit, int? offset, IClusterClient client) =>
+        group.MapGet("/{id}/rows", async (string id, int? limit, int? offset, ICatalogFacade registry, ITableReadFacade tables) =>
         {
-            var def = await Registry(client).GetTableAsync(id);
+            var def = await registry.GetTableAsync(id);
             if (def is null)
             {
                 return Results.NotFound();
             }
 
-            var grain = client.GetGrain<ITableGrain>(def.Name);
-            var rows = await grain.GetRowsAsync(limit ?? 100, offset ?? 0);
-            var total = await grain.GetRowCountAsync();
-            var seq = await grain.GetSeqAsync();
-            var frontierEpoch = await grain.GetSnapshotFrontierEpochAsync();
+            var rows = await tables.GetRowsAsync(def.Name, limit ?? 100, offset ?? 0);
+            var total = await tables.GetRowCountAsync(def.Name);
+            var seq = await tables.GetSeqAsync(def.Name);
+            var frontierEpoch = await tables.GetSnapshotFrontierEpochAsync(def.Name);
             return Results.Ok(new TableRowsResponse(rows, total, seq, frontierEpoch));
         }).RequireAuthorization("Viewer");
 
-        group.MapGet("/{id}/metrics", async (string id, IClusterClient client) =>
+        group.MapGet("/{id}/metrics", async (string id, ICatalogFacade registry, ITableReadFacade tables) =>
         {
-            var def = await Registry(client).GetTableAsync(id);
+            var def = await registry.GetTableAsync(id);
             if (def is null)
             {
                 return Results.NotFound();
             }
 
-            return Results.Ok(await client.GetGrain<ITableGrain>(def.Name).GetMetricsAsync());
+            return Results.Ok(await tables.GetMetricsAsync(def.Name));
         }).RequireAuthorization("Viewer");
 
         // Downloadable, self-contained .proto for this table: DescriptorFactory's schema (built from
         // the already-compiled TableDefinition.OutputFields, no recompilation needed) plus the
         // DynamicStreamService streaming contract. 409 if the table has never successfully compiled
         // (no OutputFields to describe), mirroring the pipeline endpoint's compile-failure behavior.
-        group.MapGet("/{id}/proto", async (string id, IClusterClient client) =>
+        group.MapGet("/{id}/proto", async (string id, ICatalogFacade registry) =>
         {
-            var registry = Registry(client);
             var def = await registry.GetTableAsync(id)
                 ?? (await registry.GetTablesAsync()).FirstOrDefault(t => t.Name == id);
             if (def is null)
@@ -202,9 +199,9 @@ public static class TablesEndpoints
             return Results.File(Encoding.UTF8.GetBytes(protoText), "text/plain; charset=utf-8", schema.FileProto.Name);
         }).RequireAuthorization("Viewer");
 
-        group.MapGet("/{id}/search", async (string id, string? q, int? limit, IClusterClient client) =>
+        group.MapGet("/{id}/search", async (string id, string? q, int? limit, ICatalogFacade registry, ITableReadFacade tables) =>
         {
-            var def = await Registry(client).GetTableAsync(id);
+            var def = await registry.GetTableAsync(id);
             if (def is null)
             {
                 return Results.NotFound();
@@ -218,7 +215,7 @@ public static class TablesEndpoints
             var query = q ?? "";
             List<TableRowDto> rows = string.IsNullOrWhiteSpace(query)
                 ? []
-                : await client.GetGrain<ITableGrain>(def.Name).SearchAsync(query, limit ?? 100);
+                : await tables.SearchAsync(def.Name, query, limit ?? 100);
             return Results.Ok(new TableSearchResponse(rows, def.SearchMode.ToString(), def.SearchEnabled, rows.Count));
         }).RequireAuthorization("Viewer");
 
@@ -228,9 +225,9 @@ public static class TablesEndpoints
         // The server derives the row-identity key from req.Row via TableGroupKeyExtractor/RowKeyCodec, the
         // same way TableHistoryGrain derives it from live deltas, so the client never needs to know the
         // table's GROUP BY identity columns or the key encoding.
-        group.MapPost("/{id}/history/lookup", async (string id, HistoryLookupRequest req, int? limit, IClusterClient client) =>
+        group.MapPost("/{id}/history/lookup", async (string id, HistoryLookupRequest req, int? limit, ICatalogFacade registry, ITableHistoryFacade history) =>
         {
-            var def = await Registry(client).GetTableAsync(id);
+            var def = await registry.GetTableAsync(id);
             if (def is null)
             {
                 return Results.NotFound();
@@ -243,13 +240,13 @@ public static class TablesEndpoints
 
             var identityColumns = TableGroupKeyExtractor.ExtractIdentityColumns(def.Sql);
             var key = RowKeyCodec.EncodeIdentity(req.Row, identityColumns);
-            var result = await client.GetGrain<ITableHistoryGrain>(def.Name).GetHistoryAsync(key, limit ?? 0);
+            var result = await history.GetHistoryAsync(def.Name, key, limit ?? 0);
             return Results.Ok(result);
         }).RequireAuthorization("Viewer");
 
-        group.MapGet("/{id}/history/stats", async (string id, IClusterClient client) =>
+        group.MapGet("/{id}/history/stats", async (string id, ICatalogFacade registry, ITableHistoryFacade history) =>
         {
-            var def = await Registry(client).GetTableAsync(id);
+            var def = await registry.GetTableAsync(id);
             if (def is null)
             {
                 return Results.NotFound();
@@ -260,14 +257,11 @@ public static class TablesEndpoints
                 return Results.BadRequest(new ErrorResponse("Row history is not enabled for this table."));
             }
 
-            return Results.Ok(await client.GetGrain<ITableHistoryGrain>(def.Name).GetStatsAsync());
+            return Results.Ok(await history.GetStatsAsync(def.Name));
         }).RequireAuthorization("Viewer");
     }
 
-    private static IRegistryGrain Registry(IClusterClient client) =>
-        client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
-
-    private static async Task<Dictionary<string, SourceSchema>> BuildStreamSchemasAsync(IRegistryGrain registry)
+    private static async Task<Dictionary<string, SourceSchema>> BuildStreamSchemasAsync(ICatalogFacade registry)
     {
         var sources = await registry.GetSourcesAsync();
         var schemas = new Dictionary<string, SourceSchema>();
@@ -279,7 +273,7 @@ public static class TablesEndpoints
         return schemas;
     }
 
-    private static async Task<Dictionary<string, SourceSchema>> BuildTableSchemasAsync(IRegistryGrain registry)
+    private static async Task<Dictionary<string, SourceSchema>> BuildTableSchemasAsync(ICatalogFacade registry)
     {
         var tables = await registry.GetTablesAsync();
         var schemas = new Dictionary<string, SourceSchema>();

@@ -1,8 +1,9 @@
 using System.Security.Claims;
-using Orleans;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
 
-namespace StreamForge.Host.Api;
+namespace StreamForge.Api;
 
 public static class UsersEndpoints
 {
@@ -10,20 +11,19 @@ public static class UsersEndpoints
     {
         var group = app.MapGroup("/api/users").RequireAuthorization("Admin");
 
-        group.MapGet("/", async (IClusterClient client) =>
+        group.MapGet("/", async (IUserStoreFacade userStore) =>
         {
-            var users = await UserStore(client).GetUsersAsync();
+            var users = await userStore.GetUsersAsync();
             return Results.Ok(users.Select(ToUserInfo).ToList());
         });
 
-        group.MapPost("/", async (CreateUserRequest req, IClusterClient client) =>
+        group.MapPost("/", async (CreateUserRequest req, IUserStoreFacade userStore) =>
         {
             if (string.IsNullOrWhiteSpace(req.Username) || string.IsNullOrWhiteSpace(req.Password))
             {
                 return Results.BadRequest(new ErrorResponse("username and password are required"));
             }
 
-            var userStore = UserStore(client);
             var created = await userStore.CreateUserAsync(req.Username, req.DisplayName, req.Role, req.Password);
             if (!created)
             {
@@ -35,9 +35,8 @@ public static class UsersEndpoints
             return Results.Created($"/api/users/{user.Username}", ToUserInfo(user));
         });
 
-        group.MapPut("/{username}", async (string username, UpdateUserRequest req, IClusterClient client) =>
+        group.MapPut("/{username}", async (string username, UpdateUserRequest req, IUserStoreFacade userStore) =>
         {
-            var userStore = UserStore(client);
             var updated = await userStore.UpdateUserAsync(username, req.DisplayName, req.Role, req.Password);
             if (!updated)
             {
@@ -49,20 +48,17 @@ public static class UsersEndpoints
             return Results.Ok(ToUserInfo(user));
         });
 
-        group.MapDelete("/{username}", async (string username, ClaimsPrincipal principal, IClusterClient client) =>
+        group.MapDelete("/{username}", async (string username, ClaimsPrincipal principal, IUserStoreFacade userStore) =>
         {
             if (string.Equals(principal.Identity?.Name, username, StringComparison.Ordinal))
             {
                 return Results.BadRequest(new ErrorResponse("cannot delete yourself"));
             }
 
-            var removed = await UserStore(client).DeleteUserAsync(username);
+            var removed = await userStore.DeleteUserAsync(username);
             return removed ? Results.NoContent() : Results.NotFound();
         });
     }
-
-    private static IUserStoreGrain UserStore(IClusterClient client) =>
-        client.GetGrain<IUserStoreGrain>(StreamConstants.UsersKey);
 
     private static UserInfo ToUserInfo(UserRecord u) => new(u.Username, u.DisplayName, u.Role, u.CreatedAtMs);
 }

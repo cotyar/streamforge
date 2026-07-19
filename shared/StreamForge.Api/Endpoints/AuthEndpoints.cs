@@ -1,9 +1,10 @@
 using System.Security.Claims;
-using Orleans;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
-using StreamForge.Host.Auth;
+using StreamForge.Api.Auth;
 
-namespace StreamForge.Host.Api;
+namespace StreamForge.Api;
 
 public static class AuthEndpoints
 {
@@ -11,9 +12,8 @@ public static class AuthEndpoints
     {
         var group = app.MapGroup("/api/auth");
 
-        group.MapPost("/login", async (LoginRequest req, IClusterClient client, JwtTokenService jwt) =>
+        group.MapPost("/login", async (LoginRequest req, IUserStoreFacade userStore, JwtTokenService jwt) =>
         {
-            var userStore = client.GetGrain<IUserStoreGrain>(StreamConstants.UsersKey);
             var user = await userStore.ValidateCredentialsAsync(req.Username, req.Password);
             if (user is null)
             {
@@ -24,10 +24,9 @@ public static class AuthEndpoints
             return Results.Ok(new LoginResponse(token, user.Username, user.DisplayName, user.Role));
         });
 
-        group.MapGet("/me", async (ClaimsPrincipal principal, IClusterClient client) =>
+        group.MapGet("/me", async (ClaimsPrincipal principal, IUserStoreFacade userStore) =>
         {
             var username = principal.Identity?.Name ?? "";
-            var userStore = client.GetGrain<IUserStoreGrain>(StreamConstants.UsersKey);
             var users = await userStore.GetUsersAsync();
             var user = users.FirstOrDefault(u => u.Username == username);
             return user is null
