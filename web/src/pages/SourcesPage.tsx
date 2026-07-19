@@ -4,12 +4,41 @@ import { ChevronRight, Database, Pencil, Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { sourcesApi } from '../api/sources'
 import type { CreateSourceRequest } from '../api/sources'
-import type { FieldDef, FieldType, Metadata, SourceDefinition, Tags } from '../api/types'
+import type { ConnectorConfig, FieldDef, FieldType, Metadata, ScheduleSpec, SourceDefinition, SourceKind, Tags } from '../api/types'
 import { useSourceTape } from '../hooks/useSourceTape'
 import { Topbar } from '../components/Topbar'
 import { RoleGate } from '../components/RoleGate'
 import { MetadataEditor } from '../components/MetadataEditor'
 import { TagList } from '../components/TagList'
+import { ConnectorStatusBadge } from '../components/sources/ConnectorStatusBadge'
+import { ScheduleEditor } from '../components/sources/ScheduleEditor'
+import {
+  UrlConfigEditor,
+  buildUrlConfig,
+  toUrlFormState,
+  type UrlFormState,
+} from '../components/sources/UrlConfigEditor'
+import {
+  FileFolderConfigEditor,
+  buildFileConfig,
+  buildFolderConfig,
+  toFileFormState,
+  toFolderFormState,
+  type FileFolderFormState,
+} from '../components/sources/FileFolderConfigEditor'
+import {
+  GrpcConfigEditor,
+  buildGrpcConfig,
+  toGrpcFormState,
+  type GrpcFormState,
+} from '../components/sources/GrpcConfigEditor'
+import {
+  MappingEditor,
+  buildMappingSpec,
+  resyncSourcePaths,
+  toMappingFormState,
+  type MappingFormState,
+} from '../components/sources/MappingEditor'
 import { cn } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -42,6 +71,9 @@ import {
 
 const FIELD_TYPES: FieldType[] = ['String', 'Double', 'Long', 'Bool', 'Timestamp', 'Json']
 const PROFILES: SourceDefinition['generatorProfile'][] = ['trades', 'quotes', 'orders', 'generic']
+const KINDS: SourceKind[] = ['generator', 'url', 'file', 'folder', 'grpc']
+/** Kinds driven by a poll schedule + optional mapping (grpc is a persistent subscription instead). */
+const POLL_KINDS: SourceKind[] = ['url', 'file', 'folder']
 
 function formatCell(v: unknown): string {
   if (v === null || v === undefined) return '—'
@@ -73,15 +105,22 @@ function SourceTape({ name }: { name: string }) {
   )
 }
 
-/** Recursive field editor: Json fields drill into nested sub-fields (which may themselves be Json). */
+/** Recursive field editor: Json fields drill into nested sub-fields (which may themselves be Json).
+ * In mapping mode (`sourcePaths` supplied), top-level (depth 0) rows grow an extra sourcePath input
+ * — the mapping's Fields are literally this same array (D-B: "one schema, sourcePath decorates it"),
+ * so nested Json children never get their own sourcePath (they're parsed out of the extracted value). */
 function FieldEditor({
   fields,
   onChange,
   depth = 0,
+  sourcePaths,
+  onSourcePathChange,
 }: {
   fields: FieldDef[]
   onChange: (fields: FieldDef[]) => void
   depth?: number
+  sourcePaths?: string[]
+  onSourcePathChange?: (i: number, path: string) => void
 }) {
   function update(i: number, patch: Partial<FieldDef>) {
     onChange(fields.map((f, idx) => (idx === i ? { ...f, ...patch } : f)))
@@ -134,6 +173,14 @@ function FieldEditor({
               <Trash2 />
             </Button>
           </div>
+          {depth === 0 && sourcePaths && onSourcePathChange && (
+            <Input
+              value={sourcePaths[i] ?? ''}
+              onChange={(e) => onSourcePathChange(i, e.target.value)}
+              placeholder={`source path (default: ${f.name || 'field name'})`}
+              className="font-mono text-xs"
+            />
+          )}
           {f.type === 'Json' && (
             <div className="ml-3 flex flex-col gap-2 border-l border-border pl-3">
               <FieldEditor fields={f.children ?? []} onChange={(children) => update(i, { children })} depth={depth + 1} />
@@ -185,24 +232,43 @@ function SchemaNode({ field, depth }: { field: FieldDef; depth: number }) {
 interface SourceFormState {
   name: string
   description: string
+  kind: SourceKind
   generatorProfile: SourceDefinition['generatorProfile']
   eventsPerSecond: number
   enabled: boolean
   fields: FieldDef[]
   tags: Tags
   metadata: Metadata
+  // Connector config (plan 006) — present regardless of kind so switching the Kind select on a
+  // NEW source doesn't discard whatever the user already typed into another kind's panel.
+  schedule: ScheduleSpec | null
+  mappingEnabled: boolean
+  mapping: MappingFormState
+  url: UrlFormState
+  file: FileFolderFormState
+  folder: FileFolderFormState
+  grpc: GrpcFormState
 }
 
 function toFormState(s?: SourceDefinition): SourceFormState {
+  const fields = s?.fields ?? [{ name: '', type: 'String' }]
   return {
     name: s?.name ?? '',
     description: s?.description ?? '',
+    kind: s?.kind ?? 'generator',
     generatorProfile: s?.generatorProfile ?? 'generic',
     eventsPerSecond: s?.eventsPerSecond ?? 5,
     enabled: s?.enabled ?? true,
-    fields: s?.fields ?? [{ name: '', type: 'String' }],
+    fields,
     tags: s?.tags ?? [],
     metadata: s?.metadata ?? {},
+    schedule: s?.connector?.schedule ?? null,
+    mappingEnabled: !!s?.connector?.mapping,
+    mapping: toMappingFormState(fields, s?.connector?.mapping),
+    url: toUrlFormState(s?.connector?.url),
+    file: toFileFormState(s?.connector?.file),
+    folder: toFolderFormState(s?.connector?.folder),
+    grpc: toGrpcFormState(s?.connector?.grpc),
   }
 }
 
@@ -221,6 +287,14 @@ function SourceModal({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  /** Fields and mapping.sourcePaths must stay index-aligned (D-B) — every place fields can change
+   * (manual edit, add/remove row, OpenAPI derive, remote-schema fetch) routes through this. */
+  function updateFields(fields: FieldDef[]) {
+    setForm((f) => ({ ...f, fields, mapping: { ...f.mapping, sourcePaths: resyncSourcePaths(fields, f.mapping.sourcePaths) } }))
+  }
+
+  const isPollKind = POLL_KINDS.includes(form.kind)
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
@@ -229,6 +303,26 @@ function SourceModal({
       return
     }
     const fields = form.fields.filter((f) => f.name.trim())
+    if (fields.length === 0) {
+      setError('At least one field is required.')
+      return
+    }
+
+    let connector: ConnectorConfig | undefined
+    if (form.kind !== 'generator') {
+      connector = {
+        schedule: isPollKind ? form.schedule : null,
+        url: form.kind === 'url' ? buildUrlConfig(form.url) : null,
+        file: form.kind === 'file' ? buildFileConfig(form.file) : null,
+        folder: form.kind === 'folder' ? buildFolderConfig(form.folder) : null,
+        grpc: form.kind === 'grpc' ? buildGrpcConfig(form.grpc) : null,
+        mapping:
+          isPollKind && form.mappingEnabled
+            ? buildMappingSpec(form.fields, { ...form.mapping, sourcePaths: resyncSourcePaths(form.fields, form.mapping.sourcePaths) })
+            : null,
+      }
+    }
+
     setSaving(true)
     try {
       if (isEdit) {
@@ -241,6 +335,8 @@ function SourceModal({
           enabled: form.enabled,
           tags: form.tags,
           metadata: form.metadata,
+          kind: form.kind,
+          connector,
         })
       } else {
         const body: CreateSourceRequest = {
@@ -252,6 +348,8 @@ function SourceModal({
           enabled: form.enabled,
           tags: form.tags,
           metadata: form.metadata,
+          kind: form.kind,
+          connector,
         }
         await sourcesApi.create(body)
       }
@@ -284,19 +382,16 @@ function SourceModal({
                 />
               </Field>
               <Field>
-                <FieldLabel htmlFor="src-profile">Profile</FieldLabel>
-                <Select
-                  value={form.generatorProfile}
-                  onValueChange={(v) => setForm((f) => ({ ...f, generatorProfile: v as SourceDefinition['generatorProfile'] }))}
-                >
-                  <SelectTrigger id="src-profile" className="w-full">
+                <FieldLabel htmlFor="src-kind">Kind</FieldLabel>
+                <Select value={form.kind} onValueChange={(v) => setForm((f) => ({ ...f, kind: v as SourceKind }))} disabled={isEdit}>
+                  <SelectTrigger id="src-kind" className="w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectGroup>
-                      {PROFILES.map((p) => (
-                        <SelectItem key={p} value={p}>
-                          {p}
+                      {KINDS.map((k) => (
+                        <SelectItem key={k} value={k}>
+                          {k}
                         </SelectItem>
                       ))}
                     </SelectGroup>
@@ -304,6 +399,9 @@ function SourceModal({
                 </Select>
               </Field>
             </div>
+            {isEdit && (
+              <p className="-mt-2 text-[11px] text-muted-foreground">Kind can't be changed here — delete and recreate to switch kinds.</p>
+            )}
 
             <Field>
               <FieldLabel htmlFor="src-description">Description</FieldLabel>
@@ -314,47 +412,138 @@ function SourceModal({
               />
             </Field>
 
-            <div className="grid grid-cols-2 gap-3">
-              <Field>
-                <FieldLabel htmlFor="src-rate">Events / sec</FieldLabel>
-                <Input
-                  id="src-rate"
-                  type="number"
-                  min={0}
-                  step="0.1"
-                  value={form.eventsPerSecond}
-                  onChange={(e) => setForm((f) => ({ ...f, eventsPerSecond: Number(e.target.value) || 0 }))}
-                />
-              </Field>
-              <Field orientation="horizontal" className="items-center pb-1.5">
-                <Switch
-                  id="src-enabled"
-                  checked={form.enabled}
-                  onCheckedChange={(checked) => setForm((f) => ({ ...f, enabled: checked }))}
-                />
-                <FieldLabel htmlFor="src-enabled" className="font-normal">
-                  Enabled
-                </FieldLabel>
-              </Field>
-            </div>
+            {form.kind === 'generator' && (
+              <div className="grid grid-cols-2 gap-3">
+                <Field>
+                  <FieldLabel htmlFor="src-profile">Profile</FieldLabel>
+                  <Select
+                    value={form.generatorProfile}
+                    onValueChange={(v) => setForm((f) => ({ ...f, generatorProfile: v as SourceDefinition['generatorProfile'] }))}
+                  >
+                    <SelectTrigger id="src-profile" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {PROFILES.map((p) => (
+                          <SelectItem key={p} value={p}>
+                            {p}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="src-rate">Events / sec</FieldLabel>
+                  <Input
+                    id="src-rate"
+                    type="number"
+                    min={0}
+                    step="0.1"
+                    value={form.eventsPerSecond}
+                    onChange={(e) => setForm((f) => ({ ...f, eventsPerSecond: Number(e.target.value) || 0 }))}
+                  />
+                </Field>
+              </div>
+            )}
+
+            <Field orientation="horizontal" className="items-center pb-1.5">
+              <Switch
+                id="src-enabled"
+                checked={form.enabled}
+                onCheckedChange={(checked) => setForm((f) => ({ ...f, enabled: checked }))}
+              />
+              <FieldLabel htmlFor="src-enabled" className="font-normal">
+                Enabled
+              </FieldLabel>
+            </Field>
+
+            {isPollKind && (
+              <ScheduleEditor initial={form.schedule} onChange={(schedule) => setForm((f) => ({ ...f, schedule }))} disabled={saving} />
+            )}
+
+            {form.kind === 'url' && (
+              <UrlConfigEditor
+                value={form.url}
+                onChange={(patch) => setForm((f) => ({ ...f, url: { ...f.url, ...patch } }))}
+                isEdit={isEdit}
+                disabled={saving}
+                onFieldsDerived={updateFields}
+              />
+            )}
+            {form.kind === 'file' && (
+              <FileFolderConfigEditor
+                variant="file"
+                value={form.file}
+                onChange={(patch) => setForm((f) => ({ ...f, file: { ...f.file, ...patch } }))}
+                disabled={saving}
+              />
+            )}
+            {form.kind === 'folder' && (
+              <FileFolderConfigEditor
+                variant="folder"
+                value={form.folder}
+                onChange={(patch) => setForm((f) => ({ ...f, folder: { ...f.folder, ...patch } }))}
+                disabled={saving}
+              />
+            )}
+            {form.kind === 'grpc' && (
+              <GrpcConfigEditor
+                value={form.grpc}
+                onChange={(patch) => setForm((f) => ({ ...f, grpc: { ...f.grpc, ...patch } }))}
+                isEdit={isEdit}
+                disabled={saving}
+                onFieldsFetched={updateFields}
+              />
+            )}
 
             <Field>
               <div className="mb-1 flex items-center justify-between">
                 <FieldLabel className="mb-0">Fields</FieldLabel>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setForm((f) => ({ ...f, fields: [...f.fields, { name: '', type: 'String' }] }))}
-                >
+                <Button type="button" variant="ghost" size="sm" onClick={() => updateFields([...form.fields, { name: '', type: 'String' }])}>
                   <Plus data-icon="inline-start" /> Add field
                 </Button>
               </div>
-              <FieldEditor fields={form.fields} onChange={(fields) => setForm((f) => ({ ...f, fields }))} />
+              <FieldEditor
+                fields={form.fields}
+                onChange={updateFields}
+                sourcePaths={isPollKind && form.mappingEnabled ? form.mapping.sourcePaths : undefined}
+                onSourcePathChange={
+                  isPollKind && form.mappingEnabled
+                    ? (i, path) =>
+                        setForm((f) => ({
+                          ...f,
+                          mapping: { ...f.mapping, sourcePaths: f.mapping.sourcePaths.map((p, idx) => (idx === i ? path : p)) },
+                        }))
+                    : undefined
+                }
+              />
               <p className="mt-1 text-[11px] text-muted-foreground">
                 Set a field to <span className="font-mono">Json</span> to drill in and declare its nested shape.
               </p>
             </Field>
+
+            {isPollKind && (
+              <Field orientation="horizontal" className="items-center pb-1.5">
+                <Switch
+                  id="src-mapping-enabled"
+                  checked={form.mappingEnabled}
+                  onCheckedChange={(checked) => setForm((f) => ({ ...f, mappingEnabled: checked }))}
+                />
+                <FieldLabel htmlFor="src-mapping-enabled" className="font-normal">
+                  Enable field mapping (extract rows from a nested response)
+                </FieldLabel>
+              </Field>
+            )}
+            {isPollKind && form.mappingEnabled && (
+              <MappingEditor
+                fields={form.fields}
+                state={form.mapping}
+                onChange={(patch) => setForm((f) => ({ ...f, mapping: { ...f.mapping, ...patch } }))}
+                disabled={saving}
+              />
+            )}
           </FieldGroup>
 
           <MetadataEditor
@@ -426,7 +615,7 @@ export function SourcesPage() {
     <div>
       <Topbar
         title="Sources"
-        subtitle="Synthetic event generators feeding your pipelines"
+        subtitle="Synthetic generators and ingestion connectors feeding your pipelines"
         action={
           <RoleGate min="Editor">
             <Button onClick={() => setModal({ mode: 'create' })}>
@@ -461,61 +650,76 @@ export function SourcesPage() {
           </Empty>
         ) : (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            {sources.map((s) => (
-              <Card key={s.name}>
-                <CardHeader>
-                  <div className="flex items-start justify-between gap-2">
+            {sources.map((s) => {
+              const isConnector = !!s.kind && s.kind !== 'generator'
+              return (
+                <Card key={s.name}>
+                  <CardHeader>
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <CardTitle>{s.name}</CardTitle>
+                        <p className="mt-0.5 text-xs text-muted-foreground">{s.description || 'No description'}</p>
+                      </div>
+                      <Badge variant="outline">{isConnector ? s.kind : s.generatorProfile}</Badge>
+                    </div>
+                    <TagList tags={s.tags} className="mt-1" />
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-3">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      {isConnector ? (
+                        <span>
+                          <span className="font-mono text-foreground">{s.kind}</span>-kind connector
+                        </span>
+                      ) : (
+                        <span>
+                          rate <span className="font-mono text-foreground">{s.eventsPerSecond}</span>/s
+                        </span>
+                      )}
+                      <RoleGate min="Editor">
+                        <label className="flex items-center gap-1.5">
+                          <Switch checked={s.enabled} onCheckedChange={() => void toggleEnabled(s)} />
+                          Enabled
+                        </label>
+                      </RoleGate>
+                    </div>
+
+                    {isConnector && (
+                      <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
+                        <ConnectorStatusBadge name={s.name} />
+                      </div>
+                    )}
+
+                    <div className="overflow-hidden rounded-lg border border-border">
+                      <div className="flex items-center justify-between border-b border-border px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        <span>Field</span>
+                        <span>Type</span>
+                      </div>
+                      <div className="flex flex-col py-1">
+                        {s.fields.map((f) => (
+                          <SchemaNode key={f.name} field={f} depth={0} />
+                        ))}
+                      </div>
+                    </div>
+
                     <div>
-                      <CardTitle>{s.name}</CardTitle>
-                      <p className="mt-0.5 text-xs text-muted-foreground">{s.description || 'No description'}</p>
+                      <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Live tape</p>
+                      <SourceTape name={s.name} />
                     </div>
-                    <Badge variant="outline">{s.generatorProfile}</Badge>
-                  </div>
-                  <TagList tags={s.tags} className="mt-1" />
-                </CardHeader>
-                <CardContent className="flex flex-col gap-3">
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>
-                      rate <span className="font-mono text-foreground">{s.eventsPerSecond}</span>/s
-                    </span>
+
                     <RoleGate min="Editor">
-                      <label className="flex items-center gap-1.5">
-                        <Switch checked={s.enabled} onCheckedChange={() => void toggleEnabled(s)} />
-                        Enabled
-                      </label>
+                      <div className="flex justify-end gap-1">
+                        <Button variant="ghost" size="sm" onClick={() => setModal({ mode: 'edit', source: s })}>
+                          <Pencil data-icon="inline-start" /> Edit
+                        </Button>
+                        <Button variant="ghost" size="sm" className="hover:text-destructive" onClick={() => setPendingDelete(s)}>
+                          <Trash2 data-icon="inline-start" /> Delete
+                        </Button>
+                      </div>
                     </RoleGate>
-                  </div>
-
-                  <div className="overflow-hidden rounded-lg border border-border">
-                    <div className="flex items-center justify-between border-b border-border px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                      <span>Field</span>
-                      <span>Type</span>
-                    </div>
-                    <div className="flex flex-col py-1">
-                      {s.fields.map((f) => (
-                        <SchemaNode key={f.name} field={f} depth={0} />
-                      ))}
-                    </div>
-                  </div>
-
-                  <div>
-                    <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Live tape</p>
-                    <SourceTape name={s.name} />
-                  </div>
-
-                  <RoleGate min="Editor">
-                    <div className="flex justify-end gap-1">
-                      <Button variant="ghost" size="sm" onClick={() => setModal({ mode: 'edit', source: s })}>
-                        <Pencil data-icon="inline-start" /> Edit
-                      </Button>
-                      <Button variant="ghost" size="sm" className="hover:text-destructive" onClick={() => setPendingDelete(s)}>
-                        <Trash2 data-icon="inline-start" /> Delete
-                      </Button>
-                    </div>
-                  </RoleGate>
-                </CardContent>
-              </Card>
-            ))}
+                  </CardContent>
+                </Card>
+              )
+            })}
           </div>
         )}
       </div>
