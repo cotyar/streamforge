@@ -147,3 +147,11 @@ public interface IArrangementMetaFacade
 {
     Task<IReadOnlyList<ArrangementMetaInfo>> GetArrangementsAsync();
 }
+
+/// <summary>Read facade for connector runtime status (plan 006, D-C). New interface rather than
+/// an ICatalogFacade extension — existing facade members are frozen (test fakes implement them).
+/// Orleans: IConnectorGrain proxy; Dapr: ConnectorActor proxy. Generator-kind sources → null.</summary>
+public interface IConnectorStatusFacade
+{
+    Task<ConnectorRuntimeStatus?> GetStatusAsync(string sourceName);
+}

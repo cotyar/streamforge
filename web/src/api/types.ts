@@ -35,6 +35,141 @@ export interface SourceDefinition {
   enabled: boolean
   tags: Tags
   metadata: Metadata
+  /** Source kind (plan 006, additive). Absent/'generator' = the pre-existing synthetic behavior. */
+  kind?: SourceKind
+  /** Connector configuration; absent for generator-kind sources (plan 006). */
+  connector?: ConnectorConfig
+}
+
+// ============================================================================
+// Plan 006: ingestion connectors. Secret values (URL header values, gRPC password/token) read
+// back as the mask '***'; sending '***' on write means "keep the stored value".
+// ============================================================================
+export type SourceKind = 'generator' | 'url' | 'file' | 'folder' | 'grpc'
+export const SECRET_MASK = '***'
+export type FileFormat = 'ndjson' | 'json' | 'csv'
+
+/** Cron (5/6-field, UTC) XOR fixed interval (min 1000 ms). */
+export interface ScheduleSpec {
+  cron?: string | null
+  intervalMs?: number | null
+}
+
+export interface OpenApiRef {
+  docUrl?: string | null
+  docInline?: string | null
+  operationId?: string | null
+  schemaPointer?: string | null
+}
+
+export interface UrlPollConfig {
+  url: string
+  headers: Record<string, string>
+  openApi?: OpenApiRef | null
+}
+
+export interface FilePollConfig {
+  path: string
+  format: FileFormat
+}
+
+export interface FolderPollConfig {
+  path: string
+  format: FileFormat
+  /** Glob over file names within the folder (no recursion), e.g. "*.json". */
+  glob?: string | null
+}
+
+export interface GrpcSubConfig {
+  address: string
+  /** "source:{name}" | "pipeline:{id}" | "table:{id}" on the REMOTE instance. */
+  entityKey: string
+  username?: string | null
+  password?: string | null
+  token?: string | null
+  /** 'reflection' (default) | 'proto'. */
+  schemaSource: string
+  protoText?: string | null
+  restAddress?: string | null
+}
+
+/** JSONPath-lite subset for paths: $ .name ['name'] [n] [*] — nothing else. */
+export interface MappingSpec {
+  itemsPath: string
+  dedupKeyField?: string | null
+  timestampField?: string | null
+  fields: FieldMapEntry[]
+}
+
+export interface FieldMapEntry {
+  /** Path relative to the item; null = same as field.name. */
+  sourcePath?: string | null
+  field: FieldDef
+}
+
+export interface ConnectorConfig {
+  schedule?: ScheduleSpec | null
+  url?: UrlPollConfig | null
+  file?: FilePollConfig | null
+  folder?: FolderPollConfig | null
+  grpc?: GrpcSubConfig | null
+  mapping?: MappingSpec | null
+}
+
+/** GET /api/sources/{name}/status — null body (204) for generator-kind sources. */
+export interface ConnectorRuntimeStatus {
+  sourceName: string
+  nextRunMs?: number | null
+  lastRunMs?: number | null
+  lastStatus: 'never' | 'ok' | 'error'
+  lastError?: string | null
+  consecutiveFailures: number
+  eventsEmittedTotal: number
+  lastBatchCount: number
+}
+
+/** POST /api/sources/schema/mapping-validate */
+export interface MappingValidateRequest {
+  document: string
+  sample?: string | null
+}
+export interface MappingValidateResult {
+  ok: boolean
+  mapping?: MappingSpec | null
+  diagnostics: string[]
+  previewRows: Record<string, unknown>[]
+}
+
+/** POST /api/sources/schema/derive-openapi */
+export interface SchemaDeriveRequest {
+  openApi: OpenApiRef
+}
+export interface SchemaDeriveResult {
+  fields: FieldDef[]
+  diagnostics: string[]
+}
+
+/** POST /api/sources/schema/from-remote */
+export interface RemoteSchemaRequest {
+  grpc: GrpcSubConfig
+}
+export interface RemoteSchemaResult {
+  fields: FieldDef[]
+  fieldNumbersJson: string
+  diagnostics: string[]
+}
+
+/** POST /api/config/import response. */
+export interface ConfigImportReportEntry {
+  kind: 'source' | 'pipeline' | 'table'
+  name: string
+  action: 'created' | 'updated' | 'deleted' | 'skipped' | 'error'
+  diagnostics: string[]
+}
+export interface ConfigImportReport {
+  mode: 'validate' | 'merge' | 'replace'
+  entries: ConfigImportReportEntry[]
+  ok: boolean
 }
 
 export interface PipelineDefinition {

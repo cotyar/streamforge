@@ -59,6 +59,11 @@ public sealed class SourceDefinition
     [Id(6)] public List<string> Tags { get; set; } = [];
     /// <summary>User-editable free-form key-value annotations.</summary>
     [Id(7)] public Dictionary<string, string> Metadata { get; set; } = [];
+    /// <summary>Source kind (plan 006, additive): "generator" (default — the pre-existing
+    /// behavior) | "url" | "file" | "folder" | "grpc". See <see cref="SourceKinds"/>.</summary>
+    [Id(8)] public string Kind { get; set; } = SourceKinds.Generator;
+    /// <summary>Connector configuration; null for generator-kind sources (plan 006).</summary>
+    [Id(9)] public ConnectorConfig? Connector { get; set; }
 }
 
 [GenerateSerializer]
