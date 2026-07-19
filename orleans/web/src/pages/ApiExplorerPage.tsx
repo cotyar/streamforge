@@ -76,7 +76,9 @@ const PROTO_KIND_CLASS: Record<ProtoTokenKind, string> = {
 function ProtoView({ text }: { text: string }) {
   const tokens = useMemo(() => tokenizeProto(text), [text])
   return (
-    <ScrollArea className="max-h-[28rem] rounded-lg border border-border bg-input/20">
+    // Native scroll container, not Radix ScrollArea: max-h on ScrollArea's root doesn't bound the
+    // Radix viewport, so vertical scroll never engaged and long protos clipped at the boundary.
+    <div className="max-h-[28rem] overflow-auto rounded-lg border border-border bg-input/20">
       <pre className="min-w-max whitespace-pre p-3 font-mono text-[12px] leading-5">
         {tokens.map((t, i) => (
           <span key={i} className={PROTO_KIND_CLASS[t.kind]}>
@@ -84,8 +86,7 @@ function ProtoView({ text }: { text: string }) {
           </span>
         ))}
       </pre>
-      <ScrollBar orientation="horizontal" />
-    </ScrollArea>
+    </div>
   )
 }
 
