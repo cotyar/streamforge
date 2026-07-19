@@ -85,7 +85,7 @@ public sealed class GrpcSubscriberCore
                     token = await LoginAsync(ct).ConfigureAwait(false); // fresh login every (re)connect
                 }
 
-                var (fields, numbers) = await FetchSchemaAsync(ct).ConfigureAwait(false);
+                var (fields, numbers) = await FetchSchemaAsync(token, ct).ConfigureAwait(false);
 
                 for (var attempt = 0; attempt < 2; attempt++)
                 {
@@ -180,7 +180,7 @@ public sealed class GrpcSubscriberCore
     // Schema acquisition
     // ------------------------------------------------------------------
 
-    private async Task<(List<FieldDef> Fields, FieldNumberMap Numbers)> FetchSchemaAsync(CancellationToken ct)
+    private async Task<(List<FieldDef> Fields, FieldNumberMap Numbers)> FetchSchemaAsync(string? token, CancellationToken ct)
     {
         if (string.Equals(_config.SchemaSource, "proto", StringComparison.OrdinalIgnoreCase))
         {
@@ -192,17 +192,18 @@ public sealed class GrpcSubscriberCore
             return (fields, numbers);
         }
 
-        return await FetchViaReflectionAsync(ct).ConfigureAwait(false);
+        return await FetchViaReflectionAsync(token, ct).ConfigureAwait(false);
     }
 
-    private async Task<(List<FieldDef> Fields, FieldNumberMap Numbers)> FetchViaReflectionAsync(CancellationToken ct)
+    private async Task<(List<FieldDef> Fields, FieldNumberMap Numbers)> FetchViaReflectionAsync(string? token, CancellationToken ct)
     {
         using var channel = CreateChannel(_config.Address);
         var client = new ServerReflection.ServerReflectionClient(channel);
         using var call = client.ServerReflectionInfo(cancellationToken: ct);
 
-        var (_, ident) = ParseEntityKey(_config.EntityKey);
-        var messageSymbol = $"{DescriptorFactory.PackageName}.{DescriptorFactory.ToPascalCase(ident)}";
+        var (kind, ident) = ParseEntityKey(_config.EntityKey);
+        var messageIdent = await ResolveMessageIdentAsync(_config, kind, ident, token, ct).ConfigureAwait(false);
+        var messageSymbol = $"{DescriptorFactory.PackageName}.{DescriptorFactory.ToPascalCase(messageIdent)}";
 
         await call.RequestStream.WriteAsync(new ServerReflectionRequest { Host = "", FileContainingSymbol = messageSymbol }).ConfigureAwait(false);
         if (!await call.ResponseStream.MoveNext(ct).ConfigureAwait(false))
@@ -242,10 +243,11 @@ public sealed class GrpcSubscriberCore
     /// <see cref="GrpcSubConfig.SchemaSource"/> just parses <see cref="GrpcSubConfig.ProtoText"/>
     /// (already inline, no network); "reflection" dials the remote's v1alpha reflection service.
     /// When <see cref="GrpcSubConfig.Username"/> is set, this logs in first (mirroring
-    /// <see cref="RunAsync"/>'s connect sequence, D-G parity) purely to surface a bad
-    /// Username/Password/RestAddress as an early diagnostic — the resulting token is NOT attached
-    /// to the reflection call itself, since this codebase's reflection surface is anonymous
-    /// (<c>DynamicReflectionService</c> is <c>[AllowAnonymous]</c>), same as the reconnect loop
+    /// <see cref="RunAsync"/>'s connect sequence, D-G parity), both to surface a bad
+    /// Username/Password/RestAddress as an early diagnostic AND because <see cref="ResolveMessageIdentAsync"/>
+    /// needs that token for its own id→name REST lookup on table/pipeline entity keys (see that method's
+    /// doc) — the token is still never attached to the reflection RPC itself, since that surface is
+    /// anonymous (<c>DynamicReflectionService</c> is <c>[AllowAnonymous]</c>), same as the reconnect loop
     /// above. Returns (null, null, diagnostics) on any failure — never throws.</summary>
     public static async Task<(List<FieldDef>? Fields, FieldNumberMap? Numbers, IReadOnlyList<string> Diagnostics)>
         FetchSchemaOnceAsync(GrpcSubConfig config, CancellationToken ct)
@@ -258,18 +260,20 @@ public sealed class GrpcSubscriberCore
 
         try
         {
-            if (string.IsNullOrEmpty(config.Token) && !string.IsNullOrEmpty(config.Username))
+            string? token = config.Token;
+            if (string.IsNullOrEmpty(token) && !string.IsNullOrEmpty(config.Username))
             {
                 var probe = new GrpcSubscriberCore(config, static (_, _) => Task.CompletedTask, static (_, _) => { });
-                await probe.LoginAsync(ct).ConfigureAwait(false);
+                token = await probe.LoginAsync(ct).ConfigureAwait(false);
             }
 
             using var channel = CreateChannel(config.Address);
             var client = new ServerReflection.ServerReflectionClient(channel);
             using var call = client.ServerReflectionInfo(cancellationToken: ct);
 
-            var (_, ident) = ParseEntityKey(config.EntityKey);
-            var messageSymbol = $"{DescriptorFactory.PackageName}.{DescriptorFactory.ToPascalCase(ident)}";
+            var (kind, ident) = ParseEntityKey(config.EntityKey);
+            var messageIdent = await ResolveMessageIdentAsync(config, kind, ident, token, ct).ConfigureAwait(false);
+            var messageSymbol = $"{DescriptorFactory.PackageName}.{DescriptorFactory.ToPascalCase(messageIdent)}";
 
             await call.RequestStream.WriteAsync(new ServerReflectionRequest { Host = "", FileContainingSymbol = messageSymbol }).ConfigureAwait(false);
             if (!await call.ResponseStream.MoveNext(ct).ConfigureAwait(false))
@@ -294,6 +298,62 @@ public sealed class GrpcSubscriberCore
         {
             return (null, null, [$"{ex.GetType().Name}: {ex.Message}"]);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Reflection symbol resolution (id -> display name for table/pipeline entity keys)
+    // ------------------------------------------------------------------
+
+    /// <summary>Resolves the ident <see cref="FetchViaReflectionAsync"/>/<see cref="FetchSchemaOnceAsync"/>
+    /// need to build a v1alpha <c>FileContainingSymbol</c> request. For <c>"source:{name}"</c> keys the
+    /// ident already IS the entity's display name — <see cref="DescriptorFactory.ToPascalCase"/> of it
+    /// exactly matches the remote's generated message name (<c>DynamicDescriptorSet.BuildAsync</c> calls
+    /// <c>DescriptorFactory.Generate(src.Name, ...)</c>), so no lookup is needed.
+    ///
+    /// <para>For <c>"table:{id}"</c>/<c>"pipeline:{id}"</c> keys the ident is an opaque id, NOT the display
+    /// name the remote used to derive its message name (<c>DynamicDescriptorSet.BuildPlan</c> calls
+    /// <c>DescriptorFactory.Generate(t.Name, ...)</c> / <c>Generate(p.Name, ...)</c> — the id is only the
+    /// <see cref="StreamForge.Abstractions.FieldNumberMap"/> lookup key, EntitySchemas.TableKey/PipelineKey,
+    /// never the proto symbol basis). Guessing <c>ToPascalCase(id)</c> as the symbol (the previous
+    /// behavior here) makes the initial <c>FileContainingSymbol</c> RPC fail outright with "symbol not
+    /// found" for any id that doesn't coincidentally equal a PascalCase-safe form of the entity's name —
+    /// which means <see cref="ReflectionSchemaWalker"/>'s own documented "single unambiguous row-message
+    /// triplet" fallback never gets a chance to run, since an ErrorResponse carries no descriptors to feed
+    /// it. Resolving the real name first via a REST GET against <see cref="GrpcSubConfig.RestAddress"/>
+    /// (already required for login) closes that gap.</para></summary>
+    private static async Task<string> ResolveMessageIdentAsync(GrpcSubConfig config, string kind, string ident, string? token, CancellationToken ct)
+    {
+        if (kind is not ("table" or "pipeline"))
+        {
+            return ident; // "source:{name}" - ident already IS the display name.
+        }
+
+        if (string.IsNullOrEmpty(config.RestAddress))
+        {
+            throw new InvalidOperationException(
+                $"GrpcSubConfig.EntityKey '{kind}:{ident}' needs RestAddress set: gRPC reflection can only " +
+                "look up a message by its exact generated name (derived from the entity's display NAME, not " +
+                "its id), so the id must first be resolved to a name via a REST GET on the remote.");
+        }
+
+        var baseUrl = config.RestAddress.TrimEnd('/');
+        var path = kind == "table" ? "tables" : "pipelines";
+        var url = $"{baseUrl}/api/{path}/{ident}";
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        if (!string.IsNullOrEmpty(token))
+        {
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        }
+        using var response = await SharedHttp.SendAsync(request, ct).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+
+        var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        using var doc = JsonDocument.Parse(body);
+        if (!doc.RootElement.TryGetProperty("name", out var nameProp) || nameProp.GetString() is not { Length: > 0 } name)
+        {
+            throw new InvalidOperationException($"GET '{url}' did not contain a non-empty 'name' field.");
+        }
+        return name;
     }
 
     private static (string Kind, string Ident) ParseEntityKey(string entityKey)
