@@ -1,5 +1,6 @@
 using StreamForge.Abstractions;
 using StreamForge.Engine;
+using StreamForge.Host.Grpc;
 
 namespace StreamForge.Host.Grpc.Dynamic;
 
@@ -15,17 +16,31 @@ public sealed record DynamicEntityDescriptor(string EntityKey, string Kind, stri
 ///
 /// <para>No caching: rebuilt fully on every <see cref="BuildAsync"/> call. Reflection requests are rare
 /// (a client fetches a descriptor once, then holds it), so a full registry read + per-pipeline
-/// recompile + <see cref="IRegistryGrain.EnsureFieldNumbersAsync"/> round trip per entity is cheap
+/// recompile + <see cref="ICatalogFacade.EnsureFieldNumbersAsync"/> round trip per entity is cheap
 /// enough for a demo; there is no mid-request invalidation to worry about as a result.</para>
+///
+/// <para>Plan 005 (Dapr sibling runtime) W1: constructed over <see cref="ICatalogFacade"/> rather than
+/// <see cref="IRegistryGrain"/> directly — every construction site today happens to pass a real
+/// <c>IRegistryGrain</c> (which IS-A ICatalogFacade, so those call sites need no change), but this type
+/// itself no longer has any Orleans-grain dependency, making it reusable from a future Dapr host.</para>
 /// </summary>
-public sealed class DynamicDescriptorSet(IRegistryGrain registry)
+public sealed class DynamicDescriptorSet(ICatalogFacade registry)
 {
     public async Task<IReadOnlyList<DynamicEntityDescriptor>> BuildAsync(CancellationToken cancellationToken = default)
     {
         var sources = await registry.GetSourcesAsync();
         var tables = await registry.GetTablesAsync();
         var pipelines = await registry.GetPipelinesAsync();
-        var streamSchemas = await SchemaBuilder.BuildStreamSchemasAsync(registry);
+
+        // Inlined equivalent of StreamForge.Host.Grpc.SchemaBuilder.BuildStreamSchemasAsync (which is
+        // typed over IRegistryGrain, not ICatalogFacade) — same mapping, built from the `sources` list
+        // already fetched above instead of a second registry round trip.
+        var streamSchemas = new Dictionary<string, SourceSchema>();
+        foreach (var src in sources)
+        {
+            var fields = src.Fields.ToDictionary(f => f.Name, f => ProtoMappers.MapFieldKind(f.Type));
+            streamSchemas[src.Name] = new SourceSchema(src.Name, fields);
+        }
 
         var plan = BuildPlan(sources, tables, pipelines, streamSchemas);
 
@@ -57,7 +72,7 @@ public sealed class DynamicDescriptorSet(IRegistryGrain registry)
     /// Pure planning step, deliberately split out of <see cref="BuildAsync"/> so it's unit-testable
     /// without a live Orleans cluster: decides which entities are in scope and what
     /// <see cref="FieldDef"/> list each one's descriptor should be generated from. Does NOT touch field
-    /// numbering — that always goes through <see cref="IRegistryGrain.EnsureFieldNumbersAsync"/>, the
+    /// numbering — that always goes through <see cref="ICatalogFacade.EnsureFieldNumbersAsync"/>, the
     /// single source of truth, so it can't be short-circuited here.
     /// </summary>
     public static List<(string EntityKey, string Kind, string Name, List<FieldDef> Fields)> BuildPlan(

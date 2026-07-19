@@ -1,44 +1,14 @@
 namespace StreamForge.Abstractions;
 
-/// <summary>Singleton (key = StreamConstants.RegistryKey). Catalog of sources + pipelines; orchestrates start/stop.</summary>
-public interface IRegistryGrain : IGrainWithStringKey
+/// <summary>Singleton (key = StreamConstants.RegistryKey). Catalog of sources + pipelines; orchestrates
+/// start/stop. Plan 005 (Dapr sibling runtime) W1: inherits <see cref="ICatalogFacade"/> — every member
+/// except <see cref="EnsureInitializedAsync"/> (Orleans-boot-only) now lives there, runtime-neutral, so
+/// the REST/gRPC layer can depend on the facade type instead of this grain interface directly. See
+/// Facades.cs's class doc for the full seam rationale.</summary>
+public interface IRegistryGrain : ICatalogFacade, IGrainWithStringKey
 {
     /// <summary>Seeds defaults on first run, re-activates generators, resumes Running pipelines.</summary>
     Task EnsureInitializedAsync();
-
-    Task<List<SourceDefinition>> GetSourcesAsync();
-    Task<SourceDefinition?> GetSourceAsync(string name);
-    Task UpsertSourceAsync(SourceDefinition def);
-    Task<bool> DeleteSourceAsync(string name);
-
-    Task<List<PipelineDefinition>> GetPipelinesAsync();
-    Task<PipelineDefinition?> GetPipelineAsync(string id);
-    Task<PipelineDefinition> CreatePipelineAsync(PipelineDefinition def);
-    Task<PipelineDefinition?> UpdatePipelineAsync(PipelineDefinition def);
-    Task<bool> DeletePipelineAsync(string id);
-    /// <summary>Start or stop a pipeline. Returns updated definition, null if not found. Sets Failed + Error on compile failure.</summary>
-    Task<PipelineDefinition?> SetPipelineStatusAsync(string id, PipelineStatus status);
-
-    Task<List<TableDefinition>> GetTablesAsync();
-    Task<TableDefinition?> GetTableAsync(string id);
-    /// <summary>Validates name uniqueness across sources+tables (throws InvalidOperationException on
-    /// collision) and compile-checks the SQL, storing OutputSchema/StreamInputs/TableInputs when it compiles.</summary>
-    Task<TableDefinition> CreateTableAsync(TableDefinition def);
-    Task<TableDefinition?> UpdateTableAsync(TableDefinition def);
-    /// <summary>Throws InvalidOperationException (409-style) if a Running table depends on this one.</summary>
-    Task<bool> DeleteTableAsync(string id);
-    /// <summary>Start or stop a table. Starting requires all of its table inputs to be Running (sets
-    /// Failed + Error otherwise). Stopping throws InvalidOperationException (409-style) if a Running table
-    /// depends on this one. Returns updated definition, null if not found.</summary>
-    Task<TableDefinition?> SetTableStatusAsync(string id, PipelineStatus status);
-
-    /// <summary>Returns the persisted field-number map (JSON) for a dynamic-protobuf entity
-    /// ("source:{name}" / "pipeline:{id}" / "table:{id}"), first evolving it against the supplied
-    /// current schema: existing fields keep their numbers, new fields get fresh ones, removed fields'
-    /// numbers are reserved forever (never reused). Persists on change. This is the single source of
-    /// truth for proto field numbering — gRPC reflection descriptors and downloadable .proto files
-    /// must both obtain numbers here so generated clients stay compatible across schema edits.</summary>
-    Task<string> EnsureFieldNumbersAsync(string entityKey, List<FieldDef> fields);
 }
 
 /// <summary>Key = pipeline id. One activation per running pipeline.</summary>
@@ -254,16 +224,11 @@ public interface IArrangementGrain : IGrainWithStringKey
     Task<ArrangementInfo> GetInfoAsync();
 }
 
-/// <summary>Singleton (key = StreamConstants.UsersKey).</summary>
-public interface IUserStoreGrain : IGrainWithStringKey
+/// <summary>Singleton (key = StreamConstants.UsersKey). Plan 005 (Dapr sibling runtime) W1: inherits
+/// <see cref="IUserStoreFacade"/> — every member except <see cref="EnsureInitializedAsync"/>
+/// (Orleans-boot-only) now lives there, runtime-neutral. See Facades.cs's class doc.</summary>
+public interface IUserStoreGrain : IUserStoreFacade, IGrainWithStringKey
 {
     /// <summary>Seeds admin/editor/viewer on first run.</summary>
     Task EnsureInitializedAsync();
-    /// <summary>Returns the user when username+password are valid, else null.</summary>
-    Task<UserRecord?> ValidateCredentialsAsync(string username, string password);
-    Task<List<UserRecord>> GetUsersAsync();
-    Task<bool> CreateUserAsync(string username, string displayName, string role, string password);
-    /// <summary>Null params leave the field unchanged.</summary>
-    Task<bool> UpdateUserAsync(string username, string? displayName, string? role, string? password);
-    Task<bool> DeleteUserAsync(string username);
 }
