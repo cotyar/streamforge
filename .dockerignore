@@ -1,0 +1,31 @@
+# Repo-root .dockerignore — shared by every flavor's Dockerfile (deploy/orleans, deploy/dapr).
+# Build contexts are the repo root so multi-stage builds can COPY across shared/, orleans/, dapr/,
+# and web/ in one context; keep this lean so `docker build` stays fast.
+
+# .NET build output — rebuilt fresh inside each image stage.
+**/bin/
+**/obj/
+
+# JS — reinstalled via bun inside the image; dist is rebuilt in-image too (never ship a stale one).
+**/node_modules/
+web/dist/
+
+# Local dev state — never ship seeded/user data or repo metadata into an image.
+**/data/
+.git/
+.gitignore
+
+# Dapr local runtime state (containers/volumes managed by `dapr init`, not part of any image).
+dapr/.dapr/
+dapr/components/**/*.local.yaml
+
+# Editor/OS/user-specific cruft.
+*.user
+.DS_Store
+.vs/
+.vscode/
+**/*.swp
+
+# Misc caches.
+**/.turbo/
+**/coverage/

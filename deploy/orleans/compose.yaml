@@ -1,0 +1,40 @@
+# StreamForge — Orleans flavor — local compose parity for the Cloud Run image.
+#
+#   docker compose -f deploy/orleans/compose.yaml up -d --build
+#   curl http://localhost:6199/healthz
+#   docker compose -f deploy/orleans/compose.yaml down
+#
+# Host port 6199 (never 5199/5299 — those are the live dev server, see CLAUDE.md). This is the
+# same container the admin app (plan 007 D-C) drives locally and the same image `deploy.sh`
+# ships to Cloud Run (plan 007 decision D-A) — compose IS the local parity check for that image.
+services:
+  streamforge-orleans:
+    build:
+      context: ../..
+      dockerfile: deploy/orleans/Dockerfile
+      # grpc.tools' bundled protoc segfaults (SIGSEGV, exit 139) under native linux/arm64 (seen on
+      # Apple Silicon Docker Desktop) — pin amd64, which also matches Cloud Run's default
+      # architecture and builds fine there (via emulation locally, natively on Cloud Build/Run).
+      platforms:
+        - linux/amd64
+    image: streamforge-orleans:local
+    platform: linux/amd64
+    ports:
+      - "6199:8080"
+    environment:
+      PORT: "8080"
+      # AI control chat (plan 007 D-D, parallel wave) reads ANTHROPIC_API_KEY / Anthropic__ApiKey;
+      # passed through only if set on the host — unset means the chat endpoint 503s with a
+      # friendly message, which is expected out of the box.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Kept for parity with earlier drafts of this compose file / any AI-chat docs that mention
+      # GEMINI_API_KEY; StreamForge's shared chat backend (D-D) is Anthropic-only, so this is inert
+      # unless something downstream starts reading it.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+    restart: "no"

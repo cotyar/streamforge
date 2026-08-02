@@ -1,0 +1,64 @@
+# StreamForge — Orleans flavor — Cloud Run v1 (Knative) Service manifest.
+#
+# Templated with ${IMAGE} (and optionally ${ANTHROPIC_API_KEY}) — deploy.sh envsubst's this before
+# `gcloud run services replace`. Single-container, single-silo localhost clustering (decision D-A):
+# max-instances is pinned to 1 because Orleans' localhost clustering only makes sense with exactly
+# one replica — do not raise it without first replacing clustering with a real membership provider.
+#
+# NOT applied by this wave — deploy.sh only prepares/prints commands (plan 007 non-goal: actual
+# deploy is the user's call). Values (region, memory, concurrency) are reasonable starting points;
+# revisit once real traffic/latency data exists.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: streamforge-orleans
+  labels:
+    app: streamforge
+    flavor: orleans
+  annotations:
+    run.googleapis.com/launch-stage: BETA
+spec:
+  template:
+    metadata:
+      annotations:
+        # Scale-to-zero when idle; never more than one replica (see comment above — single-silo
+        # localhost clustering does not support horizontal scale-out).
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "1"
+    spec:
+      containerConcurrency: 40
+      timeoutSeconds: 300
+      containers:
+        - image: ${IMAGE}
+          ports:
+            - name: http1
+              containerPort: 8080
+          env:
+            # Cloud Run sets PORT automatically; listed here only for local documentation/dry-run
+            # rendering — gcloud ignores/overrides this at deploy time.
+            - name: PORT
+              value: "8080"
+            - name: ANTHROPIC_API_KEY
+              value: ${ANTHROPIC_API_KEY}
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 0
+            periodSeconds: 2
+            failureThreshold: 20
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+  traffic:
+    - percent: 100
+      latestRevision: true

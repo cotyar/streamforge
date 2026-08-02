@@ -53,7 +53,9 @@ var apiOptions = new StreamForgeApiOptions(
     [
         "SourceService", "PipelineService", "TableService", "StreamService", "DynamicStreamService", "ServerReflection",
     ],
-    DocsFilePath: Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "docs", "index.html")),
+    DocsFilePath: Path.GetFullPath(Path.Combine(
+        app.Environment.ContentRootPath,
+        app.Configuration["Docs:File"] ?? Path.Combine("..", "..", "docs", "index.html"))),
     SpaDistPath: Path.GetFullPath(Path.Combine(
         app.Environment.ContentRootPath,
         app.Configuration["Web:Dist"] ?? Path.Combine("..", "..", "..", "web", "dist"))),
