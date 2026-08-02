@@ -1,0 +1,102 @@
+# Plan 007 W1B — Dapr flavor, local compose. Byte-identical container set to the Cloud Run multi-
+# container service in service.yaml: app + daprd + placement + redis, sharing ONE network namespace
+# (network_mode: "service:app" on the three sidecars) exactly the way Cloud Run's sidecar containers
+# share the instance's network namespace — so "localhost" means the same thing in both places.
+#
+# Usage (from repo root — build context for both custom images is the repo root):
+#   docker compose -f deploy/dapr/compose.yaml up -d --build
+#   docker compose -f deploy/dapr/compose.yaml logs -f daprd
+#   docker compose -f deploy/dapr/compose.yaml down -v
+#
+# Host port: ONLY the app container publishes one (6399 — never 5199/5299/5399, the local dev ports;
+# see AGENTS.md). redis/placement/daprd are unreachable from the host directly, same as Cloud Run
+# sidecars — reach them only through the app's published port or `docker compose exec`.
+#
+# Redis here is ephemeral (no volume) — see README.md's "ephemeral Redis" note: every `up` is a cold
+# start that reseeds the demo catalog, same as deleting orleans' data/ dir. This is intentional (mirrors
+# the Cloud Run instance, which has no persistent disk either).
+name: streamforge-dapr
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/dapr/Dockerfile.app
+    ports:
+      - "6399:8080"
+    environment:
+      DAPR_HTTP_PORT: "3500"
+      DAPR_GRPC_PORT: "50001"
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    # HEALTHCHECK is baked into the image (Dockerfile.app) — no curl/wget in this Ubuntu-based aspnet
+    # runtime image, so it uses bash's /dev/tcp (deploy/dapr/healthcheck.sh). Declared here too only to
+    # document the dependency contract; the effective check comes from the image.
+
+  redis:
+    image: redis:7-alpine
+    # Shares the app container's network namespace — identical to how Cloud Run wires sidecar
+    # containers onto the ingress container's namespace. No published host port: only reachable at
+    # localhost:6379 from inside this shared namespace (i.e. from app/daprd/placement, never the host).
+    network_mode: "service:app"
+    depends_on:
+      app:
+        condition: service_started
+
+  placement:
+    image: daprio/placement:1.18.1
+    network_mode: "service:app"
+    # Overrides needed only because this container shares a network namespace with three others:
+    #   --healthz-port 8081   placement's default healthz port (8080) collides with the app's own 8080.
+    #   --enable-metrics=false  placement's default metrics port (9090) collides with daprd's own
+    #                           default metrics port (9090) — nothing in this stack scrapes either, so
+    #                           disabling is simpler than juggling two more port numbers.
+    # --port (gRPC, what daprd's --placement-host-address points at) keeps its default, 50005.
+    command: ["/placement", "--port", "50005", "--healthz-port", "8081", "--enable-metrics=false"]
+    depends_on:
+      app:
+        condition: service_started
+
+  daprd:
+    build:
+      context: ../..
+      dockerfile: deploy/dapr/Dockerfile.daprd
+    network_mode: "service:app"
+    # No scheduler-host-address: this flavor's actors use TIMERS, not reminders (plan 005 decision,
+    # reaffirmed dapr/ARCHITECTURE.md) — only actor REMINDERS need the Scheduler service in Dapr 1.15+;
+    # timers are handled by daprd itself. Verified live (see README.md) — no scheduler container exists
+    # in this stack on purpose, unlike the local `dapr init` set (dapr_scheduler).
+    command:
+      - "/daprd"
+      - "--app-id"
+      - "streamforge-dapr"
+      - "--app-port"
+      - "8080"
+      - "--app-protocol"
+      - "http"
+      - "--dapr-http-port"
+      - "3500"
+      - "--dapr-grpc-port"
+      - "50001"
+      - "--placement-host-address"
+      - "localhost:50005"
+      - "--resources-path"
+      - "/components"
+      - "--config"
+      - "/components/config.yaml"
+    depends_on:
+      # IMPORTANT: app only needs to be service_started here, NOT service_healthy — this is load-
+      # bearing, not a shortcut. daprd cannot itself become healthy until it can reach the app on 8080
+      # (it needs the app's own Dapr SDK-mapped endpoints to learn actor types/subscriptions before it
+      # will register with placement — confirmed live: its log sits on repeated "waiting for
+      # application to listen on port 8080" lines with NOTHING actor-related proceeding until the app
+      # answers). Gating daprd's start on the app being *healthy* would therefore be circular with the
+      # app's own entrypoint (deploy/dapr/entrypoint.sh) needing daprd — entrypoint.sh breaks that tie
+      # by starting `dotnet` immediately rather than waiting, which is what lets daprd's own gate clear.
+      # Redis/placement just need to exist first (daprd's component loading and placement connection
+      # retry on their own too).
+      app:
+        condition: service_started
+      redis:
+        condition: service_started
+      placement:
+        condition: service_started

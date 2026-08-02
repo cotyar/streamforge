@@ -1,0 +1,16 @@
+# Plan 007 W1B — custom daprd image: the published daprd binary plus this stack's own components baked
+# in, so no volume/ConfigMap choreography is needed either in compose or on Cloud Run. Build context is
+# the repo root (see deploy/dapr/Dockerfile.app's header) even though this Dockerfile only needs its own
+# directory — kept consistent with the sibling Dockerfile so both build with the same `docker build -f
+# deploy/dapr/Dockerfile.daprd .` invocation shape.
+#
+# Pinned to the exact runtime this repo's local `dapr init` set up (`dapr --version` -> Runtime 1.18.1) —
+# see deploy/dapr/README.md for the pin rationale. daprd's actual invocation args (--app-id, --app-port,
+# --dapr-http-port, ...) are NOT baked in here — they're passed as the container `command` in
+# deploy/dapr/compose.yaml / deploy/dapr/service.yaml, so the same image serves both.
+FROM daprio/daprd:1.18.1
+
+# This base image is distroless-style (no shell, no package manager — see its `docker history`: a single
+# `COPY /daprd /` layer over a bazel-built minimal rootfs) and already runs as its baked-in non-root user
+# (65532:65532), so no USER/chmod step is needed or possible here.
+COPY deploy/dapr/components/ /components/

@@ -1,0 +1,143 @@
+# Plan 007 W1B — Cloud Run v1 (Knative) Service manifest, Dapr flavor: ONE service, four containers
+# sharing the instance's network namespace (Cloud Run's sidecar-container feature — the same "all four
+# talk over localhost" topology deploy/dapr/compose.yaml proves locally via network_mode: "service:app").
+#
+# Deploy-time only — NOT executed by this wave (see README.md). Rendered via `envsubst` by deploy.sh:
+#   APP_IMAGE     - built from deploy/dapr/Dockerfile.app,   pushed to Artifact Registry by deploy.sh
+#   DAPRD_IMAGE   - built from deploy/dapr/Dockerfile.daprd, pushed to Artifact Registry by deploy.sh
+#   REGION        - Cloud Run region (deploy.sh default: europe-west1)
+#   GEMINI_API_KEY - passed through as a plain env var for now (see README's Cloud Run caveats — a
+#                    Secret Manager binding is the obvious follow-up, out of scope for this wave)
+#
+# min-instances 0 / max-instances 1 (decision D-A: single-instance demo service, not meant to scale —
+# Redis/placement/daprd sidecars are process-local to one instance, not shared across replicas).
+# Memory: 2Gi total across all four containers (Cloud Run sums per-container resource requests against
+# the instance's allocated size) — app 1Gi, daprd 512Mi, placement 256Mi, redis 256Mi.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: streamforge-dapr
+  labels:
+    cloud.googleapis.com/location: ${REGION}
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        # gen2 execution environment is required for the multi-container (sidecar) feature.
+        run.googleapis.com/execution-environment: gen2
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "1"
+        # daprd's own /dapr/subscribe handshake needs the app answering on 8080, and needs redis +
+        # placement reachable — same ordering deploy/dapr/compose.yaml's depends_on encodes locally.
+        # placement/redis get their own startupProbe below so Cloud Run has a concrete "ready" signal
+        # for them (a dependency container with no probe is otherwise treated as ready immediately on
+        # process start, which would race daprd against a cold Redis/placement).
+        run.googleapis.com/container-dependencies: '{"daprd":["app","redis","placement"]}'
+    spec:
+      containers:
+        # ---- Ingress container: the only one with `ports` — Cloud Run routes external traffic here. --
+        - name: app
+          image: ${APP_IMAGE}
+          ports:
+            - name: http1
+              containerPort: 8080
+          env:
+            - name: DAPR_HTTP_PORT
+              value: "3500"
+            - name: DAPR_GRPC_PORT
+              value: "50001"
+            - name: GEMINI_API_KEY
+              value: "${GEMINI_API_KEY}"
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          startupProbe:
+            # Generous budget: the app container's entrypoint (deploy/dapr/entrypoint.sh) blocks until
+            # daprd reports healthy BEFORE launching dotnet at all, and that can itself take up to ~100s
+            # on a cold start (see entrypoint.sh's comment on the observed daprd/placement dissemination
+            # delay when both start concurrently, which is exactly Cloud Run's sidecar startup model).
+            # periodSeconds * failureThreshold must clear that plus normal ASP.NET Core startup time.
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+        # ---- Sidecars: no `ports` (they're reached over localhost from the app container only). ------
+        - name: daprd
+          image: ${DAPRD_IMAGE}
+          args:
+            - "--app-id"
+            - "streamforge-dapr"
+            - "--app-port"
+            - "8080"
+            - "--app-protocol"
+            - "http"
+            - "--dapr-http-port"
+            - "3500"
+            - "--dapr-grpc-port"
+            - "50001"
+            - "--placement-host-address"
+            - "localhost:50005"
+            - "--resources-path"
+            - "/components"
+            - "--config"
+            - "/components/config.yaml"
+          resources:
+            limits:
+              cpu: "0.5"
+              memory: 512Mi
+          # daprd exposes its own health at /v1.0/healthz on its HTTP API port.
+          startupProbe:
+            httpGet:
+              path: /v1.0/healthz
+              port: 3500
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 30
+
+        - name: placement
+          image: daprio/placement:1.18.1
+          # Same override as compose.yaml: default healthz-port (8080) collides with the app container's
+          # port, default metrics-port (9090) collides with daprd's — see compose.yaml's comment.
+          args:
+            - "--port"
+            - "50005"
+            - "--healthz-port"
+            - "8081"
+            - "--enable-metrics=false"
+          resources:
+            limits:
+              cpu: "0.25"
+              memory: 256Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 30
+
+        - name: redis
+          image: redis:7-alpine
+          resources:
+            limits:
+              cpu: "0.25"
+              memory: 256Mi
+          startupProbe:
+            tcpSocket:
+              port: 6379
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 15

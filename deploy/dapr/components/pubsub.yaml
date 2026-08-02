@@ -1,0 +1,22 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: pubsub
+spec:
+  type: pubsub.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: localhost:6379
+    - name: redisPassword
+      value: ""
+# Copied from dapr/components/pubsub.yaml (plan 007 W1B) and retargeted at localhost:6379 — inside the
+# compose/Cloud Run container set, redis/daprd/placement/app all share ONE network namespace
+# (network_mode: "service:app" locally; Cloud Run sidecars locally-equivalent), so "localhost" always
+# means "this instance's redis container", never the local dev `dapr_redis` container on the host.
+#
+# Deliberately left UNSCOPED, same as the original: the polyglot premise (dapr/POLYGLOT.md) is that any
+# sidecar'd process could publish/subscribe through this component. In THIS containerized stack only the
+# app (streamforge-dapr) is present — polyglot processors are explicitly NOT part of the Cloud Run
+# service (see deploy/dapr/README.md) — but the component stays unscoped rather than diverging from the
+# original's shape for no reason.
