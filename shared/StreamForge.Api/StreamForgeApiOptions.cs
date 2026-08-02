@@ -21,9 +21,14 @@ namespace StreamForge.Api;
 /// <param name="SpaDistPath">Absolute path to the built console SPA (web/dist) served as static files
 /// + SPA fallback, or null to skip SPA serving entirely (mirrors the Orleans host's existing
 /// Directory.Exists guard).</param>
+/// <param name="Flavor">Runtime flavor name ("orleans" / "dapr") reported by the anonymous
+/// GET /healthz endpoint (plan 007 W0) so the admin app, compose healthchecks, and Cloud Run
+/// startup probes can tell instances apart. Optional (additive evolution) — defaults keep
+/// pre-007 construction sites compiling unchanged.</param>
 public sealed record StreamForgeApiOptions(
     string ProtosDir,
     int GrpcPort,
     IReadOnlyList<string> GrpcStaticServices,
     string? DocsFilePath,
-    string? SpaDistPath);
+    string? SpaDistPath,
+    string Flavor = "unknown");

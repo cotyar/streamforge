@@ -79,7 +79,8 @@ var apiOptions = new StreamForgeApiOptions(
         app.Configuration["Docs:File"] ?? Path.Combine("..", "..", "..", "orleans", "docs", "index.html"))),
     SpaDistPath: Path.GetFullPath(Path.Combine(
         app.Environment.ContentRootPath,
-        app.Configuration["Web:Dist"] ?? Path.Combine("..", "..", "..", "web", "dist"))));
+        app.Configuration["Web:Dist"] ?? Path.Combine("..", "..", "..", "web", "dist"))),
+    Flavor: "dapr");
 
 app.MapStreamForgeApi(apiOptions);
 

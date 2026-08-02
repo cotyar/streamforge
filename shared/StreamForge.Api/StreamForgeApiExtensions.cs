@@ -131,6 +131,15 @@ public static class StreamForgeApiExtensions
             o.Theme = ScalarTheme.Kepler;
         });
 
+        // Anonymous liveness/readiness probe (plan 007 W0): used by the admin app, docker compose
+        // healthchecks, and Cloud Run startup probes. Deliberately unauthenticated and cheap.
+        app.MapGet("/healthz", () => Results.Ok(new
+        {
+            status = "ok",
+            flavor = options.Flavor,
+            time = DateTimeOffset.UtcNow,
+        })).AllowAnonymous();
+
         app.MapAuthEndpoints();
         app.MapSourcesEndpoints();
         app.MapPipelinesEndpoints();
