@@ -10,5 +10,6 @@ Written against commit `49d6979` by the improve skill (focused `plan` invocation
 | 004 | [Nested queries (non-recursive)](004-nested-queries.md) | DONE (N1–N4 + scope-aware editor autocomplete) | — |
 | 005 | [Dapr sibling runtime (shared core + polyglot)](005-dapr-port.md) | DONE (W0–W9; Dapr p50 7ms / Orleans p50 122ms, order_states tableDelta — a live Orleans SignalR-relay startup race found during this wave was root-caused and fixed post-wave, pre-dates 005, see plan status) | 001–004 (ports the platform they built) |
 | 006 | [Ingestion connectors + config import/export](006-connectors-and-config.md) | DONE (W0–W7; four real connector kinds + config import/export live on both flavors; headline cross-flavor federation — Dapr subscribed an Orleans table by id over gRPC, real rows flowing) | 005 (shared core + both flavors) |
+| 007 | [Containers + Cloud Run prep, admin app, AI control chat](007-cloudrun-admin-aichat.md) | IN PROGRESS | 005, 006 |
 
 Design tokens source of truth: `orleans/design-system/streamforge/MASTER.md`.
