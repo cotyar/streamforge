@@ -62,19 +62,21 @@ TableHistoryRuntimeSetup.AddServices(builder.Services);
 var app = builder.Build();
 
 // Host-specific facts StreamForgeApiOptions carries so the shared endpoints stay byte-identical across
-// runtimes (plan 005 W3, decision D-B). Per decision D-F (this flavor has no static gRPC serving and no
-// /docs route):
+// runtimes (plan 005 W3, decision D-B). Per decision D-F (this flavor has no static gRPC serving):
 //   - ProtosDir points at a directory that doesn't exist — /api/meta/protos/static already guards each
 //     file with File.Exists and returns an empty list, so the response SHAPE is unchanged, just empty.
 //   - GrpcStaticServices is empty (gRPC serving is phase 2 here); GrpcPort is still reported (5499,
 //     reserved) so the API Explorer UI can show it as "not yet serving" rather than omitting it.
-//   - DocsFilePath is null — MapStreamForgeApi's existing `if (options.DocsFilePath is not null ...)`
-//     guard means /docs simply isn't mapped on this flavor; the Orleans flavor keeps serving it.
+//   - DocsFilePath serves the SAME flavor-aware docs the Orleans host serves (orleans/docs/ covers both
+//     runtimes since plan 006's docs sync — the original W4 "no /docs here" descope is obsolete), so the
+//     SPA's Documentation link works on :5399 too. Sibling pages (comparison.html) come along for free.
 var apiOptions = new StreamForgeApiOptions(
     ProtosDir: Path.Combine(app.Environment.ContentRootPath, "Protos"),
     GrpcPort: app.Configuration.GetValue("Grpc:Port", 5499),
     GrpcStaticServices: [],
-    DocsFilePath: null,
+    DocsFilePath: Path.GetFullPath(Path.Combine(
+        app.Environment.ContentRootPath,
+        app.Configuration["Docs:File"] ?? Path.Combine("..", "..", "..", "orleans", "docs", "index.html"))),
     SpaDistPath: Path.GetFullPath(Path.Combine(
         app.Environment.ContentRootPath,
         app.Configuration["Web:Dist"] ?? Path.Combine("..", "..", "..", "web", "dist"))));

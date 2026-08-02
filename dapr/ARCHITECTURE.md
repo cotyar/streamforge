@@ -650,11 +650,7 @@ What remains unbuilt on this flavor is, as of W9, a short, deliberate, permanent
   `GET /api/meta/grpc` reports it with an empty static-service list (shape preserved). `/proto`
   downloads work today regardless (the shared descriptor machinery in `shared/StreamForge.AppCore`
   doesn't care which runtime called it) — only the live gRPC *serving* endpoint is phase 2.
-- **`/docs`**: not mapped on this flavor (`StreamForgeApiOptions.DocsFilePath` is `null`) — stays
-  Orleans-served, per decision D-F. `orleans/docs/comparison.html` (plan 005 W9) links back to it.
-  (Note: an unmapped `/docs` still falls through to the SPA's client-side-routing fallback and
-  returns the console app shell with HTTP 200, not a REST-style 404 — same as any other unrecognized
-  non-`/api` path; this is normal SPA-hosting behavior, not a bug.)
+- **`/docs`**: served — the same flavor-aware `orleans/docs/index.html` (+ sibling pages like `comparison.html`) the Orleans host serves; the original W4 null-`DocsFilePath` descope was removed once the docs covered both runtimes (post-plan-005 addendum).
 
 ## Known live bug found during W9 benchmarking — FIXED
 

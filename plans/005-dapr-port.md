@@ -236,7 +236,7 @@ Update ARCHITECTURE.md/AGENTS.md; parity matrix finalized; plan status → DONE.
 | Row history | full | full |
 | Parallelism 2–16 / frontiers / arrangements | full | **descoped** — rejected with clear error; `frontierEpoch` null; `/api/meta/arrangements` `[]` |
 | gRPC static + dynamic reflection + typed streams | full (:5299) | **phase 2** (:5499 reserved; `/api/meta/grpc` shape kept, empty service list) |
-| `/docs` | full | descoped — `/docs` maps only `docs/index.html` (not a directory), so `orleans/docs/comparison.html` is not auto-served on either flavor; it's linked from the Orleans `/docs` sidebar as a same-directory relative file and opened directly from the repo (confirmed live, W9) |
+| `/docs` | full (+ `/docs/comparison.html` — sibling pages next to index.html are served since `5438cbb`) | full — post-plan addendum: serves the same flavor-aware `orleans/docs/` pages (the W4 "Orleans-served only" descope became obsolete once plan 006's docs sync made the content cover both runtimes) |
 | Persistence / reseed | JSON files / delete `data/` | Redis / `reset.sh` |
 | Polyglot pub/sub participation | — | **the point**: `sf-sources` ingress + `sf-source-{name}` egress |
 
