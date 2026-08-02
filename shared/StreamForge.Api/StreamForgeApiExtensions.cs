@@ -116,6 +116,30 @@ public static class StreamForgeApiExtensions
         });
 
         services.AddSingleton<JwtTokenService>();
+
+        // Plan 007 W1C, decision D-D: AI control chat (POST /api/chat) over Google Gemini's native
+        // REST API. Plain HttpClient via IHttpClientFactory, no new NuGet dependency. Config
+        // Gemini:ApiKey|BaseUrl|Model with GEMINI_API_KEY/GOOGLE_API_KEY env fallback for the key —
+        // unset key means GeminiChatService.IsConfigured is false and ChatEndpoints returns 503.
+        services.AddHttpClient();
+        services.AddScoped(sp =>
+        {
+            var config = sp.GetRequiredService<IConfiguration>();
+            var apiKey = config["Gemini:ApiKey"]
+                ?? Environment.GetEnvironmentVariable("GEMINI_API_KEY")
+                ?? Environment.GetEnvironmentVariable("GOOGLE_API_KEY");
+            var baseUrl = config["Gemini:BaseUrl"] ?? "https://generativelanguage.googleapis.com";
+            var model = config["Gemini:Model"] ?? "gemini-2.5-flash";
+            var httpClient = sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(GeminiChatService));
+            return new GeminiChatService(
+                httpClient,
+                baseUrl,
+                model,
+                apiKey,
+                sp.GetRequiredService<StreamForge.Abstractions.ICatalogFacade>(),
+                sp.GetRequiredService<StreamForge.Abstractions.ITableReadFacade>(),
+                sp.GetRequiredService<StreamForge.Abstractions.ITableHistoryFacade>());
+        });
     }
 
     public static void MapStreamForgeApi(this WebApplication app, StreamForgeApiOptions options)
@@ -146,6 +170,7 @@ public static class StreamForgeApiExtensions
         app.MapTablesEndpoints();
         app.MapUsersEndpoints();
         app.MapConfigEndpoints();
+        app.MapChatEndpoints();
         app.MapMetaEndpoints(options);
         app.MapHub<StreamHub>("/hubs/stream");
 
