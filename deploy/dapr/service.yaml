@@ -81,6 +81,9 @@ spec:
         # ---- Sidecars: no `ports` (they're reached over localhost from the app container only). ------
         - name: daprd
           image: ${DAPRD_IMAGE}
+          # dapr's official images ship with EMPTY entrypoint/cmd (same as placement — see above);
+          # compose.yaml also runs /daprd explicitly.
+          command: ["/daprd"]
           args:
             - "--app-id"
             - "streamforge-dapr"
@@ -112,7 +115,12 @@ spec:
             failureThreshold: 30
 
         - name: placement
-          image: daprio/placement:1.18.1
+          # Mirrored into Artifact Registry by deploy.sh — Cloud Run cannot run Docker Hub images.
+          image: ${PLACEMENT_IMAGE}
+          # The daprio/placement image ships with EMPTY entrypoint/cmd (verified via image inspect —
+          # args alone exec nothing, "Application exec likely failed"); compose.yaml runs /placement
+          # explicitly for the same reason.
+          command: ["/placement"]
           # Same override as compose.yaml: default healthz-port (8080) collides with the app container's
           # port, default metrics-port (9090) collides with daprd's — see compose.yaml's comment.
           args:
@@ -134,7 +142,8 @@ spec:
             failureThreshold: 30
 
         - name: redis
-          image: redis:7-alpine
+          # Mirrored into Artifact Registry by deploy.sh — Cloud Run cannot run Docker Hub images.
+          image: ${REDIS_IMAGE}
           resources:
             limits:
               cpu: "0.25"
@@ -142,6 +151,7 @@ spec:
           startupProbe:
             tcpSocket:
               port: 6379
-            periodSeconds: 2
+            # Cloud Run validation requires timeoutSeconds < periodSeconds.
+            periodSeconds: 3
             timeoutSeconds: 2
             failureThreshold: 15

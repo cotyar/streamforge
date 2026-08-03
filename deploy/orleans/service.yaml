@@ -39,10 +39,8 @@ spec:
             - name: http1
               containerPort: 8080
           env:
-            # Cloud Run sets PORT automatically; listed here only for local documentation/dry-run
-            # rendering — gcloud ignores/overrides this at deploy time.
-            - name: PORT
-              value: "8080"
+            # PORT is NOT listed: Cloud Run reserves it (deploy is rejected if set explicitly);
+            # the platform injects PORT=8080 to match containerPort above.
             - name: GEMINI_API_KEY
               value: ${GEMINI_API_KEY}
           resources:
@@ -54,8 +52,9 @@ spec:
               path: /healthz
               port: 8080
             initialDelaySeconds: 0
-            periodSeconds: 2
-            failureThreshold: 20
+            # Cloud Run validation requires timeoutSeconds < periodSeconds (rejected live with 2/3).
+            periodSeconds: 4
+            failureThreshold: 30
             timeoutSeconds: 3
           livenessProbe:
             httpGet:

@@ -46,8 +46,12 @@ if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" ]]; then
 fi
 
 AR_HOST="${REGION}-docker.pkg.dev"
-APP_IMAGE="${AR_HOST}/${PROJECT_ID}/${AR_REPO}/dapr-app:latest"
-DAPRD_IMAGE="${AR_HOST}/${PROJECT_ID}/${AR_REPO}/dapr-daprd:latest"
+# Tagged by git SHA, not :latest — `gcloud run services replace` only creates a new revision when
+# the template CHANGES, so :latest silently re-fails the old revision instead of picking up newly
+# pushed bytes (observed live on the second deploy attempt).
+GIT_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)"
+APP_IMAGE="${AR_HOST}/${PROJECT_ID}/${AR_REPO}/dapr-app:${GIT_SHA}"
+DAPRD_IMAGE="${AR_HOST}/${PROJECT_ID}/${AR_REPO}/dapr-daprd:${GIT_SHA}"
 
 run() {
   echo "+ $*"
@@ -77,26 +81,39 @@ run gcloud artifacts repositories create "$AR_REPO" \
 run gcloud auth configure-docker "$AR_HOST" --quiet
 
 # 2. Build + push both custom images. Build context is the repo root (see Dockerfile.app/.daprd headers).
-run docker build -f "$SCRIPT_DIR/Dockerfile.app" -t "$APP_IMAGE" "$REPO_ROOT"
+# linux/amd64 pinned: Cloud Run runs amd64; a native arm64 build from an Apple Silicon host
+# fails the startup probe with "Application exec likely failed" (observed live on first deploy).
+run docker build --platform linux/amd64 -f "$SCRIPT_DIR/Dockerfile.app" -t "$APP_IMAGE" "$REPO_ROOT"
 run docker push "$APP_IMAGE"
 
-run docker build -f "$SCRIPT_DIR/Dockerfile.daprd" -t "$DAPRD_IMAGE" "$REPO_ROOT"
+run docker build --platform linux/amd64 -f "$SCRIPT_DIR/Dockerfile.daprd" -t "$DAPRD_IMAGE" "$REPO_ROOT"
 run docker push "$DAPRD_IMAGE"
 
-# 3. Render service.yaml (placement/redis images are public, referenced verbatim — only APP_IMAGE,
-#    DAPRD_IMAGE, REGION, GEMINI_API_KEY are substituted).
+# 2b. Mirror the public sidecar images into Artifact Registry. Cloud Run only runs images from
+# Artifact Registry — Docker Hub references pass deploy validation but the containers never start
+# (observed live: redis exit(255), placement "Application exec likely failed", zero stdout).
+PLACEMENT_IMAGE="${AR_HOST}/${PROJECT_ID}/${AR_REPO}/placement:1.18.1"
+REDIS_IMAGE="${AR_HOST}/${PROJECT_ID}/${AR_REPO}/redis:7-alpine"
+run docker pull --platform linux/amd64 daprio/placement:1.18.1
+run docker tag daprio/placement:1.18.1 "$PLACEMENT_IMAGE"
+run docker push "$PLACEMENT_IMAGE"
+run docker pull --platform linux/amd64 redis:7-alpine
+run docker tag redis:7-alpine "$REDIS_IMAGE"
+run docker push "$REDIS_IMAGE"
+
+# 3. Render service.yaml (every image comes from this project's Artifact Registry).
 RENDERED="$(mktemp -t streamforge-dapr-service-XXXXXX.yaml)"
 trap 'rm -f "$RENDERED"' EXIT
 
-export APP_IMAGE DAPRD_IMAGE REGION GEMINI_API_KEY
+export APP_IMAGE DAPRD_IMAGE PLACEMENT_IMAGE REDIS_IMAGE REGION GEMINI_API_KEY
 if [[ "$DRY_RUN" == true ]]; then
-  echo "+ envsubst '\${APP_IMAGE} \${DAPRD_IMAGE} \${REGION} \${GEMINI_API_KEY}' < $SCRIPT_DIR/service.yaml > $RENDERED"
-  envsubst '${APP_IMAGE} ${DAPRD_IMAGE} ${REGION} ${GEMINI_API_KEY}' < "$SCRIPT_DIR/service.yaml" > "$RENDERED"
+  echo "+ envsubst '\${APP_IMAGE} \${DAPRD_IMAGE} \${PLACEMENT_IMAGE} \${REDIS_IMAGE} \${REGION} \${GEMINI_API_KEY}' < $SCRIPT_DIR/service.yaml > $RENDERED"
+  envsubst '${APP_IMAGE} ${DAPRD_IMAGE} ${PLACEMENT_IMAGE} ${REDIS_IMAGE} ${REGION} ${GEMINI_API_KEY}' < "$SCRIPT_DIR/service.yaml" > "$RENDERED"
   echo "----- rendered service.yaml (dry-run preview) -----"
   cat "$RENDERED"
   echo "----------------------------------------------------"
 else
-  envsubst '${APP_IMAGE} ${DAPRD_IMAGE} ${REGION} ${GEMINI_API_KEY}' < "$SCRIPT_DIR/service.yaml" > "$RENDERED"
+  envsubst '${APP_IMAGE} ${DAPRD_IMAGE} ${PLACEMENT_IMAGE} ${REDIS_IMAGE} ${REGION} ${GEMINI_API_KEY}' < "$SCRIPT_DIR/service.yaml" > "$RENDERED"
 fi
 
 # 4. Replace (create-or-update) the Cloud Run service from the rendered manifest.
@@ -117,6 +134,12 @@ if [[ "$DRY_RUN" == true ]]; then
   echo
   echo "Dry run complete — no gcloud/docker mutation actually ran."
 else
+  # Demo services are woken by plain GETs — allow unauthenticated invocations (app auth is the
+  # platform's own JWT login). `services replace` does not manage the IAM policy, so bind here.
+  run gcloud run services add-iam-policy-binding "$SERVICE_NAME" \
+    --member=allUsers --role=roles/run.invoker \
+    --project="$PROJECT_ID" --region="$REGION" --quiet
+
   echo
   echo "Deployed. Fetch the URL with:"
   echo "  gcloud run services describe $SERVICE_NAME --project=$PROJECT_ID --region=$REGION --format='value(status.url)'"

@@ -116,7 +116,10 @@ interface StatusEntry {
 
 async function healthzOf(url: string, timeoutMs: number): Promise<{ ok: boolean; detail: string }> {
   try {
-    const res = await fetchWithTimeout(`${url}/healthz`, timeoutMs);
+    // /api/healthz, not /healthz: on Cloud Run's public run.app URLs the bare /healthz path is
+    // intercepted by Google Frontend (reserved path, returns Google's 404 before the container);
+    // the alias behaves identically everywhere, including local compose.
+    const res = await fetchWithTimeout(`${url}/api/healthz`, timeoutMs);
     const body = await res.text();
     return { ok: res.ok, detail: res.ok ? body.slice(0, 300) : `healthz returned HTTP ${res.status}` };
   } catch (e) {

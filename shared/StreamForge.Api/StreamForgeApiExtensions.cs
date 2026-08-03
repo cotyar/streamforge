@@ -157,12 +157,17 @@ public static class StreamForgeApiExtensions
 
         // Anonymous liveness/readiness probe (plan 007 W0): used by the admin app, docker compose
         // healthchecks, and Cloud Run startup probes. Deliberately unauthenticated and cheap.
-        app.MapGet("/healthz", () => Results.Ok(new
+        // /api/healthz alias: Google Frontend intercepts external /healthz requests on run.app URLs
+        // (reserved path — returns Google's own 404 before reaching the container; internal probes
+        // are unaffected), so anything polling over the public internet must use the alias.
+        var healthz = () => Results.Ok(new
         {
             status = "ok",
             flavor = options.Flavor,
             time = DateTimeOffset.UtcNow,
-        })).AllowAnonymous();
+        });
+        app.MapGet("/healthz", healthz).AllowAnonymous();
+        app.MapGet("/api/healthz", healthz).AllowAnonymous();
 
         app.MapAuthEndpoints();
         app.MapSourcesEndpoints();

@@ -82,12 +82,14 @@ echo "SERVICE    = $SERVICE_NAME"
 echo
 
 echo "-- 1. ensure Artifact Registry repository exists (idempotent, skips if present) --"
+# "|| true" because create is NOT idempotent (ALREADY_EXISTS is a hard error under set -e —
+# observed live on the second deploy); describe-first would race, tolerate-the-error doesn't.
 run gcloud artifacts repositories create "$REPOSITORY" \
     --project="$PROJECT_ID" \
     --location="$REGION" \
     --repository-format=docker \
     --description="StreamForge container images" \
-    --quiet
+    --quiet || true
 
 echo
 echo "-- 2. build + push the image (Cloud Build, repo root context) --"
@@ -118,6 +120,12 @@ else
     gcloud run services replace "$RENDERED" --project="$PROJECT_ID" --region="$REGION"
 fi
 rm -f "$RENDERED"
+
+# Demo services are woken by plain GETs — allow unauthenticated invocations (app auth is the
+# platform's own JWT login). `services replace` does not manage the IAM policy, so bind here.
+run gcloud run services add-iam-policy-binding "$SERVICE_NAME" \
+    --member=allUsers --role=roles/run.invoker \
+    --project="$PROJECT_ID" --region="$REGION" --quiet
 
 echo
 echo "Done. Service URL: gcloud run services describe $SERVICE_NAME --project=$PROJECT_ID --region=$REGION --format='value(status.url)'"
