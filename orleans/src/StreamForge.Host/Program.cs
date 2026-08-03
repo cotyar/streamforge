@@ -8,6 +8,7 @@ using StreamForge.Host.Grpc;
 using StreamForge.Host.Grpc.Dynamic;
 using StreamForge.Host.Services;
 using StreamForge.Host.Storage;
+using StreamForge.Host.Streaming;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -26,19 +27,43 @@ if (string.IsNullOrEmpty(builder.Configuration["urls"]))
     });
 }
 
+// Streams:Transport selects the stream transport. "pull" (DEFAULT) is Orleans' stock memory-stream
+// path, untouched. "push" swaps in StreamForge.Host.Streaming's in-process push bus under the SAME
+// provider name — every producer/consumer call site is identical in both modes (see PushStreamBus and
+// PushStreamProvider's class docs for the ordering/deadlock/backpressure reasoning).
+var streamTransport = (builder.Configuration["Streams:Transport"] ?? "pull").Trim().ToLowerInvariant();
+if (streamTransport is not ("pull" or "push"))
+{
+    throw new InvalidOperationException(
+        $"Unknown Streams:Transport '{streamTransport}'. Valid values: 'pull' (default, Orleans memory streams) or 'push'.");
+}
+
 builder.Host.UseOrleans(siloBuilder =>
 {
     siloBuilder.UseLocalhostClustering();
-    // Memory streams are PULL-based: pulling agents poll the in-memory queues every
-    // GetQueueMessagesTimerPeriod (Orleans default 100ms). Every stream hop therefore adds
-    // Uniform(0, period) latency — the table path pays it twice (sources → TableGrain,
-    // tableDelta → SignalR bridge), which is exactly the 122ms p50 / 209ms p90 the 005-W9
-    // benchmark measured vs Dapr's push-based 7ms. Streams:PullPeriodMs makes the cadence
-    // tunable; default keeps Orleans' stock behavior.
-    var pullPeriodMs = builder.Configuration.GetValue("Streams:PullPeriodMs", 100);
-    siloBuilder.AddMemoryStreams(StreamConstants.ProviderName, configurator =>
-        configurator.ConfigurePullingAgent(ob => ob.Configure(o =>
-            o.GetQueueMsgsTimerPeriod = TimeSpan.FromMilliseconds(pullPeriodMs))));
+    if (streamTransport == "push")
+    {
+        // PUSH: no pulling agents at all — publish is a non-blocking channel write, one pump task per
+        // subscriber delivers (into the grain's own turn, via a grain extension, for grain subscribers).
+        // Streams:PushCapacity bounds each subscriber's backlog; overflow drops the incoming item and
+        // logs a throttled counter (see PushStreamBus's backpressure paragraph).
+        siloBuilder.AddPushStreams(
+            StreamConstants.ProviderName,
+            builder.Configuration.GetValue("Streams:PushCapacity", 10_000));
+    }
+    else
+    {
+        // Memory streams are PULL-based: pulling agents poll the in-memory queues every
+        // GetQueueMessagesTimerPeriod (Orleans default 100ms). Every stream hop therefore adds
+        // Uniform(0, period) latency — the table path pays it twice (sources → TableGrain,
+        // tableDelta → SignalR bridge), which is exactly the 122ms p50 / 209ms p90 the 005-W9
+        // benchmark measured vs Dapr's push-based 7ms. Streams:PullPeriodMs makes the cadence
+        // tunable; default keeps Orleans' stock behavior.
+        var pullPeriodMs = builder.Configuration.GetValue("Streams:PullPeriodMs", 100);
+        siloBuilder.AddMemoryStreams(StreamConstants.ProviderName, configurator =>
+            configurator.ConfigurePullingAgent(ob => ob.Configure(o =>
+                o.GetQueueMsgsTimerPeriod = TimeSpan.FromMilliseconds(pullPeriodMs))));
+    }
     siloBuilder.AddMemoryGrainStorage(StreamConstants.PubSubStoreName);
     siloBuilder.AddJsonFileGrainStorage(StreamConstants.StorageName);
 });

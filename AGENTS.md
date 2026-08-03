@@ -38,6 +38,11 @@ cd web && bun run build
 ~/.dotnet/dotnet run --project orleans/src/StreamForge.Host   # :5199 + :5299
 cd dapr && ./tools/run.sh                                      # :5399 (needs `dapr init` done once)
 ```
+Orleans stream-transport knobs (post-005 latency work): `--Streams:Transport push` swaps the
+pull-based memory streams for the in-process push bus (`Host/Streaming/PushStream*`, p50 1ms vs
+stock 115ms on tableDelta); default `pull` is byte-identical stock Orleans, tunable via
+`--Streams:PullPeriodMs` (default 100). `TABLES__FLUSHMS` tunes the epoch flush (P≥2 tables only).
+
 Local skills (root `.claude/skills/`, `sf-` prefix) wrap the common workflows: `/sf-run` (both
 flavors), `/sf-verify` (both flavors), `/sf-sql`, `/sf-client-gen`, `/sf-config` (catalog
 export/import).
