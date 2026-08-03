@@ -184,6 +184,9 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   </div>
   <a class="back" href="/docs">&larr; User documentation</a>
   <div class="navgap"></div>
+  <a href="#live">Live demos</a>
+  <a href="#orleans-intro">Orleans in 60 seconds</a>
+  <a href="#dapr-intro">Dapr in 60 seconds</a>
   <a href="#summary">Executive summary</a>
   <a href="#architecture">Architecture side-by-side</a>
   <a href="#latency">Measured latency</a>
@@ -202,6 +205,49 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
 <p class="eyebrow">Plan 005 · Dapr sibling runtime</p>
 <h1>Orleans vs Dapr</h1>
 <p class="lede">Same platform, two runtimes. StreamForge's SQL engine, contracts, application logic, REST/SignalR API, and console SPA (<a href="#reuse">~70% of the codebase</a>) are shared verbatim between an in-process Microsoft Orleans silo and a sidecar'd Dapr deployment — only the actor/grain runtime and the transport underneath differ. This page is the honest answer to "why Orleans and not Dapr, or vice versa": measured latency, delivery-semantics tradeoffs, and the decision matrix for which building blocks fit which constraints.</p>
+
+<section id="live">
+<h2>Live demos</h2>
+<p>Every claim on this page can be shown running. Same console, same seeded market-data world, one per runtime — pick whichever environment is in front of you:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Environment</th><th>Orleans console</th><th>Dapr console</th></tr></thead>
+<tbody>
+<tr><td><b>Cloud Run demo</b> (public; wakes on first click — Orleans ~30&nbsp;s, Dapr up to ~2&nbsp;min, sleeps again after ~15&nbsp;min idle)</td>
+    <td><a href="https://streamforge-orleans-dqkewv3h4q-ew.a.run.app" target="_blank" rel="noopener">streamforge&#8209;orleans&hellip;run.app</a></td>
+    <td><a href="https://streamforge-dapr-dqkewv3h4q-ew.a.run.app" target="_blank" rel="noopener">streamforge&#8209;dapr&hellip;run.app</a></td></tr>
+<tr><td>Local dev servers (<code>dotnet run</code> / <code>dapr/tools/run.sh</code>)</td>
+    <td><a href="http://localhost:5199" target="_blank" rel="noopener">localhost:5199</a></td>
+    <td><a href="http://localhost:5399" target="_blank" rel="noopener">localhost:5399</a></td></tr>
+<tr><td>Local containers (started from the <a href="http://localhost:5599" target="_blank" rel="noopener">cluster admin</a> or <code>docker compose</code>)</td>
+    <td><a href="http://localhost:6199" target="_blank" rel="noopener">localhost:6199</a></td>
+    <td><a href="http://localhost:6399" target="_blank" rel="noopener">localhost:6399</a></td></tr>
+</tbody></table></div>
+<p>Demo logins: <code>admin/admin123!</code> · <code>editor/editor123!</code> · <code>viewer/viewer123!</code>. Suggested walk-through: Dashboard (live tape) &rarr; Tables (Z-set rows updating) &rarr; AI Control (ask it to create a source) &rarr; this page's <a href="#latency">latency scoreboard</a>.</p>
+</section>
+
+<section id="orleans-intro">
+<h2>Microsoft Orleans in 60 seconds</h2>
+<p class="lede">A .NET framework for building stateful, distributed services out of <b>virtual actors</b> ("grains") — born at Microsoft Research, battle-proven running Halo's and Xbox Live's backend services, now a first-class part of .NET.</p>
+<ul>
+<li><b>The big idea — virtual actors.</b> A grain is a tiny single-threaded object with identity, state, timers, and streams. It <i>always exists</i>: the runtime activates it on demand somewhere in the cluster, deactivates it when idle, and recovers it after failures. No locks, no placement logic, no lifecycle code in your app.</li>
+<li><b>One process, no extra moving parts.</b> The silo co-hosts with ASP.NET Core — StreamForge's Orleans flavor is literally <code>dotnet run</code>: REST, SignalR, gRPC, and thousands of actors in a single deployable.</li>
+<li><b>Typed, in-process, microsecond calls.</b> Grain-to-grain calls are plain C# method calls with compile-time contracts — the foundation of this platform's partitioned dataflow (plan 003) and its <a href="#latency">1&nbsp;ms push-transport latency</a>.</li>
+<li><b>Scale = add silos.</b> The same code shards across a cluster; the runtime rebalances grains. (This demo deliberately runs single-silo.)</li>
+</ul>
+<p><b>Official material</b>: <a href="https://learn.microsoft.com/dotnet/orleans/" target="_blank" rel="noopener">Orleans documentation (Microsoft Learn)</a> · <a href="https://learn.microsoft.com/dotnet/orleans/overview" target="_blank" rel="noopener">official overview — "the pitch" for newcomers</a> · <a href="https://github.com/dotnet/orleans" target="_blank" rel="noopener">github.com/dotnet/orleans</a></p>
+</section>
+
+<section id="dapr-intro">
+<h2>Dapr in 60 seconds</h2>
+<p class="lede">A CNCF-graduated runtime that gives <b>any language</b> distributed-systems building blocks through a <b>sidecar</b>: your app talks plain HTTP/gRPC to localhost, Dapr does the hard parts.</p>
+<ul>
+<li><b>The big idea — building blocks over APIs.</b> Pub/sub, state stores, actors, service invocation, bindings, secrets, workflows — each a small, uniform API served by the <code>daprd</code> sidecar next to your process. Your code has no infrastructure SDKs in it.</li>
+<li><b>Polyglot by construction.</b> Anything that can make an HTTP call is a first-class citizen: StreamForge's Python enricher, TypeScript/bun and Java consumers plug into the <i>same</i> topics as the .NET host — <a href="#polyglot">shown live</a>.</li>
+<li><b>Swap infrastructure with YAML.</b> The pub/sub and state components point at Redis here; retargeting to Kafka/Postgres/cloud services is a component file, not a code change.</li>
+<li><b>Actors included.</b> Dapr's actor model is the virtual-actor design Orleans pioneered — same mental model, reachable from every language, with k8s-native ops (this demo runs the whole stack as sidecars in one Cloud Run service).</li>
+</ul>
+<p><b>Official material</b>: <a href="https://dapr.io" target="_blank" rel="noopener">dapr.io</a> · <a href="https://docs.dapr.io/concepts/overview/" target="_blank" rel="noopener">official overview — concepts for newcomers</a> · <a href="https://github.com/dapr/dapr" target="_blank" rel="noopener">github.com/dapr/dapr</a> · <a href="https://www.cncf.io/projects/dapr/" target="_blank" rel="noopener">CNCF project page</a></p>
+</section>
 
 <section id="summary">
 <h2>Executive summary</h2>
