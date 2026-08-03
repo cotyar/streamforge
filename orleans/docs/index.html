@@ -200,6 +200,8 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#overview">Overview</a>
   <a href="#quickstart">Quick start</a>
   <a href="#concepts">Core concepts</a>
+  <a href="#examples">The seeded demo world</a>
+  <a href="#examples-nested" class="sub">Nested financial instruments</a>
   <div class="navgap"></div>
   <a href="#console">Using the console</a>
   <a href="#console-pipelines" class="sub">Pipelines &amp; SQL editor</a>
@@ -313,6 +315,62 @@ cd web &amp;&amp; bun install &amp;&amp; bun run build &amp;&amp; cd ..
 <p>A table is a <b>persistent materialized view</b> — the current answer to a query, maintained incrementally as data arrives. Unlike pipelines, tables have no windows: aggregates are running totals that update in place. Tables can read other tables, and their state survives restarts. See <a href="#tables">Materialized tables</a>.</p>
 <h3>Everything is an entity</h3>
 <p>Sources, pipelines, tables, and users are all managed the same way: create, edit, delete, start/stop — from the console or the <a href="#api">REST API</a>, gated by <a href="#rbac">roles</a>.</p>
+</section>
+
+<section id="examples">
+<h2>The seeded demo world</h2>
+<p>Every fresh instance (empty data dir on Orleans, empty Redis on Dapr, every containerized cold start) seeds the same self-consistent market-data world — six generator sources, seven pipelines, five tables. Everything below is live out of the box or one click away from Running.</p>
+
+<h3>Sources (synthetic generators)</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Source</th><th>Rate</th><th>What it emits</th></tr></thead>
+<tbody>
+<tr><td><code>trades</code></td><td>8/s</td><td>Executions: <code>symbol, price, qty, side</code> — the workhorse feed most examples aggregate.</td></tr>
+<tr><td><code>quotes</code></td><td>10/s</td><td>Two-sided quotes: <code>symbol, bid, ask</code> — join target for spread analytics.</td></tr>
+<tr><td><code>orders</code></td><td>4/s</td><td>Order tickets: <code>orderId, symbol, qty, status</code>.</td></tr>
+<tr><td><code>app_events</code></td><td>3/s</td><td>Application events with a <b>nested JSON payload</b> (<code>payload.user.tier</code>, <code>payload.order.symbol</code>) — the <code>-&gt;</code>/<code>-&gt;&gt;</code> showcase.</td></tr>
+<tr><td><code>structures</code></td><td>3/s</td><td><b>Multileg instruments</b>: alternates IR swaps (2 fixed-shape legs) and option strategies (STRADDLE / STRANGLE / FLY, 2&ndash;4 legs) sharing one typed <code>legs</code> JSON-array schema.</td></tr>
+<tr><td><code>order_events</code></td><td>5/s</td><td><b>Multistage order lifecycle</b>: <code>NEW &rarr; ACK &rarr; PART_FILL &times;0&ndash;3 &rarr; FILLED | CANCELED</code> (~15% cancel), monotone <code>stage_rank</code>, cumulative <code>filled_qty</code>.</td></tr>
+</tbody></table></div>
+
+<h3 id="examples-nested">Complex nested financial instruments (plan 002)</h3>
+<p>The <code>structures</code> + <code>order_events</code> pair is the platform's deep-dive example — nested payloads and entity lifecycles, not just flat ticks:</p>
+<ul>
+<li><b>Multileg structures, flattened with UNNEST.</b> Each <code>structures</code> event carries a typed <code>legs</code> array (an IR swap's pay/receive legs with <code>ccy</code>/<code>notional</code>/rate fields; an option strategy's 2&ndash;4 legs with strike/expiry fields). The Running <code>leg_exposure</code> table flattens every instrument into per-leg rows and aggregates <b>per-currency notional across all legs</b>:
+<pre><code>SELECT l -&gt;&gt; 'ccy' AS ccy, SUM(l -&gt; 'notional') AS notional, COUNT(*) AS legs
+FROM structures s, UNNEST(s.legs) AS l GROUP BY l -&gt;&gt; 'ccy'</code></pre>
+Note the fine print this example exists to teach: <code>-&gt;</code> keeps the raw numeric JSON node so <code>SUM</code> accumulates; <code>-&gt;&gt;</code> would extract text and sum to zero.</li>
+<li><b>Multistage lifecycle, materialized with LATEST BY.</b> The Running <code>order_states</code> table keeps exactly one current row per live order — retract/assert pairs stream out as each order advances:
+<pre><code>SELECT order_id, symbol, side, stage, stage_rank, stage_ts, qty, filled_qty, px
+FROM order_events LATEST BY (order_id)</code></pre>
+Row history is enabled in <code>LastN(8)</code> mode, so clicking a row in the console shows the order's <b>stage trail</b> (NEW, ACK, the PART_FILLs, then FILLED/CANCELED) — the recent-versions walk, not just the endpoints.</li>
+<li><b>Windowed fill activity.</b> The Running <code>fill-rate-5s</code> pipeline counts PART_FILL/FILLED events per symbol in 5-second tumbling windows over the same feed.</li>
+</ul>
+
+<h3>Pipelines (windowed SQL)</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Pipeline</th><th>Status</th><th>Demonstrates</th></tr></thead>
+<tbody>
+<tr><td>VWAP by symbol (5s)</td><td>Running</td><td>Tumbling-window aggregate: <code>SUM(price*qty)/SUM(qty)</code> per symbol.</td></tr>
+<tr><td>Trade vs quote spread</td><td>Running</td><td>Interval join: BUY trades <code>JOIN quotes WITHIN 5 SECONDS</code>, trade price vs bid.</td></tr>
+<tr><td>Hot symbol VWAP (nested)</td><td>Running</td><td>Plan 004: <code>WITH</code> CTE + <code>IN</code> subquery — VWAP restricted to the rolling busy-symbol set.</td></tr>
+<tr><td>fill-rate-5s</td><td>Running</td><td>Windowed lifecycle activity over <code>order_events</code> (see above).</td></tr>
+<tr><td>Order bursts (session)</td><td>Stopped</td><td><code>SESSION(GAP 3 SECONDS)</code> windows — start it to watch burst grouping.</td></tr>
+<tr><td>Unfilled orders (LEFT JOIN)</td><td>Stopped</td><td>Windowed <b>outer</b> join: orders null-padded when no trade matched WITHIN 10s.</td></tr>
+<tr><td>JSON payload join</td><td>Stopped</td><td>Join keyed on a nested-JSON extraction: <code>e.payload -&gt; 'order' -&gt;&gt; 'symbol' = t.symbol</code>.</td></tr>
+</tbody></table></div>
+
+<h3>Tables (materialized views)</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Table</th><th>Status</th><th>Demonstrates</th></tr></thead>
+<tbody>
+<tr><td><code>positions</code></td><td>Running</td><td>Running per-symbol trade aggregates; fuzzy row search enabled.</td></tr>
+<tr><td><code>leg_exposure</code></td><td>Running</td><td>UNNEST over multileg structures (see above).</td></tr>
+<tr><td><code>order_states</code></td><td>Running</td><td><code>LATEST BY</code> + LastN(8) row history (see above).</td></tr>
+<tr><td><code>gold_tier_orders</code></td><td>Stopped</td><td>JSON expressions in table mode: filter + group by nested payload fields.</td></tr>
+<tr><td><code>hot_symbols</code></td><td>Stopped</td><td>Table-over-table chaining: reads <code>positions</code>, keeps symbols with &gt;50 trades.</td></tr>
+</tbody></table></div>
+<p>The Stopped entries are left that way on purpose — starting one from the console (or asking the AI Control chat to do it) is itself a demo of lifecycle orchestration.</p>
 </section>
 
 <section id="console">
