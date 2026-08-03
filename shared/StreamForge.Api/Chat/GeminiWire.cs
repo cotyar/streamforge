@@ -96,6 +96,20 @@ internal sealed class GeminiGenerationConfig
 {
     [JsonPropertyName("maxOutputTokens")]
     public int MaxOutputTokens { get; set; } = 2048;
+
+    // gemini-2.5 models "think" by default, and thinking tokens count against maxOutputTokens —
+    // a tool-heavy turn can burn the whole budget on thinking and come back with NO content parts
+    // at all (no text, no functionCall; finishReason MAX_TOKENS). Observed live on Cloud Run.
+    // Budget 0 disables thinking for this control chat; null omits the field entirely.
+    [JsonPropertyName("thinkingConfig")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public GeminiThinkingConfig? ThinkingConfig { get; set; }
+}
+
+internal sealed class GeminiThinkingConfig
+{
+    [JsonPropertyName("thinkingBudget")]
+    public int ThinkingBudget { get; set; }
 }
 
 internal sealed class GeminiGenerateContentResponse

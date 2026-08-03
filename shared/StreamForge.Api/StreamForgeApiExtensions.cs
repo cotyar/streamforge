@@ -138,7 +138,8 @@ public static class StreamForgeApiExtensions
                 apiKey,
                 sp.GetRequiredService<StreamForge.Abstractions.ICatalogFacade>(),
                 sp.GetRequiredService<StreamForge.Abstractions.ITableReadFacade>(),
-                sp.GetRequiredService<StreamForge.Abstractions.ITableHistoryFacade>());
+                sp.GetRequiredService<StreamForge.Abstractions.ITableHistoryFacade>(),
+                thinkingBudget: config.GetValue("Gemini:ThinkingBudget", 0));
         });
     }
 

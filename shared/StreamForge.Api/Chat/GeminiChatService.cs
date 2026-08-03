@@ -26,7 +26,12 @@ public sealed class GeminiChatService(
     string? apiKey,
     ICatalogFacade catalog,
     ITableReadFacade tables,
-    ITableHistoryFacade history)
+    ITableHistoryFacade history,
+    // 0 (default) disables gemini-2.5 "thinking" — thinking tokens count against maxOutputTokens
+    // and can consume the ENTIRE budget, returning a candidate with no content parts at all
+    // (observed live: empty reply, zero tool calls). Negative = omit thinkingConfig from the wire
+    // (for models that reject the field). Config: Gemini:ThinkingBudget.
+    int thinkingBudget = 0)
 {
     private const int MaxToolIterations = 8;
 
@@ -65,6 +70,15 @@ public sealed class GeminiChatService(
             if (functionCalls.Count == 0)
             {
                 var reply = string.Concat(parts.Where(p => p.Text is not null).Select(p => p.Text));
+                if (string.IsNullOrWhiteSpace(reply))
+                {
+                    // Never hand the UI an empty bubble — happens when the model exhausts its
+                    // output budget (e.g. thinking, see the ctor comment) or ends a turn silently.
+                    reply = toolCalls.Count > 0
+                        ? "(The model returned no closing text — the tool calls below carry the results.)"
+                        : $"The model returned an empty response (finishReason: {candidate.FinishReason ?? "unknown"}) — please try again.";
+                }
+
                 return new ChatResponse(reply, toolCalls, model);
             }
 
@@ -106,7 +120,11 @@ public sealed class GeminiChatService(
             SystemInstruction = new GeminiContent { Parts = [new GeminiPart { Text = SystemPrompt }] },
             Contents = contents,
             Tools = [new GeminiTool { FunctionDeclarations = ChatToolCatalog.Declarations.ToList() }],
-            GenerationConfig = new GeminiGenerationConfig { MaxOutputTokens = 2048 },
+            GenerationConfig = new GeminiGenerationConfig
+            {
+                MaxOutputTokens = 2048,
+                ThinkingConfig = thinkingBudget < 0 ? null : new GeminiThinkingConfig { ThinkingBudget = thinkingBudget },
+            },
         };
 
         var url = $"{baseUrl.TrimEnd('/')}/v1beta/models/{model}:generateContent";
