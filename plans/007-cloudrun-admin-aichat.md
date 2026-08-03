@@ -1,6 +1,23 @@
 # Plan 007 — Containers + Cloud Run prep, cluster admin app, AI control chat
 
-**Status: IN PROGRESS** (P committed; waves W0–W3 pending)
+**Status: DONE** (P + W0–W3 complete)
+
+Results: both flavors containerized and compose-verified live (orleans single container :6199,
+265MB, linux/amd64-pinned — grpc.tools protoc segfaults under native arm64 Docker; dapr as a
+self-contained app+daprd:1.18.1+placement:1.18.1+redis:7 stack :6399, shared network namespace,
+no scheduler — timers only, daprd merely warns). Cloud Run manifests + parameterized `deploy.sh
+--dry-run` ready for both (deploying is the user's call). Admin app (`admin/`, :5599) drove both
+stacks through full start→healthy→stop cycles live, local + cloudrun-mode graceful degradation
+verified. AI control chat: `POST /api/chat` in the shared Api — **Gemini** function calling
+(user's provider switch mid-plan; config `Gemini:ApiKey|Model|BaseUrl`, `GEMINI_API_KEY` env,
+default `gemini-2.5-flash`), 16 tools over the catalog facades, confirmed-delete guard,
+8-iteration cap; SPA "AI Control" page (Editor+) with per-turn tool-call audit trace; live-proven
+on Orleans via stubbed Gemini (chat request → real `create_source` → source visible in catalog)
+and DI-proven on the Dapr container (clean 503-unconfigured, not a 500). Suites: orleans 884
+(393+491, +7 chat tests, existing test files untouched), dapr 181, `bun run build` green.
+Notable fixes en route: seed-vs-daprd circular dependency in the container topology (entrypoint
+does one idempotent restart once daprd is healthy); admin stop timeout 120s→300s (a killed
+`compose down` strands half the dapr stack under Docker load — observed live).
 
 Depends on: 005 (both flavors + shared core), 006 (connectors/config live on both).
 

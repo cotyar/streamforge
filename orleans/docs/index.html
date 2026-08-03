@@ -238,6 +238,8 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#config-format" class="sub">Document format</a>
   <a href="#config-compose" class="sub">Compose &amp; merge rules</a>
   <a href="#config-import" class="sub">Import modes</a>
+  <a href="#aichat">AI control chat</a>
+  <a href="#deploy">Deployment &amp; admin</a>
   <div class="navgap"></div>
   <a href="#architecture">Architecture</a>
   <a href="#limits">Limitations</a>
@@ -707,6 +709,27 @@ curl -s -X POST "localhost:5199/api/config/import?mode=merge" \
   -H "Authorization: Bearer $EDITOR_TOKEN" \
   -F "base.json=@base.json" -F "overlay.json=@overlay.json"</code></pre>
 <p>Auth summary: export is Viewer (Admin for <code>includeSecrets=true</code>); import is Editor; <code>replace</code> additionally requires Admin. Whole-import atomicity is <b>not</b> promised — each entity applies through the same serialized catalog registry (grain/actor turn-based), so per-entity writes are atomic but a failure partway through an import leaves earlier entities in this run already applied (the report shows exactly what happened, entity by entity).</p>
+</section>
+
+<section id="aichat">
+<h2>AI control chat</h2>
+<p>The <b>AI Control</b> page (Editor/Admin roles) is a conversational surface over the same catalog the REST API manages: ask it to list, create, pause, or delete sources, draft and validate SQL pipelines, or inspect table rows, search, and history. It is served by <code>POST /api/chat</code> on <em>both</em> runtimes and powered by Google Gemini function calling (default model <code>gemini-2.5-flash</code>).</p>
+<ul>
+<li><b>Setup</b>: <code>export GEMINI_API_KEY=&lt;key&gt;</code> (or config <code>Gemini:ApiKey</code>) before starting the host; without it the page shows a setup notice. <code>Gemini:Model</code> and <code>Gemini:BaseUrl</code> override the defaults.</li>
+<li><b>Audit trail</b>: every tool call the model makes (name, input, result) is logged beneath the reply — the chat can do nothing the tools don't expose.</li>
+<li><b>Guardrails</b>: destructive operations (deletes) require explicit in-conversation confirmation, and the tool loop is capped at 8 rounds per message.</li>
+</ul>
+</section>
+
+<section id="deploy">
+<h2>Deployment &amp; admin</h2>
+<p>Both flavors ship as self-contained containers under <code>deploy/</code> — the same images run locally under docker compose and on Google Cloud Run:</p>
+<ul>
+<li><b>Orleans</b>: one container (<code>deploy/orleans/</code>), compose on <code>:6199</code>. Single-silo topology → <code>max-instances 1</code> on Cloud Run.</li>
+<li><b>Dapr</b>: one four-container unit — app + daprd + placement + redis sharing a network namespace (<code>deploy/dapr/</code>), compose on <code>:6399</code>; the identical container set deploys as a single multi-container Cloud Run service.</li>
+<li><b>Cloud Run</b>: <code>deploy/&lt;flavor&gt;/deploy.sh</code> builds, pushes, and applies the service manifest (parameterized by <code>PROJECT_ID</code>/<code>REGION</code>; <code>--dry-run</code> prints without executing). Data is ephemeral — a cold start reseeds the demo catalog.</li>
+<li><b>Cluster admin app</b> (<code>admin/</code>, <code>bun main.ts</code>, <code>:5599</code>): start either stack on command, watch <code>/healthz</code> turn green, tail logs, and shut it down — against local compose or Cloud Run (<code>MODE=cloudrun</code>, start/stop = scale 1↔0). It never touches the dev servers on 5199/5399.</li>
+</ul>
 </section>
 
 <section id="architecture">

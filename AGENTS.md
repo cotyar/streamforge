@@ -19,6 +19,8 @@ its own note on why `/docs` doesn't serve it automatically).
   runtime 1.18.x, containers `dapr_redis`/`dapr_placement`/`dapr_scheduler` from `dapr init`), reseed
   via `dapr/tools/reset.sh` + restart, stop via `dapr stop --app-id streamforge-dapr`. Test instances:
   pick 6xxx–9xxx via `--Http:Port … --Grpc:Port … --DataDir <temp>` and kill them when done.
+  Containerized stacks (plan 007): orleans compose `6199`, dapr compose `6399`, admin app `5599` —
+  these are the *container* ports; never confuse them with (or bind over) the dev servers above.
 - Seeds apply only to an **empty data dir** (`orleans/src/StreamForge.Host/data/`; delete to
   reseed). Logins: `admin/admin123!`, `editor/editor123!`, `viewer/viewer123!`.
 - Git: remote `origin` = private `github.com/cotyar/crates-foundation`, branch `master`. Commit
@@ -39,6 +41,16 @@ cd dapr && ./tools/run.sh                                      # :5399 (needs `d
 Local skills (root `.claude/skills/`, `sf-` prefix) wrap the common workflows: `/sf-run` (both
 flavors), `/sf-verify` (both flavors), `/sf-sql`, `/sf-client-gen`, `/sf-config` (catalog
 export/import).
+
+**Containers, Cloud Run, admin, AI chat** (plan 007): `deploy/orleans/` and `deploy/dapr/` hold
+each flavor's Dockerfile(s), `compose.yaml` (host ports 6199/6399), Cloud Run `service.yaml`, and
+parameterized `deploy.sh` (`--dry-run` supported; images pinned linux/amd64 — grpc.tools protoc
+segfaults under native arm64 Docker). The Dapr stack is self-contained: app+daprd+placement+redis
+in one network namespace, no scheduler (timers only). `admin/` (`bun main.ts`, :5599) starts/stops
+either containerized stack (or Cloud Run services with `MODE=cloudrun`) and polls `/healthz`.
+AI control chat: `POST /api/chat` + SPA "AI Control" page on both flavors, Google Gemini function
+calling over the catalog facades — needs `GEMINI_API_KEY` (or `Gemini:ApiKey`); returns a clear
+503 without it. Chat logic lives in `shared/StreamForge.Api/Chat/`.
 
 **Dapr flavor extras**: `dapr/tools/run.sh` starts the sidecar'd host on 5399 (sidecar 3599/4599);
 `dapr/tools/reset.sh` SCANs and deletes this app's Redis keys to reseed (the Dapr-flavor equivalent
