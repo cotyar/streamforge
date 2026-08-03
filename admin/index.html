@@ -82,6 +82,14 @@
     letter-spacing: 0.18em;
     color: var(--muted-foreground);
   }
+  .header-links { display: flex; gap: 1.1rem; margin-left: auto; }
+  .header-links a {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--primary);
+    text-decoration: none;
+  }
+  .header-links a:hover { text-decoration: underline; }
   .mode-badge {
     font-size: 0.72rem;
     font-weight: 600;
@@ -218,6 +226,10 @@
     <span class="title">STREAMFORGE — CLUSTER ADMIN</span>
     <span class="sub">CORPORATE</span>
   </div>
+  <nav class="header-links">
+    <a href="/docs" target="_blank">Documentation</a>
+    <a href="/docs/comparison.html" target="_blank">Orleans vs Dapr</a>
+  </nav>
   <span class="mode-badge" id="mode-badge">mode: …</span>
 </header>
 
