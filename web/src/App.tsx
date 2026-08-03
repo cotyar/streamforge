@@ -12,10 +12,17 @@ import { SourcesPage } from './pages/SourcesPage'
 import { UsersPage } from './pages/UsersPage'
 import { ApiExplorerPage } from './pages/ApiExplorerPage'
 import { ConfigPage } from './pages/ConfigPage'
+import { ChatPage } from './pages/ChatPage'
 
 function AdminRoute({ children }: { children: ReactNode }) {
   const { hasRole } = useAuth()
   if (!hasRole('Admin')) return <Navigate to="/" replace />
+  return <>{children}</>
+}
+
+function EditorRoute({ children }: { children: ReactNode }) {
+  const { hasRole } = useAuth()
+  if (!hasRole('Editor')) return <Navigate to="/" replace />
   return <>{children}</>
 }
 
@@ -34,6 +41,14 @@ export default function App() {
             <Route path="/sources" element={<SourcesPage />} />
             <Route path="/explorer" element={<ApiExplorerPage />} />
             <Route path="/config" element={<ConfigPage />} />
+            <Route
+              path="/chat"
+              element={
+                <EditorRoute>
+                  <ChatPage />
+                </EditorRoute>
+              }
+            />
             <Route
               path="/users"
               element={

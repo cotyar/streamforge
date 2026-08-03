@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>StreamForge — Cluster Admin</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+  /* StreamForge — the client brand theme (subset of web/src/index.css tokens). Text wordmark
+     only — never the the client logo graphic (CLAUDE.md hard rule 7). */
+  :root {
+    --background: #f7f9f8;
+    --foreground: #14231c;
+    --card: #ffffff;
+    --primary: #008755;
+    --primary-hover: #007348;
+    --primary-foreground: #ffffff;
+    --secondary: #eaf1ec;
+    --muted: #eef3f0;
+    --muted-foreground: #55665d;
+    --accent: #e1eee6;
+    --destructive: #c6453c;
+    --warning: #8a5a00;
+    --border: #dce5e0;
+    --ok: #008755;
+    --starting: #8a5a00;
+    --down: #c6453c;
+    --unknown: #55665d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: #0a0f0d;
+      --foreground: #e7ece9;
+      --card: #10161a;
+      --primary: #008755;
+      --primary-hover: #00a868;
+      --primary-foreground: #ffffff;
+      --secondary: #16211c;
+      --muted: #121a17;
+      --muted-foreground: #93a39c;
+      --accent: #1b2a22;
+      --destructive: #e4574d;
+      --warning: #e6a93c;
+      --border: rgba(255, 255, 255, 0.08);
+      --ok: #39a87b;
+      --starting: #e6a93c;
+      --down: #e4574d;
+      --unknown: #93a39c;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+    background: var(--background);
+    color: var(--foreground);
+  }
+  code, .mono { font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace; }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1.1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--card);
+    flex-wrap: wrap;
+  }
+  .wordmark { display: flex; flex-direction: column; gap: 2px; }
+  .wordmark .title {
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+  .wordmark .sub {
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    color: var(--muted-foreground);
+  }
+  .mode-badge {
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.3rem 0.7rem;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--primary);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  main {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 1.5rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 1.25rem;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .card-head h2 {
+    margin: 0;
+    font-size: 1.05rem;
+    text-transform: capitalize;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.28rem 0.65rem;
+    border-radius: 999px;
+    background: var(--muted);
+    color: var(--foreground);
+    white-space: nowrap;
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--unknown); }
+  .pill.ok .dot { background: var(--ok); }
+  .pill.starting .dot { background: var(--starting); }
+  .pill.down .dot { background: var(--down); }
+  .pill.unknown .dot { background: var(--unknown); }
+
+  .kv { font-size: 0.82rem; color: var(--muted-foreground); display: flex; flex-direction: column; gap: 0.25rem; }
+  .kv a { color: var(--primary); text-decoration: none; }
+  .kv a:hover { text-decoration: underline; }
+  .detail {
+    font-size: 0.75rem;
+    color: var(--muted-foreground);
+    background: var(--muted);
+    border-radius: 0.4rem;
+    padding: 0.5rem 0.6rem;
+    max-height: 4.5rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .actions { display: flex; gap: 0.6rem; }
+  button {
+    font-family: inherit;
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 0.5rem 0.9rem;
+    border-radius: 0.5rem;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-start { background: var(--primary); color: var(--primary-foreground); }
+  .btn-start:not(:disabled):hover { background: var(--primary-hover); }
+  .btn-stop { background: transparent; color: var(--destructive); border-color: var(--destructive); }
+  .btn-stop:not(:disabled):hover { background: var(--destructive); color: #fff; }
+  .btn-logs {
+    background: transparent;
+    color: var(--muted-foreground);
+    border-color: var(--border);
+    margin-left: auto;
+  }
+
+  details.logs { border-top: 1px solid var(--border); padding-top: 0.6rem; }
+  details.logs summary {
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--muted-foreground);
+    list-style: none;
+  }
+  details.logs summary::-webkit-details-marker { display: none; }
+  details.logs summary::before { content: '▸ '; }
+  details.logs[open] summary::before { content: '▾ '; }
+  pre.log-body {
+    margin: 0.6rem 0 0;
+    font-size: 0.72rem;
+    background: #0a0f0d;
+    color: #d7e5dd;
+    padding: 0.7rem;
+    border-radius: 0.5rem;
+    max-height: 260px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  footer {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 0 1.5rem 2rem;
+    font-size: 0.72rem;
+    color: var(--muted-foreground);
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="wordmark">
+    <span class="title">STREAMFORGE — CLUSTER ADMIN</span>
+    <span class="sub">CORPORATE</span>
+  </div>
+  <span class="mode-badge" id="mode-badge">mode: …</span>
+</header>
+
+<main>
+  <section class="card" data-flavor="orleans">
+    <div class="card-head">
+      <h2>Orleans</h2>
+      <span class="pill unknown" data-role="pill"><span class="dot"></span><span data-role="pill-text">…</span></span>
+    </div>
+    <div class="kv">
+      <span>url: <a data-role="url" href="#" target="_blank" rel="noopener">…</a></span>
+      <span>running: <span data-role="running">…</span></span>
+    </div>
+    <div class="detail" data-role="detail">…</div>
+    <div class="actions">
+      <button class="btn-start" data-role="start">Start</button>
+      <button class="btn-stop" data-role="stop">Stop</button>
+      <button class="btn-logs" data-role="logs-toggle">Logs</button>
+    </div>
+    <details class="logs" data-role="logs-panel">
+      <summary>Logs (last ~100 lines)</summary>
+      <pre class="log-body" data-role="log-body">(not loaded — expand to fetch)</pre>
+    </details>
+  </section>
+
+  <section class="card" data-flavor="dapr">
+    <div class="card-head">
+      <h2>Dapr</h2>
+      <span class="pill unknown" data-role="pill"><span class="dot"></span><span data-role="pill-text">…</span></span>
+    </div>
+    <div class="kv">
+      <span>url: <a data-role="url" href="#" target="_blank" rel="noopener">…</a></span>
+      <span>running: <span data-role="running">…</span></span>
+    </div>
+    <div class="detail" data-role="detail">…</div>
+    <div class="actions">
+      <button class="btn-start" data-role="start">Start</button>
+      <button class="btn-stop" data-role="stop">Stop</button>
+      <button class="btn-logs" data-role="logs-toggle">Logs</button>
+    </div>
+    <details class="logs" data-role="logs-panel">
+      <summary>Logs (last ~100 lines)</summary>
+      <pre class="log-body" data-role="log-body">(not loaded — expand to fetch)</pre>
+    </details>
+  </section>
+</main>
+
+<footer>
+  Polls <code>/api/status</code> every 3s. Manages only the containerized compose stacks (ports
+  6199/6399) or Cloud Run services — never the local dev servers on 5199/5299/5399.
+</footer>
+
+<script>
+(function () {
+  const cards = Array.from(document.querySelectorAll('.card'));
+  const inFlight = new Set();
+
+  function setPill(card, health) {
+    const pill = card.querySelector('[data-role="pill"]');
+    const text = card.querySelector('[data-role="pill-text"]');
+    pill.classList.remove('ok', 'starting', 'down', 'unknown');
+    const cls = ['ok', 'starting', 'down'].includes(health) ? health : 'unknown';
+    pill.classList.add(cls);
+    text.textContent = health;
+  }
+
+  function applyStatus(flavor, entry) {
+    const card = cards.find((c) => c.dataset.flavor === flavor);
+    if (!card) return;
+    setPill(card, entry.health);
+    const urlEl = card.querySelector('[data-role="url"]');
+    if (entry.url) {
+      urlEl.textContent = entry.url;
+      urlEl.href = entry.url;
+    } else {
+      urlEl.textContent = 'n/a';
+      urlEl.removeAttribute('href');
+    }
+    card.querySelector('[data-role="running"]').textContent = String(entry.running);
+    card.querySelector('[data-role="detail"]').textContent = entry.detail || '(no detail)';
+
+    const busy = inFlight.has(flavor);
+    card.querySelector('[data-role="start"]').disabled = busy || entry.running === true;
+    card.querySelector('[data-role="stop"]').disabled = busy || entry.running === false;
+  }
+
+  async function pollStatus() {
+    try {
+      const res = await fetch('/api/status');
+      const body = await res.json();
+      document.getElementById('mode-badge').textContent = 'mode: ' + body.mode;
+      applyStatus('orleans', body.orleans);
+      applyStatus('dapr', body.dapr);
+    } catch (e) {
+      document.getElementById('mode-badge').textContent = 'mode: unreachable';
+    }
+  }
+
+  async function loadLogs(flavor, card) {
+    const body = card.querySelector('[data-role="log-body"]');
+    body.textContent = 'loading…';
+    try {
+      const res = await fetch('/api/logs?flavor=' + encodeURIComponent(flavor));
+      const data = await res.json();
+      body.textContent = data.logs || '(empty)';
+    } catch (e) {
+      body.textContent = 'failed to load logs: ' + e;
+    }
+  }
+
+  cards.forEach((card) => {
+    const flavor = card.dataset.flavor;
+
+    card.querySelector('[data-role="start"]').addEventListener('click', async () => {
+      inFlight.add(flavor);
+      pollStatus();
+      try {
+        await fetch('/api/start?flavor=' + encodeURIComponent(flavor), { method: 'POST' });
+      } finally {
+        inFlight.delete(flavor);
+        pollStatus();
+      }
+    });
+
+    card.querySelector('[data-role="stop"]').addEventListener('click', async () => {
+      if (!confirm('Stop the ' + flavor + ' stack?')) return;
+      inFlight.add(flavor);
+      pollStatus();
+      try {
+        await fetch('/api/stop?flavor=' + encodeURIComponent(flavor), { method: 'POST' });
+      } finally {
+        inFlight.delete(flavor);
+        pollStatus();
+      }
+    });
+
+    card.querySelector('[data-role="logs-toggle"]').addEventListener('click', () => {
+      const panel = card.querySelector('[data-role="logs-panel"]');
+      panel.open = !panel.open;
+      if (panel.open) loadLogs(flavor, card);
+    });
+
+    card.querySelector('[data-role="logs-panel"]').addEventListener('toggle', (ev) => {
+      if (ev.target.open) loadLogs(flavor, card);
+    });
+  });
+
+  pollStatus();
+  setInterval(pollStatus, 3000);
+})();
+</script>
+</body>
+</html>

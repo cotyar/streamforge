@@ -425,3 +425,40 @@ export interface TableHistoryStats {
   keyCount: number
   totalVersions: number
 }
+
+// ============================================================================
+// Plan 007 (W1C/W2A): AI control chat — POST /api/chat (Editor policy), server-side
+// Gemini tool loop over the source/pipeline/table facades. Stateless: the client resends the
+// full text history every turn; toolCalls is a per-turn server-side trace only (never sent back).
+// Error bodies use the shared ErrorResponse shape ({ error: string }) — client.ts's
+// extractErrorMessage already surfaces `error` into ApiError.message, so callers just inspect
+// ApiError.status (503 = not configured, 502 = provider failure) and .message.
+// ============================================================================
+
+export type ChatRole = 'user' | 'assistant'
+
+export interface ChatMessage {
+  role: ChatRole
+  content: string
+}
+
+export interface ChatRequest {
+  messages: ChatMessage[]
+}
+
+/** input/result are opaque JSON (tool-specific shape) — rendered pretty-printed, not typed further. */
+export interface ChatToolCallDto {
+  name: string
+  input: unknown
+  result: unknown
+}
+
+export interface ChatResponse {
+  reply: string
+  toolCalls: ChatToolCallDto[]
+  model: string
+}
+
+/** Verbatim 503 body when Gemini:ApiKey/GEMINI_API_KEY is unset — match this text, not just the status. */
+export const CHAT_NOT_CONFIGURED_MESSAGE =
+  'AI chat is not configured — set GEMINI_API_KEY (or Gemini:ApiKey) and restart.'
