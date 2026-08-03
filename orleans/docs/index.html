@@ -750,7 +750,7 @@ curl -s -X POST "localhost:5199/api/config/import?mode=merge" \
 <section id="limits">
 <h2>Limitations &amp; design notes</h2>
 <ul>
-<li><b>Single-process demo topology.</b> Localhost clustering and in-memory streams — the Orleans programming model is production-shaped, but multi-silo deployment would swap clustering, stream, and storage providers.</li>
+<li><b>Single-process demo topology.</b> Localhost clustering and in-memory streams — the Orleans programming model is production-shaped, but multi-silo deployment would swap clustering, stream, and storage providers. Stream delivery is switchable: stock pull-based memory streams (default; 100&nbsp;ms polling cadence, <code>--Streams:PullPeriodMs</code>) or the in-process push bus (<code>--Streams:Transport push</code>, tableDelta p50 1&nbsp;ms vs 115&nbsp;ms stock — see the <a href="/docs/comparison.html">comparison page</a> for the measured scoreboard).</li>
 <li><b>Tables rebuild on restart.</b> Snapshots persist and serve immediately, but operator internals rebuild from live traffic (the <mark>Rebuilding</mark> badge). Full operator-state checkpointing is future work.</li>
 <li><b>Table joins are INNER-only.</b> Incremental outer joins over changing state are a meaningfully harder algebra; deferred deliberately.</li>
 <li><b>Late events are dropped</b>, not retroactively corrected — bounded-lateness semantics, not full differential dataflow.</li>

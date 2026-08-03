@@ -92,6 +92,26 @@ with `dotnet run` and nothing else. The Orleans programming model is production-
 deployment swaps clustering/stream/storage providers without touching the engine. RBAC is built-in
 JWT (no IdP) for the same reason.
 
+## D13 — Stream delivery is a transport choice, and the default is honest about it
+The 005 benchmark's "Dapr 17× faster" result was never the actor model — Orleans grain calls are
+microseconds — it was memory streams' pull-based delivery (100ms polling agents, paid once per
+stream hop; two hops on the table path). The fix is a config-switchable transport under the same
+provider name: `--Streams:Transport push` swaps in an in-process push bus (bounded channel per
+subscription + one pump task delivering into the consumer grain's turn via a grain extension) and
+takes `tableDelta` from p50 115ms to **p50 1ms**, ahead of Dapr's sidecar path (7ms). *Why pull
+stays the default*: it is byte-identical stock Orleans — zero new failure modes in the default
+path — and the push bus is single-silo by construction, which is fine for this flavor's documented
+localhost topology but must not silently become a portability assumption. *Why not a transport
+seam interface*: `IStreamProvider`/`IAsyncStream<T>` already are the seam — implementing them
+keeps every one of the ~14 producer/consumer call sites unmodified, so "both modes behave the
+same" is true by construction instead of argued. Fine print: per-(key, subscriber) FIFO is kept
+(one pump per subscription, delivery awaited before the next read); publish never awaits inside
+the producer's turn (rule D10's call-cycle discipline extends to transports); backlog overflow
+drops the incoming item with an exact logged counter rather than blocking a grain turn. The
+`TABLES__FLUSHMS` epoch-flush knob is a separate, orthogonal cadence and only exists on the
+partitioned path (D9) — P=1 tables never had a flush window, which the second round of measuring
+proved the first round had misattributed.
+
 ## Known ceilings (quick list)
 Table joins INNER-only · single-node topology · generator ~1 000 ev/s/source (1 ms timer floor) ·
 arrangement partitions each subscribe the full input stream (filter-at-consumer) · no exactly-once

@@ -24,6 +24,16 @@ numbers side by side. Restructure waves (W0–W3) touched `orleans/` under the h
 waves (W4–W9) were additive. Supersedes any notion of "fork the Host and edit" — the two runtimes
 share one semantic core and one API surface.
 
+**Post-plan addendum (2026-08-03): the latency scoreboard root-caused and inverted.** The 122ms was
+never actor overhead — Orleans memory streams are pull-based (100ms polling agents; the table path
+crosses two stream hops), and the 499/608ms tail above was machine load during that run (stock
+re-measures max ~200ms). A switchable in-process push transport (`--Streams:Transport push`,
+`Host/Streaming/PushStream*`, default `pull` unchanged) takes `order_states` `tableDelta` to
+p50/p90/p99/max = **1 / 2 / 6 / 6 ms** — ahead of the Dapr flavor's 7ms. Knobs:
+`Streams:PullPeriodMs` (pull cadence, default 100), `TABLES__FLUSHMS` (epoch flush, P≥2 tables
+only — P=1 tables like the benchmarked one never had a flush window). Full history + corrected
+scoreboard: `orleans/docs/comparison.html`, design rationale: `orleans/DESIGN.md` D13.
+
 **Hard gate (every commit):** `~/.dotnet/dotnet test orleans/StreamForge.sln` — all 511 tests green
 with test `.cs` files **unmodified** (`git diff --stat orleans/tests -- '*.cs'` empty). Test
 *csproj* files may change ProjectReference paths only.

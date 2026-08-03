@@ -74,8 +74,26 @@ SQL text ──Tokenizer──▶ tokens ──Parser (recursive descent + Pratt
 | `TableHistoryGrain` | table name | yes | Opt-in row-version history fed by the table-delta stream (the stream *is* the event log): All/LastN/FirstN/MinBy/MaxBy retention + time window; row identity from GROUP BY/LATEST BY keys. |
 | `UserStoreGrain` | `"users"` | yes | PBKDF2 credentials, seeded admin/editor/viewer. |
 
-**Streams** (Orleans memory streams, provider `"streams"`): namespaces `sources`, `pipeline-out`,
-`table-delta`, `lifecycle`. `StreamBridgeService` (hosted service) relays them to SignalR groups.
+**Streams** (provider `"streams"`): namespaces `sources`, `pipeline-out`, `table-delta`,
+`lifecycle`. `StreamBridgeService` (hosted service) relays them to SignalR groups. The transport
+behind the provider name is switchable (`Streams:Transport`, post-005 latency work):
+
+- **`pull`** (default) — stock Orleans memory streams. These are *pull-based*: pulling agents poll
+  the in-memory queues every `GetQueueMsgsTimerPeriod` (default 100ms, tunable via
+  `Streams:PullPeriodMs`), so every stream hop adds Uniform(0, period) latency and the
+  generator→table→SignalR path pays it twice — measured p50 115ms / max ~200ms on `tableDelta`.
+- **`push`** — an in-process push bus (`Host/Streaming/PushStream*`) registered as a drop-in
+  `IStreamProvider` under the same name; no producer/consumer call-site differs between modes.
+  Publish is a non-blocking bounded-channel write (`Streams:PushCapacity`, default 10k; overflow
+  drops the incoming item and counts it); one pump task per subscription delivers into the grain's
+  own turn via a grain extension (per-key FIFO, no call-cycle deadlocks by construction — publish
+  never awaits inside the producer's turn); non-grain subscribers (`StreamBridgeService`, gRPC
+  streaming) receive a `DeepCopier` copy on the pump. Measured p50 **1ms** / p99 6ms on the same
+  benchmark — ahead of the Dapr flavor's Redis pub/sub (p50 7ms). Single-silo only by design
+  (localhost clustering is this flavor's documented topology); a multi-silo deployment would swap
+  back to a distributed stream provider.
+
+See `docs/comparison.html` "Measured latency" for the full scoreboard and root-cause history.
 **Persistence**: custom `JsonFileGrainStorage` — one JSON file per grain state under `data/`
 (config `DataDir`); delete the directory to reseed.
 

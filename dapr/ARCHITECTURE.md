@@ -699,7 +699,11 @@ Regression coverage: `orleans/tests/StreamForge.Host.Tests/StreamBridgeServiceSt
 (a `TestCluster`-based test that starts `StreamBridgeService` before anything has seeded the
 registry — the losing side of the race — and asserts `tableDelta`/`pipelineResult` still relay).
 See `orleans/docs/comparison.html`'s "Measured latency" section for the re-measured, now-real Orleans
-`tableDelta` numbers.
+`tableDelta` numbers — and for the post-plan root cause of the original 17× gap: Orleans' stock
+memory streams are pull-based (100ms polling agents ×2 stream hops), not slower actors. With the
+Orleans flavor's switchable push transport (`--Streams:Transport push`) the same benchmark measures
+p50 1ms vs this flavor's 7ms — i.e. each runtime's latency is dominated by its transport (Redis
+pub/sub round-trips here), which is the honest framing for client conversations.
 
 ## How to run
 
