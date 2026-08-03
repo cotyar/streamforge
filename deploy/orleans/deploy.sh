@@ -16,7 +16,7 @@
 #   1. Build the image via `gcloud builds submit` (repo root context, deploy/orleans/Dockerfile)
 #      and push it to Artifact Registry at
 #      ${REGION}-docker.pkg.dev/${PROJECT_ID}/streamforge/orleans:${TAG}
-#   2. Render deploy/orleans/service.yaml (envsubst ${IMAGE} / ${ANTHROPIC_API_KEY}) and apply it
+#   2. Render deploy/orleans/service.yaml (envsubst ${IMAGE} / ${GEMINI_API_KEY}) and apply it
 #      with `gcloud run services replace`.
 #
 # --dry-run prints every command this script would run (including the rendered service.yaml) and
@@ -105,16 +105,16 @@ echo
 echo "-- 3. render service.yaml and apply it --"
 RENDERED="$(mktemp -t streamforge-orleans-service.XXXXXX.yaml)"
 export IMAGE
-export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+export GEMINI_API_KEY="${GEMINI_API_KEY:-}"
 if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "[dry-run] envsubst '\${IMAGE} \${ANTHROPIC_API_KEY}' < deploy/orleans/service.yaml > $RENDERED"
-    envsubst '${IMAGE} ${ANTHROPIC_API_KEY}' < "$SCRIPT_DIR/service.yaml" > "$RENDERED"
+    echo "[dry-run] envsubst '\${IMAGE} \${GEMINI_API_KEY}' < deploy/orleans/service.yaml > $RENDERED"
+    envsubst '${IMAGE} ${GEMINI_API_KEY}' < "$SCRIPT_DIR/service.yaml" > "$RENDERED"
     echo "[dry-run] --- rendered service.yaml ---"
     cat "$RENDERED"
     echo "[dry-run] --- end rendered service.yaml ---"
     echo "[dry-run] gcloud run services replace $RENDERED --project=$PROJECT_ID --region=$REGION"
 else
-    envsubst '${IMAGE} ${ANTHROPIC_API_KEY}' < "$SCRIPT_DIR/service.yaml" > "$RENDERED"
+    envsubst '${IMAGE} ${GEMINI_API_KEY}' < "$SCRIPT_DIR/service.yaml" > "$RENDERED"
     gcloud run services replace "$RENDERED" --project="$PROJECT_ID" --region="$REGION"
 fi
 rm -f "$RENDERED"

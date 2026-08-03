@@ -1,6 +1,6 @@
 # StreamForge — Orleans flavor — Cloud Run v1 (Knative) Service manifest.
 #
-# Templated with ${IMAGE} (and optionally ${ANTHROPIC_API_KEY}) — deploy.sh envsubst's this before
+# Templated with ${IMAGE} (and optionally ${GEMINI_API_KEY}) — deploy.sh envsubst's this before
 # `gcloud run services replace`. Single-container, single-silo localhost clustering (decision D-A):
 # max-instances is pinned to 1 because Orleans' localhost clustering only makes sense with exactly
 # one replica — do not raise it without first replacing clustering with a real membership provider.
@@ -25,6 +25,11 @@ spec:
         # localhost clustering does not support horizontal scale-out).
         autoscaling.knative.dev/minScale: "0"
         autoscaling.knative.dev/maxScale: "1"
+        # Instance-based billing (CPU allocated for the whole instance lifetime, not just during
+        # requests): StreamForge does background work between requests — generators, pipelines,
+        # table actors — and request-based CPU throttling would freeze the streams mid-demo.
+        # Scale-to-zero above still applies, so you only pay while an instance is awake.
+        run.googleapis.com/cpu-throttling: "false"
     spec:
       containerConcurrency: 40
       timeoutSeconds: 300
@@ -38,8 +43,8 @@ spec:
             # rendering — gcloud ignores/overrides this at deploy time.
             - name: PORT
               value: "8080"
-            - name: ANTHROPIC_API_KEY
-              value: ${ANTHROPIC_API_KEY}
+            - name: GEMINI_API_KEY
+              value: ${GEMINI_API_KEY}
           resources:
             limits:
               cpu: "1"

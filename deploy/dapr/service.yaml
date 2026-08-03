@@ -29,6 +29,10 @@ spec:
         run.googleapis.com/execution-environment: gen2
         autoscaling.knative.dev/minScale: "0"
         autoscaling.knative.dev/maxScale: "1"
+        # Instance-based billing: the actor timers / pub-sub routers / generators run between
+        # requests; request-based CPU throttling would freeze the whole stack mid-demo.
+        # Scale-to-zero still applies — billed only while an instance is awake.
+        run.googleapis.com/cpu-throttling: "false"
         # daprd's own /dapr/subscribe handshake needs the app answering on 8080, and needs redis +
         # placement reachable — same ordering deploy/dapr/compose.yaml's depends_on encodes locally.
         # placement/redis get their own startupProbe below so Cloud Run has a concrete "ready" signal

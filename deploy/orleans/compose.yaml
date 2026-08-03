@@ -23,13 +23,9 @@ services:
       - "6199:8080"
     environment:
       PORT: "8080"
-      # AI control chat (plan 007 D-D, parallel wave) reads ANTHROPIC_API_KEY / Anthropic__ApiKey;
-      # passed through only if set on the host — unset means the chat endpoint 503s with a
-      # friendly message, which is expected out of the box.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Kept for parity with earlier drafts of this compose file / any AI-chat docs that mention
-      # GEMINI_API_KEY; StreamForge's shared chat backend (D-D) is Anthropic-only, so this is inert
-      # unless something downstream starts reading it.
+      # AI control chat (plan 007 D-D) reads GEMINI_API_KEY (or Gemini__ApiKey); passed through
+      # only if set on the host — unset means the chat endpoint 503s with a friendly message,
+      # which is expected out of the box.
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
