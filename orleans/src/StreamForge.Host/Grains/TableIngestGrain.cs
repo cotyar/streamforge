@@ -46,7 +46,12 @@ public sealed class TableIngestGrain : Grain, ITableIngestGrain
     private long _epochCounter;
 
     private const int FlushEventThreshold = 1000;
-    private static readonly TimeSpan FlushInterval = TimeSpan.FromMilliseconds(250);
+    // Epoch flush cadence. 250ms is the throughput-friendly default (amortizes cross-partition
+    // frontier coordination); it is also the second-largest contributor to end-to-end tableDelta
+    // latency after the memory-stream pull period — Tables:FlushMs tunes it (see Program.cs's
+    // Streams:PullPeriodMs comment and comparison.html's latency root-cause note).
+    private static readonly TimeSpan FlushInterval = TimeSpan.FromMilliseconds(
+        int.TryParse(Environment.GetEnvironmentVariable("TABLES__FLUSHMS"), out var ms) && ms > 0 ? ms : 250);
 
     public async Task StartAsync(TableDefinition def, string inputName)
     {

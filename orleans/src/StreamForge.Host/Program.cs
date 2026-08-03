@@ -29,7 +29,16 @@ if (string.IsNullOrEmpty(builder.Configuration["urls"]))
 builder.Host.UseOrleans(siloBuilder =>
 {
     siloBuilder.UseLocalhostClustering();
-    siloBuilder.AddMemoryStreams(StreamConstants.ProviderName);
+    // Memory streams are PULL-based: pulling agents poll the in-memory queues every
+    // GetQueueMessagesTimerPeriod (Orleans default 100ms). Every stream hop therefore adds
+    // Uniform(0, period) latency — the table path pays it twice (sources → TableGrain,
+    // tableDelta → SignalR bridge), which is exactly the 122ms p50 / 209ms p90 the 005-W9
+    // benchmark measured vs Dapr's push-based 7ms. Streams:PullPeriodMs makes the cadence
+    // tunable; default keeps Orleans' stock behavior.
+    var pullPeriodMs = builder.Configuration.GetValue("Streams:PullPeriodMs", 100);
+    siloBuilder.AddMemoryStreams(StreamConstants.ProviderName, configurator =>
+        configurator.ConfigurePullingAgent(ob => ob.Configure(o =>
+            o.GetQueueMsgsTimerPeriod = TimeSpan.FromMilliseconds(pullPeriodMs))));
     siloBuilder.AddMemoryGrainStorage(StreamConstants.PubSubStoreName);
     siloBuilder.AddJsonFileGrainStorage(StreamConstants.StorageName);
 });
