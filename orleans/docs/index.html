@@ -192,7 +192,6 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
 <div class="shell">
 <nav class="side" aria-label="Documentation">
   <div class="wordmark">
-    <div class="co">CORPORATE</div>
     <div class="prod">Stream<b>Forge</b></div>
     <div class="doc-tag">User documentation</div>
   </div>
@@ -773,7 +772,7 @@ curl -s -X POST "localhost:5199/api/config/import?mode=merge" \
 
 <section id="aichat">
 <h2>AI control chat</h2>
-<p>The <b>AI Control</b> page (Editor/Admin roles) is a conversational surface over the same catalog the REST API manages: ask it to list, create, pause, or delete sources, draft and validate SQL pipelines, or inspect table rows, search, and history. It is served by <code>POST /api/chat</code> on <em>both</em> runtimes and powered by Google Gemini function calling (default model <code>gemini-2.5-flash</code>).</p>
+<p>The <b>AI Control</b> page (Editor/Admin roles) is a conversational surface over the same catalog the REST API manages: ask it to list, create, pause, or delete sources, draft and validate SQL pipelines, or inspect table rows, search, and history. It is served by <code>POST /api/chat</code> on <em>both</em> runtimes and powered by Google Gemini function calling (default model <code>gemini-3.6-flash</code>); the model's reasoning for each turn is shown in a collapsible "Thought for…" block above the reply.</p>
 <ul>
 <li><b>Setup</b>: <code>export GEMINI_API_KEY=&lt;key&gt;</code> (or config <code>Gemini:ApiKey</code>) before starting the host; without it the page shows a setup notice. <code>Gemini:Model</code> and <code>Gemini:BaseUrl</code> override the defaults.</li>
 <li><b>Audit trail</b>: every tool call the model makes (name, input, result) is logged beneath the reply — the chat can do nothing the tools don't expose.</li>
@@ -804,7 +803,7 @@ curl -s -X POST "localhost:5199/api/config/import?mode=merge" \
 <tr><td><code>TableGrain</code></td><td>table name</td><td>Z-set executor, consolidated snapshot (persisted, write-behind), delta stream to downstream tables + UI, search index</td></tr>
 <tr><td><code>UserStoreGrain</code></td><td><code>users</code></td><td>Credential validation, user CRUD</td></tr>
 </tbody></table></div>
-<p>The <b>SQL engine</b> (<code>StreamForge.Engine</code>) is a pure C# library with no Orleans dependency: tokenizer → recursive-descent parser → validator (positioned diagnostics) → planner → interpreted operators. Persistence is a JSON-file grain store (one file per grain state under <code>data/</code>) — debuggable, restart-safe, and swappable for a database provider without touching grain code. The stack is Orleans 10.2.1 on .NET 10; the console is React 19 + Tailwind 4 + shadcn/ui with the the client brand system.</p>
+<p>The <b>SQL engine</b> (<code>StreamForge.Engine</code>) is a pure C# library with no Orleans dependency: tokenizer → recursive-descent parser → validator (positioned diagnostics) → planner → interpreted operators. Persistence is a JSON-file grain store (one file per grain state under <code>data/</code>) — debuggable, restart-safe, and swappable for a database provider without touching grain code. The stack is Orleans 10.2.1 on .NET 10; the console is React 19 + Tailwind 4 + shadcn/ui with a bespoke design-token system.</p>
 </section>
 
 <section id="limits">
@@ -821,7 +820,7 @@ curl -s -X POST "localhost:5199/api/config/import?mode=merge" \
 </section>
 
 <footer style="margin-top:72px; padding-top:20px; border-top:1px solid var(--border); font-size:13px; color:var(--muted);">
-StreamForge — an Orleans streaming platform demo · the client brand treatment · Served at <code>/docs</code> by the StreamForge host
+StreamForge — an Orleans streaming platform demo · Served at <code>/docs</code> by the StreamForge host
 </footer>
 
 </div></main>

@@ -56,7 +56,6 @@ function Layout() {
     <div className="flex h-full min-h-screen bg-background">
       <aside className="flex w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
         <div className="flex flex-col gap-0.5 px-5 py-5">
-          <span className="text-[10px] font-semibold tracking-widest text-muted-foreground">CORPORATE</span>
           <span className="text-lg font-bold tracking-tight text-sidebar-foreground">
             Stream<span className="text-primary">Forge</span>
           </span>

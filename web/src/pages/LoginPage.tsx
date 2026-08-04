@@ -48,7 +48,6 @@ export function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm">
         <div className="mb-8 flex flex-col items-center gap-1 text-center">
-          <span className="text-xs font-semibold tracking-widest text-muted-foreground">CORPORATE</span>
           <h1 className="text-2xl font-bold tracking-tight text-foreground">
             Stream<span className="text-primary">Forge</span>
           </h1>

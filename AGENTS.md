@@ -84,8 +84,10 @@ invocations with their own ports for `ts-consumer` (`bun run main.ts`) and `java
    entity **id** even when resolved by name.
 6. **SQL fine print**: aggregate JSON with `->` not `->>` (text sums to zero); pipeline-mode
    subqueries must be windowed; `LATEST BY` is table-mode only. Full list: DESIGN.md §D11.
-7. **the client branding**: text wordmark only — never reproduce the the client logo graphic. Theme via
-   tokens (`sf.theme`, light default); no raw hex outside the sanctioned `--sql-*`/`--chart-*` vars.
+7. **Branding is neutral**: plain "StreamForge" wordmark only — all "the client" wording was
+   removed from every page (2026-08-04, user request); do not reintroduce it, and never reproduce
+   any client logo graphic. Theme via tokens (`sf.theme`, light default); no raw hex outside the
+   sanctioned `--sql-*`/`--chart-*` vars.
 
 ## Multi-agent wave discipline (how this repo was built)
 
