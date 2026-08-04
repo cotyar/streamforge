@@ -63,7 +63,7 @@ that takes it — anything else is `400`. Nothing is ever shell-interpolated fro
 Two flavor cards (Orleans, Dapr), each with a status pill (ok/starting/down/unknown), the
 console/service URL, Start/Stop buttons (disabled while an operation is in flight for that
 flavor; Stop asks `confirm()` first), and a collapsible logs panel. The header shows the active
-mode. Text wordmark only ("STREAMFORGE — CLUSTER ADMIN" / "CORPORATE") — never the the client logo
+mode. Neutral text wordmark only ("STREAMFORGE — CLUSTER ADMIN") — no client branding or logo
 graphic, per repo brand rules.
 
 ## Notes / caveats
