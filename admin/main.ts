@@ -294,10 +294,14 @@ Bun.serve({
     }
 
     // Interactive docs, served by the admin itself so the link works even while both stacks are
-    // down (the running consoles also serve the same files at their own /docs).
-    if (req.method === "GET" && (url.pathname === "/docs" || url.pathname === "/docs/comparison.html")) {
-      const file = url.pathname === "/docs" ? "index.html" : "comparison.html";
-      const doc = Bun.file(`${REPO_ROOT}/orleans/docs/${file}`);
+    // down (the running consoles also serve the same files at their own /docs). Any sibling page
+    // (comparison.html, kotlin-vs-java.html, ...) is served by strict-allowlisted filename shape —
+    // no path separators, .html only — mirroring the shared Api's own guarded /docs/{page}.html.
+    const docsMatch = url.pathname === "/docs"
+      ? "index.html"
+      : /^\/docs\/([a-z0-9-]+\.html)$/.exec(url.pathname)?.[1];
+    if (req.method === "GET" && docsMatch) {
+      const doc = Bun.file(`${REPO_ROOT}/orleans/docs/${docsMatch}`);
       if (!(await doc.exists())) return new Response("docs not found", { status: 404 });
       return new Response(doc, { headers: { "content-type": "text/html; charset=utf-8" } });
     }

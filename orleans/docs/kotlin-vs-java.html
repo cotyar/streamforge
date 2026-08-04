@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StreamForge — Kotlin vs Java</title>
+<style>
+/* ===== Tokens — identical to orleans/docs/index.html (the client brand) ===== */
+:root {
+  --bg: #f7f9f8; --panel: #ffffff; --ink: #14231c; --muted: #55665d;
+  --brand: #008755; --brand-deep: #007348; --brand-tint: #39a87b;
+  --border: #dce5e0; --code-bg: #eef3f0; --amber: #8a5a00; --red: #c6453c;
+  --kbd-bg: #e1eee6; --shadow: 0 1px 3px rgba(20, 35, 28, 0.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a0f0d; --panel: #10161a; --ink: #e7ece9; --muted: #93a39c;
+    --brand: #39a87b; --brand-deep: #6abb97; --brand-tint: #39a87b;
+    --border: rgba(255,255,255,0.09); --code-bg: #121a17; --amber: #e6a93c; --red: #e4574d;
+    --kbd-bg: #1b2a22; --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0a0f0d; --panel: #10161a; --ink: #e7ece9; --muted: #93a39c;
+  --brand: #39a87b; --brand-deep: #6abb97; --brand-tint: #39a87b;
+  --border: rgba(255,255,255,0.09); --code-bg: #121a17; --amber: #e6a93c; --red: #e4574d;
+  --kbd-bg: #1b2a22; --shadow: none;
+}
+:root[data-theme="light"] {
+  --bg: #f7f9f8; --panel: #ffffff; --ink: #14231c; --muted: #55665d;
+  --brand: #008755; --brand-deep: #007348; --brand-tint: #39a87b;
+  --border: #dce5e0; --code-bg: #eef3f0; --amber: #8a5a00; --red: #c6453c;
+  --kbd-bg: #e1eee6; --shadow: 0 1px 3px rgba(20, 35, 28, 0.06);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.6 'IBM Plex Sans', -apple-system, 'Segoe UI', system-ui, sans-serif;
+}
+code, pre, kbd, .mono { font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.shell { display: flex; min-height: 100vh; }
+nav.side {
+  position: sticky; top: 0; align-self: flex-start; height: 100vh; overflow-y: auto;
+  width: 250px; flex-shrink: 0; padding: 24px 14px; border-right: 1px solid var(--border);
+  background: var(--panel); display: flex; flex-direction: column; gap: 4px;
+}
+.wordmark { padding: 0 10px 14px; }
+.wordmark .co { font-size: 10px; font-weight: 600; letter-spacing: 0.18em; color: var(--muted); }
+.wordmark .prod { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+.wordmark .prod b { color: var(--brand); }
+.wordmark .doc-tag { font-size: 11px; color: var(--muted); margin-top: 2px; }
+nav.side a {
+  display: block; padding: 6px 10px; border-radius: 8px; color: var(--muted);
+  text-decoration: none; font-size: 13.5px; font-weight: 500;
+}
+nav.side a:hover { color: var(--ink); background: var(--code-bg); }
+nav.side a.active { color: var(--brand-deep); background: var(--kbd-bg); }
+nav.side .navgap { height: 8px; }
+nav.side a.back { font-size: 12.5px; color: var(--brand-deep); font-weight: 600; }
+.side-foot { margin-top: auto; padding: 12px 10px 0; display: flex; align-items: center; gap: 8px; }
+#themebtn {
+  font: inherit; font-size: 12.5px; padding: 6px 12px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--panel); color: var(--ink);
+}
+#themebtn:hover { background: var(--code-bg); }
+#themebtn:focus-visible { outline: 2px solid var(--brand); }
+
+main { flex: 1; min-width: 0; padding: 48px clamp(24px, 6vw, 96px) 96px; }
+.content { max-width: 920px; }
+
+h1 { font-size: 34px; line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 8px; text-wrap: balance; }
+.lede { font-size: 17.5px; color: var(--muted); max-width: 68ch; margin: 0 0 12px; }
+h2 {
+  font-size: 23px; letter-spacing: -0.01em; margin: 64px 0 12px; padding-top: 20px;
+  border-top: 1px solid var(--border); text-wrap: balance;
+}
+section:first-of-type h2 { border-top: none; margin-top: 28px; padding-top: 0; }
+h3 { font-size: 16.5px; margin: 28px 0 8px; }
+p, li { max-width: 74ch; }
+p { margin: 10px 0; }
+a { color: var(--brand-deep); }
+.eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--brand); margin: 0 0 4px; }
+
+pre {
+  position: relative; background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.55; margin: 12px 0;
+}
+code { font-size: 0.92em; }
+p code, li code, td code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
+pre code { background: none; border: none; padding: 0; }
+
+table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+th { text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+th, td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.tablewrap { overflow-x: auto; }
+tbody tr:hover { background: var(--code-bg); }
+
+.callout {
+  border: 1px solid var(--border); border-left: 3px solid var(--brand);
+  background: var(--panel); border-radius: 10px; padding: 12px 16px; margin: 14px 0; font-size: 14.5px;
+}
+.callout.warn { border-left-color: var(--amber); }
+.callout b:first-child { color: var(--brand-deep); }
+.callout.warn b:first-child { color: var(--amber); }
+
+/* Side-by-side compare grid: Kotlin = brand green, Java = amber. */
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 16px 0; }
+@media (max-width: 700px) { .compare { grid-template-columns: 1fr; } }
+.compare > div {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px;
+}
+.compare h4 { margin: 0 0 10px; font-size: 14.5px; letter-spacing: 0.01em; }
+.compare h4.kotlin { color: var(--brand-deep); }
+.compare h4.java { color: var(--amber); }
+.compare pre { margin: 0; }
+
+mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0 2px; }
+
+@media (max-width: 760px) {
+  nav.side { display: none; }
+  main { padding: 28px 20px 64px; }
+}
+</style>
+</head>
+<body>
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('sf.theme'); /* shared with the StreamForge console + docs */
+    if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
+  } catch (e) { /* default: follow OS */ }
+})();
+</script>
+
+<div class="shell">
+<nav class="side" aria-label="Kotlin vs Java">
+  <div class="wordmark">
+    <div class="co">CORPORATE</div>
+    <div class="prod">Stream<b>Forge</b></div>
+    <div class="doc-tag">JVM language guide</div>
+  </div>
+  <a class="back" href="/docs">&larr; User documentation</a>
+  <a class="back" href="/docs/comparison.html">&larr; Orleans vs Dapr</a>
+  <div class="navgap"></div>
+  <a href="#tldr">Executive summary</a>
+  <a href="#null">Null safety</a>
+  <a href="#boilerplate">Less boilerplate</a>
+  <a href="#coroutines">Coroutines</a>
+  <a href="#expressive">Expressiveness toolbox</a>
+  <a href="#consumer">Our consumer, both ways</a>
+  <a href="#interop">Interop &amp; adoption path</a>
+  <a href="#java-side">What Java still has</a>
+  <a href="#links">Official material</a>
+  <div class="side-foot">
+    <button id="themebtn" type="button">Toggle theme</button>
+  </div>
+</nav>
+
+<main><div class="content">
+
+<p class="eyebrow">Polyglot processing &middot; JVM track</p>
+<h1>Kotlin vs Java</h1>
+<p class="lede">StreamForge's Dapr flavor invites JVM teams to write stream processors against its pub/sub contract — the repo ships a working <a href="/docs#examples">Java consumer</a>. This page is the case for writing the next one in Kotlin: what the language buys you, shown on this platform's own code, with the honest counter-column included.</p>
+
+<section id="tldr">
+<h2>Executive summary</h2>
+<div class="tablewrap"><table>
+<thead><tr><th>Concern</th><th>Java</th><th>Kotlin</th></tr></thead>
+<tbody>
+<tr><td>Null bugs</td><td><code>NullPointerException</code> at runtime; <code>Optional</code> and <code>@Nullable</code> are conventions, not guarantees</td><td>Nullability is in the <b>type system</b> — <code>String</code> vs <code>String?</code>; the compiler rejects unchecked access</td></tr>
+<tr><td>Data carriers</td><td><code>record</code> helps (finally), but no <code>copy()</code>, no default/named args, no destructuring declarations</td><td><code>data class</code>: equals/hashCode/toString/<code>copy()</code>/destructuring, with defaults and named args</td></tr>
+<tr><td>Concurrency</td><td>Threads, <code>CompletableFuture</code> chains, or virtual threads (21+) — cancellation and scoping are manual</td><td><b>Coroutines</b>: sequential-looking async code, structured concurrency, first-class cancellation, <code>Flow</code> for streams</td></tr>
+<tr><td>Domain modeling</td><td><code>sealed interface</code> + pattern matching arriving piecewise across versions</td><td><code>sealed class</code> + exhaustive <code>when</code> since 1.0 — the compiler tells you which case you forgot</td></tr>
+<tr><td>Ceremony</td><td>Getters/setters/builders/static utility classes</td><td><code>val</code>/<code>var</code> properties, top-level and extension functions, string templates</td></tr>
+<tr><td>Risk of adopting</td><td>—</td><td>Near zero: 100% two-way Java interop, mixed-source builds, migrate one file at a time</td></tr>
+</tbody></table></div>
+<div class="callout"><b>The one-sentence pitch:</b> Kotlin is Java with the defaults flipped to safe and concise — immutable-first, null-checked at compile time, expression-oriented — while keeping the whole Java ecosystem (libraries, JVM ops, profilers) unchanged underneath.</div>
+</section>
+
+<section id="null">
+<h2>Null safety — the billion-dollar mistake, fixed in the type system</h2>
+<p>Kotlin types are non-nullable unless you say otherwise. A <code>String?</code> must be checked before use, and the compiler <em>smart-casts</em> it to <code>String</code> inside the check — no casts, no <code>Optional</code> wrapping, no NPE at 3am from a field someone forgot to guard.</p>
+<div class="compare">
+<div><h4 class="java">Java</h4>
+<pre><code>// Compiles fine. Explodes at runtime
+// when payload has no "user" node.
+String tier = event.getPayload()
+    .get("user")
+    .get("tier")
+    .getAsString();      // NPE somewhere here
+
+// The defensive version — verbose,
+// and nothing forces you to write it:
+JsonObject user = payload.getAsJsonObject("user");
+String tier2 = (user != null &amp;&amp; user.has("tier"))
+    ? user.get("tier").getAsString()
+    : "unknown";</code></pre></div>
+<div><h4 class="kotlin">Kotlin</h4>
+<pre><code>// '?.' short-circuits on null, '?:' supplies
+// the fallback. One line, and the compiler
+// REQUIRES you to deal with nullability.
+val tier = event.payload["user"]
+    ?.get("tier")?.asString ?: "unknown"
+
+// Smart cast: inside the check, `user`
+// IS non-null — no cast, no warning.
+val user = payload["user"]
+if (user != null) {
+    println(user.asJsonObject)  // typed access
+}</code></pre></div>
+</div>
+</section>
+
+<section id="boilerplate">
+<h2>Less boilerplate — data classes, properties, defaults</h2>
+<p>Java 17's <code>record</code> closed part of this gap; Kotlin's <code>data class</code> still does more: <code>copy()</code> for immutable updates, default parameter values, named arguments (no telescoping constructors, no builders), and destructuring.</p>
+<div class="compare">
+<div><h4 class="java">Java (with records!)</h4>
+<pre><code>record Subscription(
+    String pubsubname, String topic, String route) {}
+
+// No defaults — overload or builder:
+Subscription a = new Subscription(
+    "pubsub", "sf-table-delta", "/sf-table-delta");
+
+// "Change one field" = re-list every field:
+Subscription b = new Subscription(
+    a.pubsubname(), "sf-pipeline-out",
+    "/sf-pipeline-out");</code></pre></div>
+<div><h4 class="kotlin">Kotlin</h4>
+<pre><code>data class Subscription(
+    val pubsubname: String = "pubsub",
+    val topic: String,
+    val route: String = "/$topic")
+
+// Defaults + named args:
+val a = Subscription(topic = "sf-table-delta")
+
+// Immutable update:
+val b = a.copy(topic = "sf-pipeline-out",
+               route = "/sf-pipeline-out")
+
+// Destructuring:
+val (pubsub, topic, route) = b</code></pre></div>
+</div>
+</section>
+
+<section id="coroutines">
+<h2>Coroutines — async that reads like sync</h2>
+<p>Stream processors are concurrency-shaped: consume, fan out, batch, retry, shut down cleanly. Kotlin coroutines make that <em>sequential-looking</em> code with structured concurrency — child tasks live inside a scope, cancellation propagates automatically, and <code>Flow</code> gives you backpressured streams with operators. Java's virtual threads (21+) solve thread <em>cost</em>, but scoping/cancellation remain manual, and <code>CompletableFuture</code> chains remain callback algebra.</p>
+<div class="compare">
+<div><h4 class="java">Java</h4>
+<pre><code>// CompletableFuture composition:
+CompletableFuture
+  .supplyAsync(() -&gt; fetchDelta())
+  .thenCompose(d -&gt; enrich(d))
+  .thenAccept(r -&gt; publish(r))
+  .exceptionally(e -&gt; { log(e); return null; });
+
+// Periodic counter (real code from our
+// java-consumer): executor + daemon thread
+// wiring, torn down by JVM exit only.
+ScheduledExecutorService timer =
+  Executors.newSingleThreadScheduledExecutor(r -&gt; {
+    Thread t = new Thread(r, "counter-printer");
+    t.setDaemon(true);
+    return t;
+  });
+timer.scheduleAtFixedRate(
+  Main::printCounters, 10, 10, TimeUnit.SECONDS);</code></pre></div>
+<div><h4 class="kotlin">Kotlin</h4>
+<pre><code>// Same logic, sequential shape; cancellable
+// at every suspension point:
+suspend fun process() = try {
+    val delta = fetchDelta()
+    val result = enrich(delta)
+    publish(result)
+} catch (e: Exception) { log(e) }
+
+// Periodic counter: a coroutine in the app's
+// scope — cancelled automatically when the
+// scope closes (structured concurrency).
+scope.launch {
+    while (isActive) {
+        delay(10.seconds)
+        printCounters()
+    }
+}</code></pre></div>
+</div>
+</section>
+
+<section id="expressive">
+<h2>The expressiveness toolbox</h2>
+<div class="tablewrap"><table>
+<thead><tr><th>Feature</th><th>What it replaces</th><th>Sketch</th></tr></thead>
+<tbody>
+<tr><td><b>Exhaustive <code>when</code> over sealed types</b></td><td>Visitor pattern / instanceof chains; forgotten-case bugs become compile errors</td><td><code>when (stage) { is New -&gt; ...; is Filled -&gt; ...; is Canceled -&gt; ... } // compiler: all cases covered</code></td></tr>
+<tr><td><b>Extension functions</b></td><td><code>StringUtils</code>-style static utility classes</td><td><code>fun JsonObject.field(camel: String, pascal: String) = this[camel] ?: this[pascal]</code> — reads like a method</td></tr>
+<tr><td><b>String templates</b></td><td><code>String.format</code> / concatenation chains</td><td><code>"$topic: +$rows rows (total $total)"</code></td></tr>
+<tr><td><b>Collections API</b></td><td>Streams API ceremony (<code>.stream()...collect(Collectors.toList())</code>)</td><td><code>deltas.filter { it.weight &gt; 0 }.groupBy { it.row["symbol"] }</code></td></tr>
+<tr><td><b>Single-expression functions</b></td><td>Method bodies that are one return</td><td><code>fun ok() = """{"status":"SUCCESS"}"""</code></td></tr>
+<tr><td><b><code>val</code> by default</b></td><td>Discipline-based <code>final</code> everywhere</td><td>Immutability is the path of least resistance, not a style-guide rule</td></tr>
+<tr><td><b>Scope functions</b></td><td>Temp-variable choreography</td><td><code>HttpServer.create(addr, 0).apply { start() }</code></td></tr>
+</tbody></table></div>
+</section>
+
+<section id="consumer">
+<h2>Our own consumer, both ways</h2>
+<p>The repo's <code>dapr/processors/java-consumer</code> (JDK <code>HttpServer</code> + Gson, 259 lines) subscribes to <code>sf-table-delta</code>/<code>sf-pipeline-out</code> behind a Dapr sidecar. Here is its subscription handshake verbatim, next to the idiomatic Kotlin equivalent — same JDK server, same wire contract, no framework on either side:</p>
+<div class="compare">
+<div><h4 class="java">Java — actual repo code</h4>
+<pre><code>private static JsonObject subscription(
+        String pubsubName, String topic, String route) {
+    JsonObject o = new JsonObject();
+    o.addProperty("pubsubname", pubsubName);
+    o.addProperty("topic", topic);
+    o.addProperty("route", route);
+    return o;
+}
+
+private static HttpHandler subscribeHandler(
+        String pubsubName) {
+    return exchange -&gt; {
+        if (!"GET".equalsIgnoreCase(
+                exchange.getRequestMethod())) {
+            sendJson(exchange, 405, "{}");
+            return;
+        }
+        JsonArray subs = new JsonArray();
+        subs.add(subscription(pubsubName,
+            "sf-table-delta", "/sf-table-delta"));
+        subs.add(subscription(pubsubName,
+            "sf-pipeline-out", "/sf-pipeline-out"));
+        sendJson(exchange, 200, GSON.toJson(subs));
+    };
+}</code></pre></div>
+<div><h4 class="kotlin">Kotlin — the same handshake</h4>
+<pre><code>val topics = listOf(
+    "sf-table-delta", "sf-pipeline-out")
+
+fun subscriptions(pubsub: String) =
+    topics.map {
+        mapOf("pubsubname" to pubsub,
+              "topic" to it,
+              "route" to "/$it")
+    }
+
+fun subscribeHandler(pubsub: String) =
+    HttpHandler { ex -&gt;
+        if (ex.requestMethod != "GET")
+            return@HttpHandler ex.sendJson(405, "{}")
+        ex.sendJson(200,
+            GSON.toJson(subscriptions(pubsub)))
+    }
+// `sendJson` is an extension function on
+// HttpExchange — the Java version threads it
+// through as a static helper instead.</code></pre></div>
+</div>
+<p>Nothing here is exotic Kotlin — it's the everyday defaults (expressions, extensions, <code>mapOf</code>, templates) compounding into roughly half the code with the failure modes (missed 405 return, mutable accumulation) squeezed out structurally.</p>
+</section>
+
+<section id="interop">
+<h2>Interop &amp; the adoption path</h2>
+<ul>
+<li><b>100% two-way Java interop.</b> Kotlin compiles to the same bytecode; call any Java library (Gson, Dapr SDK, Spring, anything on Maven Central) with no wrappers, and Java code calls Kotlin back. Mixed Kotlin/Java source sets build together — migrate one file at a time, or never migrate and only write <em>new</em> code in Kotlin.</li>
+<li><b>Same JVM underneath.</b> GC, JIT, profilers, APM agents, container images, ops runbooks — all unchanged. A Kotlin StreamForge processor deploys exactly like the Java one (same Gradle, same <code>dapr run</code>).</li>
+<li><b>First-class ecosystem support.</b> Google made it the default for Android (2019); Spring, Gradle (Kotlin DSL is the default build script language), Quarkus, and Micronaut ship first-class Kotlin support; JetBrains — the IntelliJ people — build the language and its tooling as one product.</li>
+<li><b>Beyond the JVM when needed.</b> Kotlin Multiplatform shares logic with iOS/JS/native targets — irrelevant to a stream processor today, a real option for shared client models tomorrow.</li>
+</ul>
+</section>
+
+<section id="java-side">
+<h2>What Java still has going for it — the honest column</h2>
+<div class="callout warn"><b>This page argues for Kotlin, not against reality.</b> Java is an excellent language that keeps absorbing Kotlin's best ideas — records, sealed interfaces, pattern matching, <code>var</code>, virtual threads — and the gap is narrower on Java 21+ than folklore suggests.</div>
+<ul>
+<li><b>Compile speed</b>: <code>javac</code> is meaningfully faster than <code>kotlinc</code> on large modules (the Kotlin K2 compiler narrowed, not closed, this).</li>
+<li><b>Hiring surface</b>: more Java developers exist, and every one of them can read idiomatic Java; Kotlin fluency is common but not universal on JVM teams.</li>
+<li><b>One fewer moving part</b>: no Kotlin compiler/runtime-stdlib version axis in the build; language evolution comes only from the JDK's conservative cadence — a feature for risk-averse platform teams.</li>
+<li><b>Virtual threads</b> (Java 21) remove coroutines' main <em>performance</em> argument for IO-bound servers — Kotlin's remaining edge there is the <em>programming model</em> (structured concurrency, <code>Flow</code>, cancellation), not throughput.</li>
+</ul>
+<p>The verdict this platform's polyglot story supports: for <b>new</b> JVM processors, Kotlin's compile-time null safety and lower ceremony are worth it on day one and cost nothing to adopt; existing Java code needs no migration to justify itself.</p>
+</section>
+
+<section id="links">
+<h2>Official material</h2>
+<p><a href="https://kotlinlang.org" target="_blank" rel="noopener">kotlinlang.org</a> &middot; <a href="https://kotlinlang.org/docs/comparison-to-java.html" target="_blank" rel="noopener">official "Comparison to Java" page</a> &middot; <a href="https://kotlinlang.org/docs/coroutines-overview.html" target="_blank" rel="noopener">coroutines overview</a> &middot; <a href="https://github.com/JetBrains/kotlin" target="_blank" rel="noopener">github.com/JetBrains/kotlin</a> &middot; <a href="https://dev.java" target="_blank" rel="noopener">dev.java (official Java portal — read both sides)</a></p>
+</section>
+
+<footer style="margin-top:72px; padding-top:20px; border-top:1px solid var(--border); font-size:13px; color:var(--muted);">
+StreamForge — JVM language guide for polyglot processors · the client brand treatment · Served at <code>/docs/kotlin-vs-java.html</code>
+</footer>
+
+</div></main>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var btn = document.getElementById('themebtn');
+  function current() {
+    var explicit = document.documentElement.dataset.theme;
+    if (explicit) return explicit;
+    return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  btn.addEventListener('click', function () {
+    var next = current() === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('sf.theme', next); } catch (e) { /* ignore */ }
+  });
+
+  /* Scrollspy — same pattern as index.html/comparison.html. */
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav.side a[href^="#"]'));
+  var byId = {};
+  links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+  var active = null;
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (!e.isIntersecting) return;
+      var link = byId[e.target.id];
+      if (!link) return;
+      if (active) active.classList.remove('active');
+      link.classList.add('active'); active = link;
+    });
+  }, { rootMargin: '-10% 0px -70% 0px' });
+  document.querySelectorAll('section[id]').forEach(function (el) { io.observe(el); });
+})();
+</script>
+</body>
+</html>
