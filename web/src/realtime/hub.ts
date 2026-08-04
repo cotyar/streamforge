@@ -62,13 +62,55 @@ function registerListeners(conn: signalR.HubConnection) {
   })
 }
 
+/**
+ * Transport override for hostile networks (corporate proxies that kill the WebSocket upgrade
+ * mid-handshake, hanging SignalR's own auto-fallback). Set once via URL query — ?transport=lp
+ * (LongPolling), ?transport=sse (ServerSentEvents), ?transport=ws (WebSockets only),
+ * ?transport=auto (clear) — persisted in localStorage ('sf.transport') so every page and later
+ * visits keep it. Unset = SignalR's stock negotiation (WS → SSE → LP).
+ */
+// Query → localStorage sync must run at MODULE LOAD: the router rewrites the URL (login
+// redirect) before the first hub connection, so reading location.search lazily misses it.
+try {
+  const fromUrl = new URLSearchParams(window.location.search).get('transport')
+  if (fromUrl !== null) {
+    if (fromUrl === 'auto' || fromUrl === '') localStorage.removeItem('sf.transport')
+    else localStorage.setItem('sf.transport', fromUrl)
+  }
+} catch {
+  /* ignore (SSR/tests) */
+}
+
+function resolveTransport(): signalR.HttpTransportType | undefined {
+  try {
+    switch (localStorage.getItem('sf.transport')) {
+      case 'lp':
+        return signalR.HttpTransportType.LongPolling
+      case 'sse':
+        return signalR.HttpTransportType.ServerSentEvents
+      case 'ws':
+        return signalR.HttpTransportType.WebSockets
+      default:
+        return undefined
+    }
+  } catch {
+    return undefined
+  }
+}
+
 function getConnection(): Promise<signalR.HubConnection> {
   if (connection) return Promise.resolve(connection)
   if (connectPromise) return connectPromise
 
+  const forcedTransport = resolveTransport()
+  if (forcedTransport !== undefined) {
+    console.info(`[hub] SignalR transport forced via sf.transport: ${signalR.HttpTransportType[forcedTransport]}`)
+  }
+
   const conn = new signalR.HubConnectionBuilder()
     .withUrl('/hubs/stream', {
       accessTokenFactory: () => getStoredToken() ?? '',
+      ...(forcedTransport !== undefined ? { transport: forcedTransport } : {}),
     })
     // Retry forever (default gives up after 4 attempts, leaving a stale tab after a server
     // restart): exponential backoff capped at 15s. onreconnected() re-subscribes everything.

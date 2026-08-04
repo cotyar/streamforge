@@ -590,6 +590,7 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 <section id="realtime">
 <h2>Realtime events</h2>
 <p>The console receives live data over a SignalR hub at <code>/hubs/stream</code> (JWT via <code>access_token</code> query string). Subscriptions are per-entity; the client re-subscribes automatically after reconnects, retrying forever with capped backoff.</p>
+<div class="callout"><b>Hostile networks (WebSockets blocked):</b> some corporate proxies kill the WebSocket upgrade in a way that also hangs SignalR's automatic fallback. Open the console once with <code>?transport=lp</code> appended to the URL to force <b>long polling</b> (<code>?transport=sse</code> for server-sent events, <code>?transport=ws</code> for WebSockets-only, <code>?transport=auto</code> to restore stock negotiation). The choice persists in the browser (<code>localStorage 'sf.transport'</code>) until changed.</div>
 <div class="tablewrap"><table>
 <thead><tr><th>Client → server</th><th>Server → client</th><th>Payload</th></tr></thead>
 <tbody>
