@@ -3,13 +3,15 @@ import { History } from 'lucide-react'
 import { tablesApi } from '../api/tables'
 import type { HistoryVersion, ResultRow, RowValue, TableHistoryResponse } from '../api/types'
 import { cn } from '@/lib/utils'
+import { formatEpochMs, isEpochMsColumn } from '@/lib/format'
 import { Badge } from '@/components/ui/badge'
 import { Spinner } from '@/components/ui/spinner'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia } from '@/components/ui/empty'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 
-function formatValue(v: RowValue): string {
+function formatValue(v: RowValue, key: string): string {
   if (v === undefined || v === null) return '—'
+  if (isEpochMsColumn(key, v)) return formatEpochMs(v)
   if (typeof v === 'object') return JSON.stringify(v)
   return String(v)
 }
@@ -49,7 +51,7 @@ function VersionRow({ version, previous }: { version: HistoryVersion; previous: 
                   changed ? 'rounded bg-primary/10 px-1 text-primary' : 'text-foreground',
                 )}
               >
-                {formatValue(version.row[f])}
+                {formatValue(version.row[f], f)}
               </dd>
             </div>
           )

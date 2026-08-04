@@ -31,6 +31,7 @@ import { MetadataEditor } from '../components/MetadataEditor'
 import { RowHistorySheet } from '../components/RowHistorySheet'
 import { DataflowPanel } from '../components/DataflowPanel'
 import { cn } from '@/lib/utils'
+import { formatEpochMs, isEpochMsColumn } from '@/lib/format'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -139,16 +140,17 @@ function RowsTable({
                   {outputFields.map((f) => {
                     const v: RowValue | undefined = r.row[f.name]
                     const json = v !== undefined && isJsonValue(v)
+                    const ts = typeof v === 'number' && (f.type === 'Timestamp' || isEpochMsColumn(f.name, v))
                     return (
                       <TableCell
                         key={f.name}
-                        title={json ? formatCell(v) : undefined}
+                        title={json ? formatCell(v) : ts ? String(v) : undefined}
                         className={cn(
-                          typeof v === 'number' ? 'text-right text-foreground' : 'text-foreground/80',
+                          typeof v === 'number' && !ts ? 'text-right text-foreground' : 'text-foreground/80',
                           json && 'max-w-56 truncate font-mono',
                         )}
                       >
-                        {formatCell(v)}
+                        {ts ? formatEpochMs(v as number) : formatCell(v)}
                       </TableCell>
                     )
                   })}

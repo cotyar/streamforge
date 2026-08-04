@@ -2,13 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ResultEnvelope, RowValue } from '../api/types'
 import { cn } from '@/lib/utils'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { formatEpochMs, isEpochMsColumn } from '@/lib/format'
 
 function isJsonValue(v: RowValue): v is Record<string, RowValue> | RowValue[] {
   return typeof v === 'object' && v !== null
 }
 
-function formatValue(v: RowValue): string {
+function formatValue(v: RowValue, key?: string): string {
   if (v === null) return '—'
+  if (key !== undefined && isEpochMsColumn(key, v)) return formatEpochMs(v)
   if (typeof v === 'number') return Number.isInteger(v) ? v.toLocaleString() : v.toFixed(4)
   if (typeof v === 'boolean') return v ? 'true' : 'false'
   if (isJsonValue(v)) return JSON.stringify(v)
@@ -67,16 +69,17 @@ export function ResultsTable({ rows }: { rows: ResultEnvelope[] }) {
                 const has = c in r.row
                 const v = r.row[c]
                 const json = has && isJsonValue(v)
+                const ts = has && isEpochMsColumn(c, v)
                 return (
                   <TableCell
                     key={c}
-                    title={json ? formatValue(v) : undefined}
+                    title={json ? formatValue(v) : ts ? String(v) : undefined}
                     className={cn(
-                      typeof v === 'number' ? 'text-right text-foreground' : 'text-foreground/80',
+                      typeof v === 'number' && !ts ? 'text-right text-foreground' : 'text-foreground/80',
                       json && 'max-w-56 truncate font-mono',
                     )}
                   >
-                    {has ? formatValue(v) : ''}
+                    {has ? formatValue(v, c) : ''}
                   </TableCell>
                 )
               })}
