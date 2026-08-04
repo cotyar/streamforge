@@ -27,4 +27,10 @@ public sealed record ChatRequest(List<ChatMessage> Messages);
 /// is truncated to ~2KB (see <see cref="ChatToolExecutor.TruncateToElement"/>) before being placed here.</summary>
 public sealed record ChatToolCallDto(string Name, JsonElement Input, JsonElement Result);
 
-public sealed record ChatResponse(string Reply, List<ChatToolCallDto> ToolCalls, string Model);
+public sealed record ChatResponse(
+    string Reply,
+    List<ChatToolCallDto> ToolCalls,
+    string Model,
+    // Concatenated thought summaries from the whole tool loop (null when the model produced
+    // none) — rendered by the SPA in a collapsible ai-elements Reasoning block. Additive field.
+    string? Thinking = null);

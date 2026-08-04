@@ -457,6 +457,8 @@ export interface ChatResponse {
   reply: string
   toolCalls: ChatToolCallDto[]
   model: string
+  /** Concatenated model thought summaries for the turn (additive; null/absent when none). */
+  thinking?: string | null
 }
 
 /** Verbatim 503 body when Gemini:ApiKey/GEMINI_API_KEY is unset — match this text, not just the status. */

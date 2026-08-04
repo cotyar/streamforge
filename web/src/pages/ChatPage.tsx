@@ -4,6 +4,7 @@ import { ChevronRight, RotateCcw, Send, Sparkles, TriangleAlert, Wrench } from '
 import { chatApi } from '../api/chat'
 import { ApiError } from '../api/client'
 import type { ChatMessage, ChatToolCallDto } from '../api/types'
+import { Reasoning, ReasoningContent, ReasoningTrigger } from '../components/ai-elements/reasoning'
 import { Topbar } from '../components/Topbar'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -30,6 +31,7 @@ interface Turn {
   content: string
   toolCalls?: ChatToolCallDto[]
   model?: string
+  thinking?: string | null
 }
 
 /** Pretty-print + visually truncate a tool call's opaque JSON payload — the trace is the audit
@@ -106,6 +108,12 @@ function Bubble({ turn }: { turn: Turn }) {
   const isUser = turn.role === 'user'
   return (
     <div className={cn('flex flex-col', isUser ? 'items-end' : 'items-start')}>
+      {!isUser && turn.thinking && (
+        <Reasoning className="mb-1 max-w-[85%]" defaultOpen={false}>
+          <ReasoningTrigger />
+          <ReasoningContent>{turn.thinking}</ReasoningContent>
+        </Reasoning>
+      )}
       <div
         className={cn(
           'max-w-[85%] whitespace-pre-wrap rounded-2xl px-3.5 py-2 text-sm',
@@ -146,7 +154,7 @@ export function ChatPage() {
     try {
       const wire: ChatMessage[] = nextHistory.map(({ role, content }) => ({ role, content }))
       const res = await chatApi.send(wire)
-      setHistory([...nextHistory, { role: 'assistant', content: res.reply, toolCalls: res.toolCalls, model: res.model }])
+      setHistory([...nextHistory, { role: 'assistant', content: res.reply, toolCalls: res.toolCalls, model: res.model, thinking: res.thinking }])
       setNotConfigured(null)
     } catch (err) {
       if (err instanceof ApiError && err.status === 503) {

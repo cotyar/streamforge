@@ -45,6 +45,18 @@ internal sealed class GeminiPart
     [JsonPropertyName("text")]
     public string? Text { get; set; }
 
+    // True on thought-summary parts (present when thinkingConfig.includeThoughts is set) —
+    // excluded from the user-facing reply, surfaced separately as ChatResponse.Thinking.
+    [JsonPropertyName("thought")]
+    public bool Thought { get; set; }
+
+    // gemini-3.x attaches a signature to functionCall parts and REQUIRES it to be echoed back
+    // verbatim in the multi-turn contents (400 "Function call is missing a thought_signature"
+    // otherwise — observed live). Round-tripped, never inspected.
+    [JsonPropertyName("thoughtSignature")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ThoughtSignature { get; set; }
+
     [JsonPropertyName("functionCall")]
     public GeminiFunctionCall? FunctionCall { get; set; }
 
@@ -108,8 +120,21 @@ internal sealed class GeminiGenerationConfig
 
 internal sealed class GeminiThinkingConfig
 {
+    // gemini-2.x knob (token budget; 0 = off). REJECTED with 400 by the 3.x family.
     [JsonPropertyName("thinkingBudget")]
-    public int ThinkingBudget { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? ThinkingBudget { get; set; }
+
+    // gemini-3.x knob ("LOW"/"MEDIUM"/"HIGH"...). Unknown to 2.x models.
+    [JsonPropertyName("thinkingLevel")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ThinkingLevel { get; set; }
+
+    // Ask Gemini to return thought-summary parts (parts flagged thought:true) so the UI can show
+    // the model's reasoning in a collapsible block.
+    [JsonPropertyName("includeThoughts")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? IncludeThoughts { get; set; }
 }
 
 internal sealed class GeminiGenerateContentResponse

@@ -27,11 +27,15 @@ public sealed class GeminiChatService(
     ICatalogFacade catalog,
     ITableReadFacade tables,
     ITableHistoryFacade history,
-    // 0 (default) disables gemini-2.5 "thinking" — thinking tokens count against maxOutputTokens
-    // and can consume the ENTIRE budget, returning a candidate with no content parts at all
-    // (observed live: empty reply, zero tool calls). Negative = omit thinkingConfig from the wire
-    // (for models that reject the field). Config: Gemini:ThinkingBudget.
-    int thinkingBudget = 0)
+    // Thinking control differs by model generation (both observed live):
+    //   gemini-2.x — thinkingBudget (0 = off, our default: thinking tokens count against
+    //     maxOutputTokens and can consume the whole budget, returning a candidate with NO content
+    //     parts). Negative = omit. Config: Gemini:ThinkingBudget.
+    //   gemini-3.x — rejects thinkingBudget with 400; uses thinkingLevel ("LOW" default here —
+    //     keeps the empty-reply risk down and tool loops fast). Empty string = omit. Config:
+    //     Gemini:ThinkingLevel.
+    int thinkingBudget = 0,
+    string? thinkingLevel = "LOW")
 {
     private const int MaxToolIterations = 8;
 
@@ -60,16 +64,19 @@ public sealed class GeminiChatService(
 
         var toolContext = new ChatToolContext(catalog, tables, history, principal);
         var toolCalls = new List<ChatToolCallDto>();
+        var thoughts = new List<string>();
 
         for (var iteration = 0; iteration < MaxToolIterations; iteration++)
         {
             var candidate = await CallGeminiAsync(contents, ct).ConfigureAwait(false);
             var parts = candidate.Content?.Parts ?? [];
+            thoughts.AddRange(parts.Where(p => p.Thought && !string.IsNullOrWhiteSpace(p.Text)).Select(p => p.Text!.Trim()));
             var functionCalls = parts.Where(p => p.FunctionCall is not null).ToList();
 
             if (functionCalls.Count == 0)
             {
-                var reply = string.Concat(parts.Where(p => p.Text is not null).Select(p => p.Text));
+                // Thought parts carry text too — they belong to Thinking, never to the reply.
+                var reply = string.Concat(parts.Where(p => p.Text is not null && !p.Thought).Select(p => p.Text));
                 if (string.IsNullOrWhiteSpace(reply))
                 {
                     // Never hand the UI an empty bubble — happens when the model exhausts its
@@ -79,7 +86,7 @@ public sealed class GeminiChatService(
                         : $"The model returned an empty response (finishReason: {candidate.FinishReason ?? "unknown"}) — please try again.";
                 }
 
-                return new ChatResponse(reply, toolCalls, model);
+                return new ChatResponse(reply, toolCalls, model, thoughts.Count > 0 ? string.Join("\n\n", thoughts) : null);
             }
 
             // Append the model's own turn (verbatim — including any interleaved text parts) before
@@ -110,7 +117,8 @@ public sealed class GeminiChatService(
         return new ChatResponse(
             "I've reached the tool-call budget for this turn without a final answer — please continue in a new message.",
             toolCalls,
-            model);
+            model,
+            thoughts.Count > 0 ? string.Join("\n\n", thoughts) : null);
     }
 
     private async Task<GeminiCandidate> CallGeminiAsync(List<GeminiContent> contents, CancellationToken ct)
@@ -123,7 +131,9 @@ public sealed class GeminiChatService(
             GenerationConfig = new GeminiGenerationConfig
             {
                 MaxOutputTokens = 2048,
-                ThinkingConfig = thinkingBudget < 0 ? null : new GeminiThinkingConfig { ThinkingBudget = thinkingBudget },
+                ThinkingConfig = model.StartsWith("gemini-2", StringComparison.OrdinalIgnoreCase)
+                    ? (thinkingBudget < 0 ? null : new GeminiThinkingConfig { ThinkingBudget = thinkingBudget, IncludeThoughts = thinkingBudget > 0 ? true : null })
+                    : (string.IsNullOrEmpty(thinkingLevel) ? null : new GeminiThinkingConfig { ThinkingLevel = thinkingLevel, IncludeThoughts = true }),
             },
         };
 
