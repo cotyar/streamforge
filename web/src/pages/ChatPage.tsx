@@ -4,6 +4,7 @@ import { ChevronRight, RotateCcw, Send, Sparkles, TriangleAlert, Wrench } from '
 import { chatApi } from '../api/chat'
 import { ApiError } from '../api/client'
 import type { ChatMessage, ChatToolCallDto } from '../api/types'
+import { Streamdown } from 'streamdown'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '../components/ai-elements/reasoning'
 import { Topbar } from '../components/Topbar'
 import { cn } from '@/lib/utils'
@@ -116,11 +117,12 @@ function Bubble({ turn }: { turn: Turn }) {
       )}
       <div
         className={cn(
-          'max-w-[85%] whitespace-pre-wrap rounded-2xl px-3.5 py-2 text-sm',
-          isUser ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground',
+          'max-w-[85%] rounded-2xl px-3.5 py-2 text-sm',
+          isUser ? 'whitespace-pre-wrap bg-primary text-primary-foreground' : 'bg-muted text-foreground',
         )}
       >
-        {turn.content}
+        {/* the model answers in markdown (bullet lists, `ids`, **bold**) — render it as such */}
+        {isUser ? turn.content : <Streamdown className="sf-md">{turn.content}</Streamdown>}
       </div>
       {!isUser && turn.toolCalls && <ToolCallTrace toolCalls={turn.toolCalls} />}
     </div>

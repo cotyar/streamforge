@@ -123,7 +123,7 @@ source stream ─▶ TableIngestGrain ──epoch-stamped batches──▶ Table
 |---|---|---|
 | REST | `:5199 /api/*` | Full CRUD + validate + rows/search/history/metrics + proto downloads + `/api/meta/*`. JWT (HS256, 12 h), policies Viewer ⊂ Editor ⊂ Admin. OpenAPI at `/openapi/v1.json`, interactive reference at `/scalar`. |
 | SignalR | `:5199 /hubs/stream` | Per-entity subscriptions (`pipeline:{id}`, `source:{name}`, `table:{name}`, `metrics`); token via `access_token` query. |
-| SPA + docs | `:5199 /`, `/docs`, `/explorer` | Console (the client branding, light default, `sf.theme`), interactive user docs, API Explorer (reflection surface UI). |
+| SPA + docs | `:5199 /`, `/docs`, `/explorer` | Console (neutral StreamForge branding, light default, `sf.theme`), interactive user docs, API Explorer (reflection surface UI). |
 | gRPC | `:5299` (cleartext h2c) | Static control plane `streamforge.v1` (CRUD/validate/Struct-row streaming) + hand-implemented **dynamic reflection**: every source/table/compiling-pipeline published as typed `streamforge.dynamic.v1` messages; `DynamicStreamService.SubscribeEntity` streams typed `{Entity}Event`/`{Entity}Delta` bytes. Same JWT as metadata. |
 | Typed clients | `GET /api/{kind}/{id-or-name}/proto` + `tools/generate-client.sh` | Self-contained proto3 per entity → scaffolded, built .NET client lib with typed `IAsyncEnumerable` subscribe. Field numbers persist in the registry (evolution-safe, never reused) so generated clients survive schema edits. |
 

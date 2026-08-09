@@ -225,7 +225,7 @@ Java/Kotlin: buildable sample only if gradle/maven already installed, else READM
 ### W9 — Benchmark + comparison deliverable (serial + orchestrator)
 `tools/bench`: end-to-end latency of the SAME seeded table pipeline (event publish → delta
 visible) against both runtimes, p50/p99, published numbers. `orleans/docs/comparison.html` —
-the client-styled like `docs/index.html` (text wordmark only, never the logo graphic), linked from the
+Console-styled like `docs/index.html` (text wordmark only, never the logo graphic), linked from the
 docs sidebar: in-process grains vs sidecar hops (with the measured table), typed single-runtime
 performance vs polyglot reach, Orleans streams vs at-least-once pub/sub (redelivery/dedup
 consequences), operational story (silo clustering vs k8s-native building blocks), decision matrix.

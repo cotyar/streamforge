@@ -62,7 +62,7 @@ Three user asks:
   `local` shells out to `docker compose -f deploy/<flavor>/compose.yaml up -d|down|ps`;
   `cloudrun` shells out to `gcloud run services update|describe` (scale-to-zero = stop).
   Health = polling each flavor's `/healthz`. It never binds or signals the dev servers on
-  5199/5299/5399 — it manages containers and Cloud Run services only. the client text wordmark only.
+  5199/5299/5399 — it manages containers and Cloud Run services only. StreamForge text wordmark only.
 - **D-D — AI control chat implemented ONCE, in `shared/StreamForge.Api/Chat/`** — both flavors
   get it with zero host edits (registered inside `AddStreamForgeApi`/`MapStreamForgeApi`,
   exactly like every other shared endpoint). `POST /api/chat` (Editor policy): server-side
