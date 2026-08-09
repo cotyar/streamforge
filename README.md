@@ -112,7 +112,7 @@ Deeper: [architecture](orleans/ARCHITECTURE.md) · [design rationale](orleans/DE
 ## Tests
 
 ```bash
-dotnet test orleans/StreamForge.sln     # 893
+dotnet test orleans/StreamForge.sln     # 897
 dotnet test dapr/StreamForge.Dapr.sln   # 181
 ```
 

@@ -142,6 +142,11 @@ public static class StreamForgeApiExtensions
                 thinkingBudget: config.GetValue("Gemini:ThinkingBudget", 0),
                 thinkingLevel: config["Gemini:ThinkingLevel"] ?? "LOW");
         });
+
+        // Per-login budget for /api/chat (Chat:MaxRequestsPerSession, 0 or less = unlimited).
+        // Singleton: the counters have to outlive the request scope to mean anything.
+        services.AddSingleton(sp => new ChatRateLimiter(
+            sp.GetRequiredService<IConfiguration>().GetValue("Chat:MaxRequestsPerSession", 10)));
     }
 
     public static void MapStreamForgeApi(this WebApplication app, StreamForgeApiOptions options)

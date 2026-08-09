@@ -21,6 +21,9 @@ public sealed class JwtTokenService(IConfiguration config)
             new Claim(ClaimTypes.Name, user.Username),
             new Claim("name", user.DisplayName),
             new Claim(ClaimTypes.Role, user.Role),
+            // One id per login — what ChatRateLimiter counts against, since the demo logins are
+            // shared and the username alone would make one visitor's budget everyone's.
+            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N")),
         };
 
         var token = new JwtSecurityToken(

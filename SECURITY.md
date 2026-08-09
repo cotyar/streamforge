@@ -22,7 +22,9 @@ pointing it at anything real, know that:
 - **The AI control chat can mutate the catalog.** `POST /api/chat` gives the model function-calling
   access to create, edit, start and stop sources, pipelines and tables under the caller's role. A
   publicly reachable instance with `GEMINI_API_KEY` set hands those capabilities to whoever can log
-  in. Don't expose it without restricting the role or the endpoint.
+  in. Each login session is capped at `Chat:MaxRequestsPerSession` calls (default 10) so one visitor
+  can't drain the API quota, but that is a spend guard, not an authorization boundary — don't expose
+  the endpoint without restricting the role too.
 - **State is process-local.** Both flavors keep the working set in memory (Orleans grains / Dapr
   actors); there is no durability, replication or recovery story worth relying on.
 

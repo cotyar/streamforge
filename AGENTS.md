@@ -23,7 +23,7 @@ its own note on why `/docs` doesn't serve it automatically).
   these are the *container* ports; never confuse them with (or bind over) the dev servers above.
 - Seeds apply only to an **empty data dir** (`orleans/src/StreamForge.Host/data/`; delete to
   reseed). Logins: `admin/admin123!`, `editor/editor123!`, `viewer/viewer123!`.
-- Git: remote `origin` = private `github.com/cotyar/crates-foundation`, branch `master`. Commit
+- Git: remote `origin` = public `github.com/cotyar/streamforge`, branch `master`. Commit
   messages end with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`. Push after stable
   committed waves.
 
@@ -31,9 +31,9 @@ its own note on why `/docs` doesn't serve it automatically).
 
 ```bash
 ~/.dotnet/dotnet build orleans/StreamForge.sln
-~/.dotnet/dotnet test  orleans/StreamForge.sln     # 511 tests — the whole suite must be green
+~/.dotnet/dotnet test  orleans/StreamForge.sln     # 897 tests — the whole suite must be green
 ~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln
-~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # ~153 tests — the whole suite must be green
+~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 181 tests — the whole suite must be green
 cd web && bun run build
 ~/.dotnet/dotnet run --project orleans/src/StreamForge.Host   # :5199 + :5299
 cd dapr && ./tools/run.sh                                      # :5399 (needs `dapr init` done once)
@@ -54,8 +54,9 @@ segfaults under native arm64 Docker). The Dapr stack is self-contained: app+dapr
 in one network namespace, no scheduler (timers only). `admin/` (`bun main.ts`, :5599) starts/stops
 either containerized stack (or Cloud Run services with `MODE=cloudrun`) and polls `/healthz`.
 AI control chat: `POST /api/chat` + SPA "AI Control" page on both flavors, Google Gemini function
-calling over the catalog facades — needs `GEMINI_API_KEY` (or `Gemini:ApiKey`); returns a clear
-503 without it. Chat logic lives in `shared/StreamForge.Api/Chat/`.
+calling over the catalog facades — needs `GEMINI_API_KEY` (or `Gemini:ApiKey`), returns a clear 503
+without it; capped per login session by `ChatRateLimiter` (`Chat:MaxRequestsPerSession`, default 10,
+≤0 disables), 429 past that. Chat logic lives in `shared/StreamForge.Api/Chat/`.
 
 **Dapr flavor extras**: `dapr/tools/run.sh` starts the sidecar'd host on 5399 (sidecar 3599/4599);
 `dapr/tools/reset.sh` SCANs and deletes this app's Redis keys to reseed (the Dapr-flavor equivalent
