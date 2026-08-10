@@ -23,9 +23,20 @@ internal sealed class CompiledTableJoin
     public required string SourceName { get; init; }
     public required SourceSchema Schema { get; init; }
     public required bool IsTable { get; init; }
+    /// <summary>Plan 008: for Inner/Cross/Semi/Anti/Scalar, the first equi-key component only, with every
+    /// OTHER component folded back into <see cref="Residual"/> — the pre-008 shape TableJoinOp/
+    /// TableSemiAntiOp still read (see Sql/Validator.cs's JoinKeyFolding). For Left/Right/Full, this is
+    /// simply <see cref="LeftKeys"/>[0] — TableOuterJoinOp reads <see cref="LeftKeys"/>/
+    /// <see cref="RightKeys"/> directly instead, and <see cref="Residual"/> here is then the PURE
+    /// residual (no fold-back — see TablePlanner's join builder).</summary>
     public Expr? LeftKey { get; init; }
     public Expr? RightKey { get; init; }
     public Expr? Residual { get; init; }
+    /// <summary>Plan 008: every equi-conjunct's left/right operand, in ON-clause order — the full
+    /// composite key. TableOuterJoinOp (Left/Right/Full) consumes this directly; every other op still
+    /// reads the single-key <see cref="LeftKey"/>/<see cref="RightKey"/> above.</summary>
+    public IReadOnlyList<Expr>? LeftKeys { get; init; }
+    public IReadOnlyList<Expr>? RightKeys { get; init; }
     /// <summary>Plan 004 N1: set when this JOIN's source is a derived table/CTE. See CompiledTableSource.DerivedPlan.</summary>
     public CompiledTablePlan? DerivedPlan { get; init; }
     /// <summary>Plan 002 L2: set only when Kind == Unnest — the expression TableUnnestOp evaluates against

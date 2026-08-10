@@ -2,15 +2,24 @@ using System.Collections.Generic;
 
 namespace StreamForge.Engine.Sql;
 
-/// <summary>A resolved, validated JOIN: its equi-key (null only when validation already failed) and residual filter.</summary>
-internal sealed class JoinBinding(JoinKind kind, string alias, string sourceName, TimeSpan? within, Expr? leftKey, Expr? rightKey, Expr? residual, bool isTable = false, Expr? unnestExpr = null)
+/// <summary>A resolved, validated JOIN: its equi-key component lists (null only when validation already
+/// failed, or this kind has no equi-key concept — CROSS, UNNEST) and residual filter.</summary>
+internal sealed class JoinBinding(JoinKind kind, string alias, string sourceName, TimeSpan? within, IReadOnlyList<Expr>? leftKeys, IReadOnlyList<Expr>? rightKeys, Expr? residual, bool isTable = false, Expr? unnestExpr = null)
 {
     public JoinKind Kind { get; } = kind;
     public string Alias { get; } = alias;
     public string SourceName { get; } = sourceName;
     public TimeSpan? Within { get; } = within;
-    public Expr? LeftKey { get; } = leftKey;
-    public Expr? RightKey { get; } = rightKey;
+    /// <summary>Plan 008: every equi-conjunct's left/right operand, in ON-clause order — composite keys
+    /// (e.g. `ON a.x=b.x AND a.y=b.y` yields two components on each side, not one key plus a residual).
+    /// Non-null is always &gt;= 1 element. <see cref="Residual"/> holds only conjuncts that are NOT an
+    /// equi-comparison between the two sides at all — see Validator.ExtractEquiKey. Consumed directly
+    /// (as full composite keys) only by table-mode LEFT/RIGHT/FULL's TableOuterJoinOp; every single-key
+    /// op (TableJoinOp, TableSemiAntiOp, PipelineJoinOp, PipelineSubqueryOp) is unaffected — see
+    /// Planning/TablePlanner.cs and Planning/Planner.cs's JoinKeyFolding.FoldExtraKeysIntoResidual call,
+    /// which reconstructs their pre-008 "first key + residual" view from these lists.</summary>
+    public IReadOnlyList<Expr>? LeftKeys { get; } = leftKeys;
+    public IReadOnlyList<Expr>? RightKeys { get; } = rightKeys;
     public Expr? Residual { get; } = residual;
     /// <summary>Table mode only: whether SourceName resolved against the table namespace (vs. streams).</summary>
     public bool IsTable { get; } = isTable;
@@ -246,13 +255,13 @@ internal sealed class Validator
                         $"{JoinLabel(j.Kind)} JOIN may not have a WITHIN clause in table mode — state is unbounded/consolidated, not time-bounded",
                         j.Line, j.Column));
                 }
-                if (j.Kind != JoinKind.Inner && j.Kind != JoinKind.Cross)
-                {
-                    _diags.Add(new SqlDiagnostic($"{JoinLabel(j.Kind)} JOIN is not allowed in table mode — only INNER equi-joins are supported", j.Line, j.Column));
-                }
+                // Plan 008: the outer-kind rejection that used to live here is gone — LEFT/RIGHT/FULL
+                // (and CROSS, already supported) now compile in table mode too. WITHIN stays banned
+                // (above) and the ON/equi-comparison requirements below still apply to every kind.
             }
 
-            Expr? leftKey = null, rightKey = null, residual = null;
+            List<Expr>? leftKeys = null, rightKeys = null;
+            Expr? residual = null;
 
             if (j.Kind == JoinKind.Cross)
             {
@@ -277,7 +286,7 @@ internal sealed class Validator
                 }
                 else
                 {
-                    (leftKey, rightKey, residual) = extracted.Value;
+                    (leftKeys, rightKeys, residual) = extracted.Value;
                 }
             }
 
@@ -286,7 +295,7 @@ internal sealed class Validator
                 sources.Add(new ResolvedSource { Alias = j.Source.Alias, SourceName = resolved.SourceName, Schema = jSchema!, IsTable = jIsTable, Derived = resolved.Derived });
             }
 
-            joins.Add(new JoinBinding(j.Kind, j.Source.Alias, resolved.SourceName, j.Within, leftKey, rightKey, residual, jIsTable));
+            joins.Add(new JoinBinding(j.Kind, j.Source.Alias, resolved.SourceName, j.Within, leftKeys, rightKeys, residual, jIsTable));
         }
 
         var fullScope = sources.Select(s => (s.Alias, s.Schema)).ToList();
@@ -533,7 +542,7 @@ internal sealed class Validator
         sources.Add(new ResolvedSource { Alias = unnestSrc.Alias, SourceName = "(unnest)", Schema = elementSchema, IsTable = false, Derived = null, IsUnnest = true });
         _unnestAliases.Add(unnestSrc.Alias);
 
-        joins.Add(new JoinBinding(JoinKind.Unnest, unnestSrc.Alias, "(unnest)", within: null, leftKey: null, rightKey: null, residual: null, isTable: false, unnestExpr: unnestSrc.Expr));
+        joins.Add(new JoinBinding(JoinKind.Unnest, unnestSrc.Alias, "(unnest)", within: null, leftKeys: null, rightKeys: null, residual: null, isTable: false, unnestExpr: unnestSrc.Expr));
     }
 
     /// <summary>Walks <paramref name="e"/> for the first Identifier/QualifiedIdentifier that names an
@@ -1250,37 +1259,43 @@ internal sealed class Validator
         return result;
     }
 
-    private (Expr Left, Expr Right, Expr? Residual)? ExtractEquiKey(Expr onExpr, HashSet<string> leftAliases, string rightAlias)
+    /// <summary>Plan 008: collects EVERY equi-conjunct spanning the two sides into an ordered pair of key
+    /// lists (composite keys) — not just the first one (pre-008: only the first `=` conjunct became the
+    /// key; every other conjunct, equi-shaped or not, folded into the residual — see JoinKeyFolding for
+    /// how single-key consumers get that exact view reconstructed). Only a conjunct that is NOT an
+    /// equi-comparison between exactly these two sides remains in <c>Residual</c>.</summary>
+    private (List<Expr> LeftKeys, List<Expr> RightKeys, Expr? Residual)? ExtractEquiKey(Expr onExpr, HashSet<string> leftAliases, string rightAlias)
     {
         var conjuncts = FlattenAnd(onExpr).ToList();
-        Expr? leftKey = null, rightKey = null;
+        var leftKeys = new List<Expr>();
+        var rightKeys = new List<Expr>();
         var residuals = new List<Expr>();
 
         foreach (var c in conjuncts)
         {
-            if (leftKey is null && c is BinaryExpr { Op: "=" } be)
+            if (c is BinaryExpr { Op: "=" } be)
             {
                 var la = CollectAliases(be.Left);
                 var ra = CollectAliases(be.Right);
                 if (la.Count > 0 && la.IsSubsetOf(leftAliases) && ra.Count == 1 && ra.Contains(rightAlias))
                 {
-                    leftKey = be.Left;
-                    rightKey = be.Right;
+                    leftKeys.Add(be.Left);
+                    rightKeys.Add(be.Right);
                     continue;
                 }
                 if (ra.Count > 0 && ra.IsSubsetOf(leftAliases) && la.Count == 1 && la.Contains(rightAlias))
                 {
-                    leftKey = be.Right;
-                    rightKey = be.Left;
+                    leftKeys.Add(be.Right);
+                    rightKeys.Add(be.Left);
                     continue;
                 }
             }
             residuals.Add(c);
         }
 
-        if (leftKey is null) return null;
+        if (leftKeys.Count == 0) return null;
         Expr? residual = residuals.Count == 0 ? null : residuals.Aggregate((a, b) => new BinaryExpr("AND", a, b, a.Line, a.Column));
-        return (leftKey, rightKey!, residual);
+        return (leftKeys, rightKeys, residual);
     }
 
     // ------------------------------------------------------------------
@@ -1344,5 +1359,33 @@ internal sealed class Validator
                 StructurallyEqual(ja.Left, jb.Left, bindings) && StructurallyEqual(ja.Key, jb.Key, bindings),
             _ => false,
         };
+    }
+}
+
+/// <summary>Plan 008: bridges JoinBinding's new composite key LISTS back to the single-key shape every op
+/// this wave does NOT touch (TableJoinOp, TableSemiAntiOp, PipelineJoinOp, PipelineSubqueryOp) still
+/// expects — used by Planning/TablePlanner.cs and Planning/Planner.cs when building CompiledTableJoin/
+/// CompiledJoin's pre-008 <c>LeftKey</c>/<c>RightKey</c>/<c>Residual</c> fields (kept, unchanged in name
+/// and meaning, since existing tests — TableOpsUnitTests, PipelineOpsUnitTests — construct those ops
+/// directly off exactly those fields). Only table-mode LEFT/RIGHT/FULL (TableOuterJoinOp) consumes the
+/// full <c>LeftKeys</c>/<c>RightKeys</c> lists directly instead and skips this fold entirely — see
+/// TablePlanner's join builder.</summary>
+internal static class JoinKeyFolding
+{
+    /// <summary>Reconstructs the pre-008 "first equi-key + residual" shape: every key component AFTER the
+    /// first becomes an extra `leftKeys[i] = rightKeys[i]` conjunct ANDed onto <paramref name="residual"/>,
+    /// in list order. A no-op whenever there's nothing to fold — <paramref name="leftKeys"/> is null (no
+    /// equi-key at all: CROSS/UNNEST) or has exactly one element (the overwhelming common case, and every
+    /// single-key join this wave's regression tests cover) — which is exactly what keeps every existing
+    /// single-key join's compiled Residual byte-for-byte identical to before this refactor.</summary>
+    public static Expr? FoldExtraKeysIntoResidual(IReadOnlyList<Expr>? leftKeys, IReadOnlyList<Expr>? rightKeys, Expr? residual)
+    {
+        if (leftKeys is null) return residual;
+        for (int i = 1; i < leftKeys.Count; i++)
+        {
+            var eq = new BinaryExpr("=", leftKeys[i], rightKeys![i], leftKeys[i].Line, leftKeys[i].Column);
+            residual = residual is null ? eq : new BinaryExpr("AND", residual, eq, residual.Line, residual.Column);
+        }
+        return residual;
     }
 }

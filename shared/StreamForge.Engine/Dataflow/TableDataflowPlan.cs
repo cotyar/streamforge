@@ -18,11 +18,15 @@ namespace StreamForge.Engine.Dataflow;
 // ============================================================================
 
 /// <summary>One kind of node in a table plan's partitioned dataflow graph. Mirrors the M1 op inventory
-/// 1:1: Ingest wraps <see cref="TableIngestOp"/>, Join wraps <see cref="TableJoinOp"/> (used for both
-/// plain equi-joins AND scalar-subquery joins — see <see cref="TableEdgeMode.Broadcast"/>), SemiAnti wraps
-/// <see cref="TableSemiAntiOp"/>, Unnest wraps <see cref="TableUnnestOp"/>, FilterProject wraps
-/// <see cref="TableFilterProjectOp"/> (WHERE, +terminal projection when ungrouped), Reduce wraps
-/// <see cref="TableReduceOp"/> (GROUP BY/aggregates), LatestBy wraps <see cref="TableLatestByOp"/>.</summary>
+/// 1:1: Ingest wraps <see cref="TableIngestOp"/>, Join wraps <see cref="TableJoinOp"/> (plain INNER/CROSS
+/// equi-joins AND scalar-subquery joins — see <see cref="TableEdgeMode.Broadcast"/>) OR, for JoinKind
+/// Left/Right/Full, <see cref="TableOuterJoinOp"/> (plan 008 — see JoinChainStageExecutor's op-selection
+/// switch), SemiAnti wraps <see cref="TableSemiAntiOp"/>, Unnest wraps <see cref="TableUnnestOp"/>,
+/// FilterProject wraps <see cref="TableFilterProjectOp"/> (WHERE, +terminal projection when ungrouped),
+/// Reduce wraps <see cref="TableReduceOp"/> (GROUP BY/aggregates), LatestBy wraps
+/// <see cref="TableLatestByOp"/>. No dedicated TableStageKind for outer joins — deliberately: they still
+/// share every structural property (two in-edges, Left/Right roles, hash-partitioned on the join key) a
+/// plain Join stage has; only the op instantiated inside JoinChainStageExecutor differs by JoinKind.</summary>
 public enum TableStageKind { Ingest, Join, SemiAnti, Unnest, FilterProject, Reduce, LatestBy }
 
 /// <summary>How a <see cref="TableEdgeDescriptor"/>'s deltas are routed from producer to consumer
@@ -125,15 +129,21 @@ public interface ITableStageExecutor
 /// <see cref="TablePlan.CreateDataflow"/>. Immutable and re-derivable from the same TablePlan any number
 /// of times (Registry restarts a table on a Parallelism change exactly by calling this again).
 ///
-/// SCOPE (M2): every table plan built from Sources[0] (FROM) directly and JOIN aliases that are either (a)
-/// a plain real stream/table alias (INNER equi-join — the only join kind table mode's validator allows for
-/// a non-derived source; see TableJoinOp's class doc) or (b) a derived/residual subquery join (Scalar,
-/// Semi, Anti — IN/EXISTS/scalar-subquery predicates, always compiled with a DerivedPlan — see
-/// TablePlanner.BuildScalarJoin/BuildSemiAntiJoin) is supported. A derived table/CTE named directly in FROM
-/// or JOIN position (plan 004 N1, CompiledTableSource.DerivedPlan / a non-Scalar/SemiAnti
-/// CompiledTableJoin.DerivedPlan) is NOT supported for Parallelism &gt; 1 in M2 — CreateDataflow throws
-/// <see cref="NotSupportedException"/> for those plans; Parallelism stays pinned to 1 (the existing
-/// single-grain TableGrain path, unaffected) for such tables. See the M2 report's descope list.
+/// SCOPE (M2, extended by plan 008): every table plan built from Sources[0] (FROM) directly and JOIN
+/// aliases that are either (a) a plain real stream/table alias — INNER, CROSS, LEFT, RIGHT, or FULL
+/// equi-join (plan 008 lifted the table-mode outer-join validator gate; see TableJoinOp's and
+/// TableOuterJoinOp's class docs for which op a non-derived source's JoinKind maps to) or (b) a
+/// derived/residual subquery join (Scalar, Semi, Anti — IN/EXISTS/scalar-subquery predicates, always
+/// compiled with a DerivedPlan — see TablePlanner.BuildScalarJoin/BuildSemiAntiJoin) is supported. A
+/// derived table/CTE named directly in FROM or JOIN position (plan 004 N1, CompiledTableSource.DerivedPlan
+/// / a non-Scalar/SemiAnti CompiledTableJoin.DerivedPlan) is NOT supported for Parallelism &gt; 1 in M2 —
+/// CreateDataflow throws <see cref="NotSupportedException"/> for those plans; Parallelism stays pinned to
+/// 1 (the existing single-grain TableGrain path, unaffected) for such tables. LEFT/RIGHT/FULL need no
+/// extra restriction beyond that: a non-derived, non-CROSS join's Left AND Right edges are already
+/// unconditionally HashPartition-mode (see TableDataflowBuilder) — the composite-key-aware routing
+/// (RoutingKeySpec.KeyExprs, now the join's FULL key list rather than a single expression) is what keeps
+/// matching rows co-partitioned, and hence TableOuterJoinOp's per-partition flip state correct, at
+/// Parallelism &gt;= 2. See the M2 report's descope list.
 /// </summary>
 public sealed class TableDataflowPlan
 {
@@ -273,6 +283,14 @@ public sealed class TableDataflowPlan
         public EdgeId? RightEdge;
         public string? RightAlias;
         public CompiledTablePlan? RightDerivedPlan; // set => broadcast + nested TableExecutor on the right
+
+        // Join only, JoinKind Left/Right/Full (plan 008): every (alias, schema) accumulated on the left so
+        // far, and this join's own (alias, schema) on the right — TableOuterJoinOp's constructor needs both
+        // to build its all-NULL left/right pad rows, exactly like TableExecutorImpl.EnsureInit's single-
+        // partition `accumulated` list. Null for every other stage (populated only alongside Join/SemiAnti's
+        // non-Unnest branch in TableDataflowBuilder.Build).
+        public IReadOnlyList<(string Alias, SourceSchema Schema)>? LeftAliasesSoFar;
+        public (string Alias, SourceSchema Schema)? RightSide;
 
         // Ingest / FilterProject / Reduce / LatestBy (single input)
         public EdgeId? InEdge;

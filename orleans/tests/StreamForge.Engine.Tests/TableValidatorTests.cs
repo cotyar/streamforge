@@ -65,15 +65,6 @@ public class TableValidatorTests
     }
 
     [Fact]
-    public void LeftJoinIsNotSupportedInTableMode()
-    {
-        var sql = "SELECT t.symbol FROM trades t LEFT JOIN quotes q ON t.symbol = q.symbol";
-        var r = CompileTable(sql, Trades, Quotes);
-        Assert.False(r.Ok);
-        Assert.Contains(r.Diagnostics, d => d.Message.Contains("LEFT JOIN is not allowed in table mode"));
-    }
-
-    [Fact]
     public void InnerJoinRequiresEquiComparisonInTableMode()
     {
         var sql = "SELECT t.symbol FROM trades t JOIN quotes q ON t.price > q.bid";

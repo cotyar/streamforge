@@ -76,14 +76,33 @@ public static class TablePlanner
         var joins = v.Joins.Select(j =>
         {
             var srcEntry = v.Sources.First(s => s.Alias == j.Alias);
-            // CROSS JOIN has no ON clause (LeftKey/RightKey/Residual are null by construction — see
+            // CROSS JOIN has no ON clause (LeftKeys/RightKeys/Residual are null by construction — see
             // Validator/Parser), so the cartesian product is realized by handing TableJoinOp the same
             // constant-key trick BuildSemiAntiJoin uses for EXISTS: a fresh NumberLiteral(0) on both
             // sides makes every left row equal-key-match every right row, i.e. the full cross product
             // with weight multiplication, no new op required.
-            var (leftKey, rightKey) = j.Kind == JoinKind.Cross
-                ? (new NumberLiteral(null, 0L, 0, 0), new NumberLiteral(null, 0L, 0, 0))
-                : (j.LeftKey, j.RightKey);
+            List<Expr>? leftKeys, rightKeys;
+            if (j.Kind == JoinKind.Cross)
+            {
+                leftKeys = [new NumberLiteral(null, 0L, 0, 0)];
+                rightKeys = [new NumberLiteral(null, 0L, 0, 0)];
+            }
+            else
+            {
+                leftKeys = j.LeftKeys?.ToList();
+                rightKeys = j.RightKeys?.ToList();
+            }
+
+            // Plan 008: TableOuterJoinOp (Left/Right/Full) reads LeftKeys/RightKeys directly and needs
+            // the PURE residual (genuinely non-equi conjuncts only — see Validator.ExtractEquiKey).
+            // Every other kind still goes through TableJoinOp/TableSemiAntiOp, which only ever look at
+            // LeftKey/RightKey (component [0]) — for those, every OTHER equi-key component is folded
+            // back into Residual so it's still enforced, exactly reproducing pre-008 "first key +
+            // residual" behavior byte-for-byte (see JoinKeyFolding's doc comment).
+            var residual = j.Kind is JoinKind.Left or JoinKind.Right or JoinKind.Full
+                ? j.Residual
+                : JoinKeyFolding.FoldExtraKeysIntoResidual(leftKeys, rightKeys, j.Residual);
+
             return new CompiledTableJoin
             {
                 Kind = j.Kind,
@@ -91,9 +110,11 @@ public static class TablePlanner
                 SourceName = j.SourceName,
                 Schema = srcEntry.Schema,
                 IsTable = j.IsTable,
-                LeftKey = leftKey,
-                RightKey = rightKey,
-                Residual = j.Residual,
+                LeftKey = leftKeys?[0],
+                RightKey = rightKeys?[0],
+                Residual = residual,
+                LeftKeys = leftKeys,
+                RightKeys = rightKeys,
                 DerivedPlan = sources.First(s => s.Alias == j.Alias).DerivedPlan,
                 UnnestExpr = j.UnnestExpr,
             };
@@ -407,6 +428,8 @@ public static class TablePlanner
             LeftKey = leftKey,
             RightKey = rightKey,
             Residual = null,
+            LeftKeys = [leftKey],
+            RightKeys = [rightKey],
             DerivedPlan = derivedPlan,
         };
     }
@@ -457,6 +480,8 @@ public static class TablePlanner
             LeftKey = leftKey,
             RightKey = rightKey,
             Residual = residual,
+            LeftKeys = [leftKey],
+            RightKeys = [rightKey],
             DerivedPlan = derivedPlan,
         };
     }

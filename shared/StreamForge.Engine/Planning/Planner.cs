@@ -75,6 +75,13 @@ public static class Planner
         var joins = v.Joins.Select(j =>
         {
             var srcEntry = v.Sources.First(s => s.Alias == j.Alias);
+            // Plan 008: pipeline mode has no composite-key-aware op yet (PipelineJoinOp handles every
+            // kind, including Left/Right/Full, via its existing single-key + WITHIN eviction path) — so,
+            // unlike table mode's TablePlanner, the fold is UNCONDITIONAL here: every equi-key component
+            // past the first always becomes an extra Residual conjunct, regardless of JoinKind. See
+            // JoinKeyFolding's doc comment; a no-op for every single-key join (the common case, and every
+            // join this wave's regression tests — ExecutorJoinTests, PipelineOpsUnitTests — cover).
+            var residual = JoinKeyFolding.FoldExtraKeysIntoResidual(j.LeftKeys, j.RightKeys, j.Residual);
             return new CompiledJoin
             {
                 Kind = j.Kind,
@@ -82,9 +89,11 @@ public static class Planner
                 SourceName = j.SourceName,
                 Schema = srcEntry.Schema,
                 Within = j.Within ?? TimeSpan.Zero,
-                LeftKey = j.LeftKey,
-                RightKey = j.RightKey,
-                Residual = j.Residual,
+                LeftKey = j.LeftKeys?[0],
+                RightKey = j.RightKeys?[0],
+                Residual = residual,
+                LeftKeys = j.LeftKeys,
+                RightKeys = j.RightKeys,
                 DerivedPlan = sources.First(s => s.Alias == j.Alias).DerivedPlan,
                 UnnestExpr = j.UnnestExpr,
             };
@@ -443,6 +452,8 @@ public static class Planner
             LeftKey = leftKey,
             RightKey = rightKey,
             Residual = null,
+            LeftKeys = [leftKey],
+            RightKeys = [rightKey],
             DerivedPlan = derivedPlan,
         };
     }
@@ -499,6 +510,8 @@ public static class Planner
             LeftKey = leftKey,
             RightKey = rightKey,
             Residual = residual,
+            LeftKeys = [leftKey],
+            RightKeys = [rightKey],
             DerivedPlan = derivedPlan,
         };
     }

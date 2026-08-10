@@ -31,9 +31,18 @@ internal sealed class CompiledJoin
     public required string SourceName { get; init; }
     public required SourceSchema Schema { get; init; }
     public required TimeSpan Within { get; init; }
+    /// <summary>Plan 008: first equi-key component only, with every OTHER component folded back into
+    /// <see cref="Residual"/> — the pre-008 shape every existing single-key consumer (PipelineJoinOp,
+    /// PipelineSubqueryOp) still reads. See <see cref="LeftKeys"/> for the full composite key.</summary>
     public Expr? LeftKey { get; init; }
     public Expr? RightKey { get; init; }
     public Expr? Residual { get; init; }
+    /// <summary>Plan 008: every equi-conjunct's left/right operand, in ON-clause order (composite keys —
+    /// see Sql/Validator.cs's ExtractEquiKey doc comment). Not consumed by any pipeline-mode op yet
+    /// (PipelineJoinOp has no composite-key-aware path in this wave — see JoinKeyFolding), but propagated
+    /// here for parity with CompiledTableJoin and future use.</summary>
+    public IReadOnlyList<Expr>? LeftKeys { get; init; }
+    public IReadOnlyList<Expr>? RightKeys { get; init; }
     /// <summary>Plan 004 N1: set when this JOIN's source is a derived table/CTE. See CompiledSource.DerivedPlan.</summary>
     public CompiledPlan? DerivedPlan { get; init; }
     /// <summary>Plan 002 L2: set only when Kind == Unnest — the expression PipelineUnnestOp evaluates

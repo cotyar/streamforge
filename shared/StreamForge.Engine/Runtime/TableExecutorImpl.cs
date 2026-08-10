@@ -73,19 +73,30 @@ public sealed partial class TableExecutor
 
         var compiled = _plan.Compiled;
 
+        // Plan 008: TableOuterJoinOp's null-padding needs every alias/schema accumulated so far on the
+        // left (to build its all-NULL left row) and this join's own alias/schema (for its all-NULL right
+        // row) — mirrors ExecutorImpl.EnsureInit's identical `accumulated` list for PipelineJoinOp.
+        var accumulated = new List<(string Alias, SourceSchema Schema)> { (compiled.Sources[0].Alias, compiled.Sources[0].Schema) };
+
         for (int i = 0; i < compiled.Joins.Count; i++)
         {
             var j = compiled.Joins[i];
-            // Plan 004 N2: Semi/Anti (IN/EXISTS ↔ NOT IN/NOT EXISTS) get the presence-based op; plan 002 L2's
-            // Unnest gets the 1-to-N expansion op; every other kind — including N3/N4's Scalar joins —
-            // reuses TableJoinOp as-is (see its class doc and Planner.BuildScalarJoin's doc comment on why a
-            // plain equi-join is already retraction-correct for those).
+            // Plan 008: LEFT/RIGHT/FULL get the null-padding-aware op (composite keys — LeftKeys/
+            // RightKeys, the full equi-key lists). Plan 004 N2: Semi/Anti (IN/EXISTS ↔ NOT IN/NOT EXISTS)
+            // get the presence-based op; plan 002 L2's Unnest gets the 1-to-N expansion op; every other
+            // kind — including N3/N4's Scalar joins — reuses TableJoinOp as-is (see its class doc and
+            // Planner.BuildScalarJoin's doc comment on why a plain equi-join is already retraction-correct
+            // for those), off the single-key LeftKey/RightKey (component [0], with every other equi-key
+            // component already folded into Residual — see JoinKeyFolding).
             _joins.Add(j.Kind switch
             {
+                JoinKind.Left or JoinKind.Right or JoinKind.Full =>
+                    new TableOuterJoinOp(j.Kind, j.LeftKeys!, j.RightKeys!, j.Residual, compiled.Bindings, accumulated.ToList(), (j.Alias, j.Schema)),
                 JoinKind.Semi or JoinKind.Anti => new TableSemiAntiOp(j.Kind, j.LeftKey!, j.RightKey!, compiled.Bindings),
                 JoinKind.Unnest => new TableUnnestOp(j.UnnestExpr!, j.Alias, compiled.Bindings),
                 _ => new TableJoinOp(j.LeftKey!, j.RightKey!, j.Residual, compiled.Bindings),
             });
+            accumulated.Add((j.Alias, j.Schema));
         }
 
         _filterProject = new TableFilterProjectOp(compiled);

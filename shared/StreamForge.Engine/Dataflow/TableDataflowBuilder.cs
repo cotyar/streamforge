@@ -73,6 +73,12 @@ internal static class TableDataflowBuilder
         bool chainIsWire = false; // FROM ingest's raw output is a single-alias EventRecord, not wire-encoded yet
         string? chainAlias = fromAlias;
 
+        // Plan 008: every (alias, schema) folded into the chain so far — mirrors TableExecutorImpl.
+        // EnsureInit's single-partition `accumulated` list. Only a Left/Right/Full join stage build reads
+        // it (TableOuterJoinOp's null-padding), but it's threaded through every join kind for the same
+        // reason ExecutorImpl.EnsureInit does: uniform bookkeeping, no per-kind special-casing here.
+        var accumulated = new List<(string Alias, SourceSchema Schema)> { (compiled.Sources[0].Alias, compiled.Sources[0].Schema) };
+
         for (int i = 0; i < compiled.Joins.Count; i++)
         {
             var j = compiled.Joins[i];
@@ -120,12 +126,14 @@ internal static class TableDataflowBuilder
                 // Plan 003 M3 arrangeability check (SCOPE — see this file's class doc addendum below): the
                 // Left side of THIS hop is a candidate for a shared arrangement only at i==0 (producerIsIngest
                 // — any later hop's "Left" is an already-computed multi-alias WorkingRow, not a raw input),
-                // and only when LeftKey is a BARE reference to the FROM alias's own field (no transform) —
-                // checked via compiled.Bindings (reference-equality keyed; a non-leaf/derived Expr node is
-                // never in Bindings at all, so this check doubles as "no pre-join transform").
+                // and only when EVERY LeftKeys component is a BARE reference to the FROM alias's own field
+                // (no transform) — checked via compiled.Bindings (reference-equality keyed; a non-leaf/
+                // derived Expr node is never in Bindings at all, so this check doubles as "no pre-join
+                // transform"). Plan 008: generalized from a single field to a list — a composite key is
+                // arrangeable only when ALL of its components qualify.
                 IReadOnlyList<string>? leftArrangeFields = producerIsIngest && leftMode == TableEdgeMode.HashPartition
-                    && IsBareOwnFieldRef(j.LeftKey, compiled, fromAlias, out var leftField)
-                    ? [leftField]
+                    && IsBareOwnFieldRefs(j.LeftKeys, compiled, fromAlias, out var leftFields)
+                    ? leftFields
                     : null;
                 var leftEdge = new TableEdgeDescriptor(NewEdge(), chainStage, stageId, "Left", leftMode, [], leftArrangeFields);
                 edges.Add(leftEdge);
@@ -155,11 +163,12 @@ internal static class TableDataflowBuilder
 
                     // Plan 003 M3: a non-derived join's Right side is ALWAYS fed by its own dedicated Ingest
                     // stage (never a chained WorkingRow) — so its own outbound edge (this rightEdge) is
-                    // arrangeable whenever RightKey is a bare reference to the join alias's own field. This is
-                    // the common case the M3 task targets: two tables each joining the same raw input (e.g.
-                    // "trades") on the same raw field ("symbol") share ONE arrangement here.
-                    IReadOnlyList<string>? rightArrangeFields = IsBareOwnFieldRef(j.RightKey, compiled, j.Alias, out var rightField)
-                        ? [rightField]
+                    // arrangeable whenever every RightKeys component is a bare reference to the join alias's
+                    // own field. This is the common case the M3 task targets: two tables each joining the
+                    // same raw input (e.g. "trades") on the same raw field ("symbol") share ONE arrangement
+                    // here; plan 008 generalizes it to composite keys the same way as the Left side above.
+                    IReadOnlyList<string>? rightArrangeFields = IsBareOwnFieldRefs(j.RightKeys, compiled, j.Alias, out var rightFields)
+                        ? rightFields
                         : null;
                     rightEdge = new TableEdgeDescriptor(NewEdge(), ingestStageId, stageId, "Right", TableEdgeMode.HashPartition, [], rightArrangeFields);
                     builds[ingestStageId].OutEdge = rightEdge;
@@ -181,6 +190,10 @@ internal static class TableDataflowBuilder
                     RightEdge = rightEdge.EdgeId,
                     RightAlias = j.Alias,
                     RightDerivedPlan = rightDerivedPlan,
+                    // Plan 008: threaded through for every join kind (cheap — see the `accumulated` doc
+                    // comment above); only a Left/Right/Full JoinChainStageExecutor actually reads them.
+                    LeftAliasesSoFar = accumulated.ToList(),
+                    RightSide = (j.Alias, j.Schema),
                     Compiled = compiled,
                 };
 
@@ -188,13 +201,17 @@ internal static class TableDataflowBuilder
                 {
                     // A non-derived join's Left edge is always a real key hash (never the content-hash
                     // fan-out — see producerIsIngest above: a non-derived join's leftMode is HashPartition
-                    // unconditionally, i==0 included, since LeftKey IS the natural co-partitioning key).
+                    // unconditionally, i==0 included, since LeftKeys IS the natural co-partitioning key).
+                    // Plan 008: KeyExprs is the join's FULL key list (composite keys co-partition correctly
+                    // this way — necessary for TableOuterJoinOp's per-partition flip state to be correct at
+                    // Parallelism >= 2; harmless/still-correct for every single-key-op join too, since a
+                    // matching pair's full key tuple is always identical, so it always hashes together).
                     routingSpecs[leftEdge.EdgeId.Value] = new RoutingKeySpec
                     {
                         IsWireEncoded = chainIsWire,
                         UseRowContentHash = false,
                         Alias = chainAlias,
-                        KeyExprs = [j.LeftKey ?? throw new NotSupportedException($"Join alias '{j.Alias}' has no left key; only equi-joins are supported in table mode.")],
+                        KeyExprs = j.LeftKeys?.ToList() ?? throw new NotSupportedException($"Join alias '{j.Alias}' has no left key; only equi-joins are supported in table mode."),
                         Bindings = compiled.Bindings,
                         ToStageId = stageId,
                     };
@@ -206,7 +223,7 @@ internal static class TableDataflowBuilder
                         IsWireEncoded = false,
                         UseRowContentHash = false,
                         Alias = j.Alias,
-                        KeyExprs = [j.RightKey ?? throw new NotSupportedException($"Join alias '{j.Alias}' has no right key; only equi-joins are supported in table mode.")],
+                        KeyExprs = j.RightKeys?.ToList() ?? throw new NotSupportedException($"Join alias '{j.Alias}' has no right key; only equi-joins are supported in table mode."),
                         Bindings = compiled.Bindings,
                         ToStageId = stageId,
                     };
@@ -216,6 +233,7 @@ internal static class TableDataflowBuilder
             chainStage = stageId;
             chainIsWire = true; // every join-chain stage's output is a (possibly multi-alias) WorkingRow, wire-encoded from here on
             chainAlias = null;
+            accumulated.Add((j.Alias, j.Schema));
         }
 
         // --- Stage: FilterProject ---
@@ -315,27 +333,36 @@ internal static class TableDataflowBuilder
     }
 
     /// <summary>
-    /// Plan 003 M3 arrangeability rule: <paramref name="expr"/> qualifies as "a bare reference to
-    /// <paramref name="alias"/>'s own raw field, with no pre-join transform" iff it is a leaf identifier node
-    /// (<see cref="Identifier"/> or <see cref="QualifiedIdentifier"/> — every OTHER Expr subtype represents a
-    /// computation over its children, e.g. BinaryExpr/FunctionCallExpr/JsonAccessExpr/UnaryExpr/a literal)
-    /// AND it is present in <paramref name="compiled"/>'s Bindings (a reference-equality-keyed dictionary the
-    /// validator populates ONLY for identifier leaves it resolves — see Sql/Validator.cs's
-    /// ResolveBareIdentifier/ResolveQualifiedIdentifier) resolving to exactly <paramref name="alias"/>. This
-    /// is the SCOPE boundary the M3 task calls for: "keyed directly by the join key (no pre-join transforms
-    /// other than ingest normalization) — anything fancier keeps the private per-table path" — e.g.
-    /// `t.symbol = q.symbol` qualifies on both sides, `UPPER(t.symbol) = q.symbol` does not (the Left key is
-    /// a FunctionCallExpr, never added to Bindings as a whole node), and `t.symbol = q.symbol` joined at hop
-    /// i&gt;1 (chained past the first join) does not qualify on the Left side either — not because of this
-    /// check, but because the caller only invokes it for the Left edge when producerIsIngest (i==0).
+    /// Plan 003 M3 arrangeability rule: every expression in <paramref name="exprs"/> qualifies as "a bare
+    /// reference to <paramref name="alias"/>'s own raw field, with no pre-join transform" iff it is a leaf
+    /// identifier node (<see cref="Identifier"/> or <see cref="QualifiedIdentifier"/> — every OTHER Expr
+    /// subtype represents a computation over its children, e.g. BinaryExpr/FunctionCallExpr/JsonAccessExpr/
+    /// UnaryExpr/a literal) AND it is present in <paramref name="compiled"/>'s Bindings (a reference-
+    /// equality-keyed dictionary the validator populates ONLY for identifier leaves it resolves — see
+    /// Sql/Validator.cs's ResolveBareIdentifier/ResolveQualifiedIdentifier) resolving to exactly
+    /// <paramref name="alias"/>. This is the SCOPE boundary the M3 task calls for: "keyed directly by the
+    /// join key (no pre-join transforms other than ingest normalization) — anything fancier keeps the
+    /// private per-table path" — e.g. `t.symbol = q.symbol` qualifies on both sides, `UPPER(t.symbol) =
+    /// q.symbol` does not (the Left key is a FunctionCallExpr, never added to Bindings as a whole node),
+    /// and `t.symbol = q.symbol` joined at hop i&gt;1 (chained past the first join) does not qualify on the
+    /// Left side either — not because of this check, but because the caller only invokes it for the Left
+    /// edge when producerIsIngest (i==0). Plan 008: generalized from a single expr to a list — a composite
+    /// key (`ON a.x=b.x AND a.y=b.y`) is arrangeable only when EVERY component independently qualifies;
+    /// one failing component disqualifies the whole key (arrangement indexes on the full tuple).
     /// </summary>
-    private static bool IsBareOwnFieldRef(Expr? expr, CompiledTablePlan compiled, string alias, out string field)
+    private static bool IsBareOwnFieldRefs(IReadOnlyList<Expr>? exprs, CompiledTablePlan compiled, string alias, out IReadOnlyList<string> fields)
     {
-        field = "";
-        if (expr is not (Identifier or QualifiedIdentifier)) return false;
-        if (!compiled.Bindings.TryGetValue(expr, out var binding)) return false;
-        if (!string.Equals(binding.Alias, alias, StringComparison.Ordinal)) return false;
-        field = binding.Field;
+        fields = [];
+        if (exprs is null || exprs.Count == 0) return false;
+        var result = new List<string>(exprs.Count);
+        foreach (var expr in exprs)
+        {
+            if (expr is not (Identifier or QualifiedIdentifier)) return false;
+            if (!compiled.Bindings.TryGetValue(expr, out var binding)) return false;
+            if (!string.Equals(binding.Alias, alias, StringComparison.Ordinal)) return false;
+            result.Add(binding.Field);
+        }
+        fields = result;
         return true;
     }
 }

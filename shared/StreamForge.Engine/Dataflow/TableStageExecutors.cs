@@ -1,5 +1,6 @@
 using StreamForge.Engine.Runtime;
 using StreamForge.Engine.Runtime.Ops;
+using StreamForge.Engine.Sql;
 using static StreamForge.Engine.Dataflow.TableDataflowPlan;
 
 namespace StreamForge.Engine.Dataflow;
@@ -55,10 +56,18 @@ internal sealed class JoinChainStageExecutor : TableStageExecutorBase
     public JoinChainStageExecutor(StageBuild build, int partition) : base(build, partition)
     {
         var j = build.Join!;
+        // Plan 008: a Join-kind stage build (TableStageKind.Join) covers Inner/Cross/Scalar AND, now,
+        // Left/Right/Full — the coarse stage kind doesn't distinguish them (see TableDataflowPlan's
+        // TableStageKind doc), so the outer-kind check is on j.Kind (the actual JoinKind) directly.
+        // TableOuterJoinOp reads the full LeftKeys/RightKeys composite key lists plus build's accumulated
+        // alias/schema bookkeeping (populated in TableDataflowBuilder.Build); every other kind is
+        // unchanged from pre-008 — single-key LeftKey/RightKey (component [0], residual already folded).
         _op = build.Kind switch
         {
             TableStageKind.SemiAnti => new TableSemiAntiOp(j.Kind, j.LeftKey!, j.RightKey!, build.Compiled.Bindings),
             TableStageKind.Unnest => new TableUnnestOp(j.UnnestExpr!, j.Alias, build.Compiled.Bindings),
+            TableStageKind.Join when j.Kind is JoinKind.Left or JoinKind.Right or JoinKind.Full =>
+                new TableOuterJoinOp(j.Kind, j.LeftKeys!, j.RightKeys!, j.Residual, build.Compiled.Bindings, build.LeftAliasesSoFar!, build.RightSide!.Value),
             _ => new TableJoinOp(j.LeftKey!, j.RightKey!, j.Residual, build.Compiled.Bindings),
         };
         _rightNested = build.RightDerivedPlan is not null ? new TablePlan(build.RightDerivedPlan).CreateExecutor() : null;

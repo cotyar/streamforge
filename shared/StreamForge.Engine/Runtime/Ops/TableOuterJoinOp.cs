@@ -9,10 +9,12 @@ namespace StreamForge.Engine.Runtime.Ops;
 /// as <see cref="TableJoinOp"/> (no WITHIN eviction) but with one extra behavior: a row on the
 /// "outer" (padded) side that currently has no matching row on the other side is emitted joined
 /// against an all-NULL row for that side, and re-emitted (retracted/re-asserted) whenever a later
-/// delta on the OTHER side flips that presence from empty to non-empty or back. THIS FILE IS NOT YET
-/// WIRED — no executor or dataflow-builder path constructs it today (plan 008 wave 2a-B); a later
-/// wave does that. Constructed directly and driven op-level, exactly like <see cref="TableJoinOp"/>
-/// and <see cref="TableSemiAntiOp"/> before their respective wiring waves.
+/// delta on the OTHER side flips that presence from empty to non-empty or back. WIRED as of plan 008
+/// wave 2b: <see cref="TableExecutorImpl"/>.EnsureInit (single-partition) and
+/// <see cref="TableDataflowBuilder"/>/<see cref="TableStageExecutors.JoinChainStageExecutor"/>
+/// (partitioned) both select this op for JoinKind Left/Right/Full — TableJoinOp otherwise — see those
+/// files' own doc comments for the op-selection switch and the accumulated-alias threading this op's
+/// constructor needs for null-padding.
 ///
 /// THE INVARIANT (must hold after every batch, i.e. the fully consolidated view — this is what the
 /// incremental delta rules below exist to maintain without ever recomputing it from scratch). For
