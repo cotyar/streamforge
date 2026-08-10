@@ -85,6 +85,20 @@ Pinned, tested, and documented rather than fudged:
 - Windows-in-windows: inner emissions carry the inner window's **end** timestamp.
 - Late events: pipelines drop past watermark (bounded lateness); tables never drop — epoch-stamped
   at arrival.
+- Table-mode `LEFT`/`RIGHT`/`FULL OUTER` joins are incremental, not window-deferred: an unmatched
+  row is NULL-padded the instant it arrives, and that pad is *retracted* the instant a match shows
+  up later (re-asserted if the last match disappears). A consumer watching the raw delta stream
+  during cold start sees pad → retract → product chatter; only the consolidated state is meaningful.
+  Pipeline mode dodges this by deferring pads to window eviction (D11, late-events rule above);
+  table mode has no eviction to defer to, so it can't.
+- A non-equi residual on a table-mode outer join (an `ON` conjunct that isn't itself an equality
+  between the two sides) still works, at a cost: presence flips from a key-level O(1) check to a
+  per-row rescan of the arriving side's own bucket against every already-indexed row on the other
+  side — O(|left bucket| × |right bucket|) predicate evaluations per delta. Worth knowing before
+  putting a residual on a hot join.
+- Known hazard, documented not fixed: a table-mode outer join's null-padded rows all carry the same
+  (NULL) value in the padded side's columns, so they all hash to the same partition on any
+  downstream edge keyed on one of those columns — correct, but potentially skewed.
 
 ## D12 — One process, JSON files, zero infrastructure
 Localhost clustering, in-memory streams, one-file-per-grain JSON storage. *Why*: the demo must run
@@ -113,7 +127,7 @@ partitioned path (D9) — P=1 tables never had a flush window, which the second 
 proved the first round had misattributed.
 
 ## Known ceilings (quick list)
-Table joins INNER-only · single-node topology · generator ~1 000 ev/s/source (1 ms timer floor) ·
+Table-mode CROSS JOIN needs Parallelism = 1 · single-node topology · generator ~1 000 ev/s/source (1 ms timer floor) ·
 arrangement partitions each subscribe the full input stream (filter-at-consumer) · no exactly-once
 replay · JSON path keys are literals · correlated subqueries beyond equality rejected ·
 pipeline names not enforced unique (name-resolution falls back only on unambiguous match).

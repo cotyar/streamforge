@@ -42,7 +42,8 @@ SQL text ──Tokenizer──▶ tokens ──Parser (recursive descent + Pratt
 
 - **Two compilation modes**, one dialect. *Pipeline* mode: interval joins (`WITHIN`),
   TUMBLING/HOPPING/SESSION windows, `EMIT CHANGES|FINAL`, watermarks. *Table* mode: no windows;
-  running aggregates, relational INNER equi-joins over current state, `LATEST BY`.
+  running aggregates, relational equi-joins over current state — INNER (default), LEFT/RIGHT/FULL
+  OUTER (incremental null-padding, composite keys), and CROSS (`Parallelism = 1` only) — `LATEST BY`.
 - **Grammar highlights**: `WITH`/CTEs + derived tables (recursion rejected), `[NOT] IN`/`EXISTS`
   (→ semi/anti joins), scalar subqueries (equality decorrelation), `UNNEST` over array fields,
   Postgres JSON `->`/`->>` with nested typed drill-down, qualified star `alias.*`.

@@ -32,7 +32,7 @@ FROM source | (SELECT …) alias [, UNNEST(expr) AS l …]
 | | Pipeline | Table (materialized view) |
 |---|---|---|
 | Windows / EMIT / WITHIN | yes | **no** — running aggregates, retract/assert deltas |
-| Joins | interval (WITHIN, all 5 kinds) | relational INNER equi over current state |
+| Joins | interval (WITHIN, all 5 kinds) | relational equi: INNER/LEFT/RIGHT/FULL OUTER/CROSS over current state (composite keys; CROSS needs Parallelism=1) |
 | Inputs | stream sources | streams AND other tables (chaining) |
 | LATEST BY | ✗ (diagnostic) | ✓ latest row per key by event ts |
 
@@ -51,6 +51,16 @@ FROM source | (SELECT …) alias [, UNNEST(expr) AS l …]
    "rewrite as a JOIN" diagnostic. Recursive CTEs rejected by design (see DESIGN.md §D3).
 8. Bare `*`/`alias.*` are rejected with GROUP BY/aggregates; multi-input stars prefix as `t_col`.
 9. Reserved row fields: `_ts` (epoch ms), `_source`.
+10. **Table outer joins are incremental, not window-deferred**: an unmatched row is NULL-padded the
+    instant it arrives and that pad is *retracted* the instant a match shows up (re-asserted if the
+    match later disappears) — a consumer on the raw delta stream sees pad → retract → product
+    chatter during cold start; only the consolidated state is meaningful. A NULL join key never
+    matches: it's padded immediately on the padded side, contributes nothing on the other side, and
+    (since the pad carries NULL in the padded columns) a *second* `INNER` join keyed on one of those
+    columns drops the row while a second `OUTER` join pads it again. Moving a right-side condition
+    from `ON` to `WHERE` silently degrades `LEFT` to `INNER` — the most common outer-join mistake.
+11. **`CROSS JOIN` in table mode needs `Parallelism = 1`** — it has no equi-key to hash on; the table
+    refuses to start above one partition with a clear error.
 
 ## Working examples (live seeds — copy as templates)
 
