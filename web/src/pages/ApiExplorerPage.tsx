@@ -235,6 +235,78 @@ function ConnectCard({ entity, grpcPort }: { entity: DynamicEntityMetaDto; grpcP
   )
 }
 
+// REST counterpart of ConnectCard: the plain-HTTP routes for this entity, all bearer-token
+// authenticated off the same /api/auth/login the SPA itself uses. Base URL is window.location.origin
+// (not grpcPort/a hardcoded port) since the host serves both the SPA and the REST API from one origin,
+// on dev ports, container ports, and Cloud Run alike.
+function RestCard({ entity }: { entity: DynamicEntityMetaDto }) {
+  const origin = window.location.origin
+  const auth = 'Authorization: Bearer $TOKEN'
+  const loginCmd = `curl -s -X POST ${origin}/api/auth/login -H 'content-type: application/json' -d '{"username":"admin","password":"admin123!"}'`
+
+  let routes: { label: string; text: string }[]
+  let note: string | null = null
+
+  if (entity.kind === 'source') {
+    const n = entity.name
+    routes = [
+      { label: 'List sources', text: `curl -s ${origin}/api/sources -H "${auth}"` },
+      { label: 'Get source', text: `curl -s ${origin}/api/sources/${n} -H "${auth}"` },
+      { label: 'Get .proto', text: `curl -s ${origin}/api/sources/${n}/proto -H "${auth}"` },
+      { label: 'Get status', text: `curl -s ${origin}/api/sources/${n}/status -H "${auth}"` },
+    ]
+    note = "A source's live events are SignalR-only — there is deliberately no REST rows endpoint for sources."
+  } else if (entity.kind === 'pipeline') {
+    const id = entity.id
+    routes = [
+      { label: 'Get pipeline', text: `curl -s ${origin}/api/pipelines/${id} -H "${auth}"` },
+      { label: 'Get results', text: `curl -s "${origin}/api/pipelines/${id}/results?limit=20" -H "${auth}"` },
+      { label: 'Get metrics', text: `curl -s ${origin}/api/pipelines/${id}/metrics -H "${auth}"` },
+      { label: 'Get .proto', text: `curl -s ${origin}/api/pipelines/${id}/proto -H "${auth}"` },
+    ]
+  } else {
+    const id = entity.id
+    routes = [
+      { label: 'Get table', text: `curl -s ${origin}/api/tables/${id} -H "${auth}"` },
+      { label: 'Get rows', text: `curl -s "${origin}/api/tables/${id}/rows?limit=20&offset=0" -H "${auth}"` },
+      { label: 'Search', text: `curl -s "${origin}/api/tables/${id}/search?q=AAPL&limit=20" -H "${auth}"` },
+      { label: 'Get metrics', text: `curl -s ${origin}/api/tables/${id}/metrics -H "${auth}"` },
+      { label: 'Get .proto', text: `curl -s ${origin}/api/tables/${id}/proto -H "${auth}"` },
+      { label: 'History stats', text: `curl -s ${origin}/api/tables/${id}/history/stats -H "${auth}"` },
+      {
+        label: 'History lookup (read-only POST)',
+        text: `curl -s -X POST "${origin}/api/tables/${id}/history/lookup?limit=20" -H "${auth}" -H 'content-type: application/json' -d '{"row":{...}}'`,
+      },
+    ]
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>REST</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <div>
+          <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Log in (get a token)</p>
+          <SnippetRow text={loginCmd} />
+        </div>
+        {routes.map((r) => (
+          <div key={r.label}>
+            <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{r.label}</p>
+            <SnippetRow text={r.text} />
+          </div>
+        ))}
+        {note && <p className="text-[11px] text-muted-foreground">{note}</p>}
+        <div>
+          <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Interactive reference</p>
+          <SnippetRow text={`${origin}/scalar`} />
+          <p className="mt-1 text-[11px] text-muted-foreground">Same Bearer token as above.</p>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 function formatLiveCell(v: RowValue): string {
   if (v === null || v === undefined) return '—'
   if (typeof v === 'number') return Number.isInteger(v) ? v.toString() : v.toFixed(3)
@@ -637,6 +709,7 @@ export function ApiExplorerPage() {
             <div className="flex flex-col gap-4">
               <EntityDefinitionCard entity={selection.entity} />
               <ConnectCard entity={selection.entity} grpcPort={grpcPort} />
+              <RestCard entity={selection.entity} />
               <LiveDataCard entity={selection.entity} />
             </div>
           )}
