@@ -9,7 +9,12 @@ namespace StreamForge.Engine.Runtime.Ops;
 /// joins keep BOTH sides' full state (no WITHIN eviction — state is unbounded and consolidated). On a
 /// delta (row, weight) from either side: look up matches in the *other* side's index, emit
 /// combine(row, other) with weight = weight * otherWeight for each match (Z-set bilinear join), then
-/// update this side's own index. Only INNER equi-joins are supported in table mode (validator-enforced).
+/// update this side's own index. Only INNER and CROSS equi-joins are supported in table mode (validator-
+/// enforced) — outer kinds are handled by TableOuterJoinOp instead. CROSS JOIN needs no dedicated op: a
+/// cartesian product IS this bilinear join's behavior when both sides key on the same constant, so
+/// TablePlanner synthesizes `leftKey = rightKey = NumberLiteral(0)` for a CROSS join before this op ever
+/// sees it, making every left row match every right row with weight = weight * otherWeight — the full
+/// product. This op itself stays unaware of the distinction; it just runs the same equi-join lookup.
 ///
 /// This is a mechanical relocation of the pre-M1 `TableJoinStage` into the explicit-op shape (plan 003
 /// M1: "TableJoinOp (bilinear equi-join, one per join)") — per-row join algorithm unchanged; OnLeft/

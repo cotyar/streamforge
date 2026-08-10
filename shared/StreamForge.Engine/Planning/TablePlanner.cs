@@ -76,6 +76,14 @@ public static class TablePlanner
         var joins = v.Joins.Select(j =>
         {
             var srcEntry = v.Sources.First(s => s.Alias == j.Alias);
+            // CROSS JOIN has no ON clause (LeftKey/RightKey/Residual are null by construction — see
+            // Validator/Parser), so the cartesian product is realized by handing TableJoinOp the same
+            // constant-key trick BuildSemiAntiJoin uses for EXISTS: a fresh NumberLiteral(0) on both
+            // sides makes every left row equal-key-match every right row, i.e. the full cross product
+            // with weight multiplication, no new op required.
+            var (leftKey, rightKey) = j.Kind == JoinKind.Cross
+                ? (new NumberLiteral(null, 0L, 0, 0), new NumberLiteral(null, 0L, 0, 0))
+                : (j.LeftKey, j.RightKey);
             return new CompiledTableJoin
             {
                 Kind = j.Kind,
@@ -83,8 +91,8 @@ public static class TablePlanner
                 SourceName = j.SourceName,
                 Schema = srcEntry.Schema,
                 IsTable = j.IsTable,
-                LeftKey = j.LeftKey,
-                RightKey = j.RightKey,
+                LeftKey = leftKey,
+                RightKey = rightKey,
                 Residual = j.Residual,
                 DerivedPlan = sources.First(s => s.Alias == j.Alias).DerivedPlan,
                 UnnestExpr = j.UnnestExpr,
@@ -288,9 +296,21 @@ public static class TablePlanner
 
         foreach (var j in joins)
         {
-            sb.Append(j.Kind == JoinKind.Unnest
-                ? $" ⇶[UNNEST] {FormatColumnName(j.UnnestExpr!, bindings)} AS {j.Alias}"
-                : $" ⋈[INNER] {j.SourceName} AS {j.Alias}");
+            if (j.Kind == JoinKind.Unnest)
+            {
+                sb.Append($" ⇶[UNNEST] {FormatColumnName(j.UnnestExpr!, bindings)} AS {j.Alias}");
+                continue;
+            }
+            // Table mode only ever compiles Inner/Cross/Semi/Anti/Scalar joins (outer kinds are rejected
+            // by the validator) — mirror Planner.BuildPlanSummary's symbol/label choice for pipeline mode.
+            string symbol = j.Kind == JoinKind.Cross ? "×" : "⋈";
+            string label = j.Kind switch
+            {
+                JoinKind.Inner => "INNER",
+                JoinKind.Cross => "CROSS",
+                _ => j.Kind.ToString(),
+            };
+            sb.Append($" {symbol}[{label}] {j.SourceName} AS {j.Alias}");
         }
 
         var parts = new List<string> { sb.ToString() };

@@ -246,11 +246,7 @@ internal sealed class Validator
                         $"{JoinLabel(j.Kind)} JOIN may not have a WITHIN clause in table mode — state is unbounded/consolidated, not time-bounded",
                         j.Line, j.Column));
                 }
-                if (j.Kind == JoinKind.Cross)
-                {
-                    _diags.Add(new SqlDiagnostic("CROSS JOIN is not allowed in table mode", j.Line, j.Column));
-                }
-                else if (j.Kind != JoinKind.Inner)
+                if (j.Kind != JoinKind.Inner && j.Kind != JoinKind.Cross)
                 {
                     _diags.Add(new SqlDiagnostic($"{JoinLabel(j.Kind)} JOIN is not allowed in table mode — only INNER equi-joins are supported", j.Line, j.Column));
                 }

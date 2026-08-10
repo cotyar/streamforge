@@ -65,15 +65,6 @@ public class TableValidatorTests
     }
 
     [Fact]
-    public void CrossJoinIsForbiddenInTableMode()
-    {
-        var sql = "SELECT t.symbol FROM trades t CROSS JOIN quotes q";
-        var r = CompileTable(sql, Trades, Quotes);
-        Assert.False(r.Ok);
-        Assert.Contains(r.Diagnostics, d => d.Message.Contains("CROSS JOIN is not allowed in table mode"));
-    }
-
-    [Fact]
     public void LeftJoinIsNotSupportedInTableMode()
     {
         var sql = "SELECT t.symbol FROM trades t LEFT JOIN quotes q ON t.symbol = q.symbol";

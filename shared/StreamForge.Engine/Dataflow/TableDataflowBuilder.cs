@@ -32,6 +32,18 @@ internal static class TableDataflowBuilder
                     $"(alias '{j.Alias}'); only scalar-subquery and semi/anti (IN/EXISTS) joins are supported as " +
                     "broadcast edges in M2. Use Parallelism = 1 for this table.");
             }
+            // Unlike the derived-table restrictions above (a structural M2 scope gap, unconditional on
+            // partitionCount), CROSS JOIN's problem is purely one of parallelism: its synthesized constant
+            // join key (see TablePlanner) would hash every row to the SAME partition, which is still
+            // correct at partitionCount == 1 (there's only one partition anyway) but silently serializes
+            // all the real parallelism at partitionCount > 1 — worse than an error, so only that case throws.
+            if (j.Kind == JoinKind.Cross && partitionCount > 1)
+            {
+                throw new NotSupportedException(
+                    $"Partitioned execution (Parallelism > 1) does not support CROSS JOIN " +
+                    $"(alias '{j.Alias}'); its constant join key would hash every row to a single partition, " +
+                    "which is correct but silently serial. Use Parallelism = 1 for this table.");
+            }
         }
 
         var stages = new List<TableStageDescriptor>();
