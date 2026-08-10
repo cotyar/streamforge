@@ -34,6 +34,35 @@ namespace StreamForge.Dapr.Host.Actors;
 /// the flush timer if the last known state was Running, instead of waiting for
 /// <see cref="Services.TableSupervisorService"/>'s next sweep.</para>
 ///
+/// <para><b>Plan 008 — <see cref="TableDefinition.Persistence"/> governs how the periodic flush WRITE
+/// reaches the Redis-backed actor state store; it never changes how/when the in-memory read cache
+/// (<see cref="_flushed"/>) is refreshed</b> — see <see cref="TablePersistencePolicy"/> for the pure
+/// per-tick decision, made once per <see cref="OnFlushTickAsync"/> in <see cref="DecidePersistAction"/>.
+/// <see cref="TablePersistenceMode.Batched"/> (default) is byte-for-byte the pre-008 behavior above: the
+/// write is awaited inside the same actor turn as the tick. <see cref="TablePersistenceMode.FireAndForget"/>
+/// captures the DTO synchronously (so a later mutation of <see cref="_flushed"/> can never race the
+/// in-flight write) then hands it to a background <see cref="Task.Run(Func{Task})"/> that explicitly calls
+/// <c>StateManager.SaveStateAsync()</c> itself (mirroring <see cref="TableHistoryActor.OnDeactivateAsync"/>'s
+/// own note: outside a normal actor turn, nothing auto-saves for you) — single-flight via
+/// <see cref="_inFlightPersist"/>, so an overlapping tick is skipped rather than started, and a failure is
+/// always logged (see <see cref="StartBackgroundPersist"/>), never silently dropped.
+/// <see cref="TablePersistenceMode.MemoryOnly"/> never calls <c>StateManager</c> on ANY path — flush tick,
+/// <see cref="StartAsync"/>, <see cref="StopAsync"/>, or <see cref="OnDeactivateAsync"/> (see
+/// <see cref="SaveControlStateAsync"/>'s guard) — so a MemoryOnly table's actor state row in Redis is
+/// whatever it was before the table was switched to MemoryOnly (nothing, for a table that has always been
+/// MemoryOnly). <b>Deliberate divergence from Batched/FireAndForget's self-heal:</b> because nothing is
+/// ever written, <see cref="OnActivateAsync"/> has no persisted <c>Running=true</c> to find after a host
+/// restart, so a MemoryOnly table does NOT self-heal immediately on reactivation the way the other two
+/// modes do — it comes back via <see cref="Services.TableSupervisorService"/>'s next ~15s sweep instead
+/// (which restarts it from the catalog's own independently-persisted Running status). This is the honest
+/// consequence of "never touches storage on any path", not an oversight — reads stay live either way
+/// (<see cref="_flushed"/> is still refreshed every tick purely in memory) once that sweep has run.
+/// <see cref="TableDefinition.FlushMs"/> (0 → 2000 ms, see <see cref="TablePersistencePolicy.
+/// ResolveFlushIntervalMs"/>) is honored by all three modes for the in-memory read-cache cadence; per its
+/// own doc comment it is otherwise irrelevant to MemoryOnly (nothing to durably flush), so
+/// <see cref="ResolveFlushPeriod"/> pins MemoryOnly's timer to the plain default instead of reading a knob
+/// that would misleadingly suggest a durability tradeoff MemoryOnly doesn't have.</para>
+///
 /// <para><b>RESTART-RESUME LIMITATION — identical to <c>TableGrain</c>'s, not a new one:</b> the persisted
 /// snapshot only ever captures this table's OUTPUT rows, not its operators' internal state (join indexes,
 /// GROUP BY multisets/accumulators) — that cannot be reconstructed from the output alone. Exactly like
@@ -75,10 +104,6 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     private const string StateName = "table";
     private const string FlushTimerName = "table-flush";
 
-    /// <summary>Same write-behind cadence as <c>TableGrain</c>'s own flush timer — one JSON write per
-    /// delta would thrash; 2s bounds staleness without hammering the Redis-backed actor state store.</summary>
-    private static readonly TimeSpan FlushPeriod = TimeSpan.FromSeconds(2);
-
     private TableDefinition? _def;
     private List<SourceDefinition> _sources = [];
     private List<TableDefinition> _tables = [];
@@ -109,6 +134,18 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     private long _deltasOut;
     private long _lastUpdateMs;
 
+    /// <summary>Plan 008 single-flight guard for <see cref="TablePersistenceMode.FireAndForget"/> — true
+    /// while a background <see cref="StateManager"/> write started by <see cref="StartBackgroundPersist"/>
+    /// has not yet completed. Checked by <see cref="DecidePersistAction"/> so an overlapping flush tick
+    /// skips starting a second write instead of racing the first one on the same "table" state key.</summary>
+    private volatile bool _persistInProgress;
+
+    /// <summary>The currently in-flight (or most recently completed) background write, if any — joined by
+    /// <see cref="SaveControlStateAsync"/> before a lifecycle save (Start/Stop/Deactivate) issues its own
+    /// write, so the two never race the same state key. The background task catches and logs its own
+    /// exceptions (see <see cref="StartBackgroundPersist"/>), so awaiting it here never throws.</summary>
+    private Task? _inFlightPersist;
+
     /// <summary>Self-heal on (re)activation — same rationale as <see cref="PipelineActor.OnActivateAsync"/>:
     /// Dapr actor timers do not survive deactivation, so a fresh activation whose persisted state says
     /// "Running" recompiles and re-arms the flush timer immediately rather than waiting for
@@ -137,7 +174,7 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             ActivateExecutor();
             if (_executor is not null)
             {
-                await ArmTimerAsync();
+                await ArmTimerAsync(ResolveFlushPeriod());
             }
             else
             {
@@ -165,7 +202,7 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         {
             _executor = null;
             _running = false;
-            await SaveAsync();
+            await SaveControlStateAsync();
             return ActorResult<TableInputNames>.Failure(
                 $"Parallelism must be 1 on the Dapr flavor (got {_def.Parallelism}) — partitioned execution is Orleans-only.");
         }
@@ -174,13 +211,13 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         if (_executor is null)
         {
             _running = false;
-            await SaveAsync();
+            await SaveControlStateAsync();
             return ActorResult<TableInputNames>.Failure(_lastCompileError!);
         }
 
         _running = true;
-        await SaveAsync();
-        await ArmTimerAsync();
+        await SaveControlStateAsync();
+        await ArmTimerAsync(ResolveFlushPeriod());
 
         return ActorResult<TableInputNames>.Success(new TableInputNames(_streamInputs.ToList(), _tableInputs.ToList()));
     }
@@ -191,24 +228,29 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
 
         if (_dirty)
         {
-            await FlushAsync();
+            CaptureSnapshot();
         }
 
         _executor = null;
         _searchIndex = null;
         _running = false;
-        await SaveAsync();
+        await SaveControlStateAsync();
     }
 
     /// <summary>Best-effort final flush before this activation is evicted — mirrors
     /// <c>TableGrain.OnDeactivateAsync</c> exactly (same "don't lose the last &lt;2s of deltas just because
-    /// the flush timer hadn't ticked yet" rationale).</summary>
+    /// the flush timer hadn't ticked yet" rationale). Plan 008: the in-memory capture always happens (cheap,
+    /// no I/O); the actual persist is <see cref="SaveControlStateAsync"/>'s own mode-aware, best-effort
+    /// call — a no-op for <see cref="TablePersistenceMode.MemoryOnly"/>, same as every other path.</summary>
     protected override async Task OnDeactivateAsync()
     {
-        if (_dirty)
+        if (!_dirty)
         {
-            try { await FlushAsync(); } catch { /* best-effort */ }
+            return;
         }
+
+        CaptureSnapshot();
+        try { await SaveControlStateAsync(); } catch { /* best-effort */ }
     }
 
     public Task<bool> IsRunningAsync() => Task.FromResult(_running);
@@ -419,7 +461,12 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         }
     }
 
-    private async Task FlushAsync()
+    /// <summary>Refreshes the in-memory read cache (<see cref="_flushed"/>/<see cref="_seq"/>) from the live
+    /// executor and clears <see cref="_dirty"/> — pure in-process work, no I/O. Split out from the old
+    /// "FlushAsync" specifically so this always runs (keeping <see cref="GetRowsAsync"/> et al. fresh) even
+    /// for <see cref="TablePersistenceMode.MemoryOnly"/>, which skips only the durability WRITE below, never
+    /// this read-cache refresh — see class doc's plan-008 paragraph.</summary>
+    private void CaptureSnapshot()
     {
         if (_executor is null)
         {
@@ -433,19 +480,73 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             kv => new TableRowDto { Row = new Dictionary<string, object?>(kv.Value.Row), Weight = kv.Value.Weight });
         _seq++;
         _dirty = false;
-
-        await SaveAsync();
     }
 
+    /// <summary>Per-tick entry point: refreshes the read cache, then dispatches the durability write per
+    /// <see cref="TableDefinition.Persistence"/> via the pure <see cref="TablePersistencePolicy.
+    /// DecideFlushAction"/> decision (see <see cref="DecidePersistAction"/>) — see class doc's plan-008
+    /// paragraph for what each outcome does.</summary>
     private async Task OnFlushTickAsync()
     {
-        if (_dirty)
+        if (!_dirty)
         {
-            await FlushAsync();
+            return;
+        }
+
+        CaptureSnapshot();
+
+        switch (DecidePersistAction())
+        {
+            case TablePersistAction.AwaitedWrite:
+                await SaveAsync();
+                break;
+
+            case TablePersistAction.BackgroundWrite:
+                StartBackgroundPersist();
+                break;
+
+            case TablePersistAction.Skip:
+            default:
+                break;
         }
     }
 
-    private Task SaveAsync() => StateManager.SetStateAsync(StateName, new TableActorState
+    private TablePersistAction DecidePersistAction() =>
+        TablePersistencePolicy.DecideFlushAction(_def?.Persistence ?? TablePersistenceMode.Batched, dirty: true, writeInProgress: _persistInProgress);
+
+    /// <summary>Kicks off the <see cref="TablePersistenceMode.FireAndForget"/> background write — captures
+    /// <see cref="BuildState"/> synchronously (on this actor turn, before any later mutation of
+    /// <see cref="_flushed"/> can occur) so the DTO handed to the background task is a stable snapshot, then
+    /// writes it on a <see cref="Task.Run(Func{Task})"/> that explicitly calls both <c>SetStateAsync</c> and
+    /// <c>SaveStateAsync</c> itself — outside a normal actor turn nothing auto-saves for you (same finding
+    /// <see cref="TableHistoryActor.OnDeactivateAsync"/>'s doc comment makes). Guarded single-flight by
+    /// <see cref="_persistInProgress"/> (checked by <see cref="TablePersistencePolicy.DecideFlushAction"/>
+    /// before this is ever called); a failure is always logged, never silently swallowed.</summary>
+    private void StartBackgroundPersist()
+    {
+        var state = BuildState();
+        _persistInProgress = true;
+        _inFlightPersist = Task.Run(async () =>
+        {
+            try
+            {
+                await StateManager.SetStateAsync(StateName, state);
+                await StateManager.SaveStateAsync();
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex,
+                    "TableActor[{Name}]: FireAndForget background state write failed — this flush's snapshot may be lost.",
+                    state.Def?.Name);
+            }
+            finally
+            {
+                _persistInProgress = false;
+            }
+        });
+    }
+
+    private TableActorState BuildState() => new()
     {
         Def = _def,
         Sources = _sources,
@@ -453,11 +554,54 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         Running = _running,
         Snapshot = _flushed,
         Seq = _seq,
-    });
+    };
 
-    private async Task ArmTimerAsync()
+    private async Task SaveAsync()
     {
-        await RegisterTimerAsync(FlushTimerName, nameof(OnFlushTickAsync), null, FlushPeriod, FlushPeriod);
+        await StateManager.SetStateAsync(StateName, BuildState());
+        await StateManager.SaveStateAsync();
+    }
+
+    /// <summary>Lifecycle (Start/Stop/Deactivate) persist — rare, config-change-triggered calls, not the hot
+    /// per-tick path <see cref="TableDefinition.Persistence"/> trades off (same rationale
+    /// <see cref="TableHistoryActor"/>'s class doc gives for its own Reset/Disable persisting immediately),
+    /// so this always awaits/blocks for <see cref="TablePersistenceMode.Batched"/> AND
+    /// <see cref="TablePersistenceMode.FireAndForget"/> alike — only <see cref="TablePersistenceMode.
+    /// MemoryOnly"/> skips it, on every path, per that mode's "never touches storage" contract (see class
+    /// doc's plan-008 paragraph). Joins any still-in-flight <see cref="TablePersistenceMode.FireAndForget"/>
+    /// background write first (it never throws — see <see cref="_inFlightPersist"/>'s own doc comment) so
+    /// this call is strictly ordered after it, rather than racing it on the same "table" state key.</summary>
+    private async Task SaveControlStateAsync()
+    {
+        if (_def is null || _def.Persistence == TablePersistenceMode.MemoryOnly)
+        {
+            return;
+        }
+
+        if (_inFlightPersist is { IsCompleted: false } pending)
+        {
+            await pending;
+        }
+
+        await SaveAsync();
+    }
+
+    /// <summary>Resolves this activation's flush-timer cadence from <see cref="TableDefinition.FlushMs"/>
+    /// (0 → 2000 ms default, see <see cref="TablePersistencePolicy.ResolveFlushIntervalMs"/>) — except for
+    /// <see cref="TablePersistenceMode.MemoryOnly"/>, which per that field's own doc comment ("Ignored for
+    /// MemoryOnly") always uses the plain default: there is nothing durable for the knob to tune, only the
+    /// unrelated in-memory read-cache refresh cadence (see class doc's plan-008 paragraph).</summary>
+    private TimeSpan ResolveFlushPeriod()
+    {
+        var ms = _def is { Persistence: TablePersistenceMode.MemoryOnly }
+            ? TablePersistencePolicy.DefaultFlushMs
+            : TablePersistencePolicy.ResolveFlushIntervalMs(_def?.FlushMs ?? 0);
+        return TimeSpan.FromMilliseconds(ms);
+    }
+
+    private async Task ArmTimerAsync(TimeSpan period)
+    {
+        await RegisterTimerAsync(FlushTimerName, nameof(OnFlushTickAsync), null, period, period);
         _timerArmed = true;
     }
 
@@ -491,6 +635,66 @@ public sealed class TableActorState
     public Dictionary<string, TableRowDto> Snapshot { get; set; } = [];
 
     public long Seq { get; set; }
+}
+
+/// <summary>What a flush tick should do about the durability WRITE — decided by
+/// <see cref="TablePersistencePolicy.DecideFlushAction"/>, dispatched by <see cref="TableActor.
+/// OnFlushTickAsync"/>. Never governs the in-memory read-cache refresh, which always happens on a dirty
+/// tick regardless of mode (see <see cref="TableActor.CaptureSnapshot"/>).</summary>
+public enum TablePersistAction
+{
+    /// <summary>Nothing to write this tick — <see cref="TablePersistenceMode.MemoryOnly"/> (always), or a
+    /// <see cref="TablePersistenceMode.FireAndForget"/> tick that found a previous background write still
+    /// in flight (single-flight: the next tick retries with fresher state instead of overlapping it).</summary>
+    Skip,
+
+    /// <summary>Write now, awaited inside the current actor turn — <see cref="TablePersistenceMode.
+    /// Batched"/>'s entire contract.</summary>
+    AwaitedWrite,
+
+    /// <summary>Start a background write and return without awaiting it — <see cref="TablePersistenceMode.
+    /// FireAndForget"/>'s non-blocking half of its contract (see <see cref="TableActor.
+    /// StartBackgroundPersist"/> for the single-flight bookkeeping and failure logging).</summary>
+    BackgroundWrite,
+}
+
+/// <summary>
+/// Plan 008: pure per-table-durability-policy decisions, extracted from <see cref="TableActor"/> for the
+/// same testability reason as <see cref="TableCompilation"/>/<see cref="TableHistoryApplication"/> — see
+/// dapr/tests/StreamForge.Dapr.Tests/TablePersistencePolicyTests.cs. No actor, timer, or Dapr-sidecar
+/// machinery involved; every input/output here is a plain CLR value. See <see cref="TableActor"/>'s class
+/// doc ("Plan 008" paragraph) for how each outcome is dispatched.
+/// </summary>
+public static class TablePersistencePolicy
+{
+    /// <summary>Mirrors <see cref="TableDefinition.FlushMs"/>'s own doc comment: "0 = the 2000 ms
+    /// default."</summary>
+    public const int DefaultFlushMs = 2000;
+
+    /// <summary>0 (unset) resolves to <see cref="DefaultFlushMs"/>; any positive value is used verbatim.
+    /// Mirrors <see cref="TableDefinition.FlushMs"/>'s doc comment exactly.</summary>
+    public static int ResolveFlushIntervalMs(int flushMs) => flushMs > 0 ? flushMs : DefaultFlushMs;
+
+    /// <summary>The pure decision for one flush tick's durability write, given the table's configured
+    /// <paramref name="mode"/>, whether there is anything unflushed (<paramref name="dirty"/>), and whether
+    /// a previous <see cref="TablePersistenceMode.FireAndForget"/> background write has not yet completed
+    /// (<paramref name="writeInProgress"/> — always <see langword="false"/> for <see cref="TablePersistenceMode.
+    /// Batched"/>/<see cref="TablePersistenceMode.MemoryOnly"/>, which never leave a write in flight across
+    /// ticks).</summary>
+    public static TablePersistAction DecideFlushAction(TablePersistenceMode mode, bool dirty, bool writeInProgress)
+    {
+        if (!dirty)
+        {
+            return TablePersistAction.Skip;
+        }
+
+        return mode switch
+        {
+            TablePersistenceMode.MemoryOnly => TablePersistAction.Skip,
+            TablePersistenceMode.FireAndForget => writeInProgress ? TablePersistAction.Skip : TablePersistAction.BackgroundWrite,
+            _ => TablePersistAction.AwaitedWrite, // Batched (and any future default)
+        };
+    }
 }
 
 /// <summary>

@@ -47,7 +47,11 @@ public sealed record CreateTableRequest(
     Dictionary<string, string>? Metadata = null,
     // Plan 003 M2: partitioned execution opt-in. 1 (default) = classic single-grain path. See
     // TableDefinition.Parallelism's doc comment; RegistryGrain validates 1..16.
-    int Parallelism = 1);
+    int Parallelism = 1,
+    // Plan 008: durability policy for the materialized snapshot, and the flush cadence for the two
+    // modes that write. Defaults reproduce the pre-008 behavior exactly. See TablePersistenceMode.
+    TablePersistenceMode Persistence = TablePersistenceMode.Batched,
+    int FlushMs = 0);
 
 public sealed record TableSearchResponse(IReadOnlyList<TableRowDto> Rows, string Mode, bool Enabled, int Total);
 

@@ -260,6 +260,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
     {
         ValidateUniqueTableName(def.Name, excludeTableId: null);
         ValidateParallelism(def.Parallelism);
+        ValidateFlushMs(def.FlushMs);
 
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         def.Id = Guid.NewGuid().ToString("n");
@@ -291,6 +292,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             ValidateUniqueTableName(def.Name, excludeTableId: existing.Id);
         }
         ValidateParallelism(def.Parallelism);
+        ValidateFlushMs(def.FlushMs);
 
         var compileResult = CompileTableSql(def.Sql, excludeTableId: existing.Id);
         ValidateHistoryConfig(def, compileResult);
@@ -298,6 +300,13 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         var sqlChanged = existing.Sql != def.Sql;
         var searchChanged = existing.SearchEnabled != def.SearchEnabled || existing.SearchMode != def.SearchMode;
         var parallelismChanged = existing.Parallelism != def.Parallelism;
+        // Plan 008: changing either knob restarts the table — see TableDefinition.FlushMs's doc comment
+        // ("Changing it restarts the table") and TablePersistenceMode's own doc (the actor's flush-timer
+        // cadence/mode is fixed for the lifetime of one StartAsync, exactly like Parallelism's dataflow
+        // shape is). Table-history's own copy of these two fields is NOT restarted this way — it converges
+        // separately, in place (no Entries loss), via TableHistorySupervisorService's ~15s sweep calling
+        // ITableHistoryActor.EnsureConfiguredAsync (see that method's plan-008 addendum).
+        var persistenceChanged = existing.Persistence != def.Persistence || existing.FlushMs != def.FlushMs;
         var historyConfigChanged =
             existing.HistoryEnabled != def.HistoryEnabled ||
             existing.HistoryMode != def.HistoryMode ||
@@ -319,11 +328,13 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         existing.Tags = def.Tags;
         existing.Metadata = def.Metadata;
         existing.Parallelism = def.Parallelism;
+        existing.Persistence = def.Persistence;
+        existing.FlushMs = def.FlushMs;
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         ApplyCompileResult(existing, compileResult);
 
-        if ((sqlChanged || searchChanged || parallelismChanged) && wasRunning)
+        if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged) && wasRunning)
         {
             await orchestrator.StopTableAsync(existing.Name);
             var outcome = await orchestrator.StartTableAsync(existing, state.Sources, state.Tables);
@@ -467,6 +478,17 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         {
             throw new InvalidOperationException(
                 $"Parallelism must be 1 on the Dapr flavor (got {parallelism}) — partitioned execution is Orleans-only in the Dapr flavor.");
+        }
+    }
+
+    /// <summary>Plan 008: <see cref="TableDefinition.FlushMs"/>'s own doc comment defines only 0 (→ the
+    /// 2000 ms default) and positive values; a negative interval has no meaning, so it's rejected here the
+    /// same way an out-of-range <see cref="TableDefinition.Parallelism"/> is.</summary>
+    private static void ValidateFlushMs(int flushMs)
+    {
+        if (flushMs < 0)
+        {
+            throw new InvalidOperationException($"FlushMs must be >= 0 (got {flushMs}).");
         }
     }
 

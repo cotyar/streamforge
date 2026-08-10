@@ -190,6 +190,43 @@ public sealed class TableDefinition
     /// and TableGrain's Parallelism&gt;=2 coordinator-mode doc comment. Validated 1..16 by RegistryGrain;
     /// changing it restarts the table (same restart condition as a SQL/search-config change).</summary>
     [Id(21)] public int Parallelism { get; set; } = 1;
+
+    /// <summary>Plan 008: how this table's materialized snapshot reaches durable storage.
+    /// <see cref="TablePersistenceMode.Batched"/> (default) is the pre-008 behavior — a dirty flag plus a
+    /// periodic flush that awaits the write inside the grain turn, so a flush stalls the table for as long
+    /// as serializing the whole snapshot takes. The other two trade durability for that stall; see the enum.</summary>
+    [Id(22)] public TablePersistenceMode Persistence { get; set; } = TablePersistenceMode.Batched;
+
+    /// <summary>Flush interval in ms for <see cref="TablePersistenceMode.Batched"/> and
+    /// <see cref="TablePersistenceMode.FireAndForget"/>. 0 = the 2000 ms default. Ignored for
+    /// <see cref="TablePersistenceMode.MemoryOnly"/>. Changing it restarts the table.</summary>
+    [Id(23)] public int FlushMs { get; set; }
+}
+
+/// <summary>Plan 008: per-table durability policy. State is the materialized snapshot; the question is only
+/// how it gets to storage, never how it is computed.
+///
+/// The cost being traded away is real and measurable: a flush serializes the ENTIRE snapshot into DTOs and
+/// awaits the write **inside the grain turn**, so the stall grows with the row count and lands on the same
+/// turn queue as incoming deltas.</summary>
+[GenerateSerializer]
+public enum TablePersistenceMode
+{
+    /// <summary>Dirty flag + periodic flush, awaited in the grain turn. Survives a restart, resuming from the
+    /// last flush — up to one interval of deltas is lost. The pre-008 behavior and still the default.</summary>
+    Batched,
+
+    /// <summary>Same periodic flush, but the write is not awaited by the grain turn: the turn returns as soon
+    /// as the snapshot is captured, and the write completes in the background (single-flight — a flush already
+    /// in progress is not overlapped, the next tick is skipped instead). A crash loses whatever had not yet
+    /// reached the disk, with no signal that it was lost.</summary>
+    FireAndForget,
+
+    /// <summary>Never written. The table lives entirely in the activation, so nothing touches storage on any
+    /// path. A restart brings the table back **empty**, re-accumulating only from deltas that arrive after it
+    /// — it does not replay history, so this suits tables that are naturally re-derivable or short-lived, and
+    /// nothing else.</summary>
+    MemoryOnly,
 }
 
 /// <summary>Plan 003 M2: one partition's contribution to a partitioned table's aggregate

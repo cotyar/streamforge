@@ -58,7 +58,8 @@ public interface ITableActor : IActor
     /// index/timer. Rejects <see cref="TableDefinition.Parallelism"/> &gt; 1 defensively — mirrors
     /// <see cref="Catalog.CatalogStore.CreateTableAsync"/>'s CRUD-time rejection (decision D-F);
     /// partitioned execution never reaches this actor by construction, this is belt-and-braces. On
-    /// success, arms the 2s flush timer and returns the distinct stream/table input names the compiled
+    /// success, arms the flush timer (plan 008: <see cref="TableDefinition.FlushMs"/>, 0 → 2000 ms default —
+    /// see <see cref="TableActor.ResolveFlushPeriod"/>) and returns the distinct stream/table input names the compiled
     /// plan depends on (<c>TableCompileResult.StreamInputs</c>/<c>TableInputs</c>) — <c>Lifecycle.
     /// DaprLifecycleOrchestrator</c> uses this to register <see cref="Streaming.TableEventRouter"/>'s
     /// routing table without a second, redundant compile. On compile failure (or a rejected Parallelism),
@@ -105,9 +106,11 @@ public interface ITableActor : IActor
     /// A no-op if the table isn't currently running.</summary>
     Task ProcessTableDeltasAsync(TableDeltaEnvelope envelope);
 
-    /// <summary>Mirrors <c>TableGrain.GetRowsAsync</c> — served from the write-behind-flushed snapshot
-    /// (up to ~2s stale, same as Orleans' classic path; see <see cref="TableActor"/>'s class doc), not a
-    /// live executor read. Backs <c>GET /api/tables/{id}/rows</c> via
+    /// <summary>Mirrors <c>TableGrain.GetRowsAsync</c> — served from the write-behind-flushed in-memory read
+    /// cache (up to one <see cref="TableDefinition.FlushMs"/> interval stale, same as Orleans' classic
+    /// path; see <see cref="TableActor"/>'s class doc — this cache is refreshed on every dirty tick
+    /// regardless of <see cref="TableDefinition.Persistence"/>, only the durability write differs by mode),
+    /// not a live executor read. Backs <c>GET /api/tables/{id}/rows</c> via
     /// <c>Facades.DaprTableReadFacade</c>.</summary>
     Task<List<TableRowDto>> GetRowsAsync(int limit, int offset);
 

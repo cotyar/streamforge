@@ -23,11 +23,29 @@ namespace StreamForge.Dapr.Host.Actors;
 /// <see cref="PipelineActor"/> it never talks outward to Dapr pub/sub either.</para>
 ///
 /// <para><b>State: persisted continuously via a dirty-flag + periodic flush timer — NOT per-delta,
-/// mirroring <c>TableHistoryGrain</c>'s exact write-behind cadence</b> (2-second flush timer, dirty flag
-/// set by <see cref="ApplyDeltasAsync"/>, flushed by the timer or on deactivation). <see cref="ResetAsync"/>
+/// mirroring <c>TableHistoryGrain</c>'s exact write-behind cadence</b> (flush timer period from the owning
+/// table's <see cref="TableDefinition.FlushMs"/>, 0 → 2000 ms default; dirty flag set by
+/// <see cref="ApplyDeltasAsync"/>, flushed by the timer or on deactivation). <see cref="ResetAsync"/>
 /// and <see cref="DisableAsync"/> are the two exceptions — like the grain, both persist IMMEDIATELY
 /// (they're rare, config-change-triggered calls, not the hot per-delta-batch path) rather than waiting for
 /// the next flush tick.</para>
+///
+/// <para><b>Plan 008 — shares <see cref="TableDefinition.Persistence"/> with <see cref="TableActor"/>
+/// (the SAME per-table knob, not a separate one for history)</b>, dispatched through the same pure
+/// <see cref="TablePersistencePolicy.DecideFlushAction"/> decision. <see cref="TablePersistenceMode.
+/// Batched"/> is the behavior above, unchanged. <see cref="TablePersistenceMode.FireAndForget"/> hands a
+/// deep-cloned DTO (<see cref="TableHistoryApplication.CloneForBackgroundPersist"/>) to a single-flight
+/// background write — a deep clone, not a reference copy, is required here specifically because
+/// <see cref="TableHistoryActorState.Entries"/>' <see cref="RowHistoryEntry.Versions"/> lists are mutated
+/// IN PLACE by <see cref="ApplyDeltasAsync"/> as later turns keep landing while the background write is
+/// in flight — unlike <see cref="TableActor"/>'s own <c>_flushed</c>, which is wholesale-replaced (never
+/// mutated in place) on every capture, so a bare reference copy is NOT safe here; this is exactly the kind
+/// of shape difference the plan 008 brief asked to be surfaced rather than papered over.
+/// <see cref="TablePersistenceMode.MemoryOnly"/> never touches <c>StateManager</c> on any path AND — since
+/// this actor has no separate live-vs-flushed read split the way <see cref="TableActor"/> does
+/// (<see cref="GetHistoryAsync"/>/<see cref="GetStatsAsync"/> already read <see cref="_state"/> directly,
+/// always live) — the flush timer is never even armed for a MemoryOnly table, since it would have no
+/// purpose (see <see cref="ArmFlushTimerAsync"/>'s guard).</para>
 ///
 /// <para><b>Self-heal on reactivation — same rationale as <see cref="GeneratorActor"/>/
 /// <see cref="PipelineActor"/>'s own doc comments: Dapr actor timers do NOT survive deactivation/
@@ -42,17 +60,21 @@ namespace StreamForge.Dapr.Host.Actors;
 /// the thin actor shell around it: activation/state load-save, timer arm/disarm, and the
 /// <see cref="ITableHistoryActor"/> method signatures.</para>
 /// </summary>
-public sealed class TableHistoryActor(ActorHost host) : Actor(host), ITableHistoryActor
+public sealed class TableHistoryActor(ActorHost host, ILogger<TableHistoryActor> logger) : Actor(host), ITableHistoryActor
 {
     private const string StateName = "tableHistory";
     private const string FlushTimerName = "tableHistory-flush";
 
-    /// <summary>Same cadence as <c>TableHistoryGrain</c>'s own 2-second <c>IGrainTimer</c> flush.</summary>
-    private static readonly TimeSpan FlushPeriod = TimeSpan.FromSeconds(2);
-
     private TableHistoryActorState _state = new();
     private bool _dirty;
     private bool _flushTimerArmed;
+
+    /// <summary>Plan 008 single-flight guard/in-flight handle for <see cref="TablePersistenceMode.
+    /// FireAndForget"/> — same role as <see cref="TableActor"/>'s own fields of the same name (see that
+    /// class's doc comments); the background task never throws (catches and logs internally), so joining
+    /// <see cref="_inFlightPersist"/> is always safe.</summary>
+    private volatile bool _persistInProgress;
+    private Task? _inFlightPersist;
 
     protected override async Task OnActivateAsync()
     {
@@ -62,7 +84,7 @@ public sealed class TableHistoryActor(ActorHost host) : Actor(host), ITableHisto
             _state = existing.Value;
         }
 
-        if (_state.HistoryEnabled)
+        if (_state.HistoryEnabled && _state.Persistence != TablePersistenceMode.MemoryOnly)
         {
             await ArmFlushTimerAsync();
         }
@@ -74,9 +96,9 @@ public sealed class TableHistoryActor(ActorHost host) : Actor(host), ITableHisto
 
         _state = TableHistoryApplication.Reset(def);
         _dirty = false;
-        await StateManager.SetStateAsync(StateName, _state);
+        await SaveControlStateAsync();
 
-        if (_state.HistoryEnabled)
+        if (_state.HistoryEnabled && _state.Persistence != TablePersistenceMode.MemoryOnly)
         {
             await ArmFlushTimerAsync();
         }
@@ -84,18 +106,57 @@ public sealed class TableHistoryActor(ActorHost host) : Actor(host), ITableHisto
 
     /// <summary>See <see cref="ITableHistoryActor.EnsureConfiguredAsync"/>'s doc comment for the full
     /// rationale — a no-op (preserving <see cref="_state"/> untouched, including its accumulated
-    /// <c>Entries</c>) when <paramref name="def"/>'s history config already matches, otherwise delegates
-    /// to <see cref="ResetAsync"/> exactly like a genuine config change would.</summary>
-    public Task EnsureConfiguredAsync(TableDefinition def) =>
-        TableHistoryApplication.ConfigMatches(_state, def) ? Task.CompletedTask : ResetAsync(def);
+    /// <c>Entries</c>) when <paramref name="def"/>'s history-content config already matches, otherwise
+    /// delegates to <see cref="ResetAsync"/> exactly like a genuine config change would.
+    ///
+    /// <para><b>Plan 008 addendum:</b> <see cref="TableDefinition.Persistence"/>/<see cref="TableDefinition.
+    /// FlushMs"/> are NOT history-content config (<see cref="TableHistoryApplication.ConfigMatches"/> never
+    /// compares them) — a pure persistence-mode change must never wipe accumulated <c>Entries</c> the way a
+    /// SQL/history-mode change legitimately does. When content config matches but the persistence config
+    /// has drifted, <see cref="ApplyPersistenceChangeAsync"/> re-arms the timer at the new cadence/mode in
+    /// place instead.</para></summary>
+    public Task EnsureConfiguredAsync(TableDefinition def)
+    {
+        if (!TableHistoryApplication.ConfigMatches(_state, def))
+        {
+            return ResetAsync(def);
+        }
+
+        return TableHistoryApplication.PersistenceMatches(_state, def) ? Task.CompletedTask : ApplyPersistenceChangeAsync(def);
+    }
+
+    /// <summary>In-place persistence-mode/cadence update — see <see cref="EnsureConfiguredAsync"/>'s plan
+    /// 008 addendum. Touches only <see cref="TableHistoryActorState.Persistence"/>/<see cref="
+    /// TableHistoryActorState.FlushMs"/> and the timer; <c>Entries</c>/<c>Seq</c>/identity mapping are left
+    /// exactly as they were.</summary>
+    private async Task ApplyPersistenceChangeAsync(TableDefinition def)
+    {
+        await DisarmFlushTimerIfArmedAsync();
+
+        _state.Persistence = def.Persistence;
+        _state.FlushMs = def.FlushMs;
+        await SaveControlStateAsync();
+
+        if (_state.HistoryEnabled && _state.Persistence != TablePersistenceMode.MemoryOnly)
+        {
+            await ArmFlushTimerAsync();
+        }
+    }
 
     public async Task DisableAsync()
     {
         await DisarmFlushTimerIfArmedAsync();
 
+        var wasMemoryOnly = _state.Persistence == TablePersistenceMode.MemoryOnly;
         _state = new TableHistoryActorState();
         _dirty = false;
-        await StateManager.SetStateAsync(StateName, _state);
+
+        // MemoryOnly never touches StateManager on any path (see class doc's plan-008 paragraph) — and
+        // since nothing was ever persisted for this table, there is nothing to clear either.
+        if (!wasMemoryOnly)
+        {
+            await SaveAsync();
+        }
     }
 
     public Task ApplyDeltasAsync(TableDeltaEnvelope envelope)
@@ -113,6 +174,12 @@ public sealed class TableHistoryActor(ActorHost host) : Actor(host), ITableHisto
 
     public Task<TableHistoryStats> GetStatsAsync() => Task.FromResult(TableHistoryApplication.Stats(_state));
 
+    /// <summary>Dispatches the durability write per <see cref="TableHistoryActorState.Persistence"/> via
+    /// the same pure <see cref="TablePersistencePolicy.DecideFlushAction"/> decision <see cref="TableActor"/>
+    /// uses — see class doc's plan-008 paragraph. Unlike <see cref="TableActor.OnFlushTickAsync"/> there is
+    /// no separate in-memory read-cache to refresh here (<see cref="GetHistoryAsync"/>/<see cref="
+    /// GetStatsAsync"/> already read <see cref="_state"/> directly, always live) — this tick is purely
+    /// about the durability write.</summary>
     private async Task OnFlushTickAsync()
     {
         if (!_dirty)
@@ -120,13 +187,85 @@ public sealed class TableHistoryActor(ActorHost host) : Actor(host), ITableHisto
             return;
         }
 
-        _dirty = false;
+        switch (TablePersistencePolicy.DecideFlushAction(_state.Persistence, dirty: true, writeInProgress: _persistInProgress))
+        {
+            case TablePersistAction.AwaitedWrite:
+                _dirty = false;
+                await SaveAsync();
+                break;
+
+            case TablePersistAction.BackgroundWrite:
+                _dirty = false;
+                StartBackgroundPersist();
+                break;
+
+            case TablePersistAction.Skip:
+            default:
+                // MemoryOnly (the timer is never armed for it in practice — see ArmFlushTimerAsync's
+                // guard — this branch exists for defensiveness only), or a FireAndForget write already in
+                // flight: leave _dirty set so the next tick retries once that write completes.
+                break;
+        }
+    }
+
+    /// <summary>Kicks off the <see cref="TablePersistenceMode.FireAndForget"/> background write — see class
+    /// doc's plan-008 paragraph for why this MUST deep-clone (<see cref="TableHistoryApplication.
+    /// CloneForBackgroundPersist"/>) rather than capture a bare reference to <see cref="_state"/>: later
+    /// turns keep mutating <see cref="TableHistoryActorState.Entries"/>' version lists IN PLACE while this
+    /// write is in flight. Single-flight via <see cref="_persistInProgress"/>; a failure is always logged,
+    /// never silently swallowed.</summary>
+    private void StartBackgroundPersist()
+    {
+        var snapshot = TableHistoryApplication.CloneForBackgroundPersist(_state);
+        _persistInProgress = true;
+        _inFlightPersist = Task.Run(async () =>
+        {
+            try
+            {
+                await StateManager.SetStateAsync(StateName, snapshot);
+                await StateManager.SaveStateAsync();
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "TableHistoryActor: FireAndForget background state write failed — this flush's entries may be lost.");
+            }
+            finally
+            {
+                _persistInProgress = false;
+            }
+        });
+    }
+
+    private async Task SaveAsync()
+    {
         await StateManager.SetStateAsync(StateName, _state);
+        await StateManager.SaveStateAsync();
+    }
+
+    /// <summary>Lifecycle (Reset/persistence-change) persist — rare, config-change-triggered, not the hot
+    /// per-delta-batch path, so this always awaits/blocks for Batched AND FireAndForget alike (same
+    /// rationale as <see cref="TableActor.SaveControlStateAsync"/>'s own doc comment) — only <see
+    /// cref="TablePersistenceMode.MemoryOnly"/> skips it, on every path. Joins any still-in-flight
+    /// background write first so this call is strictly ordered after it.</summary>
+    private async Task SaveControlStateAsync()
+    {
+        if (_state.Persistence == TablePersistenceMode.MemoryOnly)
+        {
+            return;
+        }
+
+        if (_inFlightPersist is { IsCompleted: false } pending)
+        {
+            await pending;
+        }
+
+        await SaveAsync();
     }
 
     private async Task ArmFlushTimerAsync()
     {
-        await RegisterTimerAsync(FlushTimerName, nameof(OnFlushTickAsync), null, FlushPeriod, FlushPeriod);
+        var period = TimeSpan.FromMilliseconds(TablePersistencePolicy.ResolveFlushIntervalMs(_state.FlushMs));
+        await RegisterTimerAsync(FlushTimerName, nameof(OnFlushTickAsync), null, period, period);
         _flushTimerArmed = true;
     }
 
@@ -148,23 +287,26 @@ public sealed class TableHistoryActor(ActorHost host) : Actor(host), ITableHisto
     /// invocation, auto-saved by the Dapr actor runtime after it returns —
     /// <c>Actor.OnPostActorMethodAsyncInternal</c>), deactivation is NOT a normal method turn, so this
     /// explicitly calls <see cref="ActorStateManager.SaveStateAsync"/> rather than relying on that
-    /// auto-save mechanism.</summary>
+    /// auto-save mechanism. Plan 008: skipped entirely for <see cref="TablePersistenceMode.MemoryOnly"/>,
+    /// same as every other path (see class doc).</summary>
     protected override async Task OnDeactivateAsync()
     {
-        if (_dirty)
+        if (!_dirty || _state.Persistence == TablePersistenceMode.MemoryOnly)
         {
-            try
-            {
-                await StateManager.SetStateAsync(StateName, _state);
-                await StateManager.SaveStateAsync();
-            }
-            catch
-            {
-                // best-effort, mirrors TableHistoryGrain.OnDeactivateAsync's own empty catch.
-            }
-
-            _dirty = false;
+            return;
         }
+
+        try
+        {
+            await StateManager.SetStateAsync(StateName, _state);
+            await StateManager.SaveStateAsync();
+        }
+        catch
+        {
+            // best-effort, mirrors TableHistoryGrain.OnDeactivateAsync's own empty catch.
+        }
+
+        _dirty = false;
     }
 }
 
@@ -192,6 +334,16 @@ public sealed class TableHistoryActorState
     /// <summary>Monotonic counter, incremented once per observed delta (assertion or retraction) — see
     /// <see cref="HistoryVersion.Seq"/>'s doc comment.</summary>
     public long Seq { get; set; }
+
+    /// <summary>Plan 008: mirrors the owning table's <see cref="TableDefinition.Persistence"/>/<see
+    /// cref="TableDefinition.FlushMs"/> at the time of the last <see cref="TableHistoryActor.ResetAsync"/>
+    /// or <see cref="TableHistoryActor.EnsureConfiguredAsync"/> persistence-only update — NOT compared by
+    /// <see cref="TableHistoryApplication.ConfigMatches"/> (a pure persistence-mode change must never wipe
+    /// <see cref="Entries"/>), only by <see cref="TableHistoryApplication.PersistenceMatches"/>.</summary>
+    public TablePersistenceMode Persistence { get; set; } = TablePersistenceMode.Batched;
+
+    /// <summary>See <see cref="Persistence"/>'s doc comment.</summary>
+    public int FlushMs { get; set; }
 }
 
 /// <summary>
@@ -221,6 +373,8 @@ public static class TableHistoryApplication
         IdentityColumns = TableGroupKeyExtractor.ExtractIdentityColumns(def.Sql),
         Entries = [],
         Seq = 0,
+        Persistence = def.Persistence,
+        FlushMs = def.FlushMs,
     };
 
     /// <summary>Mirrors <c>ITableHistoryActor.EnsureConfiguredAsync</c>'s decision, as a pure function of
@@ -269,6 +423,40 @@ public static class TableHistoryApplication
 
         return a.SequenceEqual(b, StringComparer.Ordinal);
     }
+
+    /// <summary>Plan 008: true when <paramref name="state"/>'s currently-recorded persistence mode/cadence
+    /// already matches <paramref name="def"/>'s current settings — the persistence-only counterpart of
+    /// <see cref="ConfigMatches"/>, deliberately SEPARATE from it (see <see cref="TableHistoryActorState.
+    /// Persistence"/>'s doc comment: comparing these inside <see cref="ConfigMatches"/> itself would make a
+    /// pure persistence-mode change take the full <see cref="Reset"/> path and wipe <c>Entries"/> for no
+    /// content-related reason).</summary>
+    public static bool PersistenceMatches(TableHistoryActorState state, TableDefinition def) =>
+        state.Persistence == def.Persistence && state.FlushMs == def.FlushMs;
+
+    /// <summary>Plan 008: a DEEP clone of <paramref name="state"/> for handing to a <see
+    /// cref="TablePersistenceMode.FireAndForget"/> background write — see <see cref="TableHistoryActor"/>'s
+    /// class doc for why a bare reference (or even a shallow <c>Dictionary</c> copy) is not safe: <see
+    /// cref="RowHistoryEntry.Versions"/> lists are mutated IN PLACE by <see cref="ApplyDeltas"/> as later
+    /// turns keep landing while the clone is being serialized off-turn. Cloning <see cref="RowHistoryEntry"/>
+    /// wrapper objects (each with its own new <see cref="List{T}"/>) is sufficient — the individual <see
+    /// cref="HistoryVersion"/> elements inside are effectively immutable after construction (only ever
+    /// added/removed from the list, never mutated in place), so it's safe to share those instances between
+    /// the live state and the clone.</summary>
+    public static TableHistoryActorState CloneForBackgroundPersist(TableHistoryActorState state) => new()
+    {
+        HistoryEnabled = state.HistoryEnabled,
+        HistoryMode = state.HistoryMode,
+        HistoryLimit = state.HistoryLimit,
+        HistoryByField = state.HistoryByField,
+        HistoryWindowMs = state.HistoryWindowMs,
+        IdentityColumns = state.IdentityColumns is null ? null : [.. state.IdentityColumns],
+        Entries = state.Entries.ToDictionary(
+            kv => kv.Key,
+            kv => new RowHistoryEntry { Versions = [.. kv.Value.Versions], RetractionCount = kv.Value.RetractionCount }),
+        Seq = state.Seq,
+        Persistence = state.Persistence,
+        FlushMs = state.FlushMs,
+    };
 
     /// <summary>Applies one <c>sf-table-delta</c> batch to <paramref name="state"/> in place — mirrors
     /// <c>TableHistoryGrain.OnDeltaBatchAsync</c> exactly, including the actor-wire JsonElement

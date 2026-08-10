@@ -374,6 +374,7 @@ public sealed class RegistryGrain(
     {
         ValidateUniqueTableName(def.Name, excludeTableId: null);
         ValidateParallelism(def.Parallelism);
+        ValidateFlushMs(def.FlushMs);
 
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         def.Id = Guid.NewGuid().ToString("n");
@@ -410,6 +411,7 @@ public sealed class RegistryGrain(
             ValidateUniqueTableName(def.Name, excludeTableId: existing.Id);
         }
         ValidateParallelism(def.Parallelism);
+        ValidateFlushMs(def.FlushMs);
 
         // Compile + validate against the *prospective* SQL/history config before mutating `existing` at
         // all, so a rejected update (bad name, bad historyByField) never leaves partially-applied state
@@ -424,6 +426,12 @@ public sealed class RegistryGrain(
         // the search-config restart semantics below so it takes effect immediately on a Running table
         // instead of only on the next manual stop/start.
         var parallelismChanged = existing.Parallelism != def.Parallelism;
+        // Plan 008 W2.5: a Persistence/FlushMs change picks a different write-behind policy for the SAME
+        // running grain(s) — mirror the SQL/search-config/Parallelism restart semantics below so it takes
+        // effect immediately on a Running table instead of only on the next manual stop/start (TableGrain's
+        // StartAsync/StartClassicAsync/StartCoordinatorAsync only re-reads Persistence/FlushMs from the
+        // TableDefinition it's (re)started with — see its own class doc's persistence-mode paragraph).
+        var persistenceChanged = existing.Persistence != def.Persistence || existing.FlushMs != def.FlushMs;
         var historyConfigChanged =
             existing.HistoryEnabled != def.HistoryEnabled ||
             existing.HistoryMode != def.HistoryMode ||
@@ -445,15 +453,17 @@ public sealed class RegistryGrain(
         existing.Tags = def.Tags;
         existing.Metadata = def.Metadata;
         existing.Parallelism = def.Parallelism;
+        existing.Persistence = def.Persistence;
+        existing.FlushMs = def.FlushMs;
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         ApplyCompileResult(existing, compileResult);
 
-        // A running table's grain only picks up SQL/search config/parallelism changes on (re)StartAsync —
-        // mirror the SQL-changed restart below for search config and parallelism too, so toggling
-        // SearchEnabled/SearchMode/Parallelism on a Running table takes effect immediately instead of only
-        // on the next manual stop/start.
-        if ((sqlChanged || searchChanged || parallelismChanged) && wasRunning)
+        // A running table's grain only picks up SQL/search config/parallelism/persistence changes on
+        // (re)StartAsync — mirror the SQL-changed restart below for search config, parallelism, and
+        // persistence too, so toggling SearchEnabled/SearchMode/Parallelism/Persistence/FlushMs on a
+        // Running table takes effect immediately instead of only on the next manual stop/start.
+        if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged) && wasRunning)
         {
             var tableGrain = GrainFactory.GetGrain<ITableGrain>(existing.Name);
             try
@@ -476,6 +486,15 @@ public sealed class RegistryGrain(
         if (sqlChanged || historyConfigChanged)
         {
             await GrainFactory.GetGrain<ITableHistoryGrain>(existing.Name).ResetAsync(existing);
+        }
+        else if (persistenceChanged && existing.HistoryEnabled)
+        {
+            // Plan 008 W2.5: a Persistence/FlushMs-only change doesn't invalidate the row-identity mapping
+            // or retention policy, so use ResumeAsync (not ResetAsync) — it re-reads Persistence/FlushMs
+            // from `existing` and re-registers the flush timer with the new interval/mode, but (unlike
+            // ResetAsync) deliberately leaves Entries/Seq untouched, so accumulated history survives a mode
+            // tweak the same way it survives a silo restart.
+            await GrainFactory.GetGrain<ITableHistoryGrain>(existing.Name).ResumeAsync(existing);
         }
 
         await state.WriteStateAsync();
@@ -603,6 +622,18 @@ public sealed class RegistryGrain(
         if (parallelism is < 1 or > 16)
         {
             throw new InvalidOperationException($"Parallelism must be between 1 and 16 (got {parallelism}).");
+        }
+    }
+
+    /// <summary>Plan 008 W2.5: 409-style guard (same pattern as ValidateParallelism) — TableDefinition.FlushMs
+    /// (see its own doc comment: 0 = the 2000ms default; ignored for MemoryOnly) must be non-negative. A
+    /// negative interval has no sane meaning for either Orleans' RegisterGrainTimer (which throws its own,
+    /// less caller-friendly ArgumentOutOfRangeException) or the "0 = default" convention.</summary>
+    private static void ValidateFlushMs(int flushMs)
+    {
+        if (flushMs < 0)
+        {
+            throw new InvalidOperationException($"FlushMs must be >= 0 (got {flushMs}).");
         }
     }
 

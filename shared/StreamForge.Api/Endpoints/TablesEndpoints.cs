@@ -50,6 +50,8 @@ public static class TablesEndpoints
                     Tags = req.Tags ?? [],
                     Metadata = req.Metadata ?? [],
                     Parallelism = req.Parallelism,
+                    Persistence = req.Persistence,
+                    FlushMs = req.FlushMs,
                 };
                 var created = await registry.CreateTableAsync(def);
                 return Results.Created($"/api/tables/{created.Id}", created);
@@ -81,6 +83,8 @@ public static class TablesEndpoints
             existing.Tags = req.Tags ?? existing.Tags;
             existing.Metadata = req.Metadata ?? existing.Metadata;
             existing.Parallelism = req.Parallelism;
+            existing.Persistence = req.Persistence;
+            existing.FlushMs = req.FlushMs;
 
             try
             {

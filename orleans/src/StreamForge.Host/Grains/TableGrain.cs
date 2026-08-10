@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Orleans;
 using Orleans.Concurrency;
 using Orleans.Runtime;
@@ -102,6 +103,31 @@ public sealed class TableGrainState
 /// business-time ordering the query explicitly asked for, orthogonal to (and unrelated to) dataflow-layer
 /// epoch/arrival-order lateness, which this table (and every other) never drops.
 ///
+/// PLAN 008 W2.5 — PER-TABLE PERSISTENCE MODE: the write-behind flush described above (dirty flag + timer,
+/// mirrors PipelineGrain's metrics-timer pattern) is <see cref="TablePersistenceMode.Batched"/>, still the
+/// default and still byte-identical to pre-008 — the flush interval is now configurable
+/// (<see cref="TableDefinition.FlushMs"/>, 0 = the pre-008 hardcoded 2000ms) but the write is awaited inside
+/// the grain turn exactly as before, so the turn stalls for as long as the whole-snapshot serialize + file
+/// write takes. <see cref="TablePersistenceMode.FireAndForget"/> keeps the same timer but does not await the
+/// write: <see cref="OnFlushTickAsync"/> captures the snapshot into <c>state.State</c> synchronously (that
+/// part MUST stay on the turn — TableExecutor/_coordinatorSnapshot are not thread-safe and nothing else may
+/// touch them mid-capture), then hands the actual `state.WriteStateAsync()` off via <see cref="_pendingWrite"/>
+/// without awaiting it, so the turn returns immediately. Single-flight is enforced by checking
+/// `_pendingWrite.IsCompleted` before starting a new capture — a tick that lands while the previous write is
+/// still in flight is skipped outright (not queued, not overlapped): <see cref="JsonFileGrainStorage"/> does
+/// `File.Create` + async serialize straight against the same mutable `state.State` object, so two concurrent
+/// `WriteStateAsync` calls would race two file handles on the same path and/or serialize a
+/// concurrently-mutated object — a corruption hazard, not a speedup. <see cref="TablePersistenceMode.MemoryOnly"/>
+/// registers no flush timer at all (see StartClassicAsync/StartCoordinatorAsync) — `_dirty` keeps getting set
+/// by ApplyAndPublishAsync/OnOutputBatchAsync same as always, it just never gets consumed, and both
+/// StopAsync's and OnDeactivateAsync's final-flush gates additionally check the mode so a MemoryOnly table's
+/// last snapshot is deliberately discarded, not persisted, on the way out — a restart brings it back empty,
+/// which is documented as the mode's contract, not a bug (see TablePersistenceMode's own doc comment).
+/// FireAndForget's *final* flush (stop/deactivate) is the one place it behaves like Batched again: the grain
+/// is going away either way, so a background write would just be abandoned mid-flight — StopAsync/
+/// OnDeactivateAsync both await any still-in-flight `_pendingWrite` first (so the final awaited FlushAsync
+/// below never overlaps a background one), then call the same awaited <see cref="FlushAsync"/> Batched uses.
+///
 /// [MayInterleave] ON OnOutputBatchAsync (plan 003 M4, mirrors RegistryGrain's identical fix for an
 /// identical shape of problem — see that class's doc comment): TableOutputGrain.PublishAsync calls back
 /// into THIS grain (the same one orchestrating TableOutputGrain/TableStageGrain's own start/stop) — without
@@ -117,7 +143,8 @@ public sealed class TableGrainState
 /// </summary>
 [MayInterleave(nameof(MayInterleave))]
 public sealed class TableGrain(
-    [PersistentState("table", StreamConstants.StorageName)] IPersistentState<TableGrainState> state)
+    [PersistentState("table", StreamConstants.StorageName)] IPersistentState<TableGrainState> state,
+    ILogger<TableGrain> logger)
     : Grain, ITableGrain
 {
     private TableDefinition? _def;
@@ -133,6 +160,18 @@ public sealed class TableGrain(
     private long _deltasIn;
     private long _deltasOut;
     private long _lastUpdateMs;
+
+    // Plan 008 W2.5 — per-table persistence mode (see class doc's own paragraph). Both re-read from the
+    // TableDefinition on every StartAsync — same lifetime/refresh rule as every other per-def field above
+    // (_status, _executor, etc.) — so a Persistence/FlushMs change (RegistryGrain restart-triggers it, same
+    // as SQL/search-config/Parallelism) takes effect on the very next StartClassicAsync/StartCoordinatorAsync.
+    private TablePersistenceMode _persistenceMode = TablePersistenceMode.Batched;
+    private TimeSpan _flushInterval = TimeSpan.FromSeconds(2);
+    /// <summary>FireAndForget's single-flight guard: the in-flight (or already-completed) background
+    /// `state.WriteStateAsync()` task. Never faulted — <see cref="WriteStateBestEffortAsync"/> catches and
+    /// logs internally — so awaiting it (StopAsync/OnDeactivateAsync) or polling `.IsCompleted`
+    /// (OnFlushTickAsync) never throws.</summary>
+    private Task _pendingWrite = Task.CompletedTask;
 
     // Plan 003 M2 — Parallelism >= 2 coordinator-mode state (see class doc). Unused, always default, on
     // the Parallelism==1 path.
@@ -169,6 +208,8 @@ public sealed class TableGrain(
         await StopAsync();
 
         _def = def;
+        _persistenceMode = def.Persistence;
+        _flushInterval = TimeSpan.FromMilliseconds(def.FlushMs > 0 ? def.FlushMs : 2000);
 
         if (def.Parallelism <= 1)
         {
@@ -235,7 +276,11 @@ public sealed class TableGrain(
             _tableSubs.Add(handle);
         }
 
-        _flushTimer = this.RegisterGrainTimer(OnFlushTickAsync, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+        // MemoryOnly registers no flush timer at all — see class doc's persistence-mode paragraph.
+        if (_persistenceMode != TablePersistenceMode.MemoryOnly)
+        {
+            _flushTimer = this.RegisterGrainTimer(OnFlushTickAsync, _flushInterval, _flushInterval);
+        }
 
         // Keep this activation alive for as long as the table is running — mirrors PipelineGrain.
         this.DelayDeactivation(TimeSpan.FromDays(365));
@@ -343,7 +388,11 @@ public sealed class TableGrain(
             await GrainFactory.GetGrain<ITableIngestGrain>($"{def.Name}:{inputName}").StartAsync(def, inputName);
         }
 
-        _flushTimer = this.RegisterGrainTimer(OnFlushTickAsync, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+        // MemoryOnly registers no flush timer at all — see class doc's persistence-mode paragraph.
+        if (_persistenceMode != TablePersistenceMode.MemoryOnly)
+        {
+            _flushTimer = this.RegisterGrainTimer(OnFlushTickAsync, _flushInterval, _flushInterval);
+        }
         this.DelayDeactivation(TimeSpan.FromDays(365));
     }
 
@@ -397,6 +446,13 @@ public sealed class TableGrain(
             _deployedStages = [];
         }
 
+        // Plan 008 W2.5: await any FireAndForget background write BEFORE the final flush below — otherwise
+        // the awaited FlushAsync a few lines down could run its own state.WriteStateAsync() concurrently
+        // with one still in flight from the last tick, the exact two-writers-one-file corruption hazard the
+        // single-flight design (see class doc) exists to prevent. Never faulted (WriteStateBestEffortAsync
+        // catches internally), so this can't throw and doesn't need a try/catch.
+        await _pendingWrite;
+
         // Plan 003 M4 fix: flush BEFORE clearing _coordinatorMode, not after — FlushAsync's `_coordinatorMode
         // ? _coordinatorSnapshot : _executor.Snapshot()` branch must still see _coordinatorMode==true here,
         // otherwise a coordinator-mode table's final on-stop flush silently persists the scratch executor's
@@ -408,7 +464,12 @@ public sealed class TableGrain(
         // GetRowsAsync's doc comment) made reads fast enough to reliably outrace that timer, exposing this
         // ordering bug as a real, reproducible restart-resume data loss — see
         // TableFrontierClusterTests/PartitionedTableClusterTests' restart-resume assertions.
-        if (_dirty)
+        //
+        // Plan 008 W2.5: MemoryOnly additionally skips this final flush outright (even if _dirty) — its
+        // whole contract is "nothing ever touches storage" (see class doc); FireAndForget's final flush is
+        // deliberately the awaited FlushAsync below, not another background write, because the grain is
+        // going away and a background write here would just be abandoned mid-flight.
+        if (_persistenceMode != TablePersistenceMode.MemoryOnly && _dirty)
         {
             await FlushAsync();
         }
@@ -421,7 +482,11 @@ public sealed class TableGrain(
 
     public override async Task OnDeactivateAsync(DeactivationReason reason, CancellationToken cancellationToken)
     {
-        if (_dirty)
+        // Plan 008 W2.5: same reasoning as StopAsync's final flush (see its own comment) — await any
+        // in-flight FireAndForget background write first (never faulted, so no try/catch needed), then skip
+        // entirely for MemoryOnly, otherwise flush (awaited) exactly like Batched always has.
+        try { await _pendingWrite; } catch { /* defensive only — WriteStateBestEffortAsync never faults */ }
+        if (_persistenceMode != TablePersistenceMode.MemoryOnly && _dirty)
         {
             try { await FlushAsync(); } catch { /* best-effort */ }
         }
@@ -443,7 +508,7 @@ public sealed class TableGrain(
     {
         var source = _coordinatorMode
             ? _coordinatorSnapshot.Values.Select(v => new TableRowDto { Row = new Dictionary<string, object?>(v.Row), Weight = v.Weight })
-            : state.State.Snapshot.Values;
+            : ClassicModeRows();
         var rows = source
             .Skip(Math.Max(0, offset))
             .Take(Math.Max(0, limit))
@@ -452,7 +517,28 @@ public sealed class TableGrain(
     }
 
     public Task<int> GetRowCountAsync() =>
-        Task.FromResult(_coordinatorMode ? _coordinatorSnapshot.Count : state.State.Snapshot.Count);
+        Task.FromResult(_coordinatorMode ? _coordinatorSnapshot.Count : ClassicModeRowCount());
+
+    /// <summary>Plan 008 W2.5: classic-mode (non-coordinator) row source for GetRowsAsync/GetRowCountAsync/
+    /// GetMetricsAsync's RowCount. MemoryOnly NEVER populates state.State.Snapshot — it registers no flush
+    /// timer at all and skips every final flush too (see class doc's persistence-mode paragraph), so reading
+    /// state.State.Snapshot for a MemoryOnly table would report EMPTY forever, not just "stale by up to one
+    /// flush interval" like Batched/FireAndForget — that would defeat the whole point of "the table lives
+    /// entirely in the activation" (TablePersistenceMode.MemoryOnly's own doc comment): a MemoryOnly table
+    /// must still be fully queryable, it just never touches disk. So for MemoryOnly this reads live from
+    /// _executor.Snapshot() instead — the exact same live source SearchAsync already always uses for classic
+    /// mode, regardless of persistence mode, even pre-008 (see its own `_executor?.Snapshot()` line below).
+    /// Batched/FireAndForget are UNCHANGED: still the persisted state.State.Snapshot, lagging by up to one
+    /// flush interval, exactly as pre-008.</summary>
+    private IEnumerable<TableRowDto> ClassicModeRows() =>
+        _persistenceMode == TablePersistenceMode.MemoryOnly && _executor is not null
+            ? _executor.Snapshot().Values.Select(v => new TableRowDto { Row = new Dictionary<string, object?>(v.Row), Weight = v.Weight })
+            : state.State.Snapshot.Values;
+
+    private int ClassicModeRowCount() =>
+        _persistenceMode == TablePersistenceMode.MemoryOnly && _executor is not null
+            ? _executor.Snapshot().Count
+            : state.State.Snapshot.Count;
 
     /// <summary>Plan 003 M2: in coordinator mode (Parallelism &gt;= 2), additively fans out to every
     /// deployed TableStageGrain for per-partition detail (TableMetrics.Partitions) — null/absent on the
@@ -489,8 +575,10 @@ public sealed class TableGrain(
             Status = _status,
             // Plan 003 M4: live count for coordinator mode — see GetRowsAsync's doc comment for why
             // (state.State.Snapshot lags up to the 2s flush interval; RowCount must agree with
-            // SnapshotFrontierEpoch below, which is also updated live).
-            RowCount = _coordinatorMode ? _coordinatorSnapshot.Count : state.State.Snapshot.Count,
+            // SnapshotFrontierEpoch below, which is also updated live). Plan 008 W2.5: ClassicModeRowCount
+            // additionally goes live for MemoryOnly (see its own doc comment) — state.State.Snapshot is
+            // never populated at all in that mode, not just lagging.
+            RowCount = _coordinatorMode ? _coordinatorSnapshot.Count : ClassicModeRowCount(),
             DeltasIn = _deltasIn,
             DeltasOut = _deltasOut,
             LastUpdateMs = _lastUpdateMs,
@@ -682,12 +770,17 @@ public sealed class TableGrain(
         }
     }
 
-    private async Task FlushAsync()
+    /// <summary>Captures the live consolidated Z-set into <c>state.State</c> — MUST stay synchronous, on the
+    /// grain turn: <see cref="_executor"/>/<see cref="_coordinatorSnapshot"/> are not thread-safe and this is
+    /// the only safe place to read them. Returns false (and clears <see cref="_dirty"/> without touching
+    /// state.State) when there is nothing to capture, exactly like the pre-008 FlushAsync's own null-executor
+    /// guard.</summary>
+    private bool CaptureSnapshotIntoState()
     {
         if (_executor is null)
         {
             _dirty = false;
-            return;
+            return false;
         }
 
         var snapshot = _coordinatorMode ? _coordinatorSnapshot : _executor.Snapshot();
@@ -696,16 +789,57 @@ public sealed class TableGrain(
             kv => new TableRowDto { Row = new Dictionary<string, object?>(kv.Value.Row), Weight = kv.Value.Weight });
         state.State.Seq++;
         _dirty = false;
+        return true;
+    }
 
+    /// <summary>Batched (and every final flush, see StopAsync/OnDeactivateAsync): capture + AWAIT the write,
+    /// exactly as pre-008 — the grain turn stalls for the duration of the write.</summary>
+    private async Task FlushAsync()
+    {
+        if (!CaptureSnapshotIntoState()) return;
         await state.WriteStateAsync();
+    }
+
+    /// <summary>Background half of FireAndForget's write — never throws (caught and logged here), so
+    /// <see cref="_pendingWrite"/> can always be awaited/polled without a try/catch at the call site. Per the
+    /// brief: log write failures, never let a background failure take down the grain or be swallowed
+    /// silently — this is the one place that failure surfaces.</summary>
+    private async Task WriteStateBestEffortAsync()
+    {
+        try
+        {
+            await state.WriteStateAsync();
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Background (FireAndForget) flush failed for table '{Table}'", _def?.Name);
+        }
     }
 
     private async Task OnFlushTickAsync()
     {
-        if (_dirty)
+        if (!_dirty) return;
+
+        if (_persistenceMode == TablePersistenceMode.FireAndForget)
         {
-            await FlushAsync();
+            // Single-flight: a write from a previous tick still in flight means this tick is skipped
+            // outright rather than overlapped — see class doc's persistence-mode paragraph for why that
+            // matters (JsonFileGrainStorage is not safe against two concurrent writers of the same file/
+            // state object).
+            if (!_pendingWrite.IsCompleted) return;
+
+            if (CaptureSnapshotIntoState())
+            {
+                // Capture happened synchronously above (still on this turn); the write itself is NOT
+                // awaited — the turn returns as soon as this method returns, and the write completes in the
+                // background, observed by the next tick's _pendingWrite.IsCompleted check.
+                _pendingWrite = WriteStateBestEffortAsync();
+            }
+            return;
         }
+
+        // Batched (MemoryOnly never registers this timer at all — see StartClassicAsync/StartCoordinatorAsync).
+        await FlushAsync();
     }
 
     private static FieldKind MapFieldKind(FieldType type) => type switch

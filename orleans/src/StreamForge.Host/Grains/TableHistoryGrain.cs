@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Orleans;
 using Orleans.Runtime;
 using Orleans.Streams;
@@ -56,14 +57,66 @@ public sealed class TableHistoryGrainState
 /// the stream subscription's callback stays registered — Orleans persistent-stream subscriptions survive
 /// deactivation at the pub-sub-store level, but the local callback registration does not, so this grain
 /// must stay activated to keep observing new deltas, exactly like TableGrain does for "Running").
+///
+/// PLAN 008 W2.5 — PER-TABLE PERSISTENCE MODE: this grain's write-behind flush has "the identical stall
+/// shape" TableGrain's own class doc describes (whole-state serialize + file write, awaited inside the grain
+/// turn), driven by the SAME TableDefinition.Persistence/FlushMs the owning table was configured with (see
+/// ResetAsync/ResumeAsync, both already take the full TableDefinition). The mechanism mirrors TableGrain's
+/// own persistence-mode paragraph almost exactly — Batched (default) awaits the write on the configured
+/// interval (0 = pre-008 hardcoded 2000ms), FireAndForget captures then backgrounds the write with the same
+/// single-flight guard (<see cref="_pendingWrite"/>), MemoryOnly registers no timer and skips every flush,
+/// including the final one on stop/deactivate.
+///
+/// ONE STRUCTURAL DIFFERENCE FROM TableGrain, and the reason for <see cref="_liveEntries"/>/
+/// <see cref="_liveSeq"/> existing at all: TableGrain's live source (<c>_executor</c>/
+/// <c>_coordinatorSnapshot</c>) was ALREADY a separate object from <c>state.State.Snapshot</c> pre-008 (a
+/// fresh dictionary is built into state.State.Snapshot only at flush time), so a backgrounded write can
+/// never race a live mutation — nothing else ever touches the dictionary handed to WriteStateAsync once it's
+/// captured. Pre-008 TableHistoryGrain had NO such separation: OnDeltaBatchAsync mutated
+/// <c>state.State.Entries</c> (and, in place, each <c>RowHistoryEntry.Versions</c> list /
+/// <c>RetractionCount</c>) directly and immediately — reads were zero-lag, only the DISK write lagged behind
+/// (_dirty + timer). Backgrounding that write without change would let a later turn's in-place Add/Remove on
+/// a <c>List&lt;HistoryVersion&gt;</c> or the <c>Entries</c> dictionary race
+/// <c>JsonSerializer.SerializeAsync</c> walking the very same object graph mid-flight — Dictionary/List don't
+/// tolerate structural mutation during enumeration (a real, throwable
+/// <c>InvalidOperationException</c>, not just a theoretical race, since Orleans schedules the write's
+/// continuation back onto this grain's own single-threaded turn queue, interleaved with whatever turn runs
+/// next while the write's internal awaits are pending).
+///
+/// The fix: <see cref="_liveEntries"/> (mirroring TableGrain's <c>_executor</c>) is now the ONLY thing
+/// OnDeltaBatchAsync/GetHistoryAsync/GetStatsAsync ever mutate or read for live data — zero-lag reads are
+/// fully preserved, unchanged from pre-008. <c>state.State.Entries</c> becomes purely a periodically
+/// refreshed, write-only mirror: <see cref="CaptureSnapshotIntoState"/> deep-clones (fresh dictionary, fresh
+/// <c>RowHistoryEntry</c> objects with fresh <c>Versions</c> list copies — <c>HistoryVersion</c> instances
+/// themselves are effectively immutable once constructed, so sharing THEM by reference across the clone
+/// boundary is safe) from <c>_liveEntries</c> into <c>state.State.Entries</c> at every capture, and nothing
+/// ever mutates <c>state.State.Entries</c> in place again afterward — exactly the invariant a background
+/// write needs to be safe.
 /// </summary>
 public sealed class TableHistoryGrain(
-    [PersistentState("tableHistory", StreamConstants.StorageName)] IPersistentState<TableHistoryGrainState> state)
+    [PersistentState("tableHistory", StreamConstants.StorageName)] IPersistentState<TableHistoryGrainState> state,
+    ILogger<TableHistoryGrain> logger)
     : Grain, ITableHistoryGrain
 {
     private StreamSubscriptionHandle<List<TableDeltaDto>>? _sub;
     private IGrainTimer? _flushTimer;
     private bool _dirty;
+
+    /// <summary>The live, zero-lag working set — see class doc's persistence-mode paragraph for why this
+    /// exists as a field separate from state.State.Entries. Row-identity key -> retained version history,
+    /// mutated directly and immediately by OnDeltaBatchAsync; read directly by GetHistoryAsync/GetStatsAsync.</summary>
+    private readonly Dictionary<string, RowHistoryEntry> _liveEntries = [];
+    /// <summary>The live counterpart of state.State.Seq (see TableHistoryGrainState.Seq's own doc comment) —
+    /// incremented once per observed delta, mirrored into state.State.Seq only at capture time.</summary>
+    private long _liveSeq;
+
+    // Plan 008 W2.5 — per-table persistence mode, re-read from the owning table's TableDefinition on every
+    // ResetAsync/ResumeAsync (same refresh rule TableGrain uses for its own copies of these fields).
+    private TablePersistenceMode _persistenceMode = TablePersistenceMode.Batched;
+    private TimeSpan _flushInterval = TimeSpan.FromSeconds(2);
+    /// <summary>FireAndForget's single-flight guard — see TableGrain's identically-named field for the full
+    /// reasoning. Never faulted (WriteStateBestEffortAsync catches and logs internally).</summary>
+    private Task _pendingWrite = Task.CompletedTask;
 
     public async Task ResetAsync(TableDefinition def)
     {
@@ -80,19 +133,27 @@ public sealed class TableHistoryGrain(
             Entries = [],
             Seq = 0,
         };
+        _liveEntries.Clear();
+        _liveSeq = 0;
         _dirty = false;
+        _persistenceMode = def.Persistence;
+        _flushInterval = TimeSpan.FromMilliseconds(def.FlushMs > 0 ? def.FlushMs : 2000);
         await state.WriteStateAsync();
 
+        _flushTimer?.Dispose();
+        _flushTimer = null;
         if (def.HistoryEnabled)
         {
             await SubscribeAsync(def.Name);
-            _flushTimer ??= this.RegisterGrainTimer(OnFlushTickAsync, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+            // MemoryOnly registers no flush timer at all — see class doc's persistence-mode paragraph.
+            if (_persistenceMode != TablePersistenceMode.MemoryOnly)
+            {
+                _flushTimer = this.RegisterGrainTimer(OnFlushTickAsync, _flushInterval, _flushInterval);
+            }
             this.DelayDeactivation(TimeSpan.FromDays(365));
         }
         else
         {
-            _flushTimer?.Dispose();
-            _flushTimer = null;
             this.DelayDeactivation(TimeSpan.Zero);
         }
     }
@@ -115,11 +176,32 @@ public sealed class TableHistoryGrain(
         state.State.HistoryByField = def.HistoryByField;
         state.State.HistoryWindowMs = def.HistoryWindowMs;
         state.State.IdentityColumns = TableGroupKeyExtractor.ExtractIdentityColumns(def.Sql);
+        _persistenceMode = def.Persistence;
+        _flushInterval = TimeSpan.FromMilliseconds(def.FlushMs > 0 ? def.FlushMs : 2000);
+
+        // Plan 008 W2.5: repopulate the live working set from the just-loaded persisted snapshot (Orleans'
+        // ReadStateAsync already ran before activation reached this call) — deep-cloned, not reference-copied
+        // (see class doc's persistence-mode paragraph): _liveEntries must never share RowHistoryEntry/
+        // Versions-list object identity with state.State.Entries, or the very first background write after
+        // a restart would be exposed to the same in-place-mutation race the separation exists to prevent.
+        _liveEntries.Clear();
+        foreach (var (key, entry) in state.State.Entries)
+        {
+            _liveEntries[key] = new RowHistoryEntry { Versions = new List<HistoryVersion>(entry.Versions), RetractionCount = entry.RetractionCount };
+        }
+        _liveSeq = state.State.Seq;
+
         await state.WriteStateAsync();
 
         await UnsubscribeAsync();
         await SubscribeAsync(def.Name);
-        _flushTimer ??= this.RegisterGrainTimer(OnFlushTickAsync, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+        _flushTimer?.Dispose();
+        _flushTimer = null;
+        // MemoryOnly registers no flush timer at all — see class doc's persistence-mode paragraph.
+        if (_persistenceMode != TablePersistenceMode.MemoryOnly)
+        {
+            _flushTimer = this.RegisterGrainTimer(OnFlushTickAsync, _flushInterval, _flushInterval);
+        }
         this.DelayDeactivation(TimeSpan.FromDays(365));
     }
 
@@ -130,6 +212,8 @@ public sealed class TableHistoryGrain(
         _flushTimer = null;
 
         state.State = new TableHistoryGrainState();
+        _liveEntries.Clear();
+        _liveSeq = 0;
         _dirty = false;
         await state.WriteStateAsync();
         this.DelayDeactivation(TimeSpan.Zero);
@@ -137,7 +221,7 @@ public sealed class TableHistoryGrain(
 
     public Task<TableHistoryQueryResult> GetHistoryAsync(string key, int limit)
     {
-        if (!state.State.Entries.TryGetValue(key, out var entry))
+        if (!_liveEntries.TryGetValue(key, out var entry))
         {
             return Task.FromResult(new TableHistoryQueryResult
             {
@@ -166,8 +250,8 @@ public sealed class TableHistoryGrain(
     {
         Enabled = state.State.HistoryEnabled,
         Mode = state.State.HistoryMode,
-        KeyCount = state.State.Entries.Count,
-        TotalVersions = state.State.Entries.Values.Sum(e => (long)e.Versions.Count),
+        KeyCount = _liveEntries.Count,
+        TotalVersions = _liveEntries.Values.Sum(e => (long)e.Versions.Count),
     });
 
     private async Task SubscribeAsync(string tableName)
@@ -191,18 +275,18 @@ public sealed class TableHistoryGrain(
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         foreach (var delta in batch)
         {
-            state.State.Seq++;
+            _liveSeq++;
 
             var key = RowKeyCodec.EncodeIdentity(delta.Row, state.State.IdentityColumns);
-            if (!state.State.Entries.TryGetValue(key, out var entry))
+            if (!_liveEntries.TryGetValue(key, out var entry))
             {
                 entry = new RowHistoryEntry();
-                state.State.Entries[key] = entry;
+                _liveEntries[key] = entry;
             }
 
             if (delta.Weight > 0)
             {
-                var version = new HistoryVersion(new Dictionary<string, object?>(delta.Row), nowMs, state.State.Seq);
+                var version = new HistoryVersion(new Dictionary<string, object?>(delta.Row), nowMs, _liveSeq);
                 TableRowHistoryRetention.Append(entry, version, state.State.HistoryMode, state.State.HistoryLimit, state.State.HistoryByField, state.State.HistoryWindowMs);
             }
             else
@@ -215,19 +299,71 @@ public sealed class TableHistoryGrain(
         return Task.CompletedTask;
     }
 
+    /// <summary>Deep-clones _liveEntries into state.State.Entries — see class doc's persistence-mode
+    /// paragraph for why this MUST be a full clone (fresh dictionary + fresh RowHistoryEntry/Versions-list
+    /// objects), never a reference copy: once captured, state.State.Entries must never be mutated in place
+    /// again, so a background write serializing it can never race a later OnDeltaBatchAsync mutation (which
+    /// only ever touches _liveEntries, a completely separate object graph from this point on).</summary>
+    private void CaptureSnapshotIntoState()
+    {
+        state.State.Entries = _liveEntries.ToDictionary(
+            kv => kv.Key,
+            kv => new RowHistoryEntry { Versions = new List<HistoryVersion>(kv.Value.Versions), RetractionCount = kv.Value.RetractionCount });
+        state.State.Seq = _liveSeq;
+        _dirty = false;
+    }
+
+    /// <summary>Batched (and every final flush, see OnDeactivateAsync): capture + AWAIT the write, exactly
+    /// as pre-008 — the grain turn stalls for the duration of the write.</summary>
+    private async Task FlushAsync()
+    {
+        CaptureSnapshotIntoState();
+        await state.WriteStateAsync();
+    }
+
+    /// <summary>Background half of FireAndForget's write — never throws (caught and logged here), so
+    /// <see cref="_pendingWrite"/> can always be awaited/polled without a try/catch at the call site.</summary>
+    private async Task WriteStateBestEffortAsync()
+    {
+        try
+        {
+            await state.WriteStateAsync();
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Background (FireAndForget) flush failed for table history '{Table}'", this.GetPrimaryKeyString());
+        }
+    }
+
     private async Task OnFlushTickAsync()
     {
         if (!_dirty) return;
-        _dirty = false;
-        await state.WriteStateAsync();
+
+        if (_persistenceMode == TablePersistenceMode.FireAndForget)
+        {
+            // Single-flight: a write from a previous tick still in flight means this tick is skipped
+            // outright rather than overlapped — see TableGrain's identical guard for the full reasoning
+            // (JsonFileGrainStorage is not safe against two concurrent writers of the same file/state object).
+            if (!_pendingWrite.IsCompleted) return;
+
+            CaptureSnapshotIntoState(); // synchronous, still on this turn
+            _pendingWrite = WriteStateBestEffortAsync(); // NOT awaited — turn returns immediately
+            return;
+        }
+
+        // Batched (MemoryOnly never registers this timer at all — see ResetAsync/ResumeAsync).
+        await FlushAsync();
     }
 
     public override async Task OnDeactivateAsync(DeactivationReason reason, CancellationToken cancellationToken)
     {
-        if (_dirty)
+        // Plan 008 W2.5: same reasoning as TableGrain's OnDeactivateAsync — await any in-flight
+        // FireAndForget background write first (never faulted, so no try/catch needed), then skip entirely
+        // for MemoryOnly, otherwise flush (capture + awaited write) exactly like Batched always has.
+        try { await _pendingWrite; } catch { /* defensive only — WriteStateBestEffortAsync never faults */ }
+        if (_persistenceMode != TablePersistenceMode.MemoryOnly && _dirty)
         {
-            try { await state.WriteStateAsync(); } catch { /* best-effort */ }
-            _dirty = false;
+            try { await FlushAsync(); } catch { /* best-effort */ }
         }
         await base.OnDeactivateAsync(reason, cancellationToken);
     }
