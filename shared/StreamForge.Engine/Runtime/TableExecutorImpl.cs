@@ -60,34 +60,11 @@ public sealed partial class TableExecutor
     // aliases, directly or via a derived source's nested TableExecutor).
     private readonly Dictionary<string, List<RoleEntry>> _roles = [];
 
-    // Consolidated output: canonical row text -> (row, weight). Only ever holds weight > 0 entries —
-    // Snapshot() returns this dictionary BY REFERENCE (see SnapshotCore below) so hosts on the hot `/rows`
-    // read path get an allocation-free view; that contract requires this dictionary to already contain
-    // exactly the user-visible positive rows, nothing more.
-    private readonly Dictionary<string, (EventRecord Row, long Weight)> _consolidated = [];
-
-    // Outstanding NEGATIVE running weight per canonical row key, for keys whose net weight-so-far is <= 0
-    // and are therefore not (or no longer) in _consolidated. Necessary for order-independence: under
-    // causal delivery a retraction always follows its own assertion, so this dictionary stays empty in the
-    // common case — but nothing in a Z-set/DBSP model guarantees delivery order, and a negative delta can
-    // legitimately arrive for a key with no prior positive weight (e.g. a FULL OUTER join's own retraction-
-    // driven pad, replay, or out-of-order admission). Discarding that negative delta (the old bug) loses
-    // information: a later positive delta for the same key would then be treated as a fresh start instead
-    // of netting against the outstanding debt, so a row whose true total weight is 0 could resurface at a
-    // positive weight depending on arrival order alone.
-    //
-    // Kept as a *separate* side table rather than allowing _consolidated to hold weight <= 0 entries so
-    // that _consolidated — and therefore Snapshot()'s by-reference return — never needs filtering: every
-    // entry in it is already exactly what a caller should see. The two dictionaries are disjoint by
-    // construction (ApplyConsolidation below always removes from whichever one a key is NOT being written
-    // into) and a key that nets to exactly 0 is removed from both, so neither structure accumulates residue
-    // for rows that have fully cancelled out. This is the DBSP invariant that makes the ledger order-
-    // independent: for any canonical key, the value looked up before folding in a new delta is always the
-    // exact running sum of every delta seen so far for that key (never a "resets to zero because we forgot
-    // the negative part" approximation), so — because integer addition is commutative and associative — the
-    // final classification of a key (positive/zero/negative) after the full multiset of deltas has been
-    // applied depends only on the SUM of the deltas, never on the order they arrived in.
-    private readonly Dictionary<string, long> _debtWeights = [];
+    // Consolidated output Z-set ledger (Plan 009 wave D: extracted — was two separate dictionaries here,
+    // `_consolidated`/`_debtWeights`; see ConsolidationLedger's own class doc for the full order-
+    // independence argument they used to carry locally). Snapshot() returns _ledger.Visible BY REFERENCE
+    // (see SnapshotCore below) so hosts on the hot `/rows` read path get an allocation-free view.
+    private readonly ConsolidationLedger _ledger = new();
 
     private long _epochCounter;
 
@@ -276,7 +253,7 @@ public sealed partial class TableExecutor
     private IReadOnlyDictionary<string, (EventRecord Row, long Weight)> SnapshotCore()
     {
         EnsureInit();
-        return _consolidated;
+        return _ledger.Visible;
     }
 
     /// <summary>Test-only introspection hook (see TableConsolidationLedgerTests) for the debt side-table's
@@ -285,7 +262,7 @@ public sealed partial class TableExecutor
     /// or fully cancelled out -- the common case under causal delivery. Not part of the frozen public
     /// contract (PublicApi.cs); `internal` + this assembly's InternalsVisibleTo to StreamForge.Engine.Tests
     /// is enough for the ledger itself to be provable, without adding surface area hosts could depend on.</summary>
-    internal int DebtCount => _debtWeights.Count;
+    internal int DebtCount => _ledger.DebtCount;
 
     private List<TableDelta> HandleIncoming(string name, EventRecord evt, long weight)
     {
@@ -353,29 +330,6 @@ public sealed partial class TableExecutor
     private void ApplyConsolidation(TableDelta delta)
     {
         var key = JsonText.SerializeCanonicalRow(delta.Row);
-
-        // The running weight for this key BEFORE folding in `delta`, wherever it currently lives (positive
-        // in _consolidated, negative in _debtWeights, or 0/absent from both — never in both at once).
-        long currentWeight = _consolidated.TryGetValue(key, out var existing)
-            ? existing.Weight
-            : _debtWeights.GetValueOrDefault(key);
-
-        long newWeight = currentWeight + delta.Weight;
-
-        if (newWeight > 0)
-        {
-            _consolidated[key] = (delta.Row, newWeight);
-            _debtWeights.Remove(key);
-        }
-        else if (newWeight < 0)
-        {
-            _consolidated.Remove(key);
-            _debtWeights[key] = newWeight;
-        }
-        else // newWeight == 0: fully cancelled out — no residue in either structure.
-        {
-            _consolidated.Remove(key);
-            _debtWeights.Remove(key);
-        }
+        _ledger.Apply(key, delta.Row, delta.Weight);
     }
 }
