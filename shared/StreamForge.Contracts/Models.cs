@@ -67,6 +67,26 @@ public sealed class SourceDefinition
     /// <summary>Client-push ingress configuration (plan 008 W4); non-null only for
     /// <see cref="SourceKinds.Ingest"/> sources.</summary>
     [Id(10)] public IngestConfig? Ingest { get; set; }
+    /// <summary>Plan 009 C2: what an inbound row does when a value cannot be coerced to its declared
+    /// field type. Applies to EVERY inbound path — push ingress, the four connector kinds, and NATS —
+    /// so a stringly-typed feed can be declared with real types and parsed on arrival. Default
+    /// <see cref="CoercionFailurePolicy.Null"/> preserves the pre-009 lenient behavior.</summary>
+    [Id(11)] public CoercionFailurePolicy OnCoercionFailure { get; set; } = CoercionFailurePolicy.Null;
+}
+
+/// <summary>Plan 009 C2: what happens to a value that will not coerce to its declared field type.
+/// Whichever is chosen, the failure is COUNTED and surfaced — a silently vanishing row is the one
+/// outcome none of these may produce.</summary>
+public enum CoercionFailurePolicy
+{
+    /// <summary>The field becomes null, the rest of the row is kept. Lenient, and the default because
+    /// it is the pre-009 behavior.</summary>
+    Null,
+    /// <summary>The whole row is discarded. Use when a partly-null row is worse than no row.</summary>
+    DropRow,
+    /// <summary>The whole batch is refused (a 400 on the push path). Strictest; keeps a malformed feed
+    /// from being half-ingested.</summary>
+    RejectBatch,
 }
 
 [GenerateSerializer]
@@ -94,6 +114,10 @@ public sealed class PipelineDefinition
     /// readable without a compile round-trip (POST /api/pipelines/validate is Editor-gated, a lineage view
     /// is not). Derived, never user-editable; empty until the SQL compiles.</summary>
     [Id(11)] public List<string> SourceNames { get; set; } = [];
+
+    /// <summary>Plan 009 B2: where this pipeline's result rows are republished. Empty = nowhere, the
+    /// pre-009 behavior. Delivery is fire-and-forget — see <see cref="SinkSpec"/>.</summary>
+    [Id(12)] public List<SinkSpec> Sinks { get; set; } = [];
 }
 
 /// <summary>One emitted result row. Values are primitives only (string/double/long/bool/null).</summary>
@@ -216,6 +240,10 @@ public sealed class TableDefinition
     /// flush degenerates into a full snapshot write (i.e. Batched with extra steps); too large and
     /// activation spends its time replaying.</summary>
     [Id(24)] public int JournalMaxEntries { get; set; }
+
+    /// <summary>Plan 009 B2: where this table's deltas are republished. Empty = nowhere, the pre-009
+    /// behavior. Delivery is fire-and-forget — see <see cref="SinkSpec"/>.</summary>
+    [Id(25)] public List<SinkSpec> Sinks { get; set; } = [];
 }
 
 /// <summary>Plan 008: per-table durability policy. State is the materialized snapshot; the question is only

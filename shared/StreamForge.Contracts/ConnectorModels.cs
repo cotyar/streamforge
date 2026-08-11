@@ -17,6 +17,9 @@ public static class SourceKinds
     /// <summary>Plan 008 W4: client-push ingress. The only kind that is not pull-based — there is no
     /// connector and no timer; rows arrive through IIngressFacade. See <see cref="IngestConfig"/>.</summary>
     public const string Ingest = "ingest";
+    /// <summary>Plan 009 B1: a NATS subject subscription. A persistent subscriber like
+    /// <see cref="Grpc"/>, not a polled kind — its Schedule is ignored. See <see cref="NatsSubConfig"/>.</summary>
+    public const string Nats = "nats";
 
     /// <summary>The masked placeholder for secrets-lite values (D-H).</summary>
     public const string SecretMask = "***";
@@ -34,6 +37,82 @@ public sealed class ConnectorConfig
     [Id(3)] public FolderPollConfig? Folder { get; set; }
     [Id(4)] public GrpcSubConfig? Grpc { get; set; }
     [Id(5)] public MappingSpec? Mapping { get; set; }
+    /// <summary>Plan 009 B1; set only for <see cref="SourceKinds.Nats"/>.</summary>
+    [Id(6)] public NatsSubConfig? Nats { get; set; }
+}
+
+/// <summary>Plan 009 B1: NATS subject subscription. Credentials follow the secrets-lite convention
+/// plan 006 established — read back as <see cref="SourceKinds.SecretMask"/>, and sending the mask on
+/// write means "keep the stored value".</summary>
+[GenerateSerializer]
+public sealed class NatsSubConfig
+{
+    /// <summary>Server URL(s), comma-separated, e.g. "nats://localhost:4222".</summary>
+    [Id(0)] public string Url { get; set; } = "";
+    /// <summary>Subject to subscribe to; NATS wildcards (<c>*</c>, <c>&gt;</c>) are the server's to
+    /// interpret, not ours.</summary>
+    [Id(1)] public string Subject { get; set; } = "";
+    /// <summary>Queue group. Two replicas sharing one group split the subject between them instead of
+    /// both ingesting every message — which is this path's answer to the per-replica problem that
+    /// IngestStatus.Aggregated documents on the push-ingress side. Empty = every replica gets
+    /// everything, which is rarely what you want with more than one instance.</summary>
+    [Id(2)] public string QueueGroup { get; set; } = "";
+    /// <summary>Payload format, same vocabulary as the file/folder connectors ("ndjson" | "json" | "csv").</summary>
+    [Id(3)] public string Format { get; set; } = "json";
+    [Id(4)] public string? Token { get; set; }
+    [Id(5)] public string? Username { get; set; }
+    [Id(6)] public string? Password { get; set; }
+    /// <summary>Contents of a .creds file, not a path — the catalog has to be portable across hosts.</summary>
+    [Id(7)] public string? Credentials { get; set; }
+    /// <summary>Null (default) = core NATS subscribe: at-most-once, no cursor, nothing left behind on
+    /// the server. Non-null opts into a JetStream durable consumer, which gets redelivery and acks at
+    /// the price of server-side state this platform then owns.</summary>
+    [Id(8)] public NatsJetStreamConfig? JetStream { get; set; }
+}
+
+/// <summary>Plan 009 B1: opt-in JetStream durable consumer. Deliberately not the default — a durable
+/// consumer nobody drains is a server-side resource we would create and never clean up.</summary>
+[GenerateSerializer]
+public sealed class NatsJetStreamConfig
+{
+    [Id(0)] public string Stream { get; set; } = "";
+    /// <summary>Durable consumer name. Two replicas sharing it share the work; distinct names each get
+    /// their own cursor over the whole stream.</summary>
+    [Id(1)] public string Durable { get; set; } = "";
+    /// <summary>Max in-flight unacked messages, the JetStream-side analogue of an ingress buffer bound.</summary>
+    [Id(2)] public int MaxAckPending { get; set; } = 1000;
+}
+
+/// <summary>Plan 009 B2: where a pipeline's rows or a table's deltas are republished. The platform's
+/// first outbound concept — everything before this was inbound or read-on-demand. Kind is currently
+/// only "nats"; the container shape exists so a second sink kind is additive.</summary>
+[GenerateSerializer]
+public sealed class SinkSpec
+{
+    [Id(0)] public string Kind { get; set; } = SinkKinds.Nats;
+    [Id(1)] public bool Enabled { get; set; } = true;
+    [Id(2)] public NatsPubConfig? Nats { get; set; }
+}
+
+public static class SinkKinds
+{
+    public const string Nats = "nats";
+}
+
+/// <summary>Plan 009 B2. DELIVERY IS FIRE-AND-FORGET and there is no backpressure from the sink into
+/// the pipeline — the same honest limit plan 008's ingress documents, restated rather than pretended
+/// away: a slow or absent broker drops, it does not slow the platform down.</summary>
+[GenerateSerializer]
+public sealed class NatsPubConfig
+{
+    [Id(0)] public string Url { get; set; } = "";
+    /// <summary>Subject to publish to. May contain <c>{name}</c>, replaced with the pipeline/table
+    /// name, so one spec can serve a whole catalog.</summary>
+    [Id(1)] public string Subject { get; set; } = "";
+    [Id(2)] public string? Token { get; set; }
+    [Id(3)] public string? Username { get; set; }
+    [Id(4)] public string? Password { get; set; }
+    [Id(5)] public string? Credentials { get; set; }
 }
 
 /// <summary>Cron (5/6-field, UTC, Cronos) XOR fixed interval; IntervalMs floor is 1000 (D-E).</summary>

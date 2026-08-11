@@ -41,13 +41,15 @@ export interface SourceDefinition {
   connector?: ConnectorConfig
   /** Client-push ingress config (plan 008 W4); present only for 'ingest'-kind sources. */
   ingest?: IngestConfig
+  /** Plan 009 C2: coercion-failure policy for this source's inbound rows. Absent = 'Null'. */
+  onCoercionFailure?: CoercionFailurePolicy
 }
 
 // ============================================================================
 // Plan 006: ingestion connectors. Secret values (URL header values, gRPC password/token) read
 // back as the mask '***'; sending '***' on write means "keep the stored value".
 // ============================================================================
-export type SourceKind = 'generator' | 'url' | 'file' | 'folder' | 'grpc' | 'ingest'
+export type SourceKind = 'generator' | 'url' | 'file' | 'folder' | 'grpc' | 'ingest' | 'nats'
 export const SECRET_MASK = '***'
 export type FileFormat = 'ndjson' | 'json' | 'csv'
 
@@ -116,7 +118,54 @@ export interface ConnectorConfig {
   folder?: FolderPollConfig | null
   grpc?: GrpcSubConfig | null
   mapping?: MappingSpec | null
+  /** Plan 009 B1; set only for 'nats'-kind sources. */
+  nats?: NatsSubConfig | null
 }
+
+/** Plan 009 B1. Credentials follow the same secrets-lite convention as the other connectors:
+ *  read back as '***', and sending '***' means "keep the stored value". */
+export interface NatsSubConfig {
+  url: string
+  subject: string
+  /** Two replicas sharing a queue group split the subject instead of both ingesting everything. */
+  queueGroup: string
+  format: FileFormat
+  token?: string | null
+  username?: string | null
+  password?: string | null
+  /** Contents of a .creds file, not a path. */
+  credentials?: string | null
+  /** Null = core NATS (at-most-once, no server-side state). Non-null opts into a durable consumer. */
+  jetStream?: NatsJetStreamConfig | null
+}
+
+export interface NatsJetStreamConfig {
+  stream: string
+  durable: string
+  maxAckPending: number
+}
+
+/** Plan 009 B2: the platform's first outbound concept. Delivery is fire-and-forget — a slow or
+ *  absent broker drops, it does not slow the pipeline down. */
+export interface SinkSpec {
+  kind: 'nats'
+  enabled: boolean
+  nats?: NatsPubConfig | null
+}
+
+export interface NatsPubConfig {
+  url: string
+  /** May contain {name}, replaced with the pipeline/table name. */
+  subject: string
+  token?: string | null
+  username?: string | null
+  password?: string | null
+  credentials?: string | null
+}
+
+/** Plan 009 C2: what an inbound row does when a value will not coerce to its declared field type.
+ *  Whichever is chosen, the failure is counted and surfaced. PascalCase on the wire. */
+export type CoercionFailurePolicy = 'Null' | 'DropRow' | 'RejectBatch'
 
 /** GET /api/sources/{name}/status — null body (204) for generator-kind sources. */
 export interface ConnectorRuntimeStatus {
@@ -190,6 +239,8 @@ export interface PipelineDefinition {
    * pipeline-side counterpart of TableDefinition's streamInputs/tableInputs. Optional/additive — absent
    * on responses from a pre-W5 backend; empty until the SQL compiles. */
   sourceNames?: string[]
+  /** Plan 009 B2: where this pipeline's rows are republished. Absent/empty = nowhere. */
+  sinks?: SinkSpec[]
 }
 
 export interface JsonObject {
@@ -324,6 +375,8 @@ export interface TableDefinition {
   flushMs?: number
   /** Plan 009 A2: journal length that triggers compaction, for 'Journaled' only. 0/absent = default. */
   journalMaxEntries?: number
+  /** Plan 009 B2: where this table's deltas are republished. Absent/empty = nowhere. */
+  sinks?: SinkSpec[]
 }
 
 /** Plan 008: how a table's snapshot reaches storage (wire values are PascalCase — confirmed against
