@@ -8,6 +8,7 @@ import type {
   TableHistoryResponse,
   TableHistoryStats,
   TableMetrics,
+  TablePersistenceMode,
   TableRowsResponse,
   TableSearchMode,
   TableSearchResponse,
@@ -30,6 +31,11 @@ export interface CreateTableRequest {
   /** Plan 003 M5: 1 (default) = classic single-grain execution; 2..16 = partitioned dataflow.
    * Changing it on an existing table restarts it. */
   parallelism?: number
+  /** Plan 008: durability policy for the materialized snapshot. Absent = 'batched'. Changing it on
+   * an existing table restarts it. */
+  persistence?: TablePersistenceMode
+  /** Flush interval in ms for batched/fireAndForget; 0 or absent = 2000. */
+  flushMs?: number
 }
 
 export type UpdateTableRequest = CreateTableRequest

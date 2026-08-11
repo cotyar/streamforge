@@ -190,6 +190,28 @@ public sealed class TableGrain(
     /// `_executor.Snapshot()`.</summary>
     private readonly Dictionary<string, (EventRecord Row, long Weight)> _coordinatorSnapshot = [];
 
+    /// <summary>Outstanding NEGATIVE running weight per canonical row key, for keys whose net weight-so-far
+    /// is &lt;= 0 and are therefore not (or no longer) in <see cref="_coordinatorSnapshot"/> — the same side
+    /// table (and the same reasoning) as TableExecutorImpl's own `_debtWeights`, which _coordinatorSnapshot
+    /// is the coordinator-mode analogue of. A negative delta can legitimately arrive here for a key with no
+    /// prior positive weight: this grain fans terminal-partition batches in from N partitions (and an
+    /// upstream outer join emits retraction-driven pads), so per-key causal order is not guaranteed across
+    /// that fan-in, replay, or a restart-resume. Discarding that negative (the old bug) loses information —
+    /// a later positive delta for the same key would then start fresh instead of netting against the
+    /// outstanding debt, so a row whose true total weight is 0 could resurface at a positive weight
+    /// depending on arrival order alone.
+    ///
+    /// Kept separate from _coordinatorSnapshot rather than letting that dictionary hold weight &lt;= 0
+    /// entries so it stays exactly the user-visible positive rows — GetRowsAsync/RowCount/FlushAsync/
+    /// ReflectDeltasInSearchIndex all read it unfiltered. The two are disjoint by construction
+    /// (<see cref="ApplyCoordinatorConsolidation"/> always removes from whichever one a key is NOT written
+    /// into) and a key netting to exactly 0 leaves both, so neither accumulates residue for fully cancelled
+    /// rows. That is the DBSP invariant making this ledger order-independent: the value looked up before
+    /// folding in a new delta is always the exact running sum of every delta seen so far for that key, so —
+    /// integer addition being commutative and associative — a key's final classification (positive/zero/
+    /// negative) depends only on the SUM of its deltas, never on the order they arrived in.</summary>
+    private readonly Dictionary<string, long> _coordinatorDebt = [];
+
     /// <summary>Plan 003 M4 — the M0 primitives (see FrontierTracker/EpochBuffer's own doc comments),
     /// registered over every terminal-stage partition (one UpstreamId per partition, keyed on the
     /// compiled dataflow's TerminalEdge.EdgeId — the one edge every terminal partition's own
@@ -308,6 +330,7 @@ public sealed class TableGrain(
         // "rebuild purely from live traffic" contract the classic path gets for free by allocating a brand
         // new (empty) TableExecutor on every StartClassicAsync call.
         _coordinatorSnapshot.Clear();
+        _coordinatorDebt.Clear();
 
         if (state.State.Snapshot.Count > 0)
         {
@@ -718,15 +741,32 @@ public sealed class TableGrain(
     private void ApplyCoordinatorConsolidation(TableDelta delta)
     {
         var key = _executor!.CanonicalRowKey(delta.Row);
-        if (_coordinatorSnapshot.TryGetValue(key, out var existing))
+
+        // Running weight for this key BEFORE folding in `delta`, wherever it currently lives (positive in
+        // _coordinatorSnapshot, negative in _coordinatorDebt, or 0/absent from both — never in both at
+        // once). See _coordinatorDebt's doc comment.
+        long currentWeight = _coordinatorSnapshot.TryGetValue(key, out var existing)
+            ? existing.Weight
+            : _coordinatorDebt.GetValueOrDefault(key);
+
+        long newWeight = currentWeight + delta.Weight;
+
+        if (newWeight > 0)
         {
-            long newWeight = existing.Weight + delta.Weight;
-            if (newWeight <= 0) _coordinatorSnapshot.Remove(key);
-            else _coordinatorSnapshot[key] = (existing.Row, newWeight);
+            // Same canonical key => same row content, so either representative is equivalent (the Engine's
+            // ApplyConsolidation likewise always stores the incoming row).
+            _coordinatorSnapshot[key] = (delta.Row, newWeight);
+            _coordinatorDebt.Remove(key);
         }
-        else if (delta.Weight > 0)
+        else if (newWeight < 0)
         {
-            _coordinatorSnapshot[key] = (delta.Row, delta.Weight);
+            _coordinatorSnapshot.Remove(key);
+            _coordinatorDebt[key] = newWeight;
+        }
+        else // newWeight == 0: fully cancelled out — no residue in either structure.
+        {
+            _coordinatorSnapshot.Remove(key);
+            _coordinatorDebt.Remove(key);
         }
     }
 

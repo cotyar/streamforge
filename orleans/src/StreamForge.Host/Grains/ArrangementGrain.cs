@@ -56,6 +56,26 @@ public sealed class ArrangementGrain(
     // consolidated Z-set index for this partition.
     private readonly Dictionary<string, (EventRecord Row, long Weight)> _index = [];
 
+    // Outstanding NEGATIVE running weight per canonical key, for keys whose net weight-so-far is <= 0 and
+    // are therefore not (or no longer) in _index — the same side table (and the same reasoning) as
+    // TableExecutorImpl's `_debtWeights`, which this index is the per-partition analogue of. A negative
+    // delta can legitimately arrive here for a key with no prior positive weight: this grain's input is a
+    // delta STREAM whose per-key causal order isn't guaranteed across activation/rebuild-from-checkpoint,
+    // and an upstream outer join emits retraction-driven pads. Discarding that negative (the old bug) loses
+    // information — a later positive delta for the same key would then start fresh instead of netting
+    // against the outstanding debt, so a row whose true total weight is 0 could resurface at a positive
+    // weight depending on arrival order alone.
+    //
+    // Kept separate from _index rather than letting _index hold weight <= 0 entries so that _index stays
+    // exactly the user-visible positive rows — SnapshotAsync/AttachAsync push it verbatim and RowCount
+    // counts it, none of which may see debt rows. The two are disjoint by construction (ApplyToIndex always
+    // removes from whichever one a key is NOT written into) and a key netting to exactly 0 leaves both, so
+    // neither accumulates residue for fully cancelled rows. That is the DBSP invariant making this ledger
+    // order-independent: the value looked up before folding in a new delta is always the exact running sum
+    // of every delta seen so far for that key, so — integer addition being commutative and associative —
+    // a key's final classification depends only on the SUM of its deltas, never on their arrival order.
+    private readonly Dictionary<string, long> _indexDebt = [];
+
     // consumerId -> (targetGrainKey, targetEdgeId) for every currently-attached, live-push-eligible consumer.
     private readonly Dictionary<string, (string TargetGrainKey, int TargetEdgeId)> _consumers = [];
 
@@ -174,6 +194,7 @@ public sealed class ArrangementGrain(
 
         _pending.Clear();
         _index.Clear();
+        _indexDebt.Clear();
         _rebuilding = false;
 
         // Last detach clears state (plan 003 M3 refcount+GC requirement) — a future attach for this exact
@@ -238,15 +259,31 @@ public sealed class ArrangementGrain(
     private void ApplyToIndex(TableDelta d)
     {
         var key = CanonicalRowKey(d.Row);
-        if (_index.TryGetValue(key, out var existing))
+
+        // Running weight for this key BEFORE folding in `d`, wherever it currently lives (positive in
+        // _index, negative in _indexDebt, or 0/absent from both — never in both at once). See _indexDebt.
+        long currentWeight = _index.TryGetValue(key, out var existing)
+            ? existing.Weight
+            : _indexDebt.GetValueOrDefault(key);
+
+        long newWeight = currentWeight + d.Weight;
+
+        if (newWeight > 0)
         {
-            long newWeight = existing.Weight + d.Weight;
-            if (newWeight <= 0) _index.Remove(key);
-            else _index[key] = (existing.Row, newWeight);
+            // Same canonical key => same row content, so either representative is equivalent (the Engine's
+            // ApplyConsolidation likewise always stores the incoming row).
+            _index[key] = (d.Row, newWeight);
+            _indexDebt.Remove(key);
         }
-        else if (d.Weight > 0)
+        else if (newWeight < 0)
         {
-            _index[key] = (d.Row, d.Weight);
+            _index.Remove(key);
+            _indexDebt[key] = newWeight;
+        }
+        else // newWeight == 0: fully cancelled out — no residue in either structure.
+        {
+            _index.Remove(key);
+            _indexDebt.Remove(key);
         }
     }
 

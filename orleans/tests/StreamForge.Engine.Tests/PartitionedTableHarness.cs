@@ -25,7 +25,12 @@ internal sealed class PartitionedTableHarness
 {
     private readonly TableDataflowPlan _plan;
     private readonly Dictionary<(int Stage, int Partition), ITableStageExecutor> _executors = [];
+    // Mirrors TableExecutorImpl's own _consolidated/_debtWeights split exactly (see that file's doc comment
+    // for the order-independence proof) — this harness is the M2 equivalence oracle, so it must apply the
+    // identical ledger fix or the "classic vs partitioned" comparisons in TableOuterJoinPartitionedTests
+    // would silently diverge again under reversed admission order.
     private readonly Dictionary<string, (EventRecord Row, long Weight)> _consolidated = [];
+    private readonly Dictionary<string, long> _debtWeights = [];
     private long _epochCounter;
 
     public PartitionedTableHarness(TableDataflowPlan plan) => _plan = plan;
@@ -123,15 +128,27 @@ internal sealed class PartitionedTableHarness
     private void ApplyConsolidation(TableDelta delta)
     {
         var key = JsonText.SerializeCanonicalRow(delta.Row);
-        if (_consolidated.TryGetValue(key, out var existing))
+
+        long currentWeight = _consolidated.TryGetValue(key, out var existing)
+            ? existing.Weight
+            : _debtWeights.GetValueOrDefault(key);
+
+        long newWeight = currentWeight + delta.Weight;
+
+        if (newWeight > 0)
         {
-            long newWeight = existing.Weight + delta.Weight;
-            if (newWeight <= 0) _consolidated.Remove(key);
-            else _consolidated[key] = (existing.Row, newWeight);
+            _consolidated[key] = (delta.Row, newWeight);
+            _debtWeights.Remove(key);
         }
-        else if (delta.Weight > 0)
+        else if (newWeight < 0)
         {
-            _consolidated[key] = (delta.Row, delta.Weight);
+            _consolidated.Remove(key);
+            _debtWeights[key] = newWeight;
+        }
+        else // newWeight == 0: fully cancelled out — no residue in either structure.
+        {
+            _consolidated.Remove(key);
+            _debtWeights.Remove(key);
         }
     }
 }

@@ -17,6 +17,7 @@ import type {
   TableDefinition,
   TableHistoryMode,
   TableOutputField,
+  TablePersistenceMode,
   TableSearchMode,
   TableSearchResponse,
 } from '../api/types'
@@ -244,6 +245,18 @@ const SEARCH_MODE_HINT: Record<TableSearchMode, string> = {
   Fuzzy: 'Fuzzy — typo-tolerant matching',
 }
 
+const PERSISTENCE_LABEL: Record<TablePersistenceMode, string> = {
+  Batched: 'Batched',
+  FireAndForget: 'Fire-and-forget',
+  MemoryOnly: 'Memory-only',
+}
+
+const PERSISTENCE_HINT: Record<TablePersistenceMode, string> = {
+  Batched: 'Written periodically; the write is awaited, so a flush briefly stalls the table and the stall grows with the row count.',
+  FireAndForget: 'The write happens in the background; a crash loses whatever had not reached disk.',
+  MemoryOnly: 'Never written — a restart brings this table back empty.',
+}
+
 /** Search box above the materialized view: swaps the grid to search results while a query is
  * active, and (for Editors) exposes the per-table search-index config that the backend restarts
  * the table's pipeline to apply. */
@@ -292,6 +305,17 @@ function SearchAndView({
   useEffect(() => {
     setParallelismDraft(table.parallelism)
   }, [table.parallelism])
+
+  // Persistence (durability) config draft — plan 008 W2.5, same resync-on-fresh-definition pattern
+  // as the other quick-toggle drafts above. Absent on the wire means the pre-008 default.
+  const [persistenceDraft, setPersistenceDraft] = useState<TablePersistenceMode>(table.persistence ?? 'Batched')
+  const [flushMsDraft, setFlushMsDraft] = useState(table.flushMs ?? 0)
+  const [persistenceApplying, setPersistenceApplying] = useState(false)
+
+  useEffect(() => {
+    setPersistenceDraft(table.persistence ?? 'Batched')
+    setFlushMsDraft(table.flushMs ?? 0)
+  }, [table.persistence, table.flushMs])
 
   useEffect(() => {
     setHistoryDraftEnabled(table.historyEnabled)
@@ -369,6 +393,8 @@ function SearchAndView({
       tags: table.tags,
       metadata: table.metadata,
       parallelism: table.parallelism,
+      persistence: table.persistence ?? 'Batched',
+      flushMs: table.flushMs ?? 0,
       ...overrides,
     }
   }
@@ -384,6 +410,23 @@ function SearchAndView({
       setParallelismDraft(table.parallelism)
     } finally {
       setParallelismApplying(false)
+    }
+  }
+
+  async function applyPersistence(nextMode: TablePersistenceMode, nextFlushMs: number) {
+    const clampedFlushMs = Math.max(0, nextFlushMs)
+    setPersistenceDraft(nextMode)
+    setFlushMsDraft(clampedFlushMs)
+    setPersistenceApplying(true)
+    try {
+      const saved = await tablesApi.update(table.id, fullUpdateBody({ persistence: nextMode, flushMs: clampedFlushMs }))
+      onTableChange(saved)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update persistence settings.')
+      setPersistenceDraft(table.persistence ?? 'Batched')
+      setFlushMsDraft(table.flushMs ?? 0)
+    } finally {
+      setPersistenceApplying(false)
     }
   }
 
@@ -720,6 +763,79 @@ function SearchAndView({
         </CardContent>
       </Card>
 
+      <Card>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Persistence</h3>
+            <Badge variant={persistenceDraft === 'MemoryOnly' ? 'destructive' : 'outline'}>
+              {PERSISTENCE_LABEL[persistenceDraft]}
+            </Badge>
+          </div>
+
+          {!canEdit && (
+            <span className="text-xs text-muted-foreground">{PERSISTENCE_HINT[table.persistence ?? 'Batched']}</span>
+          )}
+
+          <RoleGate min="Editor">
+            <div className="flex flex-wrap items-center gap-3 border-t border-border pt-3">
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                size="sm"
+                value={persistenceDraft}
+                disabled={persistenceApplying}
+                onValueChange={(v) => v && void applyPersistence(v as TablePersistenceMode, flushMsDraft)}
+                aria-label="Persistence mode"
+              >
+                <ToggleGroupItem value="Batched">Batched</ToggleGroupItem>
+                <ToggleGroupItem value="FireAndForget">Fire-and-forget</ToggleGroupItem>
+                <ToggleGroupItem value="MemoryOnly">Memory-only</ToggleGroupItem>
+              </ToggleGroup>
+
+              {(persistenceDraft === 'Batched' || persistenceDraft === 'FireAndForget') && (
+                <Field orientation="horizontal" className="items-center gap-1.5">
+                  <FieldLabel htmlFor="tbl-flush-ms" className="text-xs font-normal text-muted-foreground">
+                    Flush (ms)
+                  </FieldLabel>
+                  <Input
+                    id="tbl-flush-ms"
+                    type="number"
+                    min={0}
+                    step={500}
+                    className="w-24"
+                    value={flushMsDraft}
+                    disabled={persistenceApplying}
+                    onChange={(e) => setFlushMsDraft(Math.max(0, Number(e.target.value) || 0))}
+                    onBlur={() => void applyPersistence(persistenceDraft, flushMsDraft)}
+                  />
+                </Field>
+              )}
+
+              {persistenceApplying && (
+                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Spinner className="size-3.5" /> Restarting…
+                </span>
+              )}
+            </div>
+
+            <p className="text-[11px] text-muted-foreground">
+              {PERSISTENCE_HINT[persistenceDraft]}
+              {(persistenceDraft === 'Batched' || persistenceDraft === 'FireAndForget') && ' Flush 0 = 2000ms default.'}
+              {' Changing this restarts the table.'}
+            </p>
+
+            {persistenceDraft === 'MemoryOnly' && (
+              <Alert variant="destructive">
+                <TriangleAlert />
+                <AlertDescription>
+                  Memory-only rows are never written to storage — a restart or crash brings this table back empty.
+                </AlertDescription>
+              </Alert>
+            )}
+          </RoleGate>
+        </CardContent>
+      </Card>
+
       {isSearching ? (
         searchNotEnabled ? (
           <Empty className="border border-dashed">
@@ -913,7 +1029,8 @@ export function TableDetailPage() {
       // History config isn't editable from this form (see the right-panel "Row history" card, which
       // applies its own changes immediately) — carry the currently-persisted values through so a
       // plain Save never resets them back to the request DTO's defaults (history-off). Same for
-      // parallelism, editable only via the right-panel "Execution" card.
+      // parallelism and persistence/flushMs, editable only via the right-panel "Execution" and
+      // "Persistence" cards.
       const body = {
         name: name.trim(),
         description,
@@ -928,6 +1045,8 @@ export function TableDetailPage() {
         tags,
         metadata,
         parallelism: table?.parallelism ?? 1,
+        persistence: table?.persistence ?? ('Batched' as TablePersistenceMode),
+        flushMs: table?.flushMs ?? 0,
       }
       let saved: TableDefinition
       if (isNew) {

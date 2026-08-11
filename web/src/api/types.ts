@@ -311,18 +311,19 @@ export interface TableDefinition {
   /** Plan 003 M5: 1 (default) = classic single-grain execution; 2..16 deploys the partitioned
    * dataflow graph (see TableMetrics.partitions). Changing it restarts the table. */
   parallelism: number
-  /** Plan 008: durability policy for the materialized snapshot. Optional — absent means 'batched',
+  /** Plan 008: durability policy for the materialized snapshot. Optional — absent means 'Batched',
    * the pre-008 behavior. */
   persistence?: TablePersistenceMode
-  /** Flush interval in ms for batched/fireAndForget; 0 or absent = 2000. */
+  /** Flush interval in ms for Batched/FireAndForget; 0 or absent = 2000. */
   flushMs?: number
 }
 
-/** Plan 008: how a table's snapshot reaches storage. 'batched' awaits the write inside the grain turn
- * (durable, but the stall grows with the row count); 'fireAndForget' returns the turn immediately and
- * writes in the background (a crash loses the unwritten tail); 'memoryOnly' never writes, so a restart
- * brings the table back empty. */
-export type TablePersistenceMode = 'batched' | 'fireAndForget' | 'memoryOnly'
+/** Plan 008: how a table's snapshot reaches storage (wire values are PascalCase — confirmed against
+ * the running backend's JsonStringEnumConverter, same convention as TableSearchMode). 'Batched' awaits
+ * the write inside the grain turn (durable, but the stall grows with the row count); 'FireAndForget'
+ * returns the turn immediately and writes in the background (a crash loses the unwritten tail);
+ * 'MemoryOnly' never writes, so a restart brings the table back empty. */
+export type TablePersistenceMode = 'Batched' | 'FireAndForget' | 'MemoryOnly'
 
 export interface TableRowDto {
   row: ResultRow

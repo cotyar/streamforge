@@ -210,58 +210,40 @@ public class TableOuterJoinPartitionedTests
     [Fact]
     public void RightJoin_Deterministic() => AssertDeterministic(CompileTable(RightSql, [Trades], [Ref]), RightEvents());
 
-    /// <summary>FULL only: FIFO vs LIFO, NOT the full-reversal claim AssertDeterministic's own doc already
-    /// flags as plan-shape-dependent ("the stronger claim ... for plans where it holds"). See
-    /// <see cref="FullJoin_FullyReversedAdmissionOrder_DivergesFromForward_KnownConsolidationLimitation"/>
-    /// immediately below for why FULL is exactly such a plan and the confirmed root cause -- this is not an
-    /// assertion weakened to dodge a failure; FIFO vs LIFO is everything genuinely guaranteed here.</summary>
+    /// <summary>FULL: the full FIFO/LIFO/reversed determinism triad, same as LeftJoin_Deterministic/
+    /// RightJoin_Deterministic above. Previously weakened to FIFO-vs-LIFO only, because the fully-reversed
+    /// admission order used to diverge -- see
+    /// <see cref="FullJoin_FullyReversedAdmissionOrder_ConvergesWithForward"/> immediately below for the
+    /// root cause and the TableExecutorImpl.ApplyConsolidation fix that makes the full triad hold here too
+    /// now.</summary>
     [Fact]
-    public void FullJoin_Deterministic_FifoVsLifo()
-    {
-        var plan = CompileTable(FullSql, [Trades], [Ref]).Plan!;
-        var events = FullEvents();
-
-        var fifoHarness = new PartitionedTableHarness(plan.CreateDataflow(4));
-        foreach (var e in events) fifoHarness.Admit(e.Origin, e.Row, e.Weight, lifo: false);
-
-        var lifoHarness = new PartitionedTableHarness(plan.CreateDataflow(4));
-        foreach (var e in events) lifoHarness.Admit(e.Origin, e.Row, e.Weight, lifo: true);
-
-        Assert.Equal(Canon(fifoHarness), Canon(lifoHarness));
-    }
+    public void FullJoin_Deterministic() => AssertDeterministic(CompileTable(FullSql, [Trades], [Ref]), FullEvents());
 
     /// <summary>
-    /// CONFIRMED FINDING (plan 008 wave 2c-A), reported rather than fixed -- this file owns tests, not
-    /// TableExecutorImpl/TableOuterJoinOp. Reproduces byte-for-byte on the classic single-partition
-    /// TableExecutor (asserted below), so it is a general table-mode Snapshot()-consolidation limitation,
-    /// NOT anything specific to TableOuterJoinOp or the partitioned dataflow.
+    /// FIXED (plan 008 wave 2c-A follow-up): TableExecutorImpl.ApplyConsolidation (mirrored exactly by
+    /// PartitionedTableHarness.ApplyConsolidation for this test suite's own M2 equivalence oracle) now
+    /// tracks outstanding NEGATIVE running weight for a canonical row key in a side `_debtWeights` table
+    /// instead of silently discarding a negative delta that arrives before the dictionary has ever seen that
+    /// key (see TableExecutorImpl.cs's `_debtWeights` doc comment for the full order-independence argument).
     ///
-    /// ROOT CAUSE: TableExecutorImpl.ApplyConsolidation (mirrored exactly by
-    /// PartitionedTableHarness.ApplyConsolidation for this test suite's own M2 equivalence oracle) only
-    /// ever STORES weight&gt;0 entries; a negative delta for a canonical row not already in the dictionary is
-    /// silently dropped rather than recorded as a negative running total (see TableExecutorImpl.cs's "Weight
-    /// &lt;= 0 entries are pruned immediately" comment). That is safe as long as, for any given canonical row,
-    /// a retraction never arrives chronologically before its own assertion in the TOP-LEVEL admission
-    /// sequence -- true for genuine production delivery (a retraction always undoes a PRIOR real assertion)
-    /// but deliberately violated by this test's fully-REVERSED admission order.
-    ///
-    /// FULL join is where it surfaces: with the sequence reversed, ref's retraction (originally last, now
-    /// first) arrives while Left(trades) is not yet indexed for that key -- "ownMatchCount == 0" is
-    /// genuinely true *at this point in the reversed sequence*, so TableOuterJoinOp correctly (per its own
-    /// per-delta contract) emits its own T2 pad with the delta's own weight: Combine(nullLeft, ref-row)
-    /// weight -1. That -1 lands on a canonical row the consolidated dictionary has never seen -&gt; silently
-    /// dropped, not stored as -1. When the SAME ref row's original +1 assertion is admitted later in the
-    /// reversed sequence, it lands as a fresh +1 (the key is STILL absent from the dictionary's point of
-    /// view) -&gt; stored. Net effect: a row whose true weight is 0 across the whole sequence (assert, then
-    /// retract) instead persists at +1 in the reversed run only.
+    /// ROOT CAUSE (why this used to diverge): with the admission sequence reversed, ref's retraction
+    /// (originally last, now first) arrives while Left(trades) is not yet indexed for that key --
+    /// "ownMatchCount == 0" is genuinely true *at that point in the reversed sequence*, so TableOuterJoinOp
+    /// correctly (per its own per-delta contract) emits its own T2 pad with the delta's own weight:
+    /// Combine(nullLeft, ref-row) weight -1, for a canonical row the consolidated dictionary had never seen.
+    /// The OLD ledger dropped that -1 instead of recording the debt; when the SAME ref row's original +1
+    /// assertion was admitted later in the reversed sequence, it landed as a fresh +1 (the key was STILL
+    /// absent from the dictionary's point of view) instead of netting -1 + 1 = 0 against the recorded debt.
+    /// The NEW ledger records the -1 as debt, then the later +1 nets against it to exactly 0 and both
+    /// structures prune the key -- so no spurious row survives.
     ///
     /// LEFT and RIGHT never hit this in this file's event sets: whichever side retracts there is never that
     /// join's OWN padding side (ownPads is false for that arrival), so ownMatchCount is never consulted the
-    /// way FULL's is -- see LeftJoin_Deterministic/RightJoin_Deterministic above, both asserting the full
-    /// FIFO/LIFO/reversed triad successfully.
+    /// way FULL's is. FULL is kept as the scenario here because it is exactly the shape that used to surface
+    /// the bug -- now proven fixed instead.
     /// </summary>
     [Fact]
-    public void FullJoin_FullyReversedAdmissionOrder_DivergesFromForward_KnownConsolidationLimitation()
+    public void FullJoin_FullyReversedAdmissionOrder_ConvergesWithForward()
     {
         var compileResult = CompileTable(FullSql, [Trades], [Ref]);
         var plan = compileResult.Plan!;
@@ -281,24 +263,27 @@ public class TableOuterJoinPartitionedTests
             else classicReversed.OnStreamEvent(e.Origin, e.Row);
         }
 
-        // Forward order: 4 rows, no spurious (NULL,"core") pad -- the retraction correctly cancels its own
-        // earlier assertion (see FullEvents' own per-step trace in this file).
+        var forwardCanon = Canon(classicForward);
+
+        // Forward and fully-reversed top-level admission order now converge on the IDENTICAL consolidated
+        // snapshot: 4 rows, no spurious (NULL,"core") pad in either order -- the retraction correctly
+        // cancels its own earlier (or, in the reversed run, later-admitted) assertion either way.
+        Assert.Equal(forwardCanon, Canon(classicReversed));
         Assert.Equal(4, classicForward.Snapshot().Count);
         Assert.DoesNotContain(classicForward.Snapshot().Values, v => v.Row["symbol"] is null && (string?)v.Row["tag"] == "core");
+        Assert.Equal(4, classicReversed.Snapshot().Count);
+        Assert.DoesNotContain(classicReversed.Snapshot().Values, v => v.Row["symbol"] is null && (string?)v.Row["tag"] == "core");
 
-        // Reversed order: the SAME multiset of deltas, byte-identical rows/weights, produces a 5th, spurious
-        // row -- proof the divergence is real, not a fluke of this file's own harness.
-        Assert.Equal(5, classicReversed.Snapshot().Count);
-        Assert.Contains(classicReversed.Snapshot().Values, v => v.Row["symbol"] is null && (string?)v.Row["tag"] == "core");
+        // Reproduces through the partitioned harness too, both FIFO and LIFO intra-admission work-queue
+        // order, on top of the already-reversed top-level order -- confirming the fix isn't a
+        // partitioning-specific or intra-admission-order-specific coincidence.
+        var harnessReversedFifo = new PartitionedTableHarness(plan.CreateDataflow(4));
+        foreach (var e in events.AsEnumerable().Reverse()) harnessReversedFifo.Admit(e.Origin, e.Row, e.Weight, lifo: false);
+        Assert.Equal(forwardCanon, Canon(harnessReversedFifo));
 
-        // Reproduces identically through the partitioned harness too -- confirming this is not a
-        // partitioning-specific bug, just the case AssertDeterministic's own doc already anticipated could
-        // exist ("a fully reversed admission order isn't guaranteed to match for plans with order-sensitive
-        // semantics").
-        var harnessReversed = new PartitionedTableHarness(plan.CreateDataflow(4));
-        foreach (var e in events.AsEnumerable().Reverse()) harnessReversed.Admit(e.Origin, e.Row, e.Weight);
-        Assert.Equal(5, harnessReversed.Snapshot().Count);
-        Assert.Contains(harnessReversed.Snapshot().Values, v => v.Row["symbol"] is null && (string?)v.Row["tag"] == "core");
+        var harnessReversedLifo = new PartitionedTableHarness(plan.CreateDataflow(4));
+        foreach (var e in events.AsEnumerable().Reverse()) harnessReversedLifo.Admit(e.Origin, e.Row, e.Weight, lifo: true);
+        Assert.Equal(forwardCanon, Canon(harnessReversedLifo));
     }
 
     [Fact]
