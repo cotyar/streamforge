@@ -19,6 +19,33 @@ public sealed class TableGrainState
     public long Seq { get; set; }
 }
 
+/// <summary>Plan 009 A2: one journaled change since the last compaction — the second, SMALL persisted state
+/// <see cref="TablePersistenceMode.Journaled"/> writes on every flush instead of rewriting the whole
+/// <see cref="TableGrainState.Snapshot"/> (see TableGrain's class doc, Plan 009 A2 paragraph, for why a
+/// second small state — not an append-only storage provider — is the honest way to get an O(changed) write
+/// out of JsonFileGrainStorage's rewrite-the-whole-object model). <see cref="Weight"/> &gt; 0 means "this
+/// canonical row key is (now) present with this row/weight"; &lt;= 0 is an explicit REMOVAL TOMBSTONE — Row
+/// is left empty because replay only needs to know to remove the key, never what it used to contain. An
+/// ABSENT key means "unchanged since the last compaction", never a removal — collapsing that distinction
+/// (e.g. by just not recording a deleted row at all) is exactly the bug that resurrects deleted rows on
+/// replay; see TableGrain.ReplayJournalIntoSnapshot.</summary>
+public sealed class TableJournalEntry
+{
+    public Dictionary<string, object?> Row { get; set; } = [];
+    public long Weight { get; set; }
+}
+
+/// <summary>Plan 009 A2: <see cref="TablePersistenceMode.Journaled"/>'s second persisted state — keyed by
+/// canonical row key so repeated changes to the SAME key before the next compaction coalesce into one entry
+/// (bounding the journal's size by DISTINCT keys touched since the last compaction, not by delta volume).
+/// Cleared on every compaction (TableGrain.CompactAsync) and on every StartAsync (TableGrain.StartClassicAsync/
+/// StartCoordinatorAsync — see their mode-switch-consistency comment); replayed onto
+/// <see cref="TableGrainState.Snapshot"/> on activation, before that reset.</summary>
+public sealed class TableJournalState
+{
+    public Dictionary<string, TableJournalEntry> Entries { get; set; } = [];
+}
+
 /// <summary>
 /// Key = table name. One activation per running table. Subscribes to its SQL's stream inputs (the
 /// existing "sources" namespace) and table inputs ("table-delta", upstreamName), feeds every delta
@@ -128,6 +155,55 @@ public sealed class TableGrainState
 /// OnDeactivateAsync both await any still-in-flight `_pendingWrite` first (so the final awaited FlushAsync
 /// below never overlaps a background one), then call the same awaited <see cref="FlushAsync"/> Batched uses.
 ///
+/// PLAN 009 A2 — JOURNALED MODE: <see cref="TablePersistenceMode.Journaled"/> keeps a SECOND persisted state
+/// (<c>[PersistentState("table-journal", ...)] journalState</c>, <see cref="TableJournalState.Entries"/> —
+/// see that class's own doc comment) recording only the canonical row keys that changed since the last
+/// compaction, instead of rewriting the whole <c>state.State.Snapshot</c> on every flush. WHY A SECOND STATE,
+/// NOT AN APPEND-ONLY STORAGE PROVIDER: both <see cref="JsonFileGrainStorage"/> (this project) and Dapr's
+/// state store rewrite a WHOLE state object on every write — there is no "append a few bytes" primitive at
+/// that layer, so an "append-only journal" built as a storage-provider feature would be a lie: the "append"
+/// would still cost a full-object rewrite underneath. Rewriting a SMALL state (the journal) instead of the
+/// whole snapshot is the honest way to get an O(changed) write out of that existing abstraction, and it is
+/// the only shape that works identically on both flavors (see dapr/src/StreamForge.Dapr.Host/Actors/
+/// TableActor.cs's mirror-image paragraph). Two rejected alternatives, and why: handing the write to a
+/// separate grain buys nothing — the argument would still be serialized on THIS grain's own turn before the
+/// hop, so the expensive half never actually moves; sharding the table across grain-per-partition would give
+/// O(changed) too, but costs the atomicity of one consolidated snapshot and needs an epoch fence at recovery
+/// or the parts resurrect mutually inconsistent — the journal gets the same asymptotics with neither cost.
+///
+/// <see cref="JournalFlushAsync"/> (dispatched from <see cref="OnFlushTickAsync"/>/<see cref="FlushDirtyAsync"/>
+/// exactly where Batched's <see cref="FlushAsync"/> is) merges <see cref="_pendingJournalEntries"/> (this
+/// tick's touched canonical keys — <see cref="RecordJournalEntries"/>, called from the same
+/// ApplyAndPublishAsync/OnOutputBatchAsync sites <see cref="ReflectDeltasInSearchIndex"/> is) into the
+/// PERSISTED <c>journalState.State.Entries</c>, coalescing repeated changes to the same key, then writes ONLY
+/// that journal. Once the journal reaches <see cref="TableDefinition.JournalMaxEntries"/> (0 =
+/// <see cref="DefaultJournalMaxEntries"/>), it compacts: <see cref="CompactAsync"/> writes the full snapshot
+/// once (the same capture <see cref="FlushAsync"/> uses) and truncates the journal back to empty, resetting
+/// the O(changed-since-compaction) counter to zero.
+///
+/// SAME DURABILITY CONTRACT AS BATCHED, NOT A NEW ONE: Journaled's write (small or, at compaction, full) is
+/// always AWAITED inside the grain turn, exactly like Batched — it trades write VOLUME for O(changed), not
+/// durability for latency the way FireAndForget does. Because neither JournalFlushAsync nor the CompactAsync
+/// it sometimes calls ever runs in the background, and Orleans single-threads one grain's turns, a normal
+/// journal flush and a compaction it triggers can never overlap — the two-concurrent-writers hazard
+/// FireAndForget's <see cref="_pendingWrite"/> single-flight guard exists to prevent (see the paragraph
+/// above) simply cannot arise here, by construction, with no extra guard needed.
+///
+/// RESUME: StartClassicAsync/StartCoordinatorAsync call <see cref="ResumeJournaledState"/>, UNCONDITIONALLY
+/// (not gated on the mode being started — see that method's own doc comment for why: a mode switch away
+/// from Journaled must not lose entries a prior Stop already wrote to the journal), to merge
+/// <c>journalState.State.Entries</c> onto <c>state.State.Snapshot</c> BEFORE the existing "non-empty
+/// snapshot means resume" check just below — so that check (and the reset it performs) sees the
+/// TRUE last-known row set, exactly what Batched's own last flush would have captured had it flushed at that
+/// same moment. That is what makes a Journaled table's resume-detection, and its resumed row set, byte-
+/// identical to Batched's — including the shared reset itself: the RESTART-RESUME LIMITATION above is
+/// UNCHANGED and applies here too, so the merged-in row set is immediately reset to empty and marked
+/// Rebuilding exactly like Batched's, not served. The journal is then unconditionally cleared — in memory
+/// AND on disk — on every StartAsync, regardless of which mode this activation is starting in: a table that
+/// WAS Journaled and switches to Batched (or MemoryOnly, or FireAndForget) must not leave a stale journal
+/// behind for some LATER switch back to Journaled to incorrectly replay. That unconditional clear is what
+/// makes BOTH directions of a mode switch leave the table consistent.
+///
 /// [MayInterleave] ON OnOutputBatchAsync (plan 003 M4, mirrors RegistryGrain's identical fix for an
 /// identical shape of problem — see that class's doc comment): TableOutputGrain.PublishAsync calls back
 /// into THIS grain (the same one orchestrating TableOutputGrain/TableStageGrain's own start/stop) — without
@@ -144,6 +220,7 @@ public sealed class TableGrainState
 [MayInterleave(nameof(MayInterleave))]
 public sealed class TableGrain(
     [PersistentState("table", StreamConstants.StorageName)] IPersistentState<TableGrainState> state,
+    [PersistentState("table-journal", StreamConstants.StorageName)] IPersistentState<TableJournalState> journalState,
     ILogger<TableGrain> logger)
     : Grain, ITableGrain
 {
@@ -172,6 +249,20 @@ public sealed class TableGrain(
     /// logs internally — so awaiting it (StopAsync/OnDeactivateAsync) or polling `.IsCompleted`
     /// (OnFlushTickAsync) never throws.</summary>
     private Task _pendingWrite = Task.CompletedTask;
+
+    /// <summary>Plan 009 A2 — default compaction threshold when <see cref="TableDefinition.JournalMaxEntries"/>
+    /// is 0 (unset). Large enough that a table's ordinary per-tick churn doesn't compact on nearly every
+    /// flush (which would degenerate into Batched with extra steps — see TablePersistenceMode.Journaled's
+    /// own doc comment); small enough that activation's journal replay (<see cref="ReplayJournalIntoSnapshot"/>)
+    /// stays cheap.</summary>
+    public const int DefaultJournalMaxEntries = 200;
+
+    /// <summary>Plan 009 A2 — canonical row keys touched since the LAST flush tick (not since the last
+    /// compaction — that's <c>journalState.State.Entries</c>), populated by <see cref="RecordJournalEntries"/>
+    /// from the same call sites that feed <see cref="ReflectDeltasInSearchIndex"/>. Only ever non-empty
+    /// transiently, between a delta batch landing and the next <see cref="JournalFlushAsync"/> merging it
+    /// into the persisted journal — <see cref="TablePersistenceMode.Journaled"/> only.</summary>
+    private readonly Dictionary<string, TableJournalEntry> _pendingJournalEntries = [];
 
     // Plan 003 M2 — Parallelism >= 2 coordinator-mode state (see class doc). Unused, always default, on
     // the Parallelism==1 path.
@@ -268,6 +359,8 @@ public sealed class TableGrain(
         _executor = compileResult.Plan.CreateExecutor();
         _status = PipelineStatus.Running;
 
+        ResumeJournaledState();
+
         // See class-level comment: a non-empty persisted snapshot means this is a resume (not a first
         // start) — operator internal state can't be rebuilt from it, so mark rebuilding and reset to empty.
         if (state.State.Snapshot.Count > 0)
@@ -277,6 +370,8 @@ public sealed class TableGrain(
             state.State.Seq = 0;
             _dirty = true;
         }
+
+        await ClearStaleJournalAsync();
 
         // Either branch above leaves the current row set empty (fresh start, or reset-for-rebuild), so a
         // freshly built (empty) index is accurate here — it fills back in incrementally as
@@ -332,6 +427,8 @@ public sealed class TableGrain(
         _coordinatorSnapshot.Clear();
         _coordinatorDebt.Clear();
 
+        ResumeJournaledState();
+
         if (state.State.Snapshot.Count > 0)
         {
             _rebuilding = true;
@@ -339,6 +436,9 @@ public sealed class TableGrain(
             state.State.Seq = 0;
             _dirty = true;
         }
+
+        await ClearStaleJournalAsync();
+
         _searchIndex = def.SearchEnabled ? new TableSearchIndex(def.SearchMode) : null;
 
         // Plan 003 M4: initialize the coordinator's own frontier tracker BEFORE deploying anything that
@@ -491,10 +591,12 @@ public sealed class TableGrain(
         // Plan 008 W2.5: MemoryOnly additionally skips this final flush outright (even if _dirty) — its
         // whole contract is "nothing ever touches storage" (see class doc); FireAndForget's final flush is
         // deliberately the awaited FlushAsync below, not another background write, because the grain is
-        // going away and a background write here would just be abandoned mid-flight.
+        // going away and a background write here would just be abandoned mid-flight. Plan 009 A2: Journaled's
+        // final flush goes through FlushDirtyAsync too — its own small journal write, not a forced
+        // compaction (see that method's doc comment).
         if (_persistenceMode != TablePersistenceMode.MemoryOnly && _dirty)
         {
-            await FlushAsync();
+            await FlushDirtyAsync();
         }
         _coordinatorMode = false;
 
@@ -511,7 +613,7 @@ public sealed class TableGrain(
         try { await _pendingWrite; } catch { /* defensive only — WriteStateBestEffortAsync never faults */ }
         if (_persistenceMode != TablePersistenceMode.MemoryOnly && _dirty)
         {
-            try { await FlushAsync(); } catch { /* best-effort */ }
+            try { await FlushDirtyAsync(); } catch { /* best-effort */ }
         }
         await base.OnDeactivateAsync(reason, cancellationToken);
     }
@@ -552,14 +654,26 @@ public sealed class TableGrain(
     /// _executor.Snapshot() instead — the exact same live source SearchAsync already always uses for classic
     /// mode, regardless of persistence mode, even pre-008 (see its own `_executor?.Snapshot()` line below).
     /// Batched/FireAndForget are UNCHANGED: still the persisted state.State.Snapshot, lagging by up to one
-    /// flush interval, exactly as pre-008.</summary>
+    /// flush interval, exactly as pre-008.
+    ///
+    /// Plan 009 A2: <see cref="TablePersistenceMode.Journaled"/> joins MemoryOnly in reading live — for a
+    /// DIFFERENT reason, but the same fix. Journaled's whole point is that <c>state.State.Snapshot</c> is
+    /// NOT rewritten on every flush (only the small journal is — see <see cref="JournalFlushAsync"/>); it
+    /// only catches up at a compaction (<see cref="CompactAsync"/>), which can legitimately be far rarer
+    /// than the flush interval (up to <see cref="TableDefinition.JournalMaxEntries"/> distinct row changes
+    /// apart). Reading state.State.Snapshot here would therefore report stale-until-first-compaction (in the
+    /// worst case, EMPTY forever for a low-churn table) rather than "stale by up to one flush interval" —
+    /// exactly the MemoryOnly failure mode this method's guard already exists to avoid, so Journaled gets the
+    /// identical live-read fix. This does NOT change what gets WRITTEN to disk (still just the journal, per
+    /// flush) — only which copy classic-mode READS are served from, mirroring the split MemoryOnly already
+    /// established.</summary>
     private IEnumerable<TableRowDto> ClassicModeRows() =>
-        _persistenceMode == TablePersistenceMode.MemoryOnly && _executor is not null
+        _persistenceMode is TablePersistenceMode.MemoryOnly or TablePersistenceMode.Journaled && _executor is not null
             ? _executor.Snapshot().Values.Select(v => new TableRowDto { Row = new Dictionary<string, object?>(v.Row), Weight = v.Weight })
             : state.State.Snapshot.Values;
 
     private int ClassicModeRowCount() =>
-        _persistenceMode == TablePersistenceMode.MemoryOnly && _executor is not null
+        _persistenceMode is TablePersistenceMode.MemoryOnly or TablePersistenceMode.Journaled && _executor is not null
             ? _executor.Snapshot().Count
             : state.State.Snapshot.Count;
 
@@ -719,6 +833,11 @@ public sealed class TableGrain(
             _rebuilding = false; // real traffic observed since resume — mirrors the classic path's own rule (empty epoch markers do NOT clear this)
             _dirty = true;
 
+            if (_persistenceMode == TablePersistenceMode.Journaled)
+            {
+                RecordJournalEntries(allDeltas);
+            }
+
             if (_searchIndex is not null)
             {
                 ReflectDeltasInSearchIndex(allDeltas);
@@ -780,6 +899,11 @@ public sealed class TableGrain(
             ReflectDeltasInSearchIndex(deltas);
         }
 
+        if (_persistenceMode == TablePersistenceMode.Journaled)
+        {
+            RecordJournalEntries(deltas);
+        }
+
         var dtos = deltas.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight }).ToList();
         var stream = this.GetStreamProvider(StreamConstants.ProviderName)
             .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, _def!.Name));
@@ -809,6 +933,136 @@ public sealed class TableGrain(
             }
         }
     }
+
+    /// <summary>Plan 009 A2 — populates <see cref="_pendingJournalEntries"/> for <see cref="TablePersistenceMode.Journaled"/>
+    /// tables; callers only invoke this when <c>_persistenceMode == Journaled</c> (mirrors
+    /// <see cref="ReflectDeltasInSearchIndex"/>'s <c>_searchIndex is not null</c> guard shape — same per-batch,
+    /// dedup-by-key pattern). Looks each touched key up in the ALREADY-UPDATED consolidated snapshot (classic
+    /// mode's <see cref="_executor"/> or coordinator mode's <see cref="_coordinatorSnapshot"/>, exactly like
+    /// ReflectDeltasInSearchIndex does): present with weight &gt; 0 records a live entry; absent means the
+    /// key's running weight just dropped to &lt;= 0, recorded as an explicit removal tombstone (Weight = 0) —
+    /// see <see cref="TableJournalEntry"/>'s own doc comment for why skipping this instead would resurrect
+    /// the row on replay.</summary>
+    private void RecordJournalEntries(IReadOnlyList<TableDelta> deltas)
+    {
+        IReadOnlyDictionary<string, (EventRecord Row, long Weight)> snapshot = _coordinatorMode ? _coordinatorSnapshot : _executor!.Snapshot();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var delta in deltas)
+        {
+            var key = _executor!.CanonicalRowKey(delta.Row);
+            if (!seen.Add(key)) continue; // a batch can touch the same row's key more than once
+
+            _pendingJournalEntries[key] = snapshot.TryGetValue(key, out var current)
+                ? new TableJournalEntry { Row = new Dictionary<string, object?>(current.Row), Weight = current.Weight }
+                : new TableJournalEntry { Row = [], Weight = 0 };
+        }
+    }
+
+    /// <summary>Plan 009 A2 — first half of resuming: clears any leftover <see cref="_pendingJournalEntries"/>
+    /// from a prior activation (in-memory only, never persisted) and folds whatever the persisted journal
+    /// holds onto <c>state.State.Snapshot</c> via <see cref="ReplayJournalIntoSnapshot"/> BEFORE
+    /// StartClassicAsync/StartCoordinatorAsync's own "non-empty snapshot means resume" check runs.
+    ///
+    /// <b>Deliberately UNCONDITIONAL — not gated on <c>_persistenceMode == Journaled</c>.</b> A non-empty
+    /// journal can only exist here because a PRIOR activation ran in Journaled mode; the persistence mode
+    /// this activation is starting in may since have changed (a mode switch — see class doc's "RESUME"
+    /// paragraph). Gating replay on the NEW mode would lose exactly the entries a Journaled-&gt;Batched
+    /// switch needs folded in: StopAsync's own final flush (still under the OLD mode) writes those latest
+    /// changes to the SMALL journal, not to the snapshot, so skipping replay here because the mode has since
+    /// changed would silently drop them. ReplayJournalIntoSnapshot is a no-op when the journal is empty, so
+    /// this costs nothing for a table that was never Journaled.</summary>
+    private void ResumeJournaledState()
+    {
+        _pendingJournalEntries.Clear();
+        ReplayJournalIntoSnapshot();
+    }
+
+    /// <summary>Plan 009 A2 — merges <c>journalState.State.Entries</c> onto <c>state.State.Snapshot</c> in
+    /// place: a Weight &gt; 0 entry inserts/overwrites that key, a Weight &lt;= 0 entry (an explicit removal
+    /// tombstone — see <see cref="TableJournalEntry"/>'s own doc comment) removes it. Called once, from
+    /// <see cref="ResumeJournaledState"/>, before the shared resume-detection check.</summary>
+    private void ReplayJournalIntoSnapshot()
+    {
+        foreach (var (key, entry) in journalState.State.Entries)
+        {
+            if (entry.Weight > 0)
+            {
+                state.State.Snapshot[key] = new TableRowDto { Row = new Dictionary<string, object?>(entry.Row), Weight = entry.Weight };
+            }
+            else
+            {
+                state.State.Snapshot.Remove(key);
+            }
+        }
+    }
+
+    /// <summary>Plan 009 A2 — second half of resuming (called AFTER StartClassicAsync/StartCoordinatorAsync's
+    /// resume-detection reset): unconditionally clears the journal, in memory and on disk, whenever it holds
+    /// anything — regardless of which persistence mode this activation is starting in. Whatever it held is
+    /// now either folded into the reset-to-empty snapshot above (this activation IS Journaled) or simply
+    /// STALE (a different/former mode) — see class doc's Plan 009 A2 "RESUME" paragraph for why leaving it
+    /// behind would let a later switch back to Journaled replay pre-restart data onto an already-rebuilt
+    /// table.</summary>
+    private async Task ClearStaleJournalAsync()
+    {
+        if (journalState.State.Entries.Count == 0) return;
+
+        journalState.State.Entries = [];
+        await journalState.WriteStateAsync();
+    }
+
+    /// <summary>Plan 009 A2 — <see cref="TablePersistenceMode.Journaled"/>'s flush: merges
+    /// <see cref="_pendingJournalEntries"/> (this tick's touched keys, already deduped by key) into the
+    /// PERSISTED <c>journalState.State.Entries</c> — later values simply overwrite earlier ones for the same
+    /// key, exactly like <c>state.State.Snapshot</c> itself does, which is what keeps the journal's size
+    /// bounded by DISTINCT keys touched since the last compaction rather than by delta volume — then writes
+    /// ONLY that small journal state, not the whole snapshot. See class doc's Plan 009 A2 paragraph for why
+    /// this can never race a compaction it triggers.</summary>
+    private async Task JournalFlushAsync()
+    {
+        if (_pendingJournalEntries.Count == 0)
+        {
+            _dirty = false;
+            return;
+        }
+
+        foreach (var (key, entry) in _pendingJournalEntries)
+        {
+            journalState.State.Entries[key] = entry;
+        }
+        _pendingJournalEntries.Clear();
+        _dirty = false;
+        state.State.Seq++; // in-memory only (not written here) — keeps GetSeqAsync's "advances every flush" contract true for Journaled too.
+
+        await journalState.WriteStateAsync();
+
+        if (journalState.State.Entries.Count >= EffectiveJournalMaxEntries)
+        {
+            await CompactAsync();
+        }
+    }
+
+    /// <summary>Plan 009 A2 — writes the full consolidated snapshot ONCE (the same capture
+    /// <see cref="FlushAsync"/> uses) and truncates the journal back to empty, resetting the
+    /// O(changed-since-compaction) counter to zero. Only ever called from <see cref="JournalFlushAsync"/>,
+    /// immediately after that method's own awaited journal write.</summary>
+    private async Task CompactAsync()
+    {
+        CaptureSnapshotIntoState(); // false only if _executor is null, which can't happen mid-flush (see FlushAsync's identical guard).
+        await state.WriteStateAsync();
+        journalState.State.Entries = [];
+        await journalState.WriteStateAsync();
+    }
+
+    /// <summary>Plan 009 A2 — 0 (unset) resolves to <see cref="DefaultJournalMaxEntries"/>; any positive
+    /// configured value is used verbatim. Mirrors <see cref="TableDefinition.FlushMs"/>'s identical
+    /// 0-means-default convention.</summary>
+    private int EffectiveJournalMaxEntries => _def!.JournalMaxEntries > 0 ? _def.JournalMaxEntries : DefaultJournalMaxEntries;
+
+    /// <summary>Plan 009 A2 — dispatches an awaited flush to the mode-appropriate write: Journaled goes
+    /// through <see cref="JournalFlushAsync"/> (O(changed)), everything else — Batched, and every FINAL flush
+    /// (StopAsync/OnDeactivateAsync, all modes) — through the existing <see cref="FlushAsync"/> (O(|table|)).</summary>
+    private Task FlushDirtyAsync() => _persistenceMode == TablePersistenceMode.Journaled ? JournalFlushAsync() : FlushAsync();
 
     /// <summary>Captures the live consolidated Z-set into <c>state.State</c> — MUST stay synchronous, on the
     /// grain turn: <see cref="_executor"/>/<see cref="_coordinatorSnapshot"/> are not thread-safe and this is
@@ -878,8 +1132,9 @@ public sealed class TableGrain(
             return;
         }
 
-        // Batched (MemoryOnly never registers this timer at all — see StartClassicAsync/StartCoordinatorAsync).
-        await FlushAsync();
+        // Batched and Journaled (MemoryOnly never registers this timer at all — see
+        // StartClassicAsync/StartCoordinatorAsync): awaited flush, dispatched to the mode-appropriate write.
+        await FlushDirtyAsync();
     }
 
     private static FieldKind MapFieldKind(FieldType type) => type switch

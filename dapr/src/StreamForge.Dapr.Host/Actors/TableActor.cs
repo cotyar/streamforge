@@ -97,11 +97,49 @@ namespace StreamForge.Dapr.Host.Actors;
 /// reads the LIVE <see cref="TableExecutor.Snapshot"/> for weight lookup (the search INDEX itself is kept
 /// live too, updated incrementally on every delta in <see cref="ReflectDeltasInSearchIndex"/>) — mirroring
 /// <c>TableGrain.SearchAsync</c>'s identical live-vs-flushed split precisely.</para>
+///
+/// <para><b>Plan 009 A2 — JOURNALED MODE</b>, mirroring <c>TableGrain</c>'s identical Plan 009 A2 paragraph
+/// (read that one first — the design rationale is stated there once and applies verbatim to both flavors;
+/// see especially "WHY A SECOND STATE, NOT AN APPEND-ONLY STORAGE PROVIDER"). <see cref="TablePersistenceMode.
+/// Journaled"/> adds a SECOND actor state key, <see cref="JournalStateName"/> ("table-journal"), holding
+/// <see cref="TableJournalState.Entries"/> — canonical row keys changed since the last compaction, coalesced
+/// by key. A dirty flush tick under Journaled dispatches to <see cref="JournalFlushAsync"/> instead of
+/// <see cref="SaveAsync"/>: it merges <see cref="_pendingJournalEntries"/> (populated by
+/// <see cref="RecordJournalEntries"/>, called from <see cref="ApplyAndPublishAsync"/> exactly where
+/// <see cref="ReflectDeltasInSearchIndex"/> is) into <see cref="_journalEntries"/> and writes ONLY that small
+/// state — <see cref="StateName"/> ("table", the Def/Sources/Tables/Running/Snapshot/Seq bundle) is left
+/// UNTOUCHED on an ordinary Journaled tick, which is the entire point (O(changed), not O(|table|)). Once
+/// <see cref="_journalEntries"/> reaches <see cref="TableJournalPolicy.ResolveJournalMaxEntries"/>, it
+/// compacts (<see cref="CompactJournalAsync"/>): writes the full "table" state once (the same
+/// <see cref="SaveAsync"/> a Batched tick uses) and truncates the journal.
+///
+/// <b>Lifecycle saves (Start/Stop/Deactivate) are the ONE deliberate exception</b> — unlike <c>TableGrain</c>
+/// (which has nowhere else to persist "Running", so its own Stop/Deactivate final flush stays a small
+/// journal-only write, same as any other tick), this actor's "table" state key is ALSO the self-heal record
+/// (<see cref="OnActivateAsync"/> reads <see cref="TableActorState.Running"/>/<c>Def</c> from it). Every
+/// lifecycle save therefore stays a FULL <see cref="SaveAsync"/> regardless of mode (already true pre-009 —
+/// see <see cref="SaveControlStateAsync"/>'s own doc comment: "rare, config-change-triggered calls, not the
+/// hot per-tick path"), and — Journaled-specific — additionally clears the journal right after, since that
+/// full write just made "table" authoritative again and any leftover journal entries would otherwise be
+/// replayed A SECOND TIME on top of it at the next activation.
+///
+/// <b>Resume:</b> because every lifecycle save above already compacts (folds the journal into "table" and
+/// clears it), an ordinary Stop/restart never leaves a non-empty journal behind to replay. The one path that
+/// DOESN'T go through <see cref="SaveControlStateAsync"/> first is a hard process crash — no clean
+/// Stop/Deactivate at all — which can leave a real, unread journal sitting next to a stale "table" snapshot.
+/// <see cref="ActivateExecutor"/> handles exactly that: it calls <see cref="TableJournalPolicy.ReplayOntoSnapshot"/>
+/// UNCONDITIONALLY (not gated on the mode being activated INTO, defense-in-depth for a mode switch too) to
+/// fold <see cref="_journalEntries"/> onto <see cref="_flushed"/> BEFORE the existing "non-empty flushed
+/// snapshot means resume" check just below — so that check, and the reset it performs, sees the TRUE
+/// last-known row set. The journal is then unconditionally cleared (in memory immediately; on disk via the
+/// caller's own follow-up save) whenever it held anything, exactly like <c>TableGrain</c>'s
+/// <c>ClearStaleJournalAsync</c>.</para>
 /// </summary>
 public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<TableActor> logger)
     : Actor(host), ITableActor
 {
     private const string StateName = "table";
+    private const string JournalStateName = "table-journal";
     private const string FlushTimerName = "table-flush";
 
     private TableDefinition? _def;
@@ -146,6 +184,25 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     /// exceptions (see <see cref="StartBackgroundPersist"/>), so awaiting it here never throws.</summary>
     private Task? _inFlightPersist;
 
+    /// <summary>Plan 009 A2 — <see cref="TablePersistenceMode.Journaled"/>'s persisted (in-memory mirror of
+    /// the <see cref="JournalStateName"/> actor state key) journal: canonical row key -&gt; latest
+    /// (row, weight) changed since the last compaction, coalesced by key. See class doc's Plan 009 A2
+    /// paragraph.</summary>
+    private Dictionary<string, TableJournalEntry> _journalEntries = [];
+
+    /// <summary>Plan 009 A2 — canonical row keys touched since the LAST flush tick (not since the last
+    /// compaction — that's <see cref="_journalEntries"/>), populated by <see cref="RecordJournalEntries"/>
+    /// from the same call site that feeds <see cref="ReflectDeltasInSearchIndex"/>. Only ever non-empty
+    /// transiently, between a delta batch landing and the next <see cref="JournalFlushAsync"/> merging it in.</summary>
+    private readonly Dictionary<string, TableJournalEntry> _pendingJournalEntries = [];
+
+    /// <summary>Plan 009 A2 — set by <see cref="ActivateExecutor"/> when it found (and in-memory-cleared) a
+    /// non-empty <see cref="_journalEntries"/> during resume; <see cref="StartAsync"/>/<see cref="OnActivateAsync"/>'s
+    /// self-heal branch persist that clear via <see cref="SaveJournalAsync"/> right after, so a stale journal
+    /// never survives past the very next activation regardless of which mode it's activating into — see
+    /// class doc's "Resume" paragraph.</summary>
+    private bool _journalNeedsPersistedClear;
+
     /// <summary>Self-heal on (re)activation — same rationale as <see cref="PipelineActor.OnActivateAsync"/>:
     /// Dapr actor timers do not survive deactivation, so a fresh activation whose persisted state says
     /// "Running" recompiles and re-arms the flush timer immediately rather than waiting for
@@ -169,11 +226,29 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             _seq = existing.Value.Seq;
         }
 
+        // Plan 009 A2: load the journal too (whether or not this activation ends up Journaled — see
+        // ActivateExecutor's unconditional replay for why it must be read regardless of the CURRENT mode).
+        var existingJournal = await StateManager.TryGetStateAsync<TableJournalState>(JournalStateName);
+        if (existingJournal.HasValue)
+        {
+            _journalEntries = existingJournal.Value.Entries;
+        }
+
         if (_running && _def is not null)
         {
             ActivateExecutor();
             if (_executor is not null)
             {
+                // Plan 009 A2: persist the (possibly just-cleared) journal BEFORE arming the timer — see
+                // class doc's "Resume" paragraph and _journalNeedsPersistedClear's own doc comment for why
+                // this can't just wait for the next periodic tick (a mode switch away from Journaled would
+                // never take the JournalFlushAsync branch again, leaving a stale journal on disk forever).
+                if (_journalNeedsPersistedClear)
+                {
+                    await SaveJournalAsync();
+                    _journalNeedsPersistedClear = false;
+                }
+
                 await ArmTimerAsync(ResolveFlushPeriod());
             }
             else
@@ -213,6 +288,14 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             _running = false;
             await SaveControlStateAsync();
             return ActorResult<TableInputNames>.Failure(_lastCompileError!);
+        }
+
+        // Plan 009 A2: see OnActivateAsync's self-heal branch for why this has to happen here, immediately,
+        // rather than waiting for the next periodic tick.
+        if (_journalNeedsPersistedClear)
+        {
+            await SaveJournalAsync();
+            _journalNeedsPersistedClear = false;
         }
 
         _running = true;
@@ -382,6 +465,13 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         _tableInputs = tableInputs;
         _lastCompileError = null;
 
+        // Plan 009 A2: fold whatever the persisted journal holds onto _flushed BEFORE the resume-detection
+        // check below — UNCONDITIONALLY, not gated on _def.Persistence == Journaled. See class doc's
+        // "Resume" paragraph: a non-empty journal can only exist here because a PRIOR activation ran
+        // Journaled, and the mode may have since changed; TableJournalPolicy.ReplayOntoSnapshot is a no-op
+        // when _journalEntries is empty, so this costs nothing for a table that was never Journaled.
+        TableJournalPolicy.ReplayOntoSnapshot(_flushed, _journalEntries);
+
         // See TableGrain.StartClassicAsync's identical comment: a non-empty persisted snapshot means this
         // is a resume (not a first start) — operator internal state (join indexes/GROUP BY multisets)
         // can't be reconstructed from the output alone, so mark rebuilding and reset to empty; it rebuilds
@@ -392,6 +482,18 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             _flushed = [];
             _seq = 0;
             _dirty = true;
+        }
+
+        // Plan 009 A2: whatever the journal held is now either folded into the reset-to-empty _flushed above
+        // (this activation IS Journaled) or simply STALE (a different/former mode) — clear it in memory
+        // unconditionally; the caller (StartAsync/OnActivateAsync's self-heal branch) persists that clear
+        // via SaveJournalAsync when _journalNeedsPersistedClear is set, immediately, not deferred to the
+        // next tick — see class doc's "Resume" paragraph for why deferring would leave a stale journal
+        // behind forever for a table that switches away from Journaled without a clean Stop first.
+        _journalNeedsPersistedClear = _journalEntries.Count > 0;
+        if (_journalNeedsPersistedClear)
+        {
+            _journalEntries = [];
         }
 
         // Either branch above leaves the row set empty (fresh start, or reset-for-rebuild) — see
@@ -416,6 +518,11 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         if (_searchIndex is not null)
         {
             ReflectDeltasInSearchIndex(deltas);
+        }
+
+        if (_def?.Persistence == TablePersistenceMode.Journaled)
+        {
+            RecordJournalEntries(deltas);
         }
 
         _deltaSeq++;
@@ -461,6 +568,28 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         }
     }
 
+    /// <summary>Plan 009 A2 — populates <see cref="_pendingJournalEntries"/>; callers only invoke this when
+    /// <c>_def.Persistence == Journaled</c> (mirrors <see cref="ReflectDeltasInSearchIndex"/>'s guard shape —
+    /// same per-batch, dedup-by-key pattern, verbatim port of <c>TableGrain.RecordJournalEntries</c>). Looks
+    /// each touched key up in the ALREADY-UPDATED live <see cref="TableExecutor.Snapshot"/>: present with
+    /// weight &gt; 0 records a live entry; absent means the key's running weight just dropped to &lt;= 0,
+    /// recorded as an explicit removal tombstone (Weight = 0) — see <see cref="TableJournalEntry"/>'s own
+    /// doc comment for why skipping this instead would resurrect the row on replay.</summary>
+    private void RecordJournalEntries(IReadOnlyList<TableDelta> deltas)
+    {
+        var snapshot = _executor!.Snapshot();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var delta in deltas)
+        {
+            var key = _executor.CanonicalRowKey(delta.Row);
+            if (!seen.Add(key)) continue; // a batch can touch the same row's key more than once
+
+            _pendingJournalEntries[key] = snapshot.TryGetValue(key, out var current)
+                ? new TableJournalEntry { Row = new Dictionary<string, object?>(current.Row), Weight = current.Weight }
+                : new TableJournalEntry { Row = [], Weight = 0 };
+        }
+    }
+
     /// <summary>Refreshes the in-memory read cache (<see cref="_flushed"/>/<see cref="_seq"/>) from the live
     /// executor and clears <see cref="_dirty"/> — pure in-process work, no I/O. Split out from the old
     /// "FlushAsync" specifically so this always runs (keeping <see cref="GetRowsAsync"/> et al. fresh) even
@@ -503,6 +632,10 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
 
             case TablePersistAction.BackgroundWrite:
                 StartBackgroundPersist();
+                break;
+
+            case TablePersistAction.JournalWrite:
+                await JournalFlushAsync();
                 break;
 
             case TablePersistAction.Skip:
@@ -559,6 +692,55 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     private async Task SaveAsync()
     {
         await StateManager.SetStateAsync(StateName, BuildState());
+        await StateManager.SaveStateAsync();
+    }
+
+    /// <summary>Plan 009 A2 — <see cref="TablePersistenceMode.Journaled"/>'s flush: merges
+    /// <see cref="_pendingJournalEntries"/> (this tick's touched keys, already deduped by key) into
+    /// <see cref="_journalEntries"/> — later values overwrite earlier ones for the same key, exactly like
+    /// <see cref="_flushed"/> itself does, which is what keeps the journal's size bounded by DISTINCT keys
+    /// touched since the last compaction rather than by delta volume — then writes ONLY that small journal
+    /// state via <see cref="SaveJournalAsync"/>, leaving <see cref="StateName"/> ("table" — Def/Sources/
+    /// Tables/Running/Snapshot/Seq) untouched. This is the O(changed) write the class doc promises. Once
+    /// <see cref="_journalEntries"/> reaches <see cref="TableJournalPolicy.ResolveJournalMaxEntries"/>,
+    /// immediately compacts via <see cref="CompactJournalAsync"/>.</summary>
+    private async Task JournalFlushAsync()
+    {
+        if (_pendingJournalEntries.Count > 0)
+        {
+            foreach (var (key, entry) in _pendingJournalEntries)
+            {
+                _journalEntries[key] = entry;
+            }
+            _pendingJournalEntries.Clear();
+        }
+
+        await SaveJournalAsync();
+
+        var max = TableJournalPolicy.ResolveJournalMaxEntries(_def?.JournalMaxEntries ?? 0);
+        if (TableJournalPolicy.ShouldCompact(_journalEntries.Count, max))
+        {
+            await CompactJournalAsync();
+        }
+    }
+
+    /// <summary>Plan 009 A2 — writes the full "table" state once (<see cref="_flushed"/> was already
+    /// refreshed this tick by <see cref="OnFlushTickAsync"/>'s own <see cref="CaptureSnapshot"/> call — the
+    /// same capture <see cref="SaveAsync"/>'s Batched callers rely on) and truncates the journal back to
+    /// empty, resetting the O(changed-since-compaction) counter to zero. Only ever called from
+    /// <see cref="JournalFlushAsync"/>, immediately after that method's own awaited journal write — an
+    /// ordinary tick and the compaction it triggers therefore never overlap (both always awaited, on the
+    /// same actor turn — Dapr actors, like Orleans grains, process one turn at a time).</summary>
+    private async Task CompactJournalAsync()
+    {
+        await SaveAsync();
+        _journalEntries.Clear();
+        await SaveJournalAsync();
+    }
+
+    private async Task SaveJournalAsync()
+    {
+        await StateManager.SetStateAsync(JournalStateName, new TableJournalState { Entries = _journalEntries });
         await StateManager.SaveStateAsync();
     }
 
@@ -637,6 +819,28 @@ public sealed class TableActorState
     public long Seq { get; set; }
 }
 
+/// <summary>Plan 009 A2 — one journaled change since the last compaction; Dapr's counterpart of
+/// <c>StreamForge.Host.Grains.TableJournalEntry</c> (Orleans), same shape, same semantics — see that class's
+/// doc comment (or <see cref="TableActor"/>'s own Plan 009 A2 class-doc paragraph) for the full rationale.
+/// <see cref="Weight"/> &gt; 0 means "this canonical row key is (now) present with this row/weight"; &lt;= 0
+/// is an explicit REMOVAL TOMBSTONE (Row left empty — replay only needs to know to remove the key). An
+/// ABSENT key means "unchanged since the last compaction", never a removal.</summary>
+public sealed class TableJournalEntry
+{
+    public Dictionary<string, object?> Row { get; set; } = [];
+    public long Weight { get; set; }
+}
+
+/// <summary>Plan 009 A2 — <see cref="TablePersistenceMode.Journaled"/>'s second actor state key
+/// (<see cref="TableActor"/>'s <c>JournalStateName</c>, "table-journal"), separate from <see cref="TableActorState"/>
+/// ("table") so a Journaled flush can write just this small object instead of the whole snapshot bundle.
+/// Keyed by canonical row key so repeated changes to the SAME key before the next compaction coalesce into
+/// one entry.</summary>
+public sealed class TableJournalState
+{
+    public Dictionary<string, TableJournalEntry> Entries { get; set; } = [];
+}
+
 /// <summary>What a flush tick should do about the durability WRITE — decided by
 /// <see cref="TablePersistencePolicy.DecideFlushAction"/>, dispatched by <see cref="TableActor.
 /// OnFlushTickAsync"/>. Never governs the in-memory read-cache refresh, which always happens on a dirty
@@ -656,6 +860,11 @@ public enum TablePersistAction
     /// FireAndForget"/>'s non-blocking half of its contract (see <see cref="TableActor.
     /// StartBackgroundPersist"/> for the single-flight bookkeeping and failure logging).</summary>
     BackgroundWrite,
+
+    /// <summary>Plan 009 A2 — write only the small journal state, awaited inside the current actor turn —
+    /// <see cref="TablePersistenceMode.Journaled"/>'s entire contract (see <see cref="TableActor.
+    /// JournalFlushAsync"/>). Same durability as AwaitedWrite (Batched), different write VOLUME.</summary>
+    JournalWrite,
 }
 
 /// <summary>
@@ -692,8 +901,56 @@ public static class TablePersistencePolicy
         {
             TablePersistenceMode.MemoryOnly => TablePersistAction.Skip,
             TablePersistenceMode.FireAndForget => writeInProgress ? TablePersistAction.Skip : TablePersistAction.BackgroundWrite,
+            TablePersistenceMode.Journaled => TablePersistAction.JournalWrite,
             _ => TablePersistAction.AwaitedWrite, // Batched (and any future default)
         };
+    }
+}
+
+/// <summary>
+/// Plan 009 A2 — pure journal-compaction/replay decisions, extracted from <see cref="TableActor"/> for the
+/// same testability reason as <see cref="TablePersistencePolicy"/>/<see cref="TableCompilation"/> (that
+/// class needs a live <c>ActorHost</c>/<c>DaprClient</c> to construct — see
+/// dapr/tests/StreamForge.Dapr.Tests/TableDeltaSequencingTests.cs's own doc comment for why nothing in this
+/// project can instantiate it directly) — see dapr/tests/StreamForge.Dapr.Tests/TableJournalPolicyTests.cs.
+/// No actor/timer/Dapr-sidecar machinery involved; every input/output here is a plain CLR value. Mirrors
+/// <c>StreamForge.Host.Grains.TableGrain</c>'s equivalent inline logic (DefaultJournalMaxEntries,
+/// ReplayJournalIntoSnapshot) — see that class's Plan 009 A2 doc paragraph for the shared design rationale.
+/// </summary>
+public static class TableJournalPolicy
+{
+    /// <summary>Mirrors <c>TableGrain.DefaultJournalMaxEntries</c> (Orleans) exactly — same value, same
+    /// reasoning: large enough that ordinary per-tick churn doesn't compact on nearly every flush; small
+    /// enough that activation's journal replay stays cheap.</summary>
+    public const int DefaultJournalMaxEntries = 200;
+
+    /// <summary>0 (unset) resolves to <see cref="DefaultJournalMaxEntries"/>; any positive configured value
+    /// is used verbatim. Mirrors <see cref="TableDefinition.JournalMaxEntries"/>'s own doc comment exactly
+    /// (same shape as <see cref="TablePersistencePolicy.ResolveFlushIntervalMs"/>'s 0-means-default
+    /// convention).</summary>
+    public static int ResolveJournalMaxEntries(int configured) => configured > 0 ? configured : DefaultJournalMaxEntries;
+
+    /// <summary>True once the journal has reached (or somehow passed) its configured threshold — the pure
+    /// trigger <see cref="TableActor.JournalFlushAsync"/> checks after every journal write.</summary>
+    public static bool ShouldCompact(int journalEntryCount, int maxEntries) => journalEntryCount >= maxEntries;
+
+    /// <summary>Merges <paramref name="journal"/> onto <paramref name="snapshot"/> in place: a Weight &gt; 0
+    /// entry inserts/overwrites that key, a Weight &lt;= 0 entry (an explicit removal tombstone — see
+    /// <see cref="TableJournalEntry"/>'s own doc comment) removes it. A no-op when <paramref name="journal"/>
+    /// is empty. Mirrors <c>TableGrain.ReplayJournalIntoSnapshot</c> exactly.</summary>
+    public static void ReplayOntoSnapshot(Dictionary<string, TableRowDto> snapshot, IReadOnlyDictionary<string, TableJournalEntry> journal)
+    {
+        foreach (var (key, entry) in journal)
+        {
+            if (entry.Weight > 0)
+            {
+                snapshot[key] = new TableRowDto { Row = new Dictionary<string, object?>(entry.Row), Weight = entry.Weight };
+            }
+            else
+            {
+                snapshot.Remove(key);
+            }
+        }
     }
 }
 

@@ -249,12 +249,14 @@ const PERSISTENCE_LABEL: Record<TablePersistenceMode, string> = {
   Batched: 'Batched',
   FireAndForget: 'Fire-and-forget',
   MemoryOnly: 'Memory-only',
+  Journaled: 'Journaled',
 }
 
 const PERSISTENCE_HINT: Record<TablePersistenceMode, string> = {
   Batched: 'Written periodically; the write is awaited, so a flush briefly stalls the table and the stall grows with the row count.',
   FireAndForget: 'The write happens in the background; a crash loses whatever had not reached disk.',
   MemoryOnly: 'Never written — a restart brings this table back empty.',
+  Journaled: 'Same durability as batched, but a flush writes only the rows that changed, compacting to a full snapshot once the journal grows past its limit.',
 }
 
 /** Search box above the materialized view: swaps the grid to search results while a query is

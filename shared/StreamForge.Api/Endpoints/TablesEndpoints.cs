@@ -52,6 +52,7 @@ public static class TablesEndpoints
                     Parallelism = req.Parallelism,
                     Persistence = req.Persistence,
                     FlushMs = req.FlushMs,
+                    JournalMaxEntries = req.JournalMaxEntries,
                 };
                 var created = await registry.CreateTableAsync(def);
                 return Results.Created($"/api/tables/{created.Id}", created);
@@ -85,6 +86,7 @@ public static class TablesEndpoints
             existing.Parallelism = req.Parallelism;
             existing.Persistence = req.Persistence;
             existing.FlushMs = req.FlushMs;
+            existing.JournalMaxEntries = req.JournalMaxEntries;
 
             try
             {
