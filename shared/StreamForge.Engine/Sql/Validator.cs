@@ -152,6 +152,15 @@ internal sealed class Validator
     private readonly Dictionary<Expr, (string Alias, string Field)> _bindings = new(ReferenceEqualityComparer.Instance);
     private readonly List<AggregateCallExpr> _usedAggregates = [];
 
+    // Plan 008 W3: `GROUP BY ALL` deliberately reuses the SAME Expr instances as the matching select-list
+    // items (see Parser.ParseSelectQuery), so StructurallyEqual/AssignGroupByIndexes match trivially. That
+    // sharing means ResolveExpr can be asked to resolve the exact same node twice (once walking GROUP BY,
+    // once walking SELECT — Run() always does both, in that order). Re-resolving a node that already
+    // resolved successfully is harmless (the same _bindings/_exprKind entry is written again), but
+    // re-resolving one that FAILED (unknown/ambiguous column) would otherwise append the same diagnostic a
+    // second time — so every node is only ever walked once, tracked here by reference identity.
+    private readonly HashSet<Expr> _resolvedNodes = new(ReferenceEqualityComparer.Instance);
+
     // Plan 004 N2: WHERE-position gating for IN/EXISTS subquery predicates. Set only while resolving this
     // query's own WHERE clause (Run() toggles _resolvingWhere around that one ResolveExpr call);
     // _whereTopLevelConjuncts is FlattenAnd(q.Where)'s yield, by reference — the exact set of nodes an
@@ -659,6 +668,8 @@ internal sealed class Validator
 
     private void ResolveExpr(Expr e, List<(string Alias, SourceSchema Schema)> scope, int aggDepth)
     {
+        if (!_resolvedNodes.Add(e)) return;
+
         switch (e)
         {
             case NumberLiteral nl:

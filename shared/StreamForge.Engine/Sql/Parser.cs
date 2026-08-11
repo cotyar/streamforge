@@ -259,8 +259,37 @@ internal sealed class Parser
             gbLine = tok.Line; gbCol = tok.Column;
             Advance();
             ExpectKeyword("BY");
-            groupBy = [ParseOr()];
-            while (Current.IsSymbol(",")) { Advance(); groupBy.Add(ParseOr()); }
+            // DuckDB/Snowflake sugar: `GROUP BY ALL` expands to every non-aggregate select-list expression,
+            // in select-list order. "ALL" is contextual, not a reserved word — only checked right here,
+            // immediately after GROUP BY — so `SELECT all FROM t` (a column literally named "all") still
+            // parses as a column reference everywhere else, including in the select list itself.
+            if (Current.IsKeyword("ALL"))
+            {
+                var allTok = Current;
+                Advance();
+                if (select.IsStar)
+                {
+                    // `SELECT *` hasn't been expanded into columns yet — that only happens at plan time —
+                    // so ALL has nothing to enumerate here. Reject with a positioned diagnostic rather than
+                    // silently degrading to "no GROUP BY" (which would change aggregation semantics).
+                    throw Error(allTok, "GROUP BY ALL cannot be used with 'SELECT *' — star expansion happens after grouping is resolved; list the grouping columns explicitly instead of '*'");
+                }
+                // Reuse the SAME Expr instances as the select items (not clones): Validator.StructurallyEqual
+                // and AssignGroupByIndexes match trivially on shared references, and this is exactly what
+                // ContainsAggregate (internal static, same assembly/namespace) is for — it already treats a
+                // scalar subquery as aggregate-like, so `GROUP BY ALL` correctly excludes one here too.
+                groupBy = select.Items.Where(i => !Validator.ContainsAggregate(i.Expression)).Select(i => i.Expression).ToList();
+                // Empty expansion (e.g. `SELECT COUNT(*) FROM t GROUP BY ALL`) means every select item is
+                // an aggregate — fall back to null (the implicit single global group), matching what writing
+                // no GROUP BY at all produces; an empty non-null list would trip the `GroupBy is not null`
+                // gates in TablePlanner/Validator/TableDataflowBuilder.
+                if (groupBy.Count == 0) groupBy = null;
+            }
+            else
+            {
+                groupBy = [ParseOr()];
+                while (Current.IsSymbol(",")) { Advance(); groupBy.Add(ParseOr()); }
+            }
         }
 
         WindowSpec? window = null;
