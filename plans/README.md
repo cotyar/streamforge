@@ -13,5 +13,6 @@ Written against commit `49d6979` by the improve skill (focused `plan` invocation
 | 007 | [Containers + Cloud Run prep, admin app, AI control chat](007-cloudrun-admin-aichat.md) | DONE (both flavors containerized + Cloud Run-ready; admin app drove both stacks live; Gemini AI control chat on both flavors with audit-trace UI) | 005, 006 |
 
 | 008 | [REST discoverability, table joins, set operations, ingress, lineage](008-rest-joins-setops-ingress-lineage.md) | DONE (W1–W5 landed) | 005, 006, 007 |
+| 009 | [Ingress hardening, NATS transport, table delta journal](009-ingress-hardening-nats-journal.md) | IN PROGRESS (P done; A1–B3 pending) | 008 |
 
 Design tokens source of truth: `orleans/design-system/streamforge/MASTER.md`.
