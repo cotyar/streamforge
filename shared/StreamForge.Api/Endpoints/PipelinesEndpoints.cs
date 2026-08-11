@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Config;
 using StreamForge.Engine;
 using StreamForge.Host.Grpc.Dynamic;
 
@@ -15,13 +16,13 @@ public static class PipelinesEndpoints
         var group = app.MapGroup("/api/pipelines");
 
         group.MapGet("/", async (ICatalogFacade registry) =>
-            Results.Ok(await registry.GetPipelinesAsync())
+            Results.Ok((await registry.GetPipelinesAsync()).Select(SecretsMasker.MaskPipeline).ToList())
         ).RequireAuthorization("Viewer");
 
         group.MapGet("/{id}", async (string id, ICatalogFacade registry) =>
         {
             var p = await registry.GetPipelineAsync(id);
-            return p is null ? Results.NotFound() : Results.Ok(p);
+            return p is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskPipeline(p));
         }).RequireAuthorization("Viewer");
 
         group.MapPost("/", async (CreatePipelineRequest req, ClaimsPrincipal principal, ICatalogFacade registry) =>
@@ -43,9 +44,14 @@ public static class PipelinesEndpoints
                 CreatedBy = principal.Identity?.Name ?? "",
                 Tags = req.Tags ?? [],
                 Metadata = req.Metadata ?? [],
+                // Plan 009 B2: a freshly-created pipeline has no stored secrets to merge against, so a
+                // "***" here (nobody would legitimately send one — the mask value only ever comes back
+                // from a prior GET) would just... be a literal wrong credential. Not worth guarding —
+                // mirrors sources' own CreateSourceAsync, which does the identical un-merged pass-through.
+                Sinks = req.Sinks ?? [],
             };
             var created = await registry.CreatePipelineAsync(def);
-            return Results.Created($"/api/pipelines/{created.Id}", created);
+            return Results.Created($"/api/pipelines/{created.Id}", SecretsMasker.MaskPipeline(created));
         }).RequireAuthorization("Editor");
 
         group.MapPut("/{id}", async (string id, CreatePipelineRequest req, ICatalogFacade registry) =>
@@ -61,8 +67,14 @@ public static class PipelinesEndpoints
             existing.Sql = req.Sql;
             existing.Tags = req.Tags ?? existing.Tags;
             existing.Metadata = req.Metadata ?? existing.Metadata;
+            // Plan 009 B2: null Sinks means "leave unchanged" (same convention as Tags/Metadata above);
+            // a non-null Sinks that carries "***" (round-tripped from a masked GET) is restored from the
+            // currently-stored value via MergeSinkSecrets — the PUT counterpart of sources'
+            // SecretsMasker.MergeSecrets, so a GET -> edit-something-else -> PUT cycle never clobbers a
+            // real NATS credential with the literal mask string.
+            existing.Sinks = req.Sinks is null ? existing.Sinks : SecretsMasker.MergeSinkSecrets(req.Sinks, existing.Sinks);
             var updated = await registry.UpdatePipelineAsync(existing);
-            return updated is null ? Results.NotFound() : Results.Ok(updated);
+            return updated is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskPipeline(updated));
         }).RequireAuthorization("Editor");
 
         group.MapDelete("/{id}", async (string id, ICatalogFacade registry) =>
@@ -74,13 +86,16 @@ public static class PipelinesEndpoints
         group.MapPost("/{id}/start", async (string id, ICatalogFacade registry) =>
         {
             var updated = await registry.SetPipelineStatusAsync(id, PipelineStatus.Running);
-            return updated is null ? Results.NotFound() : Results.Ok(updated);
+            // Plan 009 B2: this handler returns the entity too — same secrets-lite masking as every
+            // other read path (found live: this endpoint was leaking an unmasked Sinks credential
+            // before this fix, since it returns the entity but isn't a create/update handler).
+            return updated is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskPipeline(updated));
         }).RequireAuthorization("Editor");
 
         group.MapPost("/{id}/stop", async (string id, ICatalogFacade registry) =>
         {
             var updated = await registry.SetPipelineStatusAsync(id, PipelineStatus.Stopped);
-            return updated is null ? Results.NotFound() : Results.Ok(updated);
+            return updated is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskPipeline(updated));
         }).RequireAuthorization("Editor");
 
         group.MapPost("/validate", async (ValidateRequest req, ICatalogFacade registry) =>

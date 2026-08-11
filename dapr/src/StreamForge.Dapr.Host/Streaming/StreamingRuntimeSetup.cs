@@ -45,6 +45,15 @@ public static class StreamingRuntimeSetup
         // own concrete singleton (not just behind the sink interface) here.
         services.AddSingleton<PipelineEventRouter>();
         services.AddSingleton<ISourceEventsSink>(sp => sp.GetRequiredService<PipelineEventRouter>());
+
+        // Plan 009 B2: the NATS sink publisher. Registered as a singleton (so the sf-pipeline-out
+        // endpoint below and the ITableDeltaSink fan-out resolve the SAME instance the BackgroundService
+        // itself is) and forwarded to ITableDeltaSink, mirroring DaprStreamBridge's own registration
+        // shape immediately above. See NatsSinkPublisherService's class doc for why sf-pipeline-out is
+        // wired differently (direct call, not through a sink interface).
+        services.AddSingleton<NatsSinkPublisherService>();
+        services.AddSingleton<ITableDeltaSink>(sp => sp.GetRequiredService<NatsSinkPublisherService>());
+        services.AddHostedService(sp => sp.GetRequiredService<NatsSinkPublisherService>());
     }
 
     public static void MapTopicEndpoints(WebApplication app)
@@ -85,7 +94,7 @@ public static class StreamingRuntimeSetup
         // sf-pipeline-out / sf-lifecycle / sf-metrics: nothing in this project ever needs these besides
         // "relay to SignalR" (see DaprStreamBridge's class doc comment), so these three call the bridge
         // directly by concrete type instead of through a dedicated sink interface.
-        app.MapPost($"/{PipelineOutTopic}", async (HttpContext ctx, DaprStreamBridge bridge) =>
+        app.MapPost($"/{PipelineOutTopic}", async (HttpContext ctx, DaprStreamBridge bridge, NatsSinkPublisherService natsSink) =>
         {
             var envelope = await TryReadAsync<PipelineResultsEnvelope>(ctx, logger, PipelineOutTopic);
             if (envelope is null)
@@ -95,6 +104,10 @@ public static class StreamingRuntimeSetup
 
             NormalizePipelineResultRows(envelope);
             await bridge.OnPipelineResultsAsync(envelope);
+            // Plan 009 B2: the NATS sink publisher has no other consumer for this topic (see Sinks.cs's
+            // class doc for why sf-pipeline-out isn't a generic IEnumerable<T> sink interface), so it's
+            // called directly here, right next to the bridge.
+            await natsSink.OnPipelineResultsAsync(envelope);
             return Results.Ok();
         }).WithTopic(PubsubName, PipelineOutTopic);
 

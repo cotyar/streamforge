@@ -92,15 +92,17 @@ public sealed class RegistryGrain(
         {
             try
             {
-                // Plan 006 D-C / plan 008 W4: three-way Kind dispatch. "generator" (or unset — pre-006
-                // seeds/sources) keeps the pre-existing IGeneratorGrain path unchanged; "ingest" starts
-                // NO grain at all (rows arrive through IIngressFacade); everything else goes to
-                // IConnectorGrain.
-                if (IsGeneratorKind(src.Kind))
+                // Plan 006 D-C / plan 008 W4 / plan 009 wave D: three-way Kind dispatch via the shared
+                // SourceKindDispatch.Classify (StreamForge.Abstractions — both flavors use it, see its own
+                // class doc). Generator (or unset — pre-006 seeds/sources) keeps the pre-existing
+                // IGeneratorGrain path unchanged; Ingest starts NO grain at all (rows arrive through
+                // IIngressFacade); Connector (everything else) goes to IConnectorGrain.
+                var kind = SourceKindDispatch.Classify(src.Kind);
+                if (kind == SourceKindDispatch.ActorKind.Generator)
                 {
                     await GrainFactory.GetGrain<IGeneratorGrain>(src.Name).StartAsync(src);
                 }
-                else if (!IsIngestKind(src.Kind))
+                else if (kind != SourceKindDispatch.ActorKind.Ingest)
                 {
                     await GrainFactory.GetGrain<IConnectorGrain>(src.Name).StartAsync(src);
                 }
@@ -184,28 +186,29 @@ public sealed class RegistryGrain(
 
         await state.WriteStateAsync();
 
-        // Plan 006 D-C: Kind dispatch. On an update where Kind CHANGED (e.g. generator -> url), the
-        // grain for the OLD kind is still activated and would otherwise keep polling/ticking forever —
-        // so both StopAsync calls always run (cheap/idempotent no-ops on whichever kind wasn't actually
-        // running) rather than tracking the previous Kind separately just to target one Stop call.
+        // Plan 006 D-C / plan 009 wave D: Kind dispatch via the shared SourceKindDispatch.Classify. On an
+        // update where Kind CHANGED (e.g. generator -> url), the grain for the OLD kind is still activated
+        // and would otherwise keep polling/ticking forever — so both StopAsync calls always run (cheap/
+        // idempotent no-ops on whichever kind wasn't actually running) rather than tracking the previous
+        // Kind separately just to target one Stop call.
         var generator = GrainFactory.GetGrain<IGeneratorGrain>(def.Name);
         var connector = GrainFactory.GetGrain<IConnectorGrain>(def.Name);
         if (def.Enabled)
         {
-            if (IsGeneratorKind(def.Kind))
+            switch (SourceKindDispatch.Classify(def.Kind))
             {
-                await generator.StartAsync(def);
-                await connector.StopAsync();
-            }
-            else if (IsIngestKind(def.Kind))
-            {
-                await generator.StopAsync();
-                await connector.StopAsync();
-            }
-            else
-            {
-                await connector.StartAsync(def);
-                await generator.StopAsync();
+                case SourceKindDispatch.ActorKind.Generator:
+                    await generator.StartAsync(def);
+                    await connector.StopAsync();
+                    break;
+                case SourceKindDispatch.ActorKind.Ingest:
+                    await generator.StopAsync();
+                    await connector.StopAsync();
+                    break;
+                default: // Connector
+                    await connector.StartAsync(def);
+                    await generator.StopAsync();
+                    break;
             }
         }
         else
@@ -229,17 +232,6 @@ public sealed class RegistryGrain(
         await GrainFactory.GetGrain<IConnectorGrain>(name).StopAsync();
         return true;
     }
-
-    /// <summary>Plan 006 D-C: "generator" (the SourceDefinition.Kind default) or an unset/empty value
-    /// (pre-006 persisted sources, seeds) both mean "use IGeneratorGrain" — anything else dispatches to
-    /// IConnectorGrain instead (except "ingest" — see <see cref="IsIngestKind"/>).</summary>
-    private static bool IsGeneratorKind(string? kind) =>
-        string.IsNullOrEmpty(kind) || kind == SourceKinds.Generator;
-
-    /// <summary>Plan 008 W4: "ingest" backs onto NEITHER IGeneratorGrain nor IConnectorGrain — rows
-    /// arrive through IIngressFacade (a host-process singleton, not a grain; see OrleansIngressFacade's
-    /// doc comment) instead of a timer or poll loop.</summary>
-    private static bool IsIngestKind(string? kind) => kind == SourceKinds.Ingest;
 
     public Task<List<PipelineDefinition>> GetPipelinesAsync() => Task.FromResult(state.State.Pipelines.ToList());
 
@@ -284,6 +276,7 @@ public sealed class RegistryGrain(
         existing.Sql = def.Sql;
         existing.Tags = def.Tags;
         existing.Metadata = def.Metadata;
+        existing.Sinks = def.Sinks; // plan 009 B2 — without this a PUT silently reverts sink edits
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         ApplyPipelineCompileResult(existing, compileResult);
@@ -452,7 +445,8 @@ public sealed class RegistryGrain(
         // effect immediately on a Running table instead of only on the next manual stop/start (TableGrain's
         // StartAsync/StartClassicAsync/StartCoordinatorAsync only re-reads Persistence/FlushMs from the
         // TableDefinition it's (re)started with — see its own class doc's persistence-mode paragraph).
-        var persistenceChanged = existing.Persistence != def.Persistence || existing.FlushMs != def.FlushMs;
+        var persistenceChanged = existing.Persistence != def.Persistence || existing.FlushMs != def.FlushMs
+            || existing.JournalMaxEntries != def.JournalMaxEntries;
         var historyConfigChanged =
             existing.HistoryEnabled != def.HistoryEnabled ||
             existing.HistoryMode != def.HistoryMode ||
@@ -476,6 +470,8 @@ public sealed class RegistryGrain(
         existing.Parallelism = def.Parallelism;
         existing.Persistence = def.Persistence;
         existing.FlushMs = def.FlushMs;
+        existing.JournalMaxEntries = def.JournalMaxEntries; // plan 009 A2
+        existing.Sinks = def.Sinks;                          // plan 009 B2
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         ApplyCompileResult(existing, compileResult);

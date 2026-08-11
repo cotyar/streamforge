@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Config;
 using StreamForge.Engine;
 using StreamForge.Host.Grains;
 using StreamForge.Host.Grpc.Dynamic;
@@ -16,13 +17,13 @@ public static class TablesEndpoints
         var group = app.MapGroup("/api/tables");
 
         group.MapGet("/", async (ICatalogFacade registry) =>
-            Results.Ok(await registry.GetTablesAsync())
+            Results.Ok((await registry.GetTablesAsync()).Select(SecretsMasker.MaskTable).ToList())
         ).RequireAuthorization("Viewer");
 
         group.MapGet("/{id}", async (string id, ICatalogFacade registry) =>
         {
             var t = await registry.GetTableAsync(id);
-            return t is null ? Results.NotFound() : Results.Ok(t);
+            return t is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskTable(t));
         }).RequireAuthorization("Viewer");
 
         group.MapPost("/", async (CreateTableRequest req, ClaimsPrincipal principal, ICatalogFacade registry) =>
@@ -53,9 +54,12 @@ public static class TablesEndpoints
                     Persistence = req.Persistence,
                     FlushMs = req.FlushMs,
                     JournalMaxEntries = req.JournalMaxEntries,
+                    // Plan 009 B2: see the identical note in PipelinesEndpoints' create handler — a
+                    // freshly-created table has no stored secrets to merge against.
+                    Sinks = req.Sinks ?? [],
                 };
                 var created = await registry.CreateTableAsync(def);
-                return Results.Created($"/api/tables/{created.Id}", created);
+                return Results.Created($"/api/tables/{created.Id}", SecretsMasker.MaskTable(created));
             }
             catch (InvalidOperationException ex)
             {
@@ -87,11 +91,16 @@ public static class TablesEndpoints
             existing.Persistence = req.Persistence;
             existing.FlushMs = req.FlushMs;
             existing.JournalMaxEntries = req.JournalMaxEntries;
+            // Plan 009 B2: null Sinks = unchanged; a non-null Sinks carrying "***" is restored from the
+            // stored value first (SecretsMasker.MergeSinkSecrets — see the identical, more detailed note
+            // in PipelinesEndpoints' PUT handler, including the Orleans-flavor RegistryGrain gap that
+            // applies here too, in TablesEndpoints' case via RegistryGrain.UpdateTableAsync).
+            existing.Sinks = req.Sinks is null ? existing.Sinks : SecretsMasker.MergeSinkSecrets(req.Sinks, existing.Sinks);
 
             try
             {
                 var updated = await registry.UpdateTableAsync(existing);
-                return updated is null ? Results.NotFound() : Results.Ok(updated);
+                return updated is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskTable(updated));
             }
             catch (InvalidOperationException ex)
             {
@@ -117,7 +126,8 @@ public static class TablesEndpoints
             try
             {
                 var updated = await registry.SetTableStatusAsync(id, PipelineStatus.Running);
-                return updated is null ? Results.NotFound() : Results.Ok(updated);
+                // Plan 009 B2: see the identical note on PipelinesEndpoints' /start handler — found live.
+                return updated is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskTable(updated));
             }
             catch (InvalidOperationException ex)
             {
@@ -130,7 +140,7 @@ public static class TablesEndpoints
             try
             {
                 var updated = await registry.SetTableStatusAsync(id, PipelineStatus.Stopped);
-                return updated is null ? Results.NotFound() : Results.Ok(updated);
+                return updated is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskTable(updated));
             }
             catch (InvalidOperationException ex)
             {

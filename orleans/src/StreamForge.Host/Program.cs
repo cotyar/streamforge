@@ -75,6 +75,10 @@ builder.Services.AddHostedService<GeneratorSupervisorService>();
 // never published. See the service's own doc comment.
 builder.Services.AddHostedService<IngestDrainPumpService>();
 builder.Services.AddHostedService<StreamBridgeService>();
+// Plan 009 B2: a second, independent consumer at the same stream seam as StreamBridgeService —
+// fire-and-forget republishes pipeline results / table deltas to NATS for entities with Sinks
+// configured. See the service's own doc comment.
+builder.Services.AddHostedService<NatsPublisherService>();
 
 builder.Services.AddGrpc();
 
