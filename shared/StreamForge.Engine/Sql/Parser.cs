@@ -19,6 +19,9 @@ internal sealed class Parser
         // Plan 002 L2/L3: reserved so `FROM src UNNEST(...)`/`... LATEST BY (...)` never get mistaken for
         // an AS-less alias (mirrors how JOIN/WHERE/GROUP are already reserved above).
         "UNNEST", "LATEST",
+        // Plan 008 W3: reserved so `SELECT a FROM t UNION ...` never swallows UNION as an AS-less alias
+        // for `a` (a silent mis-parse) — see ParseSelectOrSetOperation.
+        "UNION",
     };
 
     private readonly List<Token> _tokens;
@@ -26,21 +29,39 @@ internal sealed class Parser
 
     private Parser(List<Token> tokens) => _tokens = tokens;
 
+    /// <summary>Pre-008 entry point — kept byte-for-byte behavior-preserving for every non-set-operation
+    /// input (every existing caller/test predates plan 008 W3 and never feeds UNION SQL through this
+    /// method). A thin compatibility wrapper over <see cref="ParseStatement"/>: for a plain statement it's
+    /// exactly the old (query, diagnostics) shape; for a top-level set operation (which this 2-tuple has no
+    /// room to represent) it returns a null Query with whatever diagnostics ParseStatement produced — no
+    /// existing caller exercises that path (a set operation always parses successfully as a SetOp when the
+    /// SQL is well-formed, so this fallback only engages for callers that don't yet know how to ask for
+    /// one). New code should call <see cref="ParseStatement"/> instead.</summary>
     public static (SelectQuery? Query, List<SqlDiagnostic> Diagnostics) Parse(List<Token> tokens)
+    {
+        var (query, setOp, diags) = ParseStatement(tokens);
+        return setOp is not null ? (null, diags) : (query, diags);
+    }
+
+    /// <summary>Plan 008 W3: exactly one of <c>Query</c>/<c>SetOp</c> is non-null on success — a plain
+    /// statement parses to <c>Query</c>; a top-level `SELECT ... UNION [ALL] SELECT ...` chain (optionally
+    /// under a WITH list) parses to <c>SetOp</c> instead. Both null (with a non-empty Diagnostics) is the
+    /// existing failure shape. Planner.cs/TablePlanner.cs call this (not the legacy <see cref="Parse"/>).</summary>
+    public static (SelectQuery? Query, SetOperationQuery? SetOp, List<SqlDiagnostic> Diagnostics) ParseStatement(List<Token> tokens)
     {
         var parser = new Parser(tokens);
         try
         {
-            var query = parser.ParseTopLevel();
+            var (query, setOp) = parser.ParseTopLevel();
             if (parser.Current.Kind != TokenKind.EndOfInput)
             {
                 throw parser.Error(parser.Current, $"Unexpected token '{parser.Current.Text}'");
             }
-            return (query, []);
+            return (query, setOp, []);
         }
         catch (ParseException ex)
         {
-            return (null, [ex.Diagnostic]);
+            return (null, null, [ex.Diagnostic]);
         }
     }
 
@@ -52,9 +73,9 @@ internal sealed class Parser
     // 004's header, and gets a positioned diagnostic instead of silently mis-resolving).
     // ------------------------------------------------------------------
 
-    private SelectQuery ParseTopLevel()
+    private (SelectQuery? Query, SetOperationQuery? SetOp) ParseTopLevel()
     {
-        if (!Current.IsKeyword("WITH")) return ParseSelectQuery();
+        if (!Current.IsKeyword("WITH")) return ParseSelectOrSetOperation();
 
         Advance(); // WITH
         var cteNames = new List<string>();
@@ -80,7 +101,10 @@ internal sealed class Parser
             break;
         }
 
-        var mainQuery = ParseSelectQuery();
+        // Plan 008 W3: the main query following WITH may itself be a UNION chain — CTE substitution must
+        // recurse into EVERY branch (see SetOperationQuery's own doc comment on "WITH ... UNION ... must
+        // keep working").
+        var (mainQuery, mainSetOp) = ParseSelectOrSetOperation();
 
         // Desugar in declaration order: CTE i's body may only reference CTE 0..i-1 (already desugared);
         // referencing itself or a later CTE name is the recursion this dialect rejects.
@@ -90,7 +114,50 @@ internal sealed class Parser
         {
             resolved[cteNames[i]] = SubstituteCtes(cteBodies[i], resolved, allCteNames);
         }
-        return SubstituteCtes(mainQuery, resolved, allCteNames);
+
+        if (mainSetOp is not null)
+        {
+            var branches = mainSetOp.Branches.Select(b => SubstituteCtes(b, resolved, allCteNames)).ToList();
+            return (null, new SetOperationQuery(mainSetOp.All, branches, mainSetOp.Line, mainSetOp.Column));
+        }
+        return (SubstituteCtes(mainQuery!, resolved, allCteNames), null);
+    }
+
+    /// <summary>Plan 008 W3: `SELECT ... [UNION [ALL|DISTINCT] SELECT ...]*` — a single SelectQuery when no
+    /// UNION follows (the overwhelmingly common case), else a flattened <see cref="SetOperationQuery"/>.
+    /// Every UNION in the chain must share the same ALL-ness: `UNION DISTINCT` is accepted as standard-SQL
+    /// sugar for plain `UNION` (same as the bare keyword), but mixing e.g. `a UNION ALL b UNION c` is
+    /// rejected with its own positioned diagnostic (pointing at the mismatched UNION keyword) rather than
+    /// silently preferring one interpretation — <see cref="SetOperationQuery"/> carries a single <c>All</c>
+    /// flag for the whole chain, so there is no per-branch operator to fall back to anyway.</summary>
+    private (SelectQuery? Query, SetOperationQuery? SetOp) ParseSelectOrSetOperation()
+    {
+        var first = ParseSelectQuery();
+        if (!Current.IsKeyword("UNION")) return (first, null);
+
+        var chainTok = Current;
+        var branches = new List<SelectQuery> { first };
+        bool? all = null;
+
+        while (Current.IsKeyword("UNION"))
+        {
+            var opTok = Advance(); // 'UNION'
+            bool thisAll = MatchKeyword("ALL");
+            if (!thisAll) MatchKeyword("DISTINCT"); // 'UNION DISTINCT' is sugar for plain 'UNION'
+
+            if (all is null)
+            {
+                all = thisAll;
+            }
+            else if (all != thisAll)
+            {
+                throw Error(opTok, "Mixing UNION and UNION ALL in the same statement is not supported — use the same set-operation kind throughout the chain");
+            }
+
+            branches.Add(ParseSelectQuery());
+        }
+
+        return (null, new SetOperationQuery(all!.Value, branches, chainTok.Line, chainTok.Column));
     }
 
     /// <summary>Rewrites every FROM/JOIN NamedSource in <paramref name="query"/> (recursing into any
@@ -167,6 +234,11 @@ internal sealed class Parser
                 return ns;
             case DerivedSource ds:
                 return new DerivedSource(SubstituteCtes(ds.Query, resolved, allCteNames), ds.Alias, ds.Line, ds.Column);
+            case DerivedSetOperationSource dus:
+                // Plan 008 W3: derived-table-position set operation — recurse CTE substitution into every
+                // branch, same reasoning as the top-level ParseTopLevel case.
+                var branches = dus.SetOp.Branches.Select(b => SubstituteCtes(b, resolved, allCteNames)).ToList();
+                return new DerivedSetOperationSource(new SetOperationQuery(dus.SetOp.All, branches, dus.SetOp.Line, dus.SetOp.Column), dus.Alias, dus.Line, dus.Column);
             default:
                 return item;
         }
@@ -182,6 +254,20 @@ internal sealed class Parser
     }
 
     private ParseException Error(Token at, string message) => new(new SqlDiagnostic(message, at.Line, at.Column));
+
+    /// <summary>Plan 008 W3: IN/EXISTS/scalar-subquery position is explicitly OUT of set-operation v1 scope
+    /// (those paths synthesize their own joins and are the highest-risk surface for no benefit — see
+    /// SetOperationQuery's doc comment) — called right after each of those three inner ParseSelectQuery()
+    /// calls, before the closing ')', so a UNION there gets its own clear, positioned diagnostic instead of
+    /// falling through to whatever generic "expected ')'" message the caller's own ExpectSymbol would
+    /// otherwise produce.</summary>
+    private void RejectUnionInSubqueryPosition(string context)
+    {
+        if (Current.IsKeyword("UNION"))
+        {
+            throw Error(Current, $"UNION is not supported inside {context} in this dialect — restructure the query without a set operation there");
+        }
+    }
 
     private void ExpectKeyword(string keyword)
     {
@@ -411,25 +497,34 @@ internal sealed class Parser
         if (Current.IsSymbol("("))
         {
             var openTok = Advance();
-            var inner = ParseSelectQuery();
+            // Plan 008 W3: derived-table position accepts a set operation too — `FROM ( SELECT ... UNION
+            // [ALL] SELECT ... ) alias` — see SetOperationQuery's doc comment on the v1 scope of where a
+            // set operation is legal.
+            var (inner, innerSetOp) = ParseSelectOrSetOperation();
             ExpectSymbol(")");
+            string alias = ParseMandatoryDerivedAlias();
 
-            string alias;
-            if (MatchKeyword("AS"))
-            {
-                alias = ExpectIdentifierToken().Text;
-            }
-            else if (Current.Kind == TokenKind.Identifier && !ClauseKeywords.Contains(Current.Text))
-            {
-                alias = Advance().Text;
-            }
-            else
-            {
-                throw Error(Current, "A derived table (subquery in FROM/JOIN) requires an alias");
-            }
-            return new DerivedSource(inner, alias, openTok.Line, openTok.Column);
+            return innerSetOp is not null
+                ? new DerivedSetOperationSource(innerSetOp, alias, openTok.Line, openTok.Column)
+                : new DerivedSource(inner!, alias, openTok.Line, openTok.Column);
         }
         return ParseSourceRef();
+    }
+
+    /// <summary>Shared by both derived-table-position shapes (plain and set-operation) — Postgres itself
+    /// requires an alias for a derived table; also required here since neither has a name of its own to
+    /// fall back on.</summary>
+    private string ParseMandatoryDerivedAlias()
+    {
+        if (MatchKeyword("AS"))
+        {
+            return ExpectIdentifierToken().Text;
+        }
+        if (Current.Kind == TokenKind.Identifier && !ClauseKeywords.Contains(Current.Text))
+        {
+            return Advance().Text;
+        }
+        throw Error(Current, "A derived table (subquery in FROM/JOIN) requires an alias");
     }
 
     private bool IsJoinStart() =>
@@ -610,6 +705,7 @@ internal sealed class Parser
     {
         ExpectSymbol("(");
         var subquery = ParseSelectQuery();
+        RejectUnionInSubqueryPosition("EXISTS (...)");
         ExpectSymbol(")");
         return new ExistsExpr(subquery, negated, line, col);
     }
@@ -635,6 +731,7 @@ internal sealed class Parser
             var tok = Advance(); // 'IN'
             ExpectSymbol("(");
             var subquery = ParseSelectQuery();
+            RejectUnionInSubqueryPosition("IN (...)");
             ExpectSymbol(")");
             return new InSubqueryExpr(left, subquery, inNegated, tok.Line, tok.Column);
         }
@@ -737,6 +834,7 @@ internal sealed class Parser
                 if (Current.IsKeyword("SELECT"))
                 {
                     var subquery = ParseSelectQuery();
+                    RejectUnionInSubqueryPosition("a scalar subquery");
                     ExpectSymbol(")");
                     return new ScalarSubqueryExpr(subquery, tok.Line, tok.Column);
                 }

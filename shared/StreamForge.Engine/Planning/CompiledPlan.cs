@@ -69,4 +69,17 @@ internal sealed class CompiledPlan
     public required SourceSchema OutputSchema { get; init; }
     public required List<string> SourceNames { get; init; }
     public required string SourceLabel { get; init; } // comma-joined source names, used as output _source
+
+    /// <summary>Plan 008 W3: non-null only for a set-operation root (top-level `SELECT ... UNION ALL
+    /// SELECT ...`, or the same in derived-table position — see Sql/Validator.cs's UnionDerivedInfo). When
+    /// set, EVERY other field above is a benign placeholder (Sources/Joins empty, Where/GroupBy/Window
+    /// null, Output empty, ...) — the union-root plan has no FROM/JOIN chain of its own; ExecutorImpl's
+    /// union-aware EnsureInit/OnEventCore/AdvanceWatermarkCore branch on this field FIRST and never touch
+    /// those placeholder fields. Each branch is itself a complete, independently-compiled CompiledPlan
+    /// (built by the SAME BuildCompiledPlan every ordinary query goes through) — "reuse the nesting seam"
+    /// per plan 008: this slot sits exactly where CompiledSource.DerivedPlan/CompiledJoin.DerivedPlan
+    /// already nest one compiled plan inside another for a derived table, so a set operation appearing
+    /// there (FROM ( ... UNION ... ) alias) needs zero extra wiring at the executor layer — see
+    /// Planning/Planner.cs's BuildCompiledUnionPlan.</summary>
+    public List<CompiledPlan>? UnionBranches { get; init; }
 }

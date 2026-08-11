@@ -27,15 +27,22 @@ public static class TablePlanner
         var (tokens, tokenDiags) = new Tokenizer(sql).Tokenize();
         diagnostics.AddRange(tokenDiags);
 
-        var (query, parseDiags) = Parser.Parse(tokens);
+        var (query, setOp, parseDiags) = Parser.ParseStatement(tokens);
         diagnostics.AddRange(parseDiags);
 
-        if (query is null)
+        if (query is null && setOp is null)
         {
             return new TableCompileResult { Ok = false, Diagnostics = diagnostics };
         }
 
-        var validation = Validator.ValidateTable(query, streamSchemas, tableSchemas);
+        // Plan 008 W3: a top-level (or WITH-wrapped) set operation takes its own compile path — see
+        // CompileSetOperation. Everything below is the pre-008 single-query path, unchanged.
+        if (setOp is not null)
+        {
+            return CompileSetOperation(setOp, streamSchemas, tableSchemas, diagnostics);
+        }
+
+        var validation = Validator.ValidateTable(query!, streamSchemas, tableSchemas);
         diagnostics.AddRange(validation.Diagnostics);
 
         if (diagnostics.Exists(d => d.Severity == DiagnosticSeverity.Error))
@@ -43,7 +50,7 @@ public static class TablePlanner
             return new TableCompileResult { Ok = false, Diagnostics = diagnostics };
         }
 
-        var compiled = BuildCompiledTablePlan(query, validation);
+        var compiled = BuildCompiledTablePlan(query!, validation);
         var plan = new TablePlan(compiled);
 
         return new TableCompileResult
@@ -55,6 +62,128 @@ public static class TablePlanner
             TableInputs = compiled.TableInputs,
             OutputSchema = compiled.OutputSchema,
             Plan = plan,
+        };
+    }
+
+    /// <summary>Plan 008 W3: compiles a top-level (or WITH-wrapped) table-mode `SELECT ... UNION [ALL]
+    /// SELECT ...` chain — the table-mode mirror of Planner.CompileSetOperation. UNION (distinct) is
+    /// allowed here (table mode only — see Validator.ValidateSetOperationTable).</summary>
+    private static TableCompileResult CompileSetOperation(SetOperationQuery setOp, IReadOnlyDictionary<string, SourceSchema> streamSchemas, IReadOnlyDictionary<string, SourceSchema> tableSchemas, List<SqlDiagnostic> diagnostics)
+    {
+        var v = Validator.ValidateSetOperationTable(setOp, streamSchemas, tableSchemas);
+        diagnostics.AddRange(v.Diagnostics);
+
+        if (diagnostics.Exists(d => d.Severity == DiagnosticSeverity.Error))
+        {
+            return new TableCompileResult { Ok = false, Diagnostics = diagnostics };
+        }
+
+        var compiled = BuildCompiledUnionPlan(setOp, v.BranchValidations, v.OutputSchema!, v.StreamInputs, v.TableInputs);
+        var plan = new TablePlan(compiled);
+
+        return new TableCompileResult
+        {
+            Ok = true,
+            Diagnostics = diagnostics,
+            PlanSummary = compiled.PlanSummary,
+            StreamInputs = compiled.StreamInputs,
+            TableInputs = compiled.TableInputs,
+            OutputSchema = compiled.OutputSchema,
+            Plan = plan,
+        };
+    }
+
+    /// <summary>Plan 008 W3: builds a union-root CompiledTablePlan — table-mode mirror of
+    /// Planner.BuildCompiledUnionPlan (see its doc comment for the normalization reasoning). StreamInputs/
+    /// TableInputs are the already-unioned (distinct, across every branch) leaf inputs Validator computed —
+    /// passed straight through rather than recomputed here, since Validator.ResolveFromItem's FoldNestedInputs
+    /// already applied the exact same "flatten through any derived/union nesting" rule this plan needs.</summary>
+    private static CompiledTablePlan BuildCompiledUnionPlan(SetOperationQuery setOp, List<ValidationResult> branchValidations, SourceSchema unifiedSchema, List<string> streamInputs, List<string> tableInputs)
+    {
+        var branchNames = unifiedSchema.Fields.Keys.ToList();
+        var rawBranchPlans = new List<CompiledTablePlan>();
+        for (int i = 0; i < setOp.Branches.Count; i++)
+        {
+            rawBranchPlans.Add(BuildCompiledTablePlan(setOp.Branches[i], branchValidations[i]));
+        }
+
+        string opText = setOp.All ? "UNION ALL" : "UNION";
+        var sourceLabel = string.Join(",", rawBranchPlans.Select(b => b.SourceLabel));
+        var summary = string.Join($" {opText} ", rawBranchPlans.Select(b => b.SourceLabel)) + $" → SELECT {unifiedSchema.Fields.Count} cols";
+
+        // Plan 008 W3: EVERY branch (0 included) is normalized to the SAME output column names AND the SAME
+        // `_source` stamp — see NormalizeBranchPlan's doc comment for why `_source` matters just as much as
+        // column names here: two branches asserting "the same logical row" must produce CANONICALLY
+        // IDENTICAL EventRecords (same field set, same values, including `_ts`/`_source`) for
+        // TableExecutorImpl.ApplyConsolidation's weight-sum (UNION ALL) and TableDistinctOp's zero-crossing
+        // dedup (UNION) to mean anything — otherwise every branch's own per-alias `_source` label would make
+        // two logically-identical rows canonically DIFFERENT, silently defeating both.
+        var branchPlans = rawBranchPlans.Select(bp => NormalizeBranchPlan(bp, branchNames, sourceLabel)).ToList();
+
+        return new CompiledTablePlan
+        {
+            Sources = [],
+            Joins = [],
+            Where = null,
+            GroupBy = null,
+            Output = [],
+            AggregateNodes = [],
+            AggregateIndex = new Dictionary<AggregateCallExpr, int>(ReferenceEqualityComparer.Instance),
+            Bindings = new Dictionary<Expr, (string Alias, string Field)>(ReferenceEqualityComparer.Instance),
+            HasAggregates = false,
+            PlanSummary = summary,
+            StreamInputs = streamInputs,
+            TableInputs = tableInputs,
+            SourceLabel = sourceLabel,
+            OutputSchema = unifiedSchema,
+            LatestBy = null,
+            UnionBranches = branchPlans,
+            UnionAll = setOp.All,
+        };
+    }
+
+    /// <summary>Plan 008 W3: returns a copy of <paramref name="plan"/> with its Output items' Names replaced
+    /// positionally by <paramref name="names"/> (branch 0's own names — a no-op for branch 0 itself, since
+    /// `names` IS branch 0's own names) and its <see cref="CompiledTablePlan.SourceLabel"/> replaced by
+    /// <paramref name="sourceLabel"/> (the union's own joined label) — every branch's own
+    /// TableFilterProjectOp/TableReduceOp/TableLatestByOp then independently emits rows already shaped like
+    /// the union's declared output, with a UNIFORM `_source`, so TableExecutorImpl's union-root path needs
+    /// no rename/restamp adapter of its own (see EnsureInitUnion's doc comment).</summary>
+    private static CompiledTablePlan NormalizeBranchPlan(CompiledTablePlan plan, List<string> names, string sourceLabel)
+    {
+        var newOutput = new List<OutputItem>();
+        for (int i = 0; i < plan.Output.Count; i++)
+        {
+            var item = plan.Output[i];
+            newOutput.Add(new OutputItem { Name = i < names.Count ? names[i] : item.Name, Expression = item.Expression, GroupByIndex = item.GroupByIndex });
+        }
+
+        var oldKinds = plan.OutputSchema.Fields.Values.ToList();
+        var newFields = new Dictionary<string, FieldKind>();
+        for (int i = 0; i < newOutput.Count; i++)
+        {
+            newFields[newOutput[i].Name] = i < oldKinds.Count ? oldKinds[i] : FieldKind.String;
+        }
+
+        return new CompiledTablePlan
+        {
+            Sources = plan.Sources,
+            Joins = plan.Joins,
+            Where = plan.Where,
+            GroupBy = plan.GroupBy,
+            Output = newOutput,
+            AggregateNodes = plan.AggregateNodes,
+            AggregateIndex = plan.AggregateIndex,
+            Bindings = plan.Bindings,
+            HasAggregates = plan.HasAggregates,
+            PlanSummary = plan.PlanSummary,
+            StreamInputs = plan.StreamInputs,
+            TableInputs = plan.TableInputs,
+            SourceLabel = sourceLabel,
+            OutputSchema = new SourceSchema(plan.OutputSchema.Name, newFields),
+            LatestBy = plan.LatestBy,
+            UnionBranches = plan.UnionBranches,
+            UnionAll = plan.UnionAll,
         };
     }
 
@@ -71,7 +200,15 @@ public static class TablePlanner
             SourceName = s.SourceName,
             Schema = s.Schema,
             IsTable = s.IsTable,
-            DerivedPlan = s.Derived is null ? null : BuildCompiledTablePlan(s.Derived.Query, s.Derived.Validation),
+            // Plan 008 W3: a derived-table-position set operation reuses this exact nesting seam — see
+            // Planner.cs's identical comment on its own pipeline-mode CompiledSource.DerivedPlan assignment.
+            DerivedPlan = s.Derived is not null
+                ? BuildCompiledTablePlan(s.Derived.Query, s.Derived.Validation)
+                : s.UnionDerived is not null
+                    ? BuildCompiledUnionPlan(s.UnionDerived.SetOp, s.UnionDerived.BranchValidations, s.Schema,
+                        s.UnionDerived.BranchValidations.SelectMany(bv => bv.StreamInputs).Distinct(StringComparer.Ordinal).ToList(),
+                        s.UnionDerived.BranchValidations.SelectMany(bv => bv.TableInputs).Distinct(StringComparer.Ordinal).ToList())
+                    : null,
         }).ToList();
         var joins = v.Joins.Select(j =>
         {

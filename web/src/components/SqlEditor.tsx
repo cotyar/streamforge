@@ -10,6 +10,8 @@ const KEYWORDS = new Set([
   'CROSS', 'ON', 'WITHIN', 'AS', 'EMIT', 'CHANGES', 'FINAL', 'TUMBLING', 'HOPPING', 'SESSION', 'SIZE',
   'ADVANCE', 'GAP', 'AND', 'OR', 'NOT', 'TRUE', 'FALSE', 'NULL', 'SECONDS', 'MILLISECONDS', 'MINUTES', 'HOURS',
   'WITH',
+  // Plan 008 W3: set operations + GROUP BY ALL.
+  'UNION', 'ALL',
 ])
 
 const AGGREGATE_FNS = new Set(['COUNT', 'SUM', 'AVG', 'MIN', 'MAX'])

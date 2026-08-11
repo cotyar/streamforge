@@ -16,6 +16,21 @@ internal static class TableDataflowBuilder
         Dictionary<int, StageBuild> Builds, Dictionary<int, RoutingKeySpec> RoutingSpecs)
         Build(CompiledTablePlan compiled, int partitionCount)
     {
+        if (compiled.UnionBranches is not null)
+        {
+            // Plan 008 W3: a set-operation root has no FROM/JOIN chain of its own (Sources/Joins are both
+            // empty — see CompiledTablePlan.UnionBranches's doc comment), so this check must come BEFORE
+            // the compiled.Sources[0] dereference just below, or an empty Sources list would throw
+            // IndexOutOfRangeException instead of this clear, positioned message. Unconditional (not gated
+            // on partitionCount > 1) — same style as the derived-table-in-FROM-position check right below,
+            // which this deliberately mirrors: a real N-ary merge stage would need a new TableStageKind
+            // (see TableStageKindLabel's exhaustive switch) plus breaking the documented "1 or 2 in-edges
+            // per stage" invariant — out of scope for this wave (plan 008's own descope note).
+            throw new NotSupportedException(
+                "Partitioned execution (Parallelism > 1) does not support a set operation (UNION/UNION ALL) at " +
+                "the table root; set-operation tables run single-partition only in this wave. " +
+                "Use Parallelism = 1 for this table.");
+        }
         if (compiled.Sources[0].DerivedPlan is not null)
         {
             throw new NotSupportedException(

@@ -38,9 +38,24 @@ internal sealed class DerivedInfo
     public required ValidationResult Validation { get; init; }
 }
 
-/// <summary>One resolved FROM/JOIN source — a plain named stream/table (Derived is null) or a derived
-/// table/CTE (Derived is set; Schema is then the inner query's synthesized output schema, "one level up"
-/// per plan 004 N1).</summary>
+/// <summary>Plan 008 W3: set on a <see cref="ResolvedSource"/> when it came from a derived-table-position
+/// set operation — `FROM ( SELECT ... UNION [ALL] SELECT ... ) alias`. Parallels <see cref="DerivedInfo"/>
+/// (kept as its own type rather than widening DerivedInfo — see DerivedSetOperationSource's own doc comment
+/// for why). Carries every branch's own independently-computed ValidationResult, in branch order, so
+/// Planner can build each branch's CompiledPlan/CompiledTablePlan the exact same recursive way a plain
+/// derived table's does (Planner.BuildCompiledPlan/BuildCompiledTablePlan already take a SelectQuery +
+/// ValidationResult pair per call).</summary>
+internal sealed class UnionDerivedInfo
+{
+    public required SetOperationQuery SetOp { get; init; }
+    public required List<ValidationResult> BranchValidations { get; init; }
+}
+
+/// <summary>One resolved FROM/JOIN source — a plain named stream/table (Derived/UnionDerived both null), a
+/// derived table/CTE (Derived is set; Schema is then the inner query's synthesized output schema, "one
+/// level up" per plan 004 N1), or a derived-table-position set operation (UnionDerived is set — plan 008
+/// W3; Schema is then the branches' unified output schema). Derived and UnionDerived are mutually
+/// exclusive.</summary>
 internal sealed class ResolvedSource
 {
     public required string Alias { get; init; }
@@ -48,10 +63,26 @@ internal sealed class ResolvedSource
     public required SourceSchema Schema { get; init; }
     public required bool IsTable { get; init; }
     public DerivedInfo? Derived { get; init; }
+    public UnionDerivedInfo? UnionDerived { get; init; }
     /// <summary>Plan 002 L2: true when this source is an UNNEST alias (its Schema is the synthetic
     /// one-field element schema — see Validator.ResolveUnnestJoin) rather than a real named/derived
     /// source.</summary>
     public bool IsUnnest { get; init; }
+}
+
+/// <summary>Plan 008 W3: outcome of validating a top-level (or WITH-wrapped) set operation — the
+/// SetOperationQuery analogue of <see cref="ValidationResult"/>. <see cref="OutputSchema"/> is null only
+/// when branch validation/compatibility failed (Diagnostics then holds the reason); StreamInputs/
+/// TableInputs are each branch's own already-folded leaf inputs, unioned (distinct) across every branch —
+/// mirrors how Planner.BuildCompiledPlan unions SourceNames across branches for pipeline mode.</summary>
+internal sealed class SetOperationValidationResult
+{
+    public required List<SqlDiagnostic> Diagnostics { get; init; }
+    public required List<ValidationResult> BranchValidations { get; init; }
+    public required SourceSchema? OutputSchema { get; init; }
+    public required List<string> StreamInputs { get; init; }
+    public required List<string> TableInputs { get; init; }
+    public bool HasErrors => Diagnostics.Exists(d => d.Severity == DiagnosticSeverity.Error);
 }
 
 /// <summary>Plan 004 N2: one resolved `[NOT] IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` WHERE predicate
@@ -222,6 +253,71 @@ internal sealed class Validator
         return v.Run(query);
     }
 
+    /// <summary>Plan 008 W3: message for "UNION (distinct) used in pipeline mode" — shared by the top-level
+    /// set-operation path (<see cref="FinishSetOperationValidation"/>) and the derived-table-position path
+    /// (ResolveFromItem's DerivedSetOperationSource case), so both surfaces report byte-identical wording.
+    /// Names UNION ALL as the fix per plan 008's D-F decision (pipeline mode has no Z-set weights to dedup
+    /// with, so weight-clamping is meaningless there, and an unbounded distinct over an unbounded stream is
+    /// unbounded state — see DESIGN.md §D11).</summary>
+    private const string PipelineUnionDistinctMessage =
+        "UNION (distinct) is not supported in pipeline mode — pipeline mode has no Z-set weights to dedup " +
+        "with, and an unbounded distinct over an unbounded stream would be unbounded state; use UNION ALL instead";
+
+    /// <summary>Plan 008 W3: top-level (or WITH-wrapped) pipeline-mode set operation. Every branch validates
+    /// independently and uncorrelated (own Validator instance per branch, same schemas) — see
+    /// FinishSetOperationValidation for the shared branch-compatibility/ALL-ness checks.</summary>
+    public static SetOperationValidationResult ValidateSetOperation(SetOperationQuery setOp, IReadOnlyDictionary<string, SourceSchema> schemas)
+    {
+        var branchValidations = setOp.Branches.Select(b => Validate(b, schemas)).ToList();
+        return FinishSetOperationValidation(setOp, branchValidations, isTable: false);
+    }
+
+    /// <summary>Plan 008 W3: top-level (or WITH-wrapped) table-mode set operation — the ValidateTable
+    /// analogue of <see cref="ValidateSetOperation"/>. UNION (distinct) is allowed here (table mode only).</summary>
+    public static SetOperationValidationResult ValidateSetOperationTable(SetOperationQuery setOp, IReadOnlyDictionary<string, SourceSchema> streamSchemas, IReadOnlyDictionary<string, SourceSchema> tableSchemas)
+    {
+        var branchValidations = setOp.Branches.Select(b => ValidateTable(b, streamSchemas, tableSchemas)).ToList();
+        return FinishSetOperationValidation(setOp, branchValidations, isTable: true);
+    }
+
+    private static SetOperationValidationResult FinishSetOperationValidation(SetOperationQuery setOp, List<ValidationResult> branchValidations, bool isTable)
+    {
+        var diags = new List<SqlDiagnostic>();
+        foreach (var bv in branchValidations) diags.AddRange(bv.Diagnostics);
+
+        if (!isTable && !setOp.All)
+        {
+            diags.Add(new SqlDiagnostic(PipelineUnionDistinctMessage, setOp.Line, setOp.Column));
+        }
+
+        SourceSchema? unified = null;
+        var streamInputs = new List<string>();
+        var tableInputs = new List<string>();
+
+        if (!diags.Exists(d => d.Severity == DiagnosticSeverity.Error))
+        {
+            var branchSchemas = setOp.Branches.Zip(branchValidations, (b, bv) => BuildDerivedOutputSchema(b, bv)).ToList();
+            var (compatDiags, u) = CheckSetOperationBranchCompatibility(branchSchemas, setOp.Line, setOp.Column);
+            diags.AddRange(compatDiags);
+            unified = u;
+
+            if (isTable)
+            {
+                streamInputs = branchValidations.SelectMany(bv => bv.StreamInputs).Distinct(StringComparer.Ordinal).ToList();
+                tableInputs = branchValidations.SelectMany(bv => bv.TableInputs).Distinct(StringComparer.Ordinal).ToList();
+            }
+        }
+
+        return new SetOperationValidationResult
+        {
+            Diagnostics = diags,
+            BranchValidations = branchValidations,
+            OutputSchema = unified,
+            StreamInputs = streamInputs,
+            TableInputs = tableInputs,
+        };
+    }
+
     private ValidationResult Run(SelectQuery q)
     {
         var sources = new List<ResolvedSource>();
@@ -301,7 +397,7 @@ internal sealed class Validator
 
             if (sourceOk)
             {
-                sources.Add(new ResolvedSource { Alias = j.Source.Alias, SourceName = resolved.SourceName, Schema = jSchema!, IsTable = jIsTable, Derived = resolved.Derived });
+                sources.Add(new ResolvedSource { Alias = j.Source.Alias, SourceName = resolved.SourceName, Schema = jSchema!, IsTable = jIsTable, Derived = resolved.Derived, UnionDerived = resolved.UnionDerived });
             }
 
             joins.Add(new JoinBinding(j.Kind, j.Source.Alias, resolved.SourceName, j.Within, leftKeys, rightKeys, residual, jIsTable));
@@ -452,18 +548,20 @@ internal sealed class Validator
         var r = ResolveFromItem(item, aliasSeen);
         if (r.Ok)
         {
-            sources.Add(new ResolvedSource { Alias = item.Alias, SourceName = r.SourceName, Schema = r.Schema!, IsTable = r.IsTable, Derived = r.Derived });
+            sources.Add(new ResolvedSource { Alias = item.Alias, SourceName = r.SourceName, Schema = r.Schema!, IsTable = r.IsTable, Derived = r.Derived, UnionDerived = r.UnionDerived });
         }
     }
 
-    /// <summary>Resolves one FROM/JOIN item — a plain named source (existing lookup rules unchanged) or a
+    /// <summary>Resolves one FROM/JOIN item — a plain named source (existing lookup rules unchanged), a
     /// derived table/CTE (plan 004 N1: recursively validates the inner query against the SAME
     /// stream/table namespace — uncorrelated, no outer-alias visibility — then synthesizes this alias's
-    /// schema from the inner query's own output). Does NOT add to <paramref name="sources"/> itself
-    /// (callers differ: FROM adds unconditionally via <see cref="RegisterSource"/>, JOIN adds after also
-    /// resolving its ON clause) — but DOES perform the duplicate-alias check every FROM/JOIN item needs,
-    /// same as the pre-N1 RegisterSource did regardless of call site.</summary>
-    private (bool Ok, string SourceName, SourceSchema? Schema, bool IsTable, DerivedInfo? Derived) ResolveFromItem(FromItem item, HashSet<string> aliasSeen)
+    /// schema from the inner query's own output), or (plan 008 W3) a derived-table-position set operation
+    /// (same uncorrelated-recursion idea, applied to every branch, plus a branch-compatibility check for
+    /// the unified schema). Does NOT add to <paramref name="sources"/> itself (callers differ: FROM adds
+    /// unconditionally via <see cref="RegisterSource"/>, JOIN adds after also resolving its ON clause) —
+    /// but DOES perform the duplicate-alias check every FROM/JOIN item needs, same as the pre-N1
+    /// RegisterSource did regardless of call site.</summary>
+    private (bool Ok, string SourceName, SourceSchema? Schema, bool IsTable, DerivedInfo? Derived, UnionDerivedInfo? UnionDerived) ResolveFromItem(FromItem item, HashSet<string> aliasSeen)
     {
         if (!aliasSeen.Add(item.Alias))
         {
@@ -476,7 +574,29 @@ internal sealed class Validator
             _diags.AddRange(inner.Diagnostics);
             FoldNestedInputs(inner);
             var schema = BuildDerivedOutputSchema(ds.Query, inner);
-            return (true, "(derived)", schema, false, new DerivedInfo { Query = ds.Query, Validation = inner });
+            return (true, "(derived)", schema, false, new DerivedInfo { Query = ds.Query, Validation = inner }, null);
+        }
+
+        if (item is DerivedSetOperationSource dus)
+        {
+            var branchValidations = dus.SetOp.Branches.Select(ValidateNestedUncorrelated).ToList();
+            foreach (var bv in branchValidations)
+            {
+                _diags.AddRange(bv.Diagnostics);
+                FoldNestedInputs(bv);
+            }
+
+            if (_mode == ValidationMode.Stream && !dus.SetOp.All)
+            {
+                _diags.Add(new SqlDiagnostic(PipelineUnionDistinctMessage, dus.SetOp.Line, dus.SetOp.Column));
+            }
+
+            var branchSchemas = dus.SetOp.Branches.Zip(branchValidations, (b, bv) => BuildDerivedOutputSchema(b, bv)).ToList();
+            var (compatDiags, unified) = CheckSetOperationBranchCompatibility(branchSchemas, dus.SetOp.Line, dus.SetOp.Column);
+            _diags.AddRange(compatDiags);
+
+            var schema = unified ?? new SourceSchema("(derived)", new Dictionary<string, FieldKind>());
+            return (true, "(derived)", schema, false, null, new UnionDerivedInfo { SetOp = dus.SetOp, BranchValidations = branchValidations });
         }
 
         var sref = (NamedSource)item;
@@ -484,14 +604,14 @@ internal sealed class Validator
         if (_mode == ValidationMode.Table && _ambiguousNames.Contains(sref.Name))
         {
             _diags.Add(new SqlDiagnostic($"Ambiguous name '{sref.Name}' — present in both streams and tables", sref.Line, sref.Column));
-            return (false, sref.Name, null, false, null);
+            return (false, sref.Name, null, false, null, null);
         }
 
         if (!_schemas.TryGetValue(sref.Name, out var namedSchema))
         {
             var available = string.Join(", ", _schemas.Keys.OrderBy(k => k, StringComparer.Ordinal));
             _diags.Add(new SqlDiagnostic($"Unknown source '{sref.Name}' — available: {available}", sref.Line, sref.Column));
-            return (false, sref.Name, null, false, null);
+            return (false, sref.Name, null, false, null, null);
         }
 
         bool isTable = _mode == ValidationMode.Table && _tableNames.Contains(sref.Name);
@@ -500,7 +620,7 @@ internal sealed class Validator
             if (isTable) _tableInputs.Add(sref.Name); else _streamInputs.Add(sref.Name);
         }
 
-        return (true, sref.Name, namedSchema, isTable, null);
+        return (true, sref.Name, namedSchema, isTable, null, null);
     }
 
     // ------------------------------------------------------------------
@@ -589,6 +709,66 @@ internal sealed class Validator
         if (_mode != ValidationMode.Table) return;
         _streamInputs.AddRange(inner.StreamInputs);
         _tableInputs.AddRange(inner.TableInputs);
+    }
+
+    /// <summary>Plan 008 W3: checks that every branch of a set operation has the same output arity and
+    /// positionally-compatible column kinds, and computes the unified output schema — branch 0's column
+    /// NAMES, with each column's KIND unified pairwise across every branch (Long+Double unify to Double;
+    /// every other pair must be identical; Json and Timestamp only unify with themselves, matching how
+    /// nothing else in this dialect implicitly widens a JSON or timestamp value). An arity mismatch is
+    /// reported once (comparing every branch to branch 0's own count) and short-circuits — a schema of the
+    /// WRONG column count would be worse than none, and a kind mismatch on a column that doesn't even line
+    /// up positionally is not a meaningful diagnostic. Returns (Diagnostics, null) on any incompatibility;
+    /// (empty, non-null) on success. There is no schema-equality/merge helper anywhere else in the repo —
+    /// this is new code for plan 008 W3, homed next to BuildDerivedOutputSchema (the other "compute a
+    /// derived alias's schema from an inner validation" helper) rather than in Planning/, since both the
+    /// top-level set-operation path and the derived-table-position path need it at validation time, before
+    /// any CompiledPlan exists.</summary>
+    internal static (List<SqlDiagnostic> Diagnostics, SourceSchema? Unified) CheckSetOperationBranchCompatibility(
+        IReadOnlyList<SourceSchema> branchSchemas, int line, int column)
+    {
+        var diags = new List<SqlDiagnostic>();
+        if (branchSchemas.Count == 0) return (diags, null);
+
+        var firstNames = branchSchemas[0].Fields.Keys.ToList();
+        var firstKinds = branchSchemas[0].Fields.Values.ToList();
+        int arity = firstNames.Count;
+
+        for (int b = 1; b < branchSchemas.Count; b++)
+        {
+            if (branchSchemas[b].Fields.Count != arity)
+            {
+                diags.Add(new SqlDiagnostic(
+                    $"UNION branch {b + 1} has {branchSchemas[b].Fields.Count} output column(s), branch 1 has {arity} — every branch of a set operation must have the same number of columns",
+                    line, column));
+            }
+        }
+        if (diags.Count > 0) return (diags, null);
+
+        var unifiedKinds = firstKinds.ToArray();
+        for (int b = 1; b < branchSchemas.Count; b++)
+        {
+            var kinds = branchSchemas[b].Fields.Values.ToList();
+            for (int i = 0; i < arity; i++)
+            {
+                var u = unifiedKinds[i];
+                var k = kinds[i];
+                if (u == k) continue;
+                if ((u == FieldKind.Long && k == FieldKind.Double) || (u == FieldKind.Double && k == FieldKind.Long))
+                {
+                    unifiedKinds[i] = FieldKind.Double;
+                    continue;
+                }
+                diags.Add(new SqlDiagnostic(
+                    $"UNION branch {b + 1}'s column {i + 1} ('{firstNames[i]}') has kind {k}, which is not compatible with branch 1's kind {u}",
+                    line, column));
+            }
+        }
+        if (diags.Count > 0) return (diags, null);
+
+        var fields = new Dictionary<string, FieldKind>();
+        for (int i = 0; i < arity; i++) fields[firstNames[i]] = unifiedKinds[i];
+        return (diags, new SourceSchema("(union)", fields));
     }
 
     /// <summary>Plan 004 N1: "a derived table's output schema (existing BuildOutputSchema) is the

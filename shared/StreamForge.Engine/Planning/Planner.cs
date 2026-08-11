@@ -27,15 +27,22 @@ public static class Planner
         var (tokens, tokenDiags) = new Tokenizer(sql).Tokenize();
         diagnostics.AddRange(tokenDiags);
 
-        var (query, parseDiags) = Parser.Parse(tokens);
+        var (query, setOp, parseDiags) = Parser.ParseStatement(tokens);
         diagnostics.AddRange(parseDiags);
 
-        if (query is null)
+        if (query is null && setOp is null)
         {
             return new CompileResult { Ok = false, Diagnostics = diagnostics };
         }
 
-        var validation = Validator.Validate(query, schemas);
+        // Plan 008 W3: a top-level (or WITH-wrapped) set operation takes its own compile path — see
+        // CompileSetOperation. Everything below is the pre-008 single-query path, unchanged.
+        if (setOp is not null)
+        {
+            return CompileSetOperation(setOp, schemas, diagnostics);
+        }
+
+        var validation = Validator.Validate(query!, schemas);
         diagnostics.AddRange(validation.Diagnostics);
 
         if (diagnostics.Exists(d => d.Severity == DiagnosticSeverity.Error))
@@ -43,7 +50,7 @@ public static class Planner
             return new CompileResult { Ok = false, Diagnostics = diagnostics };
         }
 
-        var compiled = BuildCompiledPlan(query, validation);
+        var compiled = BuildCompiledPlan(query!, validation);
         var plan = new PipelinePlan(compiled);
 
         return new CompileResult
@@ -54,6 +61,117 @@ public static class Planner
             SourceNames = compiled.SourceNames,
             OutputSchema = compiled.OutputSchema,
             Plan = plan,
+        };
+    }
+
+    /// <summary>Plan 008 W3: compiles a top-level (or WITH-wrapped) `SELECT ... UNION [ALL] SELECT ...`
+    /// chain — validates every branch (independently, uncorrelated) plus branch compatibility via
+    /// Validator.ValidateSetOperation, then builds each branch's own CompiledPlan (the SAME
+    /// BuildCompiledPlan every ordinary query goes through) and wraps them in a union-root CompiledPlan —
+    /// see BuildCompiledUnionPlan and CompiledPlan.UnionBranches's doc comment.</summary>
+    private static CompileResult CompileSetOperation(SetOperationQuery setOp, IReadOnlyDictionary<string, SourceSchema> schemas, List<SqlDiagnostic> diagnostics)
+    {
+        var v = Validator.ValidateSetOperation(setOp, schemas);
+        diagnostics.AddRange(v.Diagnostics);
+
+        if (diagnostics.Exists(d => d.Severity == DiagnosticSeverity.Error))
+        {
+            return new CompileResult { Ok = false, Diagnostics = diagnostics };
+        }
+
+        var compiled = BuildCompiledUnionPlan(setOp, v.BranchValidations, v.OutputSchema!);
+        var plan = new PipelinePlan(compiled);
+
+        return new CompileResult
+        {
+            Ok = true,
+            Diagnostics = diagnostics,
+            PlanSummary = compiled.PlanSummary,
+            SourceNames = compiled.SourceNames,
+            OutputSchema = compiled.OutputSchema,
+            Plan = plan,
+        };
+    }
+
+    /// <summary>Plan 008 W3: builds a union-root CompiledPlan — every branch compiled via the ordinary,
+    /// recursive BuildCompiledPlan, then EVERY branch (0 included) normalized to the SAME output column
+    /// names (branch 0's own — a no-op for branch 0 itself) AND the SAME `_source` stamp (the union's own
+    /// joined label, not each branch's own alias-based one) — see NormalizeOutputColumns's doc comment for
+    /// why `_source` matters here too: table mode's consolidation/dedup depend on it (this pipeline-mode
+    /// copy has no consolidation of its own, but keeps the SAME normalization for a consistent, non-
+    /// surprising `_source` value regardless of which branch a row came from).</summary>
+    private static CompiledPlan BuildCompiledUnionPlan(SetOperationQuery setOp, List<ValidationResult> branchValidations, SourceSchema unifiedSchema)
+    {
+        var branchNames = unifiedSchema.Fields.Keys.ToList();
+        var rawBranchPlans = setOp.Branches.Select((b, i) => BuildCompiledPlan(b, branchValidations[i])).ToList();
+
+        var sourceNames = rawBranchPlans.SelectMany(b => b.SourceNames).Distinct().ToList();
+        var sourceLabel = string.Join(",", rawBranchPlans.Select(b => b.SourceLabel));
+        string opText = setOp.All ? "UNION ALL" : "UNION";
+        var summary = string.Join($" {opText} ", rawBranchPlans.Select(b => b.SourceLabel)) + $" → SELECT {unifiedSchema.Fields.Count} cols";
+
+        var branchPlans = rawBranchPlans.Select(bp => NormalizeOutputColumns(bp, branchNames, sourceLabel)).ToList();
+
+        return new CompiledPlan
+        {
+            Sources = [],
+            Joins = [],
+            Where = null,
+            GroupBy = null,
+            Window = null,
+            Emit = EmitMode.Final,
+            Output = [],
+            AggregateNodes = [],
+            AggregateIndex = new Dictionary<AggregateCallExpr, int>(ReferenceEqualityComparer.Instance),
+            Bindings = new Dictionary<Expr, (string Alias, string Field)>(ReferenceEqualityComparer.Instance),
+            HasAggregates = false,
+            PlanSummary = summary,
+            OutputSchema = unifiedSchema,
+            SourceNames = sourceNames,
+            SourceLabel = sourceLabel,
+            UnionBranches = branchPlans,
+        };
+    }
+
+    /// <summary>Plan 008 W3: returns a copy of <paramref name="plan"/> with its Output items' Names replaced
+    /// positionally by <paramref name="names"/> (same Expression/GroupByIndex — only the column NAME
+    /// changes), its OutputSchema rebuilt to match (same kinds, new names, same order), and its SourceLabel
+    /// replaced by <paramref name="sourceLabel"/> — see BuildCompiledUnionPlan's doc comment on why every
+    /// branch (0 included) needs this.</summary>
+    private static CompiledPlan NormalizeOutputColumns(CompiledPlan plan, List<string> names, string sourceLabel)
+    {
+        var newOutput = new List<OutputItem>();
+        for (int i = 0; i < plan.Output.Count; i++)
+        {
+            var item = plan.Output[i];
+            newOutput.Add(new OutputItem { Name = i < names.Count ? names[i] : item.Name, Expression = item.Expression, GroupByIndex = item.GroupByIndex });
+        }
+
+        var oldKinds = plan.OutputSchema.Fields.Values.ToList();
+        var newFields = new Dictionary<string, FieldKind>();
+        for (int i = 0; i < newOutput.Count; i++)
+        {
+            newFields[newOutput[i].Name] = i < oldKinds.Count ? oldKinds[i] : FieldKind.String;
+        }
+
+        return new CompiledPlan
+        {
+            Sources = plan.Sources,
+            Joins = plan.Joins,
+            Where = plan.Where,
+            GroupBy = plan.GroupBy,
+            Window = plan.Window,
+            Emit = plan.Emit,
+            Output = newOutput,
+            AggregateNodes = plan.AggregateNodes,
+            AggregateIndex = plan.AggregateIndex,
+            Bindings = plan.Bindings,
+            HasAggregates = plan.HasAggregates,
+            PlanSummary = plan.PlanSummary,
+            OutputSchema = new SourceSchema(plan.OutputSchema.Name, newFields),
+            SourceNames = plan.SourceNames,
+            SourceLabel = sourceLabel,
+            UnionBranches = plan.UnionBranches,
         };
     }
 
@@ -70,7 +188,14 @@ public static class Planner
             Alias = s.Alias,
             SourceName = s.SourceName,
             Schema = s.Schema,
-            DerivedPlan = s.Derived is null ? null : BuildCompiledPlan(s.Derived.Query, s.Derived.Validation),
+            // Plan 008 W3: a derived-table-position set operation (`FROM ( ... UNION ... ) alias`) reuses
+            // this EXACT nesting seam — its compiled form IS a union-root CompiledPlan (see
+            // BuildCompiledUnionPlan), which slots into DerivedPlan just like a plain derived table's.
+            DerivedPlan = s.Derived is not null
+                ? BuildCompiledPlan(s.Derived.Query, s.Derived.Validation)
+                : s.UnionDerived is not null
+                    ? BuildCompiledUnionPlan(s.UnionDerived.SetOp, s.UnionDerived.BranchValidations, s.Schema)
+                    : null,
         }).ToList();
         var joins = v.Joins.Select(j =>
         {

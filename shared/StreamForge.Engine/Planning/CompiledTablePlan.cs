@@ -66,4 +66,16 @@ internal sealed class CompiledTablePlan
     /// (mutually exclusive with GroupBy/HasAggregates by construction; see Validator's exclusivity
     /// diagnostics). See Runtime/Ops/TableLatestByOp.cs.</summary>
     public List<Expr>? LatestBy { get; init; }
+
+    /// <summary>Plan 008 W3: non-null only for a set-operation root — see CompiledPlan.UnionBranches's doc
+    /// comment (same shape, table-mode mirror). Each branch is itself a complete CompiledTablePlan built by
+    /// BuildCompiledTablePlan — see Planning/TablePlanner.cs's BuildCompiledUnionPlan.</summary>
+    public List<CompiledTablePlan>? UnionBranches { get; init; }
+
+    /// <summary>Plan 008 W3: meaningful only when <see cref="UnionBranches"/> is set — true for UNION ALL
+    /// (plain weight-sum concatenation across branches; the default, since every OTHER shape of
+    /// CompiledTablePlan has no set operation at all and this field is simply unused), false for UNION
+    /// (distinct) — table mode only, see TableExecutorImpl's union-root path wiring a TableDistinctOp
+    /// downstream of the branch concatenation when this is false.</summary>
+    public bool UnionAll { get; init; } = true;
 }

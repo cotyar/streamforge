@@ -99,6 +99,17 @@ Pinned, tested, and documented rather than fudged:
 - Known hazard, documented not fixed: a table-mode outer join's null-padded rows all carry the same
   (NULL) value in the padded side's columns, so they all hash to the same partition on any
   downstream edge keyed on one of those columns — correct, but potentially skewed.
+- `UNION ALL` runs in both pipelines and tables (plain concatenation — a row asserted by two
+  branches shows up twice, weights summed in tables); plain `UNION`/`UNION ALL DISTINCT` is
+  **tables-only** — pipelines have no Z-set weight to dedup with, so an unbounded distinct over an
+  unbounded stream would be unbounded state; a pipeline-mode `UNION` gets a diagnostic naming
+  `UNION ALL` as the fix. Accepted at the top level (optionally under `WITH`, recursing into every
+  branch) and in derived-table position (`FROM (… UNION …) alias`); rejected inside
+  `IN`/`EXISTS`/scalar subqueries — those synthesize their own joins and are the highest-risk
+  surface for no benefit. Branches must have equal arity; kinds unify positionally (`Long`+`Double`
+  → `Double`, everything else exact, `JSON`/timestamp only with themselves); output column names
+  come from branch 0. A set-operation table is pinned to `Parallelism = 1` (a real N-ary merge
+  stage is out of scope for this wave).
 
 ## D12 — One process, JSON files, zero infrastructure
 Localhost clustering, in-memory streams, one-file-per-grain JSON storage. *Why*: the demo must run

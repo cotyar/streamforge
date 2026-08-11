@@ -91,12 +91,26 @@ public sealed partial class TableExecutor
 
     private long _epochCounter;
 
+    // Plan 008 W3: set (non-null) only when this plan's CompiledTablePlan.UnionBranches is non-null — a
+    // set-operation root. Every OTHER field above (`_joins`, `_filterProject`, `_reduce`, `_latestBy`,
+    // `_ingestOps`, `_roles`) stays completely unused for such a plan — EnsureInit/HandleIncoming both
+    // branch on `_unionRoles` FIRST and never touch them.
+    private List<TableExecutor>? _unionBranchExecutors;
+    private Dictionary<string, List<TableExecutor>>? _unionRoles;
+    private TableDistinctOp? _distinct;
+
     private void EnsureInit()
     {
         if (_initialized) return;
         _initialized = true;
 
         var compiled = _plan.Compiled;
+
+        if (compiled.UnionBranches is not null)
+        {
+            EnsureInitUnion(compiled);
+            return;
+        }
 
         // Plan 008: TableOuterJoinOp's null-padding needs every alias/schema accumulated so far on the
         // left (to build its all-NULL left row) and this join's own alias/schema (for its all-NULL right
@@ -178,6 +192,75 @@ public sealed partial class TableExecutor
         list.Add(entry);
     }
 
+    /// <summary>Plan 008 W3: table-mode union root. One nested TableExecutor per branch — each branch is
+    /// itself a COMPLETE, independently-compiled CompiledTablePlan (its own WHERE/GROUP BY/joins/projection
+    /// already applied), registered under every real leaf stream AND table input it transitively depends on
+    /// (already flattened through any further nesting by Validator.ResolveFromItem — same rule the plain
+    /// derived-table AddRole path above already relies on) — the SAME source feeding two branches lands in
+    /// both branches' role lists, so one incoming delta fans out to every subscribing branch. UNION
+    /// (distinct) additionally wires a TableDistinctOp downstream of the branch concatenation (see
+    /// HandleIncomingUnion) — UNION ALL needs nothing further: TableExecutorImpl's own ApplyConsolidation
+    /// already sums weights per canonical row key regardless of which branch a delta came from, which IS
+    /// UNION ALL's "no dedup, straight weight concatenation" semantics for free.</summary>
+    private void EnsureInitUnion(CompiledTablePlan compiled)
+    {
+        _unionBranchExecutors = [];
+        _unionRoles = [];
+        foreach (var branch in compiled.UnionBranches!)
+        {
+            var exec = new TableExecutor(new TablePlan(branch));
+            _unionBranchExecutors.Add(exec);
+            foreach (var leaf in branch.StreamInputs) AddUnionRoleUnder(leaf, exec);
+            foreach (var leaf in branch.TableInputs) AddUnionRoleUnder(leaf, exec);
+        }
+        if (!compiled.UnionAll)
+        {
+            _distinct = new TableDistinctOp();
+        }
+    }
+
+    private void AddUnionRoleUnder(string name, TableExecutor exec)
+    {
+        if (!_unionRoles!.TryGetValue(name, out var list))
+        {
+            list = [];
+            _unionRoles[name] = list;
+        }
+        list.Add(exec);
+    }
+
+    /// <summary>Plan 008 W3: union-root admission — feeds <paramref name="evt"/>/<paramref name="weight"/>
+    /// into every branch executor that subscribes to <paramref name="name"/> via the SAME OnTableDelta call
+    /// the plain derived-table role path already uses (see HandleIncoming's `role.Derived.OnTableDelta`
+    /// line — routing through OnTableDelta unconditionally reproduces whichever admission the outer caller
+    /// actually used, OnStreamEvent's implicit weight=1 included), concatenates every branch's own emitted
+    /// deltas, optionally dedups via <see cref="_distinct"/> (UNION only), then folds the result into this
+    /// table's own consolidated output exactly like the ordinary path does.</summary>
+    private List<TableDelta> HandleIncomingUnion(string name, EventRecord evt, long weight)
+    {
+        var output = new List<TableDelta>();
+        if (_unionRoles!.TryGetValue(name, out var branches))
+        {
+            foreach (var branchExecutor in branches)
+            {
+                output.AddRange(branchExecutor.OnTableDelta(name, new TableDelta(evt, weight)));
+            }
+        }
+
+        if (_distinct is not null)
+        {
+            var epoch = new Epoch(_epochCounter++);
+            output = _distinct.OnBatch(epoch, output).ToList();
+        }
+
+        foreach (var delta in output)
+        {
+            ApplyConsolidation(delta);
+        }
+
+        return output;
+    }
+
     private IReadOnlyList<TableDelta> OnStreamEventCore(string source, EventRecord evt)
     {
         EnsureInit();
@@ -206,6 +289,8 @@ public sealed partial class TableExecutor
 
     private List<TableDelta> HandleIncoming(string name, EventRecord evt, long weight)
     {
+        if (_unionRoles is not null) return HandleIncomingUnion(name, evt, weight);
+
         var output = new List<TableDelta>();
         if (!_roles.TryGetValue(name, out var roles)) return output;
 

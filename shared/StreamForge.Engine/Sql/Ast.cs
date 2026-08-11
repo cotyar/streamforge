@@ -233,6 +233,39 @@ internal sealed class SessionWindowSpec(TimeSpan gap) : WindowSpec
 
 internal enum EmitMode { Final, Changes }
 
+/// <summary>Plan 008 W3: `SELECT ... UNION [ALL] SELECT ... [UNION [ALL] SELECT ...]` — the first AST node
+/// that sits ABOVE a single <see cref="SelectQuery"/> (see Sql/Parser.cs's ParseTopLevel loop). A whole
+/// statement's set-operation chain is flattened into one node: every branch shares the SAME
+/// <see cref="All"/>-ness (mixing bare UNION and UNION ALL within one chain is rejected by the parser with
+/// its own diagnostic — see Parser.ParseSetOperationOrSelect — rather than silently picking one). Accepted
+/// in exactly two grammar positions (v1 scope): top level (this is literally the parser's own top-level
+/// result) and derived-table position (`FROM ( ... ) alias` — see <see cref="DerivedSetOperationSource"/>).
+/// Rejected with a positioned diagnostic inside IN/EXISTS/scalar subqueries (see ParseComparison/
+/// ParseExistsBody/ParsePrimary's own UNION checks) — those synthesize their own joins and are the
+/// highest-risk surface for no benefit (plan 008's own risk note).
+///
+/// <see cref="All"/> == true is UNION ALL (both pipeline and table mode); false is UNION (distinct,
+/// table mode only — pipeline mode rejects it with a diagnostic naming UNION ALL as the fix, since pipeline
+/// mode has no Z-set weights to dedup with and an unbounded distinct over an unbounded stream is unbounded
+/// state — see Sql/Validator.cs's set-operation validation and DESIGN.md §D11).</summary>
+internal sealed class SetOperationQuery(bool all, List<SelectQuery> branches, int line, int col)
+{
+    public bool All { get; } = all;
+    public List<SelectQuery> Branches { get; } = branches;
+    public int Line { get; } = line;
+    public int Column { get; } = col;
+}
+
+/// <summary>Plan 008 W3: derived-table-position set operation — `FROM ( SELECT ... UNION [ALL] SELECT ... )
+/// alias`. Parallels <see cref="DerivedSource"/> (a plain derived SELECT) but wraps a
+/// <see cref="SetOperationQuery"/> instead of a single <see cref="SelectQuery"/> — kept as its own FromItem
+/// subtype (rather than widening DerivedSource itself) so the far more common plain-derived-table path's
+/// shape and every existing call site touching DerivedSource.Query stays completely unchanged.</summary>
+internal sealed class DerivedSetOperationSource(SetOperationQuery setOp, string alias, int line, int col) : FromItem(alias, line, col)
+{
+    public SetOperationQuery SetOp { get; } = setOp;
+}
+
 internal sealed class SelectQuery(
     SelectClause select,
     FromClause from,

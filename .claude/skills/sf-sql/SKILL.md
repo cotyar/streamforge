@@ -22,6 +22,7 @@ FROM source | (SELECT …) alias [, UNNEST(expr) AS l …]
 [GROUP BY expr, … | LATEST BY (col, …)]            -- LATEST BY: tables only
 [WINDOW TUMBLING(SIZE d) | HOPPING(SIZE d, ADVANCE BY d) | SESSION(GAP d)]   -- pipelines only
 [EMIT CHANGES | EMIT FINAL]
+[UNION [ALL|DISTINCT] SELECT …] …    -- top level or FROM (…) alias only; UNION (no ALL): tables only
 -- durations: N MILLISECONDS|SECONDS|MINUTES|HOURS · comments: -- · GROUP BY repeats the
 -- exact expression (no alias sugar) · aggregates: COUNT/SUM/AVG/MIN/MAX · fns: ABS/ROUND/
 -- UPPER/LOWER/COALESCE · JSON: expr -> 'key' (raw) / expr ->> 'key' (text) / -> 0 (index)
@@ -61,6 +62,12 @@ FROM source | (SELECT …) alias [, UNNEST(expr) AS l …]
     from `ON` to `WHERE` silently degrades `LEFT` to `INNER` — the most common outer-join mistake.
 11. **`CROSS JOIN` in table mode needs `Parallelism = 1`** — it has no equi-key to hash on; the table
     refuses to start above one partition with a clear error.
+12. **`UNION ALL` works everywhere; plain `UNION` (distinct) is tables-only** — pipelines have no
+    Z-set weight to dedup with, so `UNION` there gets a diagnostic naming `UNION ALL` as the fix.
+    Branches need equal arity and unifiable column kinds (`Long`+`Double` → `Double`, else exact
+    match, `JSON`/timestamp only with themselves); output names come from branch 0. Legal only at
+    the top level (optionally under `WITH`) and in `FROM (… UNION …) alias` position — never inside
+    `IN`/`EXISTS`/scalar subqueries. A set-operation table also needs `Parallelism = 1`.
 
 ## Working examples (live seeds — copy as templates)
 
@@ -77,4 +84,8 @@ FROM structures s, UNNEST(s.legs) AS l GROUP BY l ->> 'ccy'
 -- LATEST BY current-state view (seed table: order_states)
 SELECT order_id, symbol, side, stage, stage_rank, stage_ts, qty, filled_qty, px
 FROM order_events LATEST BY (order_id)
+
+-- UNION ALL fan-in (pipeline or table); drop ALL for dedup (tables only)
+SELECT symbol, price AS px FROM trades
+UNION ALL SELECT symbol, bid AS px FROM quotes
 ```

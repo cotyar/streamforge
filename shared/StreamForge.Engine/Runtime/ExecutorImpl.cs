@@ -59,6 +59,13 @@ public sealed partial class PipelineExecutor : IPipelineOpChain
     // under several different keys) so AdvanceWatermark drives each one exactly once per call.
     private readonly List<RoleEntry> _derivedNodes = [];
 
+    // Plan 008 W3: set (non-null) only when this plan's CompiledPlan.UnionBranches is non-null — a
+    // set-operation root. Every OTHER field above stays completely unused for such a plan (see
+    // CompiledPlan.UnionBranches's doc comment) — EnsureInit/OnEventCore/AdvanceWatermarkCore all branch on
+    // this field FIRST and never touch _joins/_filterProject/_window/_roles/_derivedNodes.
+    private List<PipelineExecutor>? _unionBranchExecutors;
+    private Dictionary<string, List<PipelineExecutor>>? _unionRoles;
+
     public long LateEvents { get; private set; }
 
     private void EnsureInit()
@@ -67,6 +74,13 @@ public sealed partial class PipelineExecutor : IPipelineOpChain
         _initialized = true;
 
         var compiled = _plan.Compiled;
+
+        if (compiled.UnionBranches is not null)
+        {
+            EnsureInitUnion(compiled);
+            return;
+        }
+
         var accumulated = new List<(string Alias, SourceSchema Schema)> { (compiled.Sources[0].Alias, compiled.Sources[0].Schema) };
 
         for (int i = 0; i < compiled.Joins.Count; i++)
@@ -135,9 +149,40 @@ public sealed partial class PipelineExecutor : IPipelineOpChain
         list.Add(entry);
     }
 
+    /// <summary>Plan 008 W3: a `UNION ALL` executor is structurally "N nested executors, no join stages, no
+    /// filter/project, concatenate emissions" — each branch is itself a COMPLETE, independently-compiled
+    /// CompiledPlan (its own WHERE/GROUP BY/WINDOW/projection already applied by its own nested
+    /// PipelineExecutor), so the union root needs nothing beyond fan-out + concatenation. One nested
+    /// PipelineExecutor per branch, registered under every leaf source name that branch's own
+    /// CompiledPlan.SourceNames names (already flattened through any further nesting — see
+    /// Planner.BuildCompiledPlan) — the SAME source appearing in two branches lands in both branches' role
+    /// lists, so a single incoming event fans out to every branch that subscribes to it (plan 008's own
+    /// "one event/delta must be fanned out to every branch that subscribes to that input" requirement).</summary>
+    private void EnsureInitUnion(CompiledPlan compiled)
+    {
+        _unionBranchExecutors = [];
+        _unionRoles = [];
+        foreach (var branch in compiled.UnionBranches!)
+        {
+            var exec = new PipelineExecutor(new PipelinePlan(branch));
+            _unionBranchExecutors.Add(exec);
+            foreach (var leaf in branch.SourceNames)
+            {
+                if (!_unionRoles.TryGetValue(leaf, out var list))
+                {
+                    list = [];
+                    _unionRoles[leaf] = list;
+                }
+                list.Add(exec);
+            }
+        }
+    }
+
     private IReadOnlyList<EventRecord> OnEventCore(string sourceName, EventRecord evt)
     {
         EnsureInit();
+
+        if (_unionRoles is not null) return OnEventUnion(sourceName, evt);
 
         if (evt.Timestamp < Watermark)
         {
@@ -204,9 +249,53 @@ public sealed partial class PipelineExecutor : IPipelineOpChain
         if (candidate > Watermark) Watermark = candidate;
     }
 
+    /// <summary>Plan 008 W3: union-root OnEvent — fan the incoming event out to every branch executor that
+    /// subscribes to <paramref name="sourceName"/> and concatenate their emissions verbatim. No join/
+    /// filter/project/window stage of the union root's own to run the result through — each branch's own
+    /// nested PipelineExecutor already applied its own WHERE/GROUP BY/WINDOW/projection before returning
+    /// these rows (see EnsureInitUnion's doc comment), and (for every branch after the first) already has
+    /// its output columns renamed to match branch 0's names (see Planner.RenameOutputColumns) — so the
+    /// union's declared OutputSchema is honored by construction, not by any adapter here.</summary>
+    private IReadOnlyList<EventRecord> OnEventUnion(string sourceName, EventRecord evt)
+    {
+        if (evt.Timestamp < Watermark)
+        {
+            LateEvents++;
+            return [];
+        }
+
+        var results = new List<EventRecord>();
+        if (_unionRoles!.TryGetValue(sourceName, out var branches))
+        {
+            foreach (var branchExecutor in branches)
+            {
+                results.AddRange(branchExecutor.OnEvent(sourceName, evt));
+            }
+        }
+        BumpWatermark(evt.Timestamp);
+        return results;
+    }
+
+    /// <summary>Plan 008 W3: union-root AdvanceWatermark — drives every branch executor's own watermark
+    /// (closing any branch-local windows) and concatenates their emissions, same "no stage of its own"
+    /// shape as OnEventUnion.</summary>
+    private IReadOnlyList<EventRecord> AdvanceWatermarkUnion(long nowMs)
+    {
+        var results = new List<EventRecord>();
+        foreach (var branchExecutor in _unionBranchExecutors!)
+        {
+            results.AddRange(branchExecutor.AdvanceWatermark(nowMs));
+        }
+        long candidate = nowMs - AllowedLatenessMs;
+        if (candidate > Watermark) Watermark = candidate;
+        return results;
+    }
+
     private IReadOnlyList<EventRecord> AdvanceWatermarkCore(long nowMs)
     {
         EnsureInit();
+
+        if (_unionRoles is not null) return AdvanceWatermarkUnion(nowMs);
 
         var results = new List<EventRecord>();
 
