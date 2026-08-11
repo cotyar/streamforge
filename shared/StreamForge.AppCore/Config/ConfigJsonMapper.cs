@@ -272,12 +272,14 @@ internal static class ConfigJsonMapper
         {
             p.Tags ??= [];
             p.Metadata ??= [];
+            p.Sinks ??= [];
         }
 
         foreach (var t in doc.Tables)
         {
             t.Tags ??= [];
             t.Metadata ??= [];
+            t.Sinks ??= [];
         }
     }
 

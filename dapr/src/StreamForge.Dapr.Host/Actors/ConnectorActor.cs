@@ -7,6 +7,7 @@ using StreamForge.Abstractions;
 using StreamForge.Abstractions.Streaming;
 using StreamForge.AppCore.Connectors;
 using StreamForge.AppCore.Connectors.Grpc;
+using StreamForge.AppCore.Connectors.Nats;
 using StreamForge.AppCore.Connectors.Polling;
 using StreamForge.AppCore.Connectors.Scheduling;
 using StreamForge.Dapr.Host.Streaming;
@@ -80,6 +81,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
     private ConnectorActorState _state = new();
     private bool _timerArmed;
     private CancellationTokenSource? _grpcCts;
+    private CancellationTokenSource? _natsCts;
 
     protected override async Task OnActivateAsync()
     {
@@ -95,6 +97,10 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
             {
                 StartGrpcSubscriber(_state.Def);
             }
+            else if (_state.Def.Kind == SourceKinds.Nats)
+            {
+                StartNatsSubscriber(_state.Def);
+            }
             else
             {
                 await ArmTimerFromPersistedNextRunAsync();
@@ -106,6 +112,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
     {
         await DisarmTimerIfArmedAsync();
         StopGrpcSubscriberIfRunning();
+        StopNatsSubscriberIfRunning();
 
         _state.Def = def;
         _state.Running = def.Enabled;
@@ -119,6 +126,12 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         if (def.Kind == SourceKinds.Grpc)
         {
             StartGrpcSubscriber(def);
+            return;
+        }
+
+        if (def.Kind == SourceKinds.Nats)
+        {
+            StartNatsSubscriber(def);
             return;
         }
 
@@ -137,6 +150,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
     {
         await DisarmTimerIfArmedAsync();
         StopGrpcSubscriberIfRunning();
+        StopNatsSubscriberIfRunning();
         _state.Running = false;
         await SaveAsync();
     }
@@ -155,9 +169,9 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         LastBatchCount = _state.LastBatchCount,
     });
 
-    public async Task RecordSubscriberBatchAsync(int rowCount, string status, string? error)
+    public async Task RecordSubscriberBatchAsync(int rowCount, string status, string? error, List<string>? dedupKeys = null)
     {
-        ConnectorBookkeeping.ApplySubscriberBatch(_state, rowCount, status, error);
+        ConnectorBookkeeping.ApplySubscriberBatch(_state, rowCount, status, error, dedupKeys);
         await SaveAsync();
     }
 
@@ -368,9 +382,19 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
             config,
             onRows: async (rows, _) =>
             {
+                // Plan 009 C2: gRPC-decoded rows never pass through ConnectorPollCycle (unlike NATS
+                // below), so declared-type coercion happens right here, before anything is stamped or
+                // published — "coerce before admission", same rule as every other inbound path.
+                var coercion = ConnectorRowCoercion.Apply(def.Fields, rows.ToList(), def.OnCoercionFailure);
+                if (coercion.BatchRejected)
+                {
+                    await ConnectorActorProxy(name).RecordSubscriberBatchAsync(0, "error", $"coercion rejected batch: {coercion.RejectReason}");
+                    return;
+                }
+
                 var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                var stamped = new List<Dictionary<string, object?>>(rows.Count);
-                foreach (var row in rows)
+                var stamped = new List<Dictionary<string, object?>>(coercion.Rows.Count);
+                foreach (var row in coercion.Rows)
                 {
                     row["_source"] = name;
                     if (!row.ContainsKey("_ts"))
@@ -385,7 +409,11 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
                 await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, StreamingRuntimeSetup.SourcesTopic, envelope);
                 await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + name, envelope);
 
-                await ConnectorActorProxy(name).RecordSubscriberBatchAsync(stamped.Count, "ok", null);
+                await ConnectorActorProxy(name).RecordSubscriberBatchAsync(
+                    stamped.Count, "ok",
+                    coercion.FailureCount > 0
+                        ? $"{coercion.FailureCount} field coercion failure(s) this batch; policy={def.OnCoercionFailure}"
+                        : null);
             },
             onStatus: (status, error) =>
             {
@@ -398,6 +426,63 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
             });
 
         _ = Task.Run(() => core.RunAsync(cts.Token));
+    }
+
+    // ------------------------------------------------------------------
+    // nats kind: persistent background subscriber (no timer) — plan 009 B1
+    // ------------------------------------------------------------------
+
+    private void StartNatsSubscriber(SourceDefinition def)
+    {
+        var config = def.Connector?.Nats;
+        if (config is null)
+        {
+            logger.LogWarning("ConnectorActor[{Source}]: kind 'nats' but no nats config — not starting subscriber.", def.Name);
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        _natsCts = cts;
+        var name = def.Name;
+
+        // Closure-local dedup tracker seeded from the persisted snapshot at subscribe-start — the
+        // background subscriber task must never touch `_state` directly (see this class's "Acyclic by
+        // construction" / reentrancy discipline doc above), so an updated snapshot round-trips through
+        // RecordSubscriberBatchAsync's dedupKeys parameter on every accepted batch instead of a second,
+        // ad hoc marshal point.
+        var dedup = new DedupTracker(_state.DedupKeys);
+
+        var core = new NatsSubscriberCore(
+            def, dedup,
+            onRows: async (rows, _) =>
+            {
+                // NatsSubscriberCore already ran these rows through ConnectorPollCycle.Emit (parse/
+                // extract/coerce/dedup/"_source"/"_ts" stamping) — unlike gRPC above, nothing left to do
+                // here but publish and persist the dedup snapshot.
+                var envelope = new SourceEventsEnvelope { Source = name, Events = rows.ToList() };
+                await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, StreamingRuntimeSetup.SourcesTopic, envelope);
+                await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + name, envelope);
+
+                await ConnectorActorProxy(name).RecordSubscriberBatchAsync(rows.Count, "ok", null, dedup.ToPersistable());
+            },
+            onStatus: (status, error) =>
+            {
+                _ = RecordStatusBestEffortAsync(name, status, error);
+            });
+
+        _ = Task.Run(() => core.RunAsync(cts.Token));
+    }
+
+    private void StopNatsSubscriberIfRunning()
+    {
+        if (_natsCts is null)
+        {
+            return;
+        }
+
+        _natsCts.Cancel();
+        _natsCts.Dispose();
+        _natsCts = null;
     }
 
     private async Task RecordStatusBestEffortAsync(string sourceName, string status, string? error)
@@ -490,7 +575,13 @@ public static class ConnectorBookkeeping
         {
             state.ConsecutiveFailures = 0;
             state.LastStatus = "ok";
-            state.LastError = null;
+            // Plan 009 C2: Null/DropRow coercion failures never produce a non-null Error (only
+            // RejectBatch does, inside ConnectorPollCycle.Emit) — this is the only other channel back to
+            // ConnectorRuntimeStatus.LastError (no dedicated counter field exists on that frozen
+            // contract), so a clean cycle still surfaces a non-zero count instead of going quiet.
+            state.LastError = result.CoercionFailures > 0
+                ? $"{result.CoercionFailures} field coercion failure(s) this cycle; policy={state.Def?.OnCoercionFailure}"
+                : null;
             state.LastBatchCount = result.Rows.Count;
             state.EventsEmittedTotal += result.Rows.Count;
         }
@@ -507,23 +598,32 @@ public static class ConnectorBookkeeping
         state.NextRunMs = next?.ToUnixTimeMilliseconds();
     }
 
-    /// <summary>Applies one gRPC subscriber batch/status callback to <paramref name="state"/> in place
-    /// (plan 006 D-G). "ok" with <paramref name="rowCount"/> &gt; 0 is a real batch: resets the failure
-    /// streak and bumps LastRunMs/LastBatchCount/EventsEmittedTotal. "ok" with rowCount == 0 is a pure
-    /// status update (e.g. right after a successful (re)connect, before any row has arrived yet) — still
-    /// resets the failure streak but leaves the batch counters untouched. "error" increments
-    /// ConsecutiveFailures and records LastError. Any other status (e.g. "connecting") is recorded as-is
-    /// without touching the failure streak. <see cref="ConnectorActorState.NextRunMs"/> is deliberately
-    /// left untouched — a persistent gRPC subscription has no scheduled "next run" (D-G): reconnection
-    /// timing is entirely internal to <see cref="GrpcSubscriberCore"/>.</summary>
-    public static void ApplySubscriberBatch(ConnectorActorState state, int rowCount, string status, string? error)
+    /// <summary>Applies one gRPC/NATS subscriber batch/status callback to <paramref name="state"/> in
+    /// place (plan 006 D-G; plan 009 B1 added the nats kind, same shape). "ok" with
+    /// <paramref name="rowCount"/> &gt; 0 is a real batch: resets the failure streak and bumps
+    /// LastRunMs/LastBatchCount/EventsEmittedTotal. "ok" with rowCount == 0 is a pure status update (e.g.
+    /// right after a successful (re)connect, before any row has arrived yet) — still resets the failure
+    /// streak but leaves the batch counters untouched. Either way, <paramref name="error"/> is recorded
+    /// verbatim (plan 009 C2, additive behavior change from the pre-009 hardcoded null — every pre-009
+    /// call site always passed <c>error: null</c> alongside "ok", so this is byte-identical for them):
+    /// an "ok" status can now carry an informational note (e.g. "N field coercion failure(s) this
+    /// batch") without a status of "error" that would incorrectly bump ConsecutiveFailures. "error"
+    /// increments ConsecutiveFailures and records LastError. Any other status (e.g. "connecting") is
+    /// recorded as-is without touching the failure streak. <see cref="ConnectorActorState.NextRunMs"/>
+    /// is deliberately left untouched — a persistent subscription has no scheduled "next run" (D-G):
+    /// reconnection timing is entirely internal to <see cref="GrpcSubscriberCore"/>/
+    /// <see cref="NatsSubscriberCore"/>. <paramref name="dedupKeys"/> (plan 009 B1, additive): the nats
+    /// kind's dedup tracker snapshot, applied when non-null — see
+    /// <see cref="IConnectorActor.RecordSubscriberBatchAsync"/>'s doc comment for why it round-trips
+    /// through here rather than a second marshal point.</summary>
+    public static void ApplySubscriberBatch(ConnectorActorState state, int rowCount, string status, string? error, List<string>? dedupKeys = null)
     {
         switch (status)
         {
             case "ok":
                 state.ConsecutiveFailures = 0;
                 state.LastStatus = "ok";
-                state.LastError = null;
+                state.LastError = error;
                 if (rowCount > 0)
                 {
                     state.LastRunMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -543,6 +643,11 @@ public static class ConnectorBookkeeping
                 state.LastStatus = status;
                 state.LastError = error;
                 break;
+        }
+
+        if (dedupKeys is not null)
+        {
+            state.DedupKeys = dedupKeys;
         }
     }
 }

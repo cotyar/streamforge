@@ -53,6 +53,26 @@ public static class SecretsMasker
             }
         }
 
+        // Plan 009 B1: Token/Password/Credentials are secrets (a .creds file's contents are as
+        // sensitive as a password); Url/Subject/QueueGroup/Format/Username are not.
+        if (connector.Nats is { } nats)
+        {
+            if (!string.IsNullOrEmpty(nats.Token))
+            {
+                nats.Token = SourceKinds.SecretMask;
+            }
+
+            if (!string.IsNullOrEmpty(nats.Password))
+            {
+                nats.Password = SourceKinds.SecretMask;
+            }
+
+            if (!string.IsNullOrEmpty(nats.Credentials))
+            {
+                nats.Credentials = SourceKinds.SecretMask;
+            }
+        }
+
         return clone;
     }
 
@@ -125,6 +145,25 @@ public static class SecretsMasker
             }
         }
 
+        // Plan 009 B1 — same "a written *** means keep the stored value" rule as Grpc above.
+        if (connector.Nats is { } nats && storedConnector.Nats is { } storedNats)
+        {
+            if (nats.Token == SourceKinds.SecretMask)
+            {
+                nats.Token = storedNats.Token;
+            }
+
+            if (nats.Password == SourceKinds.SecretMask)
+            {
+                nats.Password = storedNats.Password;
+            }
+
+            if (nats.Credentials == SourceKinds.SecretMask)
+            {
+                nats.Credentials = storedNats.Credentials;
+            }
+        }
+
         return clone;
     }
 
@@ -190,6 +229,132 @@ public static class SecretsMasker
             return true;
         }
 
+        if (connector.Nats is { } nats &&
+            (nats.Token == SourceKinds.SecretMask || nats.Password == SourceKinds.SecretMask || nats.Credentials == SourceKinds.SecretMask))
+        {
+            return true;
+        }
+
         return false;
     }
+
+    // ------------------------------------------------------------------
+    // Plan 009 B2: SinkSpec.Nats credentials — PipelineDefinition.Sinks / TableDefinition.Sinks.
+    // A separate region (new methods, not folded into the SourceDefinition-shaped ones above) because
+    // Sinks lives on PipelineDefinition/TableDefinition, not SourceDefinition; the masking RULE is the
+    // same secrets-lite convention (D-H) the rest of this file implements.
+    // ------------------------------------------------------------------
+
+    /// <summary>Deep-clones <paramref name="sinks"/> and replaces every NON-EMPTY
+    /// <c>NatsPubConfig</c> credential (Token/Password/Credentials — Username is treated as an
+    /// identifier, not a secret, matching <see cref="GrpcSubConfig"/>'s existing convention of masking
+    /// Password/Token but not Username) with <see cref="SourceKinds.SecretMask"/>. Never mutates
+    /// <paramref name="sinks"/>.</summary>
+    public static List<SinkSpec> MaskSinks(List<SinkSpec> sinks)
+    {
+        var clone = ConfigJsonMapper.DeepCloneModel(sinks);
+        MaskSinksInPlace(clone);
+        return clone;
+    }
+
+    /// <summary>Deep-clones the WHOLE <paramref name="def"/> (every field, via
+    /// <see cref="ConfigJsonMapper.DeepCloneModel{T}"/> — same "everything, not a hand-picked field
+    /// list" approach <see cref="Mask(SourceDefinition)"/> uses) and masks its Sinks credentials —
+    /// the PipelineDefinition read-path counterpart of <see cref="Mask(SourceDefinition)"/>. Never
+    /// mutates <paramref name="def"/>.</summary>
+    public static PipelineDefinition MaskPipeline(PipelineDefinition def)
+    {
+        var clone = ConfigJsonMapper.DeepCloneModel(def);
+        MaskSinksInPlace(clone.Sinks);
+        return clone;
+    }
+
+    /// <summary>TableDefinition counterpart of <see cref="MaskPipeline"/>.</summary>
+    public static TableDefinition MaskTable(TableDefinition def)
+    {
+        var clone = ConfigJsonMapper.DeepCloneModel(def);
+        MaskSinksInPlace(clone.Sinks);
+        return clone;
+    }
+
+    /// <summary>Masks NatsPubConfig credentials on an ALREADY-owned (already cloned, or freshly
+    /// constructed) list in place — the shared primitive <see cref="MaskSinks"/>/
+    /// <see cref="MaskPipeline"/>/<see cref="MaskTable"/> all call after cloning, so the clone-then-mask
+    /// sequence exists exactly once.</summary>
+    private static void MaskSinksInPlace(List<SinkSpec> sinks)
+    {
+        foreach (var sink in sinks)
+        {
+            if (sink.Nats is not { } nats)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrEmpty(nats.Token))
+            {
+                nats.Token = SourceKinds.SecretMask;
+            }
+
+            if (!string.IsNullOrEmpty(nats.Password))
+            {
+                nats.Password = SourceKinds.SecretMask;
+            }
+
+            if (!string.IsNullOrEmpty(nats.Credentials))
+            {
+                nats.Credentials = SourceKinds.SecretMask;
+            }
+        }
+    }
+
+    /// <summary>Restores masked NatsPubConfig credentials in <paramref name="incoming"/> from
+    /// <paramref name="stored"/> — the Sinks counterpart of <see cref="MergeSecrets"/>. Sinks has no
+    /// stable id (see <c>SinkSpec</c>'s own doc comment — the container shape exists so a second sink
+    /// KIND is additive, not so entries can be individually addressed), so entries are matched
+    /// POSITIONALLY by list index; this is the same "PUT replaces the whole object" model the rest of
+    /// this API already uses for Tags/Metadata, so a client that GETs (masked) then PUTs the whole array
+    /// back preserves index alignment for free. An index present only in <paramref name="incoming"/>
+    /// (list grew) has nothing to restore from and is left as-is — same "nothing to keep" rule
+    /// <see cref="MergeSecrets"/> applies to an unmatched header key. Never mutates either input.</summary>
+    public static List<SinkSpec> MergeSinkSecrets(List<SinkSpec> incoming, List<SinkSpec>? stored)
+    {
+        var clone = ConfigJsonMapper.DeepCloneModel(incoming);
+        if (stored is null)
+        {
+            return clone;
+        }
+
+        for (var i = 0; i < clone.Count && i < stored.Count; i++)
+        {
+            if (clone[i].Nats is not { } nats || stored[i].Nats is not { } storedNats)
+            {
+                continue;
+            }
+
+            if (nats.Token == SourceKinds.SecretMask)
+            {
+                nats.Token = storedNats.Token;
+            }
+
+            if (nats.Password == SourceKinds.SecretMask)
+            {
+                nats.Password = storedNats.Password;
+            }
+
+            if (nats.Credentials == SourceKinds.SecretMask)
+            {
+                nats.Credentials = storedNats.Credentials;
+            }
+        }
+
+        return clone;
+    }
+
+    /// <summary>True if any NatsPubConfig credential slot across <paramref name="sinks"/> currently
+    /// holds the literal mask value. Used the same way <see cref="HasMaskedValues"/> is used for
+    /// sources: decide whether an imported/PUT-ed Sinks list needs <see cref="MergeSinkSecrets"/>
+    /// applied before comparing/persisting it.</summary>
+    public static bool HasMaskedSinkValues(List<SinkSpec>? sinks) =>
+        (sinks ?? []).Any(s => s.Nats is { } n &&
+            (n.Token == SourceKinds.SecretMask || n.Password == SourceKinds.SecretMask || n.Credentials == SourceKinds.SecretMask));
 }

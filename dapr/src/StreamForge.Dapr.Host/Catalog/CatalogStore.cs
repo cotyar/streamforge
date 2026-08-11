@@ -174,6 +174,10 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         existing.Sql = def.Sql;
         existing.Tags = def.Tags;
         existing.Metadata = def.Metadata;
+        // Plan 009 B2: without this, a PUT that only changes Sinks (add/remove/reconfigure a NATS sink
+        // on an already-Running pipeline) would silently keep the old Sinks list forever — every other
+        // field here already flows from `def`, Sinks was simply missing.
+        existing.Sinks = def.Sinks;
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         ApplyPipelineCompileResult(existing, compileResult);
@@ -339,6 +343,9 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         existing.Parallelism = def.Parallelism;
         existing.Persistence = def.Persistence;
         existing.FlushMs = def.FlushMs;
+        // Plan 009 B2: see the identical note in UpdatePipelineAsync above — without this a PUT that
+        // only touches Sinks silently keeps the old list.
+        existing.Sinks = def.Sinks;
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         ApplyCompileResult(existing, compileResult);

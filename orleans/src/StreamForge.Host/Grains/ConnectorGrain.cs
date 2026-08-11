@@ -4,6 +4,7 @@ using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Connectors;
 using StreamForge.AppCore.Connectors.Grpc;
+using StreamForge.AppCore.Connectors.Nats;
 using StreamForge.AppCore.Connectors.Polling;
 using StreamForge.AppCore.Connectors.Scheduling;
 using StreamForge.Engine;
@@ -19,8 +20,8 @@ public sealed class ConnectorGrainState
     public int ConsecutiveFailures { get; set; }
     public long? LastRunMs { get; set; }
     public long? NextRunMs { get; set; }
-    /// <summary>"never" | "ok" | "error" | "connecting" (gRPC-kind only, transient — see
-    /// GrpcSubscriberCore's onStatus contract).</summary>
+    /// <summary>"never" | "ok" | "error" | "connecting" (gRPC/NATS-kind only, transient — see
+    /// GrpcSubscriberCore/NatsSubscriberCore's onStatus contract).</summary>
     public string LastStatus { get; set; } = "never";
     public string? LastError { get; set; }
     public long EventsEmittedTotal { get; set; }
@@ -78,12 +79,14 @@ public sealed class ConnectorGrain(
     private IGrainTimer? _timer;
     private CancellationTokenSource? _grpcCts;
     private Task? _grpcTask;
+    private CancellationTokenSource? _natsCts;
+    private Task? _natsTask;
     private DedupTracker? _dedup;
     private FileLedger? _ledger;
 
-    // Emission-counter persist throttle for the gRPC path (EmitRowsAsync can fire once per remote
-    // frame — far more often than a poll cycle's natural "persist once per cycle" cadence): persist
-    // at most every 50 batches or 5 seconds, whichever comes first (design pin).
+    // Emission-counter persist throttle for the gRPC/NATS path (EmitRowsAsync can fire once per remote
+    // frame/message — far more often than a poll cycle's natural "persist once per cycle" cadence):
+    // persist at most every 50 batches or 5 seconds, whichever comes first (design pin).
     private int _batchesSincePersist;
     private DateTime _lastPersistUtc = DateTime.MinValue;
 
@@ -106,6 +109,7 @@ public sealed class ConnectorGrain(
         _timer?.Dispose();
         _timer = null;
         CancelGrpc();
+        CancelNats();
 
         ArmForKind(def, persistNextRun: true);
         await state.WriteStateAsync();
@@ -122,6 +126,7 @@ public sealed class ConnectorGrain(
         _timer?.Dispose();
         _timer = null;
         CancelGrpc();
+        CancelNats();
         await state.WriteStateAsync();
     }
 
@@ -176,6 +181,15 @@ public sealed class ConnectorGrain(
         var elapsed = DateTime.UtcNow - _lastPersistUtc;
         if (_batchesSincePersist >= 50 || elapsed >= TimeSpan.FromSeconds(5))
         {
+            // Plan 009 B1: the nats path's MappingSpec.DedupKeyField dedup runs on _dedup (via
+            // ConnectorPollCycle.Emit inside NatsSubscriberCore) — persist it on the same throttle as
+            // everything else here so it survives a silo recycle. Harmless no-op for the grpc path,
+            // which never touches _dedup.
+            if (_dedup is not null)
+            {
+                state.State.DedupKeys = _dedup.ToPersistable();
+            }
+
             await state.WriteStateAsync();
             _batchesSincePersist = 0;
             _lastPersistUtc = DateTime.UtcNow;
@@ -224,6 +238,12 @@ public sealed class ConnectorGrain(
         if (def.Kind == SourceKinds.Grpc)
         {
             StartGrpcSubscriber(def);
+            return;
+        }
+
+        if (def.Kind == SourceKinds.Nats)
+        {
+            StartNatsSubscriber(def);
             return;
         }
 
@@ -296,7 +316,7 @@ public sealed class ConnectorGrain(
 
         var core = new GrpcSubscriberCore(
             cfg,
-            (rows, seq) => self.EmitRowsAsync(rows.ToList(), seq),
+            (rows, seq) => HandleDecodedRowsAsync(def, self, statusSink, rows, seq),
             (status, error) => _ = SafeReportStatusAsync(statusSink, status, error));
 
         _grpcTask = Task.Run(async () =>
@@ -316,6 +336,89 @@ public sealed class ConnectorGrain(
                 // unexpected but must not crash the background task's thread.
             }
         }, CancellationToken.None);
+    }
+
+    /// <summary>Plan 009 C2: gRPC's onRows callback entry point. Unlike NATS (whose rows are already
+    /// coerced — <see cref="ConnectorPollCycle.Emit"/> runs inside <see cref="NatsSubscriberCore"/> via
+    /// the shared mapping path), a gRPC-decoded row never passes through
+    /// <see cref="ConnectorPollCycle"/> at all, so coercion happens HERE, once per callback, before the
+    /// rows ever reach <see cref="IConnectorGrain.EmitRowsAsync"/> — "coerce before admission" applies
+    /// here exactly as it does for the poll-cycle kinds. A RejectBatch rejection never calls
+    /// EmitRowsAsync at all (nothing left behind); Null/DropRow's non-zero failure count is reported
+    /// AFTER emission (never before — see <see cref="EmitRowsAsync"/>'s own unconditional
+    /// <c>LastError = null</c> on a successful batch, which would otherwise clobber this note if the
+    /// order were reversed).</summary>
+    private static async Task HandleDecodedRowsAsync(
+        SourceDefinition def, IConnectorGrain self, IConnectorStatusSink statusSink,
+        IReadOnlyList<Dictionary<string, object?>> rows, long seq)
+    {
+        var coercion = ConnectorRowCoercion.Apply(def.Fields, rows.ToList(), def.OnCoercionFailure);
+        if (coercion.BatchRejected)
+        {
+            await SafeReportStatusAsync(statusSink, "error", $"coercion rejected batch: {coercion.RejectReason}");
+            return;
+        }
+
+        await self.EmitRowsAsync(coercion.Rows, seq);
+
+        if (coercion.FailureCount > 0)
+        {
+            await SafeReportStatusAsync(
+                statusSink, "ok", $"{coercion.FailureCount} field coercion failure(s) this batch; policy={def.OnCoercionFailure}");
+        }
+    }
+
+    private void StartNatsSubscriber(SourceDefinition def)
+    {
+        _ = def.Connector?.Nats
+            ?? throw new InvalidOperationException($"source '{def.Name}' has kind 'nats' but no nats config");
+
+        _natsCts?.Cancel();
+        _natsCts?.Dispose();
+        _natsCts = new CancellationTokenSource();
+        var ct = _natsCts.Token;
+
+        var self = this.AsReference<IConnectorGrain>();
+        var statusSink = this.AsReference<IConnectorStatusSink>();
+
+        // NatsSubscriberCore already runs rows through ConnectorPollCycle.Emit (parse/extract/coerce/
+        // dedup/stamp) internally, so — unlike gRPC above — the onRows callback here just forwards
+        // already-finished rows straight to EmitRowsAsync (its own "_source"/"_ts" TryAdd stamping is a
+        // harmless no-op on rows that already carry both).
+        var core = new NatsSubscriberCore(
+            def, _dedup!,
+            (rows, seq) => self.EmitRowsAsync(rows.ToList(), seq),
+            (status, error) => _ = SafeReportStatusAsync(statusSink, status, error));
+
+        _natsTask = Task.Run(async () =>
+        {
+            try
+            {
+                await core.RunAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected on StopAsync.
+            }
+            catch
+            {
+                // Best-effort — NatsSubscriberCore.RunAsync already catches and status-reports every
+                // failure it can attribute to a specific reconnect attempt; anything escaping here is
+                // unexpected but must not crash the background task's thread.
+            }
+        }, CancellationToken.None);
+    }
+
+    private void CancelNats()
+    {
+        if (_natsCts is null)
+        {
+            return;
+        }
+        _natsCts.Cancel();
+        _natsCts.Dispose();
+        _natsCts = null;
+        _natsTask = null;
     }
 
     private static async Task SafeReportStatusAsync(IConnectorStatusSink sink, string status, string? error)
@@ -387,7 +490,13 @@ public sealed class ConnectorGrain(
             }
             state.State.ConsecutiveFailures = 0;
             state.State.LastStatus = "ok";
-            state.State.LastError = null;
+            // Plan 009 C2: a coercion failure under Null/DropRow never produces a non-null Error above
+            // (only RejectBatch does, via ConnectorPollCycle.Emit) — this is the only other channel back
+            // to ConnectorRuntimeStatus.LastError (no dedicated counter field exists on that frozen
+            // contract), so a clean cycle still surfaces a non-zero count here instead of going quiet.
+            state.State.LastError = result.CoercionFailures > 0
+                ? $"{result.CoercionFailures} field coercion failure(s) this cycle; policy={def.OnCoercionFailure}"
+                : null;
         }
         else
         {

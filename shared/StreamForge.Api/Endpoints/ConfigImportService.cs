@@ -437,6 +437,9 @@ public static class ConfigImportService
                     Tags = [.. docTable.Tags],
                     Metadata = new Dictionary<string, string>(docTable.Metadata),
                     Parallelism = docTable.Parallelism,
+                    // Plan 009 B2: a freshly-created table has no stored entity to merge secrets
+                    // against — same "nothing to keep" rule as a source's own create path.
+                    Sinks = [.. docTable.Sinks],
                 };
                 applied = await registry.CreateTableAsync(def);
             }
@@ -455,6 +458,14 @@ public static class ConfigImportService
                 existing.Tags = [.. docTable.Tags];
                 existing.Metadata = new Dictionary<string, string>(docTable.Metadata);
                 existing.Parallelism = docTable.Parallelism;
+                // Plan 009 B2: D-J — SecretsMasker.MergeSinkSecrets(incoming, storedIfAny), the Sinks
+                // counterpart of ProcessSourceAsync's SecretsMasker.MergeSecrets call. NOTE (Orleans
+                // flavor only): RegistryGrain.UpdateTableAsync's field-copy list doesn't yet include
+                // Sinks (see PipelinesEndpoints'/TablesEndpoints' PUT handlers for the same reported,
+                // out-of-ownership gap) — this assignment is correct and takes effect once that grain
+                // method is fixed; today it's a no-op on Orleans for the "updated" case specifically
+                // (the "created" case above is unaffected on both flavors).
+                existing.Sinks = SecretsMasker.MergeSinkSecrets(docTable.Sinks, existing.Sinks);
 
                 var updated = await registry.UpdateTableAsync(existing);
                 if (updated is null)
@@ -543,6 +554,8 @@ public static class ConfigImportService
                     CreatedBy = createdBy,
                     Tags = [.. docPipeline.Tags],
                     Metadata = new Dictionary<string, string>(docPipeline.Metadata),
+                    // Plan 009 B2: see the identical note in ProcessTableAsync's create path.
+                    Sinks = [.. docPipeline.Sinks],
                 };
                 applied = await registry.CreatePipelineAsync(def);
             }
@@ -553,6 +566,9 @@ public static class ConfigImportService
                 existing.Sql = docPipeline.Sql;
                 existing.Tags = [.. docPipeline.Tags];
                 existing.Metadata = new Dictionary<string, string>(docPipeline.Metadata);
+                // Plan 009 B2: see the identical note (including the Orleans RegistryGrain gap) in
+                // ProcessTableAsync's update path above.
+                existing.Sinks = SecretsMasker.MergeSinkSecrets(docPipeline.Sinks, existing.Sinks);
 
                 var updated = await registry.UpdatePipelineAsync(existing);
                 if (updated is null)

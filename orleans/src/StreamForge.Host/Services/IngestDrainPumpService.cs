@@ -60,7 +60,7 @@ public sealed class IngestDrainPumpService(
         ILogger logger,
         CancellationToken ct)
     {
-        var ingestNames = sources.Where(s => s.Kind == SourceKinds.Ingest).Select(s => s.Name).ToList();
+        var ingestNames = sources.Where(s => SourceKindDispatch.Classify(s.Kind) == SourceKindDispatch.ActorKind.Ingest).Select(s => s.Name).ToList();
         ingress.RetainOnly(ingestNames.ToHashSet(StringComparer.Ordinal));
 
         foreach (var name in ingestNames)
@@ -99,7 +99,7 @@ public sealed class IngestDrainPumpService(
         ILogger logger,
         CancellationToken ct)
     {
-        foreach (var name in sources.Where(s => s.Kind == SourceKinds.Ingest).Select(s => s.Name))
+        foreach (var name in sources.Where(s => SourceKindDispatch.Classify(s.Kind) == SourceKindDispatch.ActorKind.Ingest).Select(s => s.Name))
         {
             var buffer = ingress.TryGet(name);
             if (buffer is null)

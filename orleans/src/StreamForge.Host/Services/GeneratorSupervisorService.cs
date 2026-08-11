@@ -22,17 +22,19 @@ public sealed class GeneratorSupervisorService(IClusterClient client, IHostAppli
                 {
                     try
                     {
-                        // Plan 006 D-C / plan 008 W4: Kind dispatch, mirroring RegistryGrain's
-                        // UpsertSourceAsync/EnsureInitializedAsync three-way split — "generator" (or
-                        // unset) pings IGeneratorGrain, "ingest" backs onto no grain at all (rows arrive
-                        // through IIngressFacade — nothing to ping), everything else pings IConnectorGrain.
-                        if (string.IsNullOrEmpty(src.Kind) || src.Kind == SourceKinds.Generator)
+                        // Plan 006 D-C / plan 008 W4 / plan 009 wave D: Kind dispatch via the shared
+                        // SourceKindDispatch.Classify, mirroring RegistryGrain's UpsertSourceAsync/
+                        // EnsureInitializedAsync three-way split — Generator (or unset) pings
+                        // IGeneratorGrain, Ingest backs onto no grain at all (rows arrive through
+                        // IIngressFacade — nothing to ping), Connector pings IConnectorGrain.
+                        switch (SourceKindDispatch.Classify(src.Kind))
                         {
-                            await client.GetGrain<IGeneratorGrain>(src.Name).PingAsync();
-                        }
-                        else if (src.Kind != SourceKinds.Ingest)
-                        {
-                            await client.GetGrain<IConnectorGrain>(src.Name).PingAsync();
+                            case SourceKindDispatch.ActorKind.Generator:
+                                await client.GetGrain<IGeneratorGrain>(src.Name).PingAsync();
+                                break;
+                            case SourceKindDispatch.ActorKind.Connector:
+                                await client.GetGrain<IConnectorGrain>(src.Name).PingAsync();
+                                break;
                         }
                     }
                     catch

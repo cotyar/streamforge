@@ -22,7 +22,7 @@ public static class SourceValidation
     private static readonly HashSet<string> KnownKinds = new(StringComparer.Ordinal)
     {
         SourceKinds.Generator, SourceKinds.Url, SourceKinds.File, SourceKinds.Folder, SourceKinds.Grpc,
-        SourceKinds.Ingest,
+        SourceKinds.Ingest, SourceKinds.Nats,
     };
 
     private static readonly HashSet<string> KnownFileFormats = new(StringComparer.Ordinal)
@@ -56,7 +56,7 @@ public static class SourceValidation
 
         if (!KnownKinds.Contains(def.Kind))
         {
-            errors.Add($"kind '{def.Kind}' is not recognized (expected one of: generator, url, file, folder, grpc, ingest)");
+            errors.Add($"kind '{def.Kind}' is not recognized (expected one of: generator, url, file, folder, grpc, ingest, nats)");
             return errors;
         }
 
@@ -115,11 +115,13 @@ public static class SourceValidation
             case SourceKinds.Grpc:
                 ValidateGrpc(connector, errors);
                 break;
+            case SourceKinds.Nats:
+                ValidateNats(connector, errors);
+                break;
         }
 
-        // Schedule/Mapping apply to poll-driven kinds only — a grpc source is a persistent
-        // subscription; its Schedule (if any) is ignored by the driver (ConnectorConfig doc
-        // comment).
+        // Schedule applies to poll-driven kinds only — grpc/nats are persistent subscriptions; their
+        // Schedule (if any) is ignored by the driver (ConnectorConfig doc comment).
         if (def.Kind is SourceKinds.Url or SourceKinds.File or SourceKinds.Folder)
         {
             // An absent Schedule is valid — the driver applies a documented 30 s default; only
@@ -131,11 +133,15 @@ public static class SourceValidation
                     errors.Add($"connector.schedule: {e}");
                 }
             }
+        }
 
-            if (connector.Mapping is not null)
-            {
-                ValidateMapping(connector.Mapping, errors);
-            }
+        // Mapping applies to url/file/folder AND nats (plan 009 B1 — a NATS message goes through the
+        // exact same mapping path a polled body does); grpc decodes against its own schema and never
+        // reads Connector.Mapping at all.
+        if (def.Kind is SourceKinds.Url or SourceKinds.File or SourceKinds.Folder or SourceKinds.Nats
+            && connector.Mapping is not null)
+        {
+            ValidateMapping(connector.Mapping, errors);
         }
 
         return errors;
@@ -235,6 +241,55 @@ public static class SourceValidation
         if (!string.IsNullOrEmpty(grpc.Username) && string.IsNullOrEmpty(grpc.RestAddress))
         {
             errors.Add("connector.grpc.restAddress is required when username/password are set (needed to POST /api/auth/login)");
+        }
+    }
+
+    /// <summary>Plan 009 B1: kind 'nats' config validation — url + subject are required (a NATS
+    /// subscription with no server to dial or subject to listen on cannot possibly do anything); Format
+    /// must be a known connector format (same vocabulary as file/folder); JetStream, when present,
+    /// needs BOTH Stream and Durable (a durable consumer with either missing cannot be created — see
+    /// <see cref="NatsJetStreamConfig"/>'s own doc comment on why JetStream is opt-in in the first
+    /// place).</summary>
+    private static void ValidateNats(ConnectorConfig connector, List<string> errors)
+    {
+        var nats = connector.Nats;
+        if (nats is null)
+        {
+            errors.Add("kind 'nats' requires connector.nats");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(nats.Url))
+        {
+            errors.Add("connector.nats.url is required");
+        }
+
+        if (string.IsNullOrWhiteSpace(nats.Subject))
+        {
+            errors.Add("connector.nats.subject is required");
+        }
+
+        if (!KnownFileFormats.Contains(nats.Format))
+        {
+            errors.Add($"connector.nats.format '{nats.Format}' is not recognized (expected one of: ndjson, json, csv)");
+        }
+
+        if (nats.JetStream is { } js)
+        {
+            if (string.IsNullOrWhiteSpace(js.Stream))
+            {
+                errors.Add("connector.nats.jetStream.stream is required when jetStream is set");
+            }
+
+            if (string.IsNullOrWhiteSpace(js.Durable))
+            {
+                errors.Add("connector.nats.jetStream.durable is required when jetStream is set");
+            }
+
+            if (js.MaxAckPending <= 0)
+            {
+                errors.Add("connector.nats.jetStream.maxAckPending must be > 0");
+            }
         }
     }
 

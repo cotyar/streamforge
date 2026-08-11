@@ -6,16 +6,25 @@ using StreamForge.AppCore.Connectors.Polling;
 
 namespace StreamForge.AppCore.Connectors;
 
-/// <summary>Result of one poll cycle: rows ready to emit (already `_ts`/`_source`-stamped, deduped)
-/// plus the error channel. State mutations happen on the trackers the caller passed in — persist
-/// them after a successful emit.</summary>
-public sealed record PollCycleResult(List<Dictionary<string, object?>> Rows, string? Error);
+/// <summary>Result of one poll cycle: rows ready to emit (already `_ts`/`_source`-stamped, deduped,
+/// and — plan 009 C2 — coerced to each field's declared type) plus the error channel. State mutations
+/// happen on the trackers the caller passed in — persist them after a successful emit.
+/// <see cref="CoercionFailures"/> counts field-level coercion failures encountered while producing
+/// <see cref="Rows"/> (0 for pre-009 callers/records — additive, default parameter) — see
+/// <see cref="ConnectorRowCoercion"/> for what happens to a failing field/row per
+/// <see cref="SourceDefinition.OnCoercionFailure"/>; a <see cref="CoercionFailurePolicy.RejectBatch"/>
+/// rejection surfaces as a non-null <see cref="Error"/> instead (same "coerce before admission, nothing
+/// left behind" shape as every other Error case here).</summary>
+public sealed record PollCycleResult(List<Dictionary<string, object?>> Rows, string? Error, int CoercionFailures = 0);
 
 /// <summary>One poll execution for url/file/folder connector kinds, composing the W2 cores
-/// (FormatParsers → RecordExtractor → DedupTracker/FileLedger) identically on both runtimes.
-/// The drivers own scheduling, persistence, and emission; this owns the cycle semantics.
-/// HTTP is injected; file/folder I/O is BCL. gRPC kind is NOT handled here — it is a persistent
-/// subscription (GrpcSubscriberCore), not a poll.</summary>
+/// (FormatParsers → RecordExtractor → DedupTracker/FileLedger) identically on both runtimes, plus
+/// (plan 009 C2) declared-type coercion via <see cref="ConnectorRowCoercion"/>. The drivers own
+/// scheduling, persistence, and emission; this owns the cycle semantics. HTTP is injected; file/folder
+/// I/O is BCL. gRPC kind is NOT handled here — it decodes already-typed rows off the wire and applies
+/// its own coercion pass (ConnectorGrain/ConnectorActor). NATS (plan 009 B1) IS handled here —
+/// <see cref="ExecuteNatsMessage"/> — because it shares the exact same format/mapping path a polled
+/// body uses; only its transport (a persistent subscription) is different.</summary>
 public static class ConnectorPollCycle
 {
     /// <summary>Effective mapping: the configured one, else a pass-through built from the source's
@@ -76,6 +85,15 @@ public static class ConnectorPollCycle
         return new PollCycleResult(rows, errors.Count == 0 ? null : string.Join("; ", errors));
     }
 
+    /// <summary>NATS kind (plan 009 B1): one message payload → parse (<see cref="NatsSubConfig.Format"/>)
+    /// → extract (Mapping) → coerce/dedup/stamp — the EXACT SAME pipeline url/file/folder connectors use
+    /// for a fetched body (the class doc's "do not invent a second extraction path" rule), so a NATS
+    /// message becomes a row exactly the way a polled HTTP body does. <paramref name="dedup"/> is the
+    /// subscription-lifetime tracker the caller persists — <c>MappingSpec.DedupKeyField</c> applies here
+    /// exactly as it does for a poll cycle, which matters most for JetStream redelivery.</summary>
+    public static PollCycleResult ExecuteNatsMessage(SourceDefinition def, string format, string payloadText, DedupTracker dedup, long nowMs)
+        => ParseAndExtract(def, format, payloadText, dedup, nowMs);
+
     private static PollCycleResult ParseAndExtract(SourceDefinition def, string format, string text, DedupTracker dedup, long nowMs)
     {
         List<JsonElement> items;
@@ -104,9 +122,17 @@ public static class ConnectorPollCycle
 
     private static PollCycleResult Emit(SourceDefinition def, List<Dictionary<string, object?>> rows, DedupTracker dedup, long nowMs)
     {
+        // Plan 009 C2: coerce every declared field to its type BEFORE dedup/admission — a RejectBatch
+        // rejection must leave nothing behind, same rule A1.1 states for push ingress.
+        var coercion = ConnectorRowCoercion.Apply(def.Fields, rows, def.OnCoercionFailure);
+        if (coercion.BatchRejected)
+        {
+            return new PollCycleResult([], $"coercion rejected batch: {coercion.RejectReason}", coercion.FailureCount);
+        }
+
         var dedupField = def.Connector?.Mapping?.DedupKeyField;
-        var emitted = new List<Dictionary<string, object?>>(rows.Count);
-        foreach (var row in rows)
+        var emitted = new List<Dictionary<string, object?>>(coercion.Rows.Count);
+        foreach (var row in coercion.Rows)
         {
             if (dedupField is not null
                 && row.TryGetValue(dedupField, out var key) && key is not null
@@ -118,6 +144,6 @@ public static class ConnectorPollCycle
             if (!row.ContainsKey("_ts")) row["_ts"] = nowMs;
             emitted.Add(row);
         }
-        return new PollCycleResult(emitted, null);
+        return new PollCycleResult(emitted, null, coercion.FailureCount);
     }
 }

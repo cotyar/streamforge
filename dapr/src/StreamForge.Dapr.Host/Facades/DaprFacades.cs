@@ -2,7 +2,6 @@ using Dapr.Actors;
 using Dapr.Actors.Client;
 using StreamForge.Abstractions;
 using StreamForge.Dapr.Host.Actors;
-using StreamForge.Dapr.Host.Lifecycle;
 
 namespace StreamForge.Dapr.Host.Facades;
 

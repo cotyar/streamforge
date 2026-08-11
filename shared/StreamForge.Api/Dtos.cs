@@ -22,7 +22,12 @@ public sealed record CreatePipelineRequest(
     string Description,
     string Sql,
     List<string>? Tags = null,
-    Dictionary<string, string>? Metadata = null);
+    Dictionary<string, string>? Metadata = null,
+    // Plan 009 B2: where this pipeline's result rows are republished. Null/omitted = leave unset (on
+    // create) or unchanged (on update, mirroring how Tags/Metadata's null-means-unchanged works below).
+    // NatsPubConfig credential fields follow the secrets-lite convention (SourceKinds.SecretMask on read;
+    // a written mask means "keep the stored value") — see PipelinesEndpoints' PUT handler.
+    List<SinkSpec>? Sinks = null);
 
 public sealed record ValidateRequest(string Sql);
 
@@ -53,7 +58,10 @@ public sealed record CreateTableRequest(
     TablePersistenceMode Persistence = TablePersistenceMode.Batched,
     int FlushMs = 0,
     // Plan 009 A2: compaction threshold for TablePersistenceMode.Journaled. 0 = default.
-    int JournalMaxEntries = 0);
+    int JournalMaxEntries = 0,
+    // Plan 009 B2: where this table's deltas are republished. Same null-means-unchanged convention as
+    // CreatePipelineRequest.Sinks above.
+    List<SinkSpec>? Sinks = null);
 
 public sealed record TableSearchResponse(IReadOnlyList<TableRowDto> Rows, string Mode, bool Enabled, int Total);
 

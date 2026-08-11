@@ -45,6 +45,11 @@ public sealed class ConfigPipeline
     public bool Running { get; set; }
     public List<string> Tags { get; set; } = [];
     public Dictionary<string, string> Metadata { get; set; } = [];
+    /// <summary>Plan 009 B2: mirrors <see cref="PipelineDefinition.Sinks"/> (additive). NatsPubConfig
+    /// credentials are masked (<see cref="SourceKinds.SecretMask"/>) in an export unless the caller asks
+    /// for <c>includeSecrets</c> — see <see cref="ConfigSerializer.FromCatalog"/> — following the exact
+    /// convention Sources' secrets already use in this document.</summary>
+    public List<SinkSpec> Sinks { get; set; } = [];
 }
 
 /// <summary>
@@ -73,4 +78,7 @@ public sealed class ConfigTable
     public string? HistoryByField { get; set; }
     public long HistoryWindowMs { get; set; }
     public int Parallelism { get; set; } = 1;
+    /// <summary>Plan 009 B2: mirrors <see cref="TableDefinition.Sinks"/> — see the identical note on
+    /// <see cref="ConfigPipeline.Sinks"/>.</summary>
+    public List<SinkSpec> Sinks { get; set; } = [];
 }

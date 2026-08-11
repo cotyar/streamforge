@@ -240,43 +240,10 @@ public sealed partial class DaprLifecycleOrchestrator(
     }
 }
 
-/// <summary>
-/// Plan 006 (ingestion connectors) W3-B: the pure "which actor type owns this source" classification
-/// behind <see cref="DaprLifecycleOrchestrator.NotifySourceChangedAsync"/>'s kind dispatch, extracted into
-/// its own framework-free static class specifically so it is unit-testable without a live Dapr sidecar
-/// (every <see cref="DaprLifecycleOrchestrator"/> method itself requires one — see
-/// dapr/tests/StreamForge.Dapr.Tests/GeneratorLifecycleOrchestratorTests.cs's class doc for that finding
-/// and dapr/tests/StreamForge.Dapr.Tests/ConnectorLifecycleOrchestratorTests.cs for the tests against this
-/// class).
-/// </summary>
-public static class SourceKindDispatch
-{
-    /// <summary>Plan 008 W4c added <see cref="Ingest"/> as a genuine third case (not folded into
-    /// <see cref="Connector"/>) — an ingest-kind source has no actor at all, so callers that used to
-    /// assume "not Generator means Connector" (e.g. the old binary <see cref="Classify"/>) MUST switch
-    /// on all three values explicitly now; see <see cref="Lifecycle.DaprLifecycleOrchestrator.NotifySourceChangedAsync"/>
-    /// and <see cref="Facades.DaprConnectorStatusFacade"/> for the two call sites this mattered for.</summary>
-    public enum ActorKind { Generator, Connector, Ingest }
-
-    /// <summary>Null/empty/"generator" → <see cref="ActorKind.Generator"/> (the pre-006 default —
-    /// existing sources with no <see cref="SourceDefinition.Kind"/> set at all deserialize with an empty
-    /// string before the additive default kicks in, so empty is treated identically to "generator", not
-    /// as an error). <see cref="SourceKinds.Ingest"/> → <see cref="ActorKind.Ingest"/> (plan 008 W4c —
-    /// no actor at all; see <see cref="Ingest.DaprIngressFacade"/>). Every other value (url/file/folder/
-    /// grpc, or any future kind) → <see cref="ActorKind.Connector"/> — this dispatch is deliberately NOT
-    /// an exhaustive switch over every <see cref="SourceKinds"/> constant, so a not-yet-invented
-    /// connector-shaped kind still routes to <see cref="IConnectorActor"/> (which is itself responsible
-    /// for rejecting a kind it doesn't know how to run) rather than silently falling through to the
-    /// generator path. <see cref="SourceKinds.Ingest"/> is checked explicitly, ahead of that catch-all,
-    /// specifically so it does NOT fall into the connector bucket — see the defect this fixed, noted in
-    /// <see cref="Facades.DaprConnectorStatusFacade"/>'s doc comment.</summary>
-    public static ActorKind Classify(string? kind)
-    {
-        if (string.IsNullOrEmpty(kind) || kind == SourceKinds.Generator)
-        {
-            return ActorKind.Generator;
-        }
-
-        return kind == SourceKinds.Ingest ? ActorKind.Ingest : ActorKind.Connector;
-    }
-}
+// SourceKindDispatch (the pure "which actor/grain type owns this source" classification) moved to
+// shared/StreamForge.Contracts/SourceKindDispatch.cs in plan 009 wave D — both flavors already reference
+// that assembly (StreamForge.Abstractions, already `using`d above), so the Orleans flavor's own
+// independently hand-written RegistryGrain/GeneratorSupervisorService/IngestDrainPumpService dispatch logic
+// could be collapsed onto the exact same tested implementation instead of staying a second copy here. See
+// that type's own class doc for the full history (plan 006 W3-B origin, the plan 008 W4c Ingest addition,
+// and the "kind != generator" defect that motivated sharing it in the first place).

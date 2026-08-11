@@ -128,10 +128,23 @@ public static class ImportPlanner
             return new PlannedAction("pipeline", docPipeline.Name, "created", []);
         }
 
+        // Plan 009 B2: same "a masked doc needs its secrets restored from stored before comparing"
+        // rule PlanSource applies to source secrets — otherwise a doc round-tripped through a masked
+        // export would ALWAYS compare "updated" (mask string != real credential) even when nothing
+        // actually changed, and — worse — ProcessPipelineAsync would persist the literal mask string.
+        var diagnostics = new List<string>();
+        var effective = docPipeline;
+        if (SecretsMasker.HasMaskedSinkValues(docPipeline.Sinks))
+        {
+            effective = ConfigJsonMapper.DeepCloneModel(docPipeline);
+            effective.Sinks = SecretsMasker.MergeSinkSecrets(docPipeline.Sinks, stored.Sinks);
+            diagnostics.Add("secrets: kept stored values");
+        }
+
         var storedAsConfig = ConfigSerializer.ToConfigPipeline(stored);
-        var same = ConfigJsonMapper.ToCanonicalJsonText(ConfigJsonMapper.PipelineNode(docPipeline)) ==
+        var same = ConfigJsonMapper.ToCanonicalJsonText(ConfigJsonMapper.PipelineNode(effective)) ==
                    ConfigJsonMapper.ToCanonicalJsonText(ConfigJsonMapper.PipelineNode(storedAsConfig));
-        return new PlannedAction("pipeline", docPipeline.Name, same ? "skipped" : "updated", []);
+        return new PlannedAction("pipeline", docPipeline.Name, same ? "skipped" : "updated", diagnostics);
     }
 
     private static PlannedAction PlanTable(ConfigTable docTable, TableDefinition? stored)
@@ -141,10 +154,20 @@ public static class ImportPlanner
             return new PlannedAction("table", docTable.Name, "created", []);
         }
 
+        // Plan 009 B2: see the identical note in PlanPipeline above.
+        var diagnostics = new List<string>();
+        var effective = docTable;
+        if (SecretsMasker.HasMaskedSinkValues(docTable.Sinks))
+        {
+            effective = ConfigJsonMapper.DeepCloneModel(docTable);
+            effective.Sinks = SecretsMasker.MergeSinkSecrets(docTable.Sinks, stored.Sinks);
+            diagnostics.Add("secrets: kept stored values");
+        }
+
         var storedAsConfig = ConfigSerializer.ToConfigTable(stored);
-        var same = ConfigJsonMapper.ToCanonicalJsonText(ConfigJsonMapper.TableNode(docTable)) ==
+        var same = ConfigJsonMapper.ToCanonicalJsonText(ConfigJsonMapper.TableNode(effective)) ==
                    ConfigJsonMapper.ToCanonicalJsonText(ConfigJsonMapper.TableNode(storedAsConfig));
-        return new PlannedAction("table", docTable.Name, same ? "skipped" : "updated", []);
+        return new PlannedAction("table", docTable.Name, same ? "skipped" : "updated", diagnostics);
     }
 
     /// <summary>Best-effort dependency scan for a NEW table's SQL: every <c>FROM &lt;identifier&gt;</c>

@@ -53,7 +53,9 @@ public static class ConfigSerializer
     /// <see cref="ConfigPipeline.Running"/>'s doc comment). When <paramref name="includeSecrets"/>
     /// is false (the default posture — D-H), every source is passed through
     /// <see cref="SecretsMasker.Mask"/> first so header values / gRPC password+token never leave
-    /// the process in a plain export.</summary>
+    /// the process in a plain export; plan 009 B2 extends the identical rule to Sinks' NatsPubConfig
+    /// credentials via <see cref="ToConfigPipeline"/>/<see cref="ToConfigTable"/>'s own
+    /// <paramref name="includeSecrets"/> parameter.</summary>
     public static ConfigDocument FromCatalog(
         IReadOnlyList<SourceDefinition> sources,
         IReadOnlyList<PipelineDefinition> pipelines,
@@ -61,15 +63,17 @@ public static class ConfigSerializer
         bool includeSecrets) => new()
     {
         Sources = [.. sources.Select(s => includeSecrets ? ConfigJsonMapper.DeepCloneModel(s) : SecretsMasker.Mask(s))],
-        Pipelines = [.. pipelines.Select(ToConfigPipeline)],
-        Tables = [.. tables.Select(ToConfigTable)],
+        Pipelines = [.. pipelines.Select(p => ToConfigPipeline(p, includeSecrets))],
+        Tables = [.. tables.Select(t => ToConfigTable(t, includeSecrets))],
     };
 
     /// <summary>Catalog PipelineDefinition -&gt; ConfigPipeline mapping (D-I "Running = Status !=
     /// Stopped"). Internal: shared by <see cref="FromCatalog"/> and <see cref="ImportPlanner"/>
     /// (which needs the same mapping to compare a doc entity against the stored catalog entity on
-    /// equal footing).</summary>
-    internal static ConfigPipeline ToConfigPipeline(PipelineDefinition p) => new()
+    /// equal footing — always called with the default <paramref name="includeSecrets"/> = true there,
+    /// since ImportPlanner compares real Contracts objects, not an exported document; masking only
+    /// matters at the <see cref="FromCatalog"/> export boundary).</summary>
+    internal static ConfigPipeline ToConfigPipeline(PipelineDefinition p, bool includeSecrets = true) => new()
     {
         Name = p.Name,
         Description = p.Description,
@@ -77,12 +81,13 @@ public static class ConfigSerializer
         Running = p.Status != PipelineStatus.Stopped,
         Tags = [.. p.Tags],
         Metadata = new Dictionary<string, string>(p.Metadata),
+        Sinks = includeSecrets ? [.. p.Sinks] : SecretsMasker.MaskSinks(p.Sinks),
     };
 
     /// <summary>Catalog TableDefinition -&gt; ConfigTable mapping — same Running rule as
     /// <see cref="ToConfigPipeline"/> plus the table-only knobs, runtime/derived fields (id, Status,
     /// Error, CreatedBy/timestamps, OutputFields, StreamInputs/TableInputs) dropped.</summary>
-    internal static ConfigTable ToConfigTable(TableDefinition t) => new()
+    internal static ConfigTable ToConfigTable(TableDefinition t, bool includeSecrets = true) => new()
     {
         Name = t.Name,
         Description = t.Description,
@@ -98,5 +103,6 @@ public static class ConfigSerializer
         HistoryByField = t.HistoryByField,
         HistoryWindowMs = t.HistoryWindowMs,
         Parallelism = t.Parallelism,
+        Sinks = includeSecrets ? [.. t.Sinks] : SecretsMasker.MaskSinks(t.Sinks),
     };
 }

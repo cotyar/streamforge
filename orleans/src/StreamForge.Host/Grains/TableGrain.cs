@@ -7,6 +7,7 @@ using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
 using StreamForge.Engine.Dataflow;
+using StreamForge.Engine.Runtime;
 using StreamForge.Host.Search;
 
 namespace StreamForge.Host.Grains;
@@ -89,7 +90,7 @@ public sealed class TableJournalState
 /// <see cref="OnOutputBatchAsync"/> directly, carrying (fromPartition, epoch) alongside the deltas; this
 /// grain buffers those per (partition, epoch) with the same FrontierTracker+EpochBuffer M0 primitives every
 /// other dataflow hop uses (_outputFrontier/_outputBuffer below), registered over every terminal-stage
-/// partition, and only consolidates a batch into _coordinatorSnapshot/the search index once EVERY terminal
+/// partition, and only consolidates a batch into _coordinatorLedger/the search index once EVERY terminal
 /// partition has reported reaching that epoch. <see cref="GetSnapshotFrontierEpochAsync"/> (mirrored on
 /// TableMetrics.SnapshotFrontierEpoch) then reports that same epoch.
 ///
@@ -97,7 +98,7 @@ public sealed class TableJournalState
 /// OnOutputBatchAsync): at any point a caller observes SnapshotFrontierEpoch == F via GetRowsAsync/
 /// GetMetricsAsync/GetSnapshotFrontierEpochAsync, the rows/search results served AT THAT SAME MOMENT
 /// reflect ALL deltas whose epoch is &lt;= F and NONE beyond it. This holds because (a)
-/// _coordinatorSnapshot is only ever mutated inside OnOutputBatchAsync, synchronously, with no `await`
+/// _coordinatorLedger is only ever mutated inside OnOutputBatchAsync, synchronously, with no `await`
 /// between reading the newly-ready batches and updating _snapshotFrontierEpoch (Orleans single-threads one
 /// grain's turns, so no GetRowsAsync call can be dispatched mid-way through one OnOutputBatchAsync
 /// invocation), and (b) a batch is never consolidated before _outputFrontier's combined frontier (min over
@@ -137,7 +138,7 @@ public sealed class TableJournalState
 /// the grain turn exactly as before, so the turn stalls for as long as the whole-snapshot serialize + file
 /// write takes. <see cref="TablePersistenceMode.FireAndForget"/> keeps the same timer but does not await the
 /// write: <see cref="OnFlushTickAsync"/> captures the snapshot into <c>state.State</c> synchronously (that
-/// part MUST stay on the turn — TableExecutor/_coordinatorSnapshot are not thread-safe and nothing else may
+/// part MUST stay on the turn — TableExecutor/_coordinatorLedger are not thread-safe and nothing else may
 /// touch them mid-capture), then hands the actual `state.WriteStateAsync()` off via <see cref="_pendingWrite"/>
 /// without awaiting it, so the turn returns immediately. Single-flight is enforced by checking
 /// `_pendingWrite.IsCompleted` before starting a new capture — a tick that lands while the previous write is
@@ -275,33 +276,19 @@ public sealed class TableGrain(
     /// each arrangement's own Rebuilding into this table's and to report ArrangedInputs.</summary>
     private List<(string ArrangementKey, string ConsumerId)> _deployedArrangements = [];
     /// <summary>Coordinator mode's own live consolidated Z-set (canonical row key -> (row, weight)) — the
-    /// coordinator-mode analogue of TableExecutor's internal `_consolidated` (not reachable from Host —
-    /// see class doc), fed by <see cref="OnOutputBatchAsync"/> and read by
-    /// ReflectDeltasInSearchIndex/FlushAsync/SearchAsync exactly where the classic path reads
-    /// `_executor.Snapshot()`.</summary>
-    private readonly Dictionary<string, (EventRecord Row, long Weight)> _coordinatorSnapshot = [];
-
-    /// <summary>Outstanding NEGATIVE running weight per canonical row key, for keys whose net weight-so-far
-    /// is &lt;= 0 and are therefore not (or no longer) in <see cref="_coordinatorSnapshot"/> — the same side
-    /// table (and the same reasoning) as TableExecutorImpl's own `_debtWeights`, which _coordinatorSnapshot
-    /// is the coordinator-mode analogue of. A negative delta can legitimately arrive here for a key with no
-    /// prior positive weight: this grain fans terminal-partition batches in from N partitions (and an
-    /// upstream outer join emits retraction-driven pads), so per-key causal order is not guaranteed across
-    /// that fan-in, replay, or a restart-resume. Discarding that negative (the old bug) loses information —
-    /// a later positive delta for the same key would then start fresh instead of netting against the
-    /// outstanding debt, so a row whose true total weight is 0 could resurface at a positive weight
-    /// depending on arrival order alone.
+    /// coordinator-mode analogue of TableExecutor's internal ledger, fed by <see cref="OnOutputBatchAsync"/>
+    /// (via <see cref="ApplyCoordinatorConsolidation"/>) and read by ReflectDeltasInSearchIndex/FlushAsync/
+    /// SearchAsync exactly where the classic path reads `_executor.Snapshot()`.
     ///
-    /// Kept separate from _coordinatorSnapshot rather than letting that dictionary hold weight &lt;= 0
-    /// entries so it stays exactly the user-visible positive rows — GetRowsAsync/RowCount/FlushAsync/
-    /// ReflectDeltasInSearchIndex all read it unfiltered. The two are disjoint by construction
-    /// (<see cref="ApplyCoordinatorConsolidation"/> always removes from whichever one a key is NOT written
-    /// into) and a key netting to exactly 0 leaves both, so neither accumulates residue for fully cancelled
-    /// rows. That is the DBSP invariant making this ledger order-independent: the value looked up before
-    /// folding in a new delta is always the exact running sum of every delta seen so far for that key, so —
-    /// integer addition being commutative and associative — a key's final classification (positive/zero/
-    /// negative) depends only on the SUM of its deltas, never on the order they arrived in.</summary>
-    private readonly Dictionary<string, long> _coordinatorDebt = [];
+    /// Plan 009 wave D: this used to be two hand-rolled dictionaries here (`_coordinatorSnapshot` + a
+    /// separate `_coordinatorDebt` side-table for outstanding negative running weight) — the exact same
+    /// shape and arithmetic TableExecutorImpl and ArrangementGrain each separately hand-wrote too. Now a
+    /// shared <see cref="ConsolidationLedger"/> (Engine-side, since Host references Engine) — see its own
+    /// class doc for the full order-independence argument (why a negative delta with no prior positive
+    /// weight is retained as debt rather than dropped: this grain fans terminal-partition batches in from N
+    /// partitions, and an upstream outer join emits retraction-driven pads, so per-key causal order is not
+    /// guaranteed across that fan-in, replay, or a restart-resume).</summary>
+    private readonly ConsolidationLedger _coordinatorLedger = new();
 
     /// <summary>Plan 003 M4 — the M0 primitives (see FrontierTracker/EpochBuffer's own doc comments),
     /// registered over every terminal-stage partition (one UpstreamId per partition, keyed on the
@@ -311,7 +298,7 @@ public sealed class TableGrain(
     private FrontierTracker? _outputFrontier;
     private EpochBuffer? _outputBuffer;
     private EdgeId _terminalEdgeId;
-    /// <summary>Plan 003 M4 — the epoch _coordinatorSnapshot currently, honestly, fully reflects (see class
+    /// <summary>Plan 003 M4 — the epoch _coordinatorLedger currently, honestly, fully reflects (see class
     /// doc's consistency statement). Null until OnOutputBatchAsync has observed at least one full round
     /// (every terminal partition reporting) since the last StartCoordinatorAsync.</summary>
     private long? _snapshotFrontierEpoch;
@@ -418,14 +405,13 @@ public sealed class TableGrain(
         _coordinatorMode = true;
         _coordinatorParallelism = def.Parallelism;
 
-        // _coordinatorSnapshot (unlike _executor above) is a grain-instance field that outlives a single
+        // _coordinatorLedger (unlike _executor above) is a grain-instance field that outlives a single
         // StartAsync/StopAsync cycle — the grain activation itself isn't torn down on StopAsync, only its
         // subscriptions/sub-grains are. Without clearing it here, a restart-resume would silently resurrect
         // pre-restart rows into the freshly-reset state.State.Snapshot on the next flush, breaking the same
         // "rebuild purely from live traffic" contract the classic path gets for free by allocating a brand
         // new (empty) TableExecutor on every StartClassicAsync call.
-        _coordinatorSnapshot.Clear();
-        _coordinatorDebt.Clear();
+        _coordinatorLedger.Clear();
 
         ResumeJournaledState();
 
@@ -577,10 +563,10 @@ public sealed class TableGrain(
         await _pendingWrite;
 
         // Plan 003 M4 fix: flush BEFORE clearing _coordinatorMode, not after — FlushAsync's `_coordinatorMode
-        // ? _coordinatorSnapshot : _executor.Snapshot()` branch must still see _coordinatorMode==true here,
+        // ? _coordinatorLedger.Visible : _executor.Snapshot()` branch must still see _coordinatorMode==true here,
         // otherwise a coordinator-mode table's final on-stop flush silently persists the scratch executor's
         // (always-empty — see class doc, "never fed an event") snapshot instead of the real
-        // _coordinatorSnapshot, losing every row from the persisted state.State.Snapshot on every stop. This
+        // _coordinatorLedger, losing every row from the persisted state.State.Snapshot on every stop. This
         // was a latent pre-M4 bug masked by GetRowsAsync/GetRowCountAsync previously reading the (up to 2s
         // stale) persisted copy — by the time a poll observed the row count, the periodic 2s flush timer had
         // usually already run it correctly WHILE _coordinatorMode was still true. M4's live-read fix (see
@@ -619,10 +605,10 @@ public sealed class TableGrain(
     }
 
     /// <summary>Plan 003 M4: coordinator mode (Parallelism &gt;= 2) serves rows from the LIVE
-    /// <see cref="_coordinatorSnapshot"/> rather than the write-behind-persisted state.State.Snapshot (which
+    /// <see cref="_coordinatorLedger"/> rather than the write-behind-persisted state.State.Snapshot (which
     /// can lag up to the 2s flush-timer interval — see class doc / OnFlushTickAsync). This is required for
     /// the frontier-consistency statement to actually hold: <see cref="_snapshotFrontierEpoch"/> is advanced
-    /// synchronously, in the same OnOutputBatchAsync call that updates _coordinatorSnapshot, so reading rows
+    /// synchronously, in the same OnOutputBatchAsync call that updates _coordinatorLedger, so reading rows
     /// from anything else (state.State.Snapshot included) could report a frontier ahead of what the rows
     /// served actually reflect. state.State.Snapshot remains the PERSISTED copy either way — still flushed
     /// on the same 2s cadence, still what restart-resume reads (see StartCoordinatorAsync's Rebuilding
@@ -632,7 +618,7 @@ public sealed class TableGrain(
     public Task<List<TableRowDto>> GetRowsAsync(int limit, int offset)
     {
         var source = _coordinatorMode
-            ? _coordinatorSnapshot.Values.Select(v => new TableRowDto { Row = new Dictionary<string, object?>(v.Row), Weight = v.Weight })
+            ? _coordinatorLedger.Visible.Values.Select(v => new TableRowDto { Row = new Dictionary<string, object?>(v.Row), Weight = v.Weight })
             : ClassicModeRows();
         var rows = source
             .Skip(Math.Max(0, offset))
@@ -642,7 +628,7 @@ public sealed class TableGrain(
     }
 
     public Task<int> GetRowCountAsync() =>
-        Task.FromResult(_coordinatorMode ? _coordinatorSnapshot.Count : ClassicModeRowCount());
+        Task.FromResult(_coordinatorMode ? _coordinatorLedger.Visible.Count : ClassicModeRowCount());
 
     /// <summary>Plan 008 W2.5: classic-mode (non-coordinator) row source for GetRowsAsync/GetRowCountAsync/
     /// GetMetricsAsync's RowCount. MemoryOnly NEVER populates state.State.Snapshot — it registers no flush
@@ -715,7 +701,7 @@ public sealed class TableGrain(
             // SnapshotFrontierEpoch below, which is also updated live). Plan 008 W2.5: ClassicModeRowCount
             // additionally goes live for MemoryOnly (see its own doc comment) — state.State.Snapshot is
             // never populated at all in that mode, not just lagging.
-            RowCount = _coordinatorMode ? _coordinatorSnapshot.Count : ClassicModeRowCount(),
+            RowCount = _coordinatorMode ? _coordinatorLedger.Visible.Count : ClassicModeRowCount(),
             DeltasIn = _deltasIn,
             DeltasOut = _deltasOut,
             LastUpdateMs = _lastUpdateMs,
@@ -742,7 +728,7 @@ public sealed class TableGrain(
             return Task.FromResult(new List<TableRowDto>());
         }
 
-        IReadOnlyDictionary<string, (EventRecord Row, long Weight)>? snapshot = _coordinatorMode ? _coordinatorSnapshot : _executor?.Snapshot();
+        IReadOnlyDictionary<string, (EventRecord Row, long Weight)>? snapshot = _coordinatorMode ? _coordinatorLedger.Visible : _executor?.Snapshot();
         var hits = _searchIndex.Search(query, limit);
         var rows = hits.Select(h =>
         {
@@ -794,13 +780,13 @@ public sealed class TableGrain(
     /// PushBatchAsync already uses for every OTHER hop — see that method); only once EVERY terminal
     /// partition has reported reaching a given epoch does that epoch's batches become "ready", at which
     /// point — synchronously, no `await` in between — they are consolidated into
-    /// <see cref="_coordinatorSnapshot"/>/the search index AND _snapshotFrontierEpoch is advanced to match.
+    /// <see cref="_coordinatorLedger"/>/the search index AND _snapshotFrontierEpoch is advanced to match.
     /// That synchronous, no-await body is exactly what makes the class doc's consistency statement true —
     /// and still holds despite this method being [MayInterleave] (see class doc): interleaving only changes
     /// which QUEUED turn Orleans picks up next when another turn is suspended at an `await`; it never
     /// interrupts a synchronous method's body mid-statement. Since neither this method nor GetRowsAsync
     /// ever yields, one always runs to completion before the other can start — no GetRowsAsync call can
-    /// ever observe _coordinatorSnapshot mid-update, and _snapshotFrontierEpoch never claims more than what
+    /// ever observe _coordinatorLedger mid-update, and _snapshotFrontierEpoch never claims more than what
     /// was just applied. No SQL runs here — the partitioned graph already computed these deltas; this grain
     /// only consolidates + persists + indexes them for reads.</summary>
     public Task OnOutputBatchAsync(int fromPartition, long epochValue, List<TableDeltaDto> deltas)
@@ -859,34 +845,11 @@ public sealed class TableGrain(
 
     private void ApplyCoordinatorConsolidation(TableDelta delta)
     {
+        // CanonicalRowKey is the one piece of Engine key-derivation logic exposed publicly (see class doc);
+        // the weight-folding arithmetic itself now lives in ConsolidationLedger.Apply — see its class doc
+        // for the order-independence argument this method used to carry locally.
         var key = _executor!.CanonicalRowKey(delta.Row);
-
-        // Running weight for this key BEFORE folding in `delta`, wherever it currently lives (positive in
-        // _coordinatorSnapshot, negative in _coordinatorDebt, or 0/absent from both — never in both at
-        // once). See _coordinatorDebt's doc comment.
-        long currentWeight = _coordinatorSnapshot.TryGetValue(key, out var existing)
-            ? existing.Weight
-            : _coordinatorDebt.GetValueOrDefault(key);
-
-        long newWeight = currentWeight + delta.Weight;
-
-        if (newWeight > 0)
-        {
-            // Same canonical key => same row content, so either representative is equivalent (the Engine's
-            // ApplyConsolidation likewise always stores the incoming row).
-            _coordinatorSnapshot[key] = (delta.Row, newWeight);
-            _coordinatorDebt.Remove(key);
-        }
-        else if (newWeight < 0)
-        {
-            _coordinatorSnapshot.Remove(key);
-            _coordinatorDebt[key] = newWeight;
-        }
-        else // newWeight == 0: fully cancelled out — no residue in either structure.
-        {
-            _coordinatorSnapshot.Remove(key);
-            _coordinatorDebt.Remove(key);
-        }
+        _coordinatorLedger.Apply(key, delta.Row, delta.Weight);
     }
 
     private async Task ApplyAndPublishAsync(IReadOnlyList<TableDelta> deltas)
@@ -916,7 +879,7 @@ public sealed class TableGrain(
     /// (Remove). Only rows actually touched by this batch are re-checked, not the whole table.</summary>
     private void ReflectDeltasInSearchIndex(IReadOnlyList<TableDelta> deltas)
     {
-        IReadOnlyDictionary<string, (EventRecord Row, long Weight)> snapshot = _coordinatorMode ? _coordinatorSnapshot : _executor!.Snapshot();
+        IReadOnlyDictionary<string, (EventRecord Row, long Weight)> snapshot = _coordinatorMode ? _coordinatorLedger.Visible : _executor!.Snapshot();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var delta in deltas)
         {
@@ -938,14 +901,14 @@ public sealed class TableGrain(
     /// tables; callers only invoke this when <c>_persistenceMode == Journaled</c> (mirrors
     /// <see cref="ReflectDeltasInSearchIndex"/>'s <c>_searchIndex is not null</c> guard shape — same per-batch,
     /// dedup-by-key pattern). Looks each touched key up in the ALREADY-UPDATED consolidated snapshot (classic
-    /// mode's <see cref="_executor"/> or coordinator mode's <see cref="_coordinatorSnapshot"/>, exactly like
+    /// mode's <see cref="_executor"/> or coordinator mode's <see cref="_coordinatorLedger"/>, exactly like
     /// ReflectDeltasInSearchIndex does): present with weight &gt; 0 records a live entry; absent means the
     /// key's running weight just dropped to &lt;= 0, recorded as an explicit removal tombstone (Weight = 0) —
     /// see <see cref="TableJournalEntry"/>'s own doc comment for why skipping this instead would resurrect
     /// the row on replay.</summary>
     private void RecordJournalEntries(IReadOnlyList<TableDelta> deltas)
     {
-        IReadOnlyDictionary<string, (EventRecord Row, long Weight)> snapshot = _coordinatorMode ? _coordinatorSnapshot : _executor!.Snapshot();
+        IReadOnlyDictionary<string, (EventRecord Row, long Weight)> snapshot = _coordinatorMode ? _coordinatorLedger.Visible : _executor!.Snapshot();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var delta in deltas)
         {
@@ -1065,7 +1028,7 @@ public sealed class TableGrain(
     private Task FlushDirtyAsync() => _persistenceMode == TablePersistenceMode.Journaled ? JournalFlushAsync() : FlushAsync();
 
     /// <summary>Captures the live consolidated Z-set into <c>state.State</c> — MUST stay synchronous, on the
-    /// grain turn: <see cref="_executor"/>/<see cref="_coordinatorSnapshot"/> are not thread-safe and this is
+    /// grain turn: <see cref="_executor"/>/<see cref="_coordinatorLedger"/> are not thread-safe and this is
     /// the only safe place to read them. Returns false (and clears <see cref="_dirty"/> without touching
     /// state.State) when there is nothing to capture, exactly like the pre-008 FlushAsync's own null-executor
     /// guard.</summary>
@@ -1077,7 +1040,7 @@ public sealed class TableGrain(
             return false;
         }
 
-        var snapshot = _coordinatorMode ? _coordinatorSnapshot : _executor.Snapshot();
+        var snapshot = _coordinatorMode ? _coordinatorLedger.Visible : _executor.Snapshot();
         state.State.Snapshot = snapshot.ToDictionary(
             kv => kv.Key,
             kv => new TableRowDto { Row = new Dictionary<string, object?>(kv.Value.Row), Weight = kv.Value.Weight });
