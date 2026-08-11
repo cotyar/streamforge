@@ -9,6 +9,7 @@ import { PipelineDetailPage } from './pages/PipelineDetailPage'
 import { TablesPage } from './pages/TablesPage'
 import { TableDetailPage } from './pages/TableDetailPage'
 import { SourcesPage } from './pages/SourcesPage'
+import { LineagePage } from './pages/LineagePage'
 import { UsersPage } from './pages/UsersPage'
 import { ApiExplorerPage } from './pages/ApiExplorerPage'
 import { ConfigPage } from './pages/ConfigPage'
@@ -39,6 +40,7 @@ export default function App() {
             <Route path="/tables" element={<TablesPage />} />
             <Route path="/tables/:id" element={<TableDetailPage />} />
             <Route path="/sources" element={<SourcesPage />} />
+            <Route path="/lineage" element={<LineagePage />} />
             <Route path="/explorer" element={<ApiExplorerPage />} />
             <Route path="/config" element={<ConfigPage />} />
             <Route

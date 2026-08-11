@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { Metadata, PipelineDefinition, ResultEnvelope, Tags, ValidateResponse } from './types'
+import type { ExecutionPlanResponse, Metadata, PipelineDefinition, ResultEnvelope, Tags, ValidateResponse } from './types'
 
 export interface CreatePipelineRequest {
   name: string
@@ -27,4 +27,7 @@ export const pipelinesApi = {
   validate: (body: ValidateRequest) => api.post<ValidateResponse>('/api/pipelines/validate', body),
   results: (id: string, limit = 50) =>
     api.get<ResultEnvelope[]>(`/api/pipelines/${encodeURIComponent(id)}/results?limit=${limit}`),
+  // Plan 008 W5: always the logical view (physical: false — pipelines have no partitioned dataflow
+  // graph concept) — see ExecutionPlanResponse's doc comment in ./types.
+  plan: (id: string) => api.get<ExecutionPlanResponse>(`/api/pipelines/${encodeURIComponent(id)}/plan`),
 }

@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
+import { tablesApi } from '../api/tables'
 import type { TableDefinition, TableMetrics, TablePartitionMetrics } from '../api/types'
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -42,10 +43,13 @@ function lagClasses(frontierEpoch: number, maxFrontier: number): string {
  *
  * Stage columns are labeled `Stage {id} · {kind}` — TablePartitionMetrics.kind (plan 003 M4) carries the
  * real operator name (Join/SemiAnti/Unnest/FilterProject/Reduce/LatestBy — see
- * StreamForge.Engine.Dataflow.TableStageKindLabel on the backend). "Ingest" and "Output" are still drawn
- * as structural end-caps (the graph's known entry/exit points) rather than data-bearing columns, since
- * neither is represented in the partition metrics array (Ingest runs at partition count 1 and isn't
- * tracked per-partition; the terminal gather isn't a TableStageGrain at all).
+ * StreamForge.Engine.Dataflow.TableStageKindLabel on the backend). The leading/trailing caps are still
+ * drawn as structural end-caps (the graph's known entry/exit points) rather than data-bearing columns,
+ * since neither is represented in the partition metrics array (ingest runs at partition count 1 and
+ * isn't tracked per-partition; the terminal gather isn't a TableStageGrain at all) — but their labels
+ * are data-driven where the data exists: the leading cap names the real external inputs (plan 008 W5,
+ * from GET /plan's externalInputNames on its fromStageId === -1 edges), and the trailing cap names this
+ * table itself (its output, definitionally, has no other name).
  *
  * Delta rate is derived client-side the same way useTableMetrics derives its aggregate deltasIn/s —
  * diffing cumulative per-cell counters between successive polls — off the SAME `metrics` object the
@@ -54,6 +58,33 @@ function lagClasses(frontierEpoch: number, maxFrontier: number): string {
 export function DataflowPanel({ table, metrics }: { table: TableDefinition; metrics: TableMetrics | null }) {
   const prevRef = useRef<Map<string, { deltasIn: number; atMs: number }>>(new Map())
   const rateRef = useRef<Map<string, number>>(new Map())
+
+  // Plan 008 W5: the Ingest end-cap's label is data-driven from the same /plan endpoint the
+  // lineage page's Plan tab renders — the external input names actually feeding this table's
+  // stage graph, instead of the generic word "Ingest". Fetched once per table (the plan is a
+  // structural property, not a metric — no need for the 2s poll the rest of this panel uses).
+  // Best-effort: a failed/unavailable plan just leaves the caps at their pre-existing static labels.
+  const [ingestNames, setIngestNames] = useState<string[] | null>(null)
+  useEffect(() => {
+    setIngestNames(null)
+    if (table.parallelism < 2) return
+    let cancelled = false
+    tablesApi
+      .plan(table.id)
+      .then((plan) => {
+        if (cancelled) return
+        const names = new Set<string>()
+        for (const e of plan.edges) if (e.fromStageId === -1) for (const n of e.externalInputNames) names.add(n)
+        setIngestNames(names.size > 0 ? Array.from(names) : null)
+      })
+      .catch(() => {
+        // best-effort — keep the generic "Ingest" label
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [table.id, table.parallelism])
+  const ingestLabel = ingestNames ? (ingestNames.length === 1 ? ingestNames[0] : `${ingestNames[0]} +${ingestNames.length - 1}`) : 'Ingest'
 
   const partitions = metrics?.partitions ?? null
 
@@ -143,7 +174,9 @@ export function DataflowPanel({ table, metrics }: { table: TableDefinition; metr
         <TooltipProvider>
           <div className="flex items-stretch gap-2 overflow-x-auto pb-1">
             <div className="flex flex-col items-center justify-center gap-1 self-stretch rounded-lg border border-dashed border-border px-3 py-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              <span className="[writing-mode:vertical-rl]">Ingest</span>
+              <span className="[writing-mode:vertical-rl]" title={ingestNames?.join(', ')}>
+                {ingestLabel}
+              </span>
             </div>
             <ChevronRight className="my-auto size-4 shrink-0 text-muted-foreground" />
 
@@ -200,7 +233,7 @@ export function DataflowPanel({ table, metrics }: { table: TableDefinition; metr
             ))}
 
             <div className="flex flex-col items-center justify-center gap-1 self-stretch rounded-lg border border-dashed border-border px-3 py-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              <span className="[writing-mode:vertical-rl]">Output</span>
+              <span className="[writing-mode:vertical-rl]">{table.name}</span>
             </div>
           </div>
         </TooltipProvider>

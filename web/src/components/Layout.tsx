@@ -1,5 +1,5 @@
 import { NavLink, Navigate, Outlet } from 'react-router-dom'
-import { ArrowLeftRight, Bot, BookOpen, Braces, LayoutDashboard, LogOut, Moon, Sun, Users as UsersIconLucide, Workflow, Database, Table2 } from 'lucide-react'
+import { ArrowLeftRight, Bot, BookOpen, Braces, LayoutDashboard, LogOut, Moon, Sun, Users as UsersIconLucide, Workflow, Database, Table2, Waypoints } from 'lucide-react'
 import { useAuth } from '../api/auth'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/lib/theme'
@@ -14,6 +14,7 @@ const NAV_ITEMS = [
   { to: '/pipelines', label: 'Pipelines', icon: Workflow, end: false },
   { to: '/tables', label: 'Tables', icon: Table2, end: false },
   { to: '/sources', label: 'Sources', icon: Database, end: false },
+  { to: '/lineage', label: 'Lineage', icon: Waypoints, end: false },
   { to: '/explorer', label: 'API Explorer', icon: Braces, end: false },
   { to: '/config', label: 'Configuration', icon: ArrowLeftRight, end: false },
 ] as const

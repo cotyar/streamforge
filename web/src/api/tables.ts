@@ -1,5 +1,6 @@
 import { api } from './client'
 import type {
+  ExecutionPlanResponse,
   Metadata,
   ResultRow,
   Tags,
@@ -64,4 +65,6 @@ export const tablesApi = {
   historyLookup: (id: string, row: ResultRow, limit = 0) =>
     api.post<TableHistoryResponse>(`/api/tables/${encodeURIComponent(id)}/history/lookup?limit=${limit}`, { row }),
   historyStats: (id: string) => api.get<TableHistoryStats>(`/api/tables/${encodeURIComponent(id)}/history/stats`),
+  // Plan 008 W5: lineage + execution-plan view (see ExecutionPlanResponse's doc comment in ./types).
+  plan: (id: string) => api.get<ExecutionPlanResponse>(`/api/tables/${encodeURIComponent(id)}/plan`),
 }
