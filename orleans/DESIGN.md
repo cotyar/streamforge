@@ -110,6 +110,39 @@ Pinned, tested, and documented rather than fudged:
   → `Double`, everything else exact, `JSON`/timestamp only with themselves); output column names
   come from branch 0. A set-operation table is pinned to `Parallelism = 1` (a real N-ary merge
   stage is out of scope for this wave).
+- **Type-conversion functions are total, never throwing** (plan 009 Round C wave C1): `TO_LONG`/
+  `TO_DOUBLE`/`TO_BOOL`/`TO_TIMESTAMP`/`TO_STRING`, plus `CAST(expr AS type)` sugar desugaring to the
+  same nodes. An unconvertible value yields NULL, not an error — a streaming operator can't throw per
+  row without killing the pipeline for every other row, and `COALESCE` already covers "supply a
+  default". This is a real tradeoff, not a footnote: a typo'd or malformed field silently becomes
+  NULL and keeps flowing (visible only as a missing/zero contribution downstream, e.g. `SUM` skipping
+  it) rather than surfacing anywhere. `TO_TIMESTAMP` accepts epoch-ms (numeric or numeric string) or
+  ISO-8601 text; `TO_STRING` is culture-invariant everywhere (never the ambient culture). Three
+  specific spots are worth knowing rather than assuming:
+  - `TO_BOOL`'s string rule is **permissive, not a fixed spelling list**: `"true"`/`"false"` parse
+    case-insensitively, and every OTHER non-empty, non-`"0"` string (garbage included, e.g. `"abc"`)
+    coerces to `true`. This isn't a design choice made for the SQL function in isolation — it's
+    `FieldValueCoercion.TryToBool`'s existing inbound-ingest rule, and the SQL function shares the
+    exact same canonical implementation (`StreamForge.Engine.Runtime.FieldValueConversion`) so the two
+    can never drift apart. A stricter "true/false/0/1 else NULL" rule was the original intent but was
+    dropped once it became clear it would mean two different bool-coercion rules for the same field
+    kind depending on which code path hit it.
+  - Double-to-`long` narrowing (`TO_LONG` on a double, or the `Long`/`Timestamp` coercion generally)
+    is an **unchecked** cast, matching the same shared implementation's existing behavior: a double
+    outside the `long` range does not come back NULL, it comes back as whatever the CLR's unchecked
+    conversion produces. A numeric *string* that overflows `long` DOES come back NULL (`long.TryParse`
+    fails outright) — only the direct-double path has this gap.
+  - `TO_STRING` renders ISO-8601 text only when its argument is syntactically a `TO_TIMESTAMP(...)`
+    call (which `CAST(x AS TIMESTAMP)` also produces, being the same desugared node) — a bare column
+    declared `Timestamp`-kind does NOT get ISO-8601 rendering from a plain `TO_STRING(col)`, because at
+    runtime it is represented identically to a `Long`-kind value (a bare CLR `long`, with no per-value
+    type tag). Threading compile-time `FieldKind` through the runtime evaluator to fix this was out of
+    scope for the three seams this wave touched (`Validator`/`ExpressionEvaluator`/`Parser`).
+  - A JSON leaf reached via `->` is in scope and is the wave's whole reason to exist: `payload -> 'qty'`
+    on a producer that quoted its numbers (`"qty": "10.5"`) is otherwise permanently stuck as a JSON
+    string leaf — `SUM(TO_DOUBLE(payload -> 'qty'))` is what makes it summable. A composite JSON node
+    (dict/list, from a non-terminal `->`) fed to `TO_STRING` renders as compact JSON text, same as
+    `->>` would for that node.
 
 ## D12 — One process, JSON files, zero infrastructure
 Localhost clustering, in-memory streams, one-file-per-grain JSON storage. *Why*: the demo must run

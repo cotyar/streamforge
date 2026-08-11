@@ -857,6 +857,9 @@ internal sealed class Parser
         if (string.Equals(name, "FALSE", StringComparison.OrdinalIgnoreCase)) return new BoolLiteral(false, tok.Line, tok.Column);
         if (string.Equals(name, "NULL", StringComparison.OrdinalIgnoreCase)) return new NullLiteral(tok.Line, tok.Column);
         if (string.Equals(name, "EXISTS", StringComparison.OrdinalIgnoreCase)) return ParseExistsBody(negated: false, tok.Line, tok.Column);
+        // Plan 009 Round C wave C1: CAST(expr AS type) sugar — only intercepted when followed by '(' so
+        // a column genuinely named "cast" (unlikely, but not reserved) still parses as a plain identifier.
+        if (string.Equals(name, "CAST", StringComparison.OrdinalIgnoreCase) && Current.IsSymbol("(")) return ParseCastBody(tok.Line, tok.Column);
 
         if (Current.IsSymbol("("))
         {
@@ -903,5 +906,46 @@ internal sealed class Parser
         }
 
         return new FunctionCallExpr(name, args, line, col);
+    }
+
+    // ------------------------------------------------------------------
+    // Plan 009 Round C wave C1 — CAST(expr AS type) sugar
+    // ------------------------------------------------------------------
+
+    /// <summary>Desugars `CAST(expr AS type)` to the very same <see cref="FunctionCallExpr"/> node the
+    /// TO_* function-call spelling produces (`CAST(x AS LONG)` and `TO_LONG(x)` build an identical
+    /// tree) — there is exactly one implementation and one set of semantics downstream (Validator's
+    /// arity/result-kind switches, ExpressionEvaluator's dispatch) either way.</summary>
+    private Expr ParseCastBody(int line, int col)
+    {
+        ExpectSymbol("(");
+        var expr = ParseOr();
+        ExpectKeyword("AS");
+        string fnName = ParseCastTargetFunction();
+        ExpectSymbol(")");
+        return new FunctionCallExpr(fnName, [expr], line, col);
+    }
+
+    /// <summary>Accepts the dialect's own <see cref="FieldKind"/> spellings (STRING/DOUBLE/LONG/BOOL/
+    /// TIMESTAMP) plus the handful of common SQL spellings that cost nothing extra here — a single
+    /// extra keyword-equality check, or one bounded lookahead for the two-word "DOUBLE PRECISION":
+    /// TEXT, BIGINT, INT, BOOLEAN, DOUBLE PRECISION. JSON is deliberately NOT a legal CAST target:
+    /// there is no TO_JSON function in this wave (JSON values only ever arise from '->' access in this
+    /// dialect, never from converting a scalar INTO Json), so casting AS JSON wouldn't desugar to
+    /// anything — an explicit diagnostic here is clearer than a confusing "unknown function" later.</summary>
+    private string ParseCastTargetFunction()
+    {
+        var tok = ExpectIdentifierToken();
+        string typeName = tok.Text.ToUpperInvariant();
+        if (typeName == "DOUBLE" && Current.IsKeyword("PRECISION")) Advance();
+        return typeName switch
+        {
+            "STRING" or "TEXT" => "TO_STRING",
+            "DOUBLE" => "TO_DOUBLE",
+            "LONG" or "BIGINT" or "INT" => "TO_LONG",
+            "BOOL" or "BOOLEAN" => "TO_BOOL",
+            "TIMESTAMP" => "TO_TIMESTAMP",
+            _ => throw Error(tok, $"Unknown CAST target type '{tok.Text}' — expected STRING, DOUBLE, LONG, BOOL, or TIMESTAMP (TEXT, BIGINT, INT, BOOLEAN, DOUBLE PRECISION also accepted)"),
+        };
     }
 }

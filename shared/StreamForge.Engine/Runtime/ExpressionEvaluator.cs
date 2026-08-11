@@ -195,8 +195,49 @@ internal static class ExpressionEvaluator
             "UPPER" => args.Count > 0 && args[0] is string su ? su.ToUpperInvariant() : null,
             "LOWER" => args.Count > 0 && args[0] is string sl ? sl.ToLowerInvariant() : null,
             "COALESCE" => args.FirstOrDefault(v => v is not null),
+            // Plan 009 Round C wave C1: total type-conversion functions — an unconvertible or NULL
+            // argument yields NULL, never an exception (see FieldValueConversion's class doc for why
+            // these delegate to that canonical, FieldKind-keyed implementation rather than each
+            // reimplementing the rule).
+            "TO_LONG" => args.Count > 0 && args[0] is { } lv0 && FieldValueConversion.TryCoerce(FieldKind.Long, lv0, out var lv) ? lv : null,
+            "TO_DOUBLE" => args.Count > 0 && args[0] is { } dv0 && FieldValueConversion.TryCoerce(FieldKind.Double, dv0, out var dv) ? dv : null,
+            "TO_BOOL" => args.Count > 0 && args[0] is { } bv0 && FieldValueConversion.TryCoerce(FieldKind.Bool, bv0, out var bv) ? bv : null,
+            "TO_TIMESTAMP" => args.Count > 0 && args[0] is { } tv0 && FieldValueConversion.TryToTimestamp(tv0, out var tv) ? tv : null,
+            "TO_STRING" => args.Count > 0 ? EvalToString(f, args[0]) : null,
             _ => null,
         };
+    }
+
+    /// <summary>TO_STRING: culture-invariant always. A composite JSON node (from a non-terminal '->'
+    /// chain, e.g. `TO_STRING(payload -> 'order')`) renders as compact JSON text, same as '->>' would
+    /// for the same node — TO_STRING is meant to be usable on anything '->' can produce, not just
+    /// scalar JSON leaves. ISO-8601 rendering only fires when the argument is SYNTACTICALLY a
+    /// TO_TIMESTAMP(...) call (which CAST(x AS TIMESTAMP) sugar also produces, being the same node) —
+    /// a plain column declared FieldKind.Timestamp does NOT get ISO-8601 text here, because at runtime
+    /// it is represented identically to a FieldKind.Long value (a bare CLR `long`, see
+    /// FieldValueConversion's own doc comment on that representation choice); there is no per-value
+    /// runtime tag to distinguish the two without threading compile-time FieldKind through EvalContext,
+    /// which is out of scope for this wave's three specified seams. This is a real, documented
+    /// limitation (DESIGN.md §D11), not a silent gap.</summary>
+    private static object? EvalToString(FunctionCallExpr f, object? value)
+    {
+        switch (value)
+        {
+            case null:
+                return null;
+            case Dictionary<string, object?> or List<object?>:
+                return JsonText.Serialize(value);
+        }
+
+        if (value is long epochMs && f.Args.Count > 0 &&
+            f.Args[0] is FunctionCallExpr inner && string.Equals(inner.Name, "TO_TIMESTAMP", StringComparison.OrdinalIgnoreCase))
+        {
+            return DateTimeOffset.FromUnixTimeMilliseconds(epochMs)
+                .ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        // FieldKind.String coercion always succeeds (see FieldValueConversion.TryCoerce's doc).
+        return FieldValueConversion.TryCoerce(FieldKind.String, value, out var coerced) ? coerced : null;
     }
 
     private static object? Abs(object? v) => v switch { long l => (object)Math.Abs(l), double d => (object)Math.Abs(d), _ => null };

@@ -12,10 +12,16 @@ const KEYWORDS = new Set([
   'WITH',
   // Plan 008 W3: set operations + GROUP BY ALL.
   'UNION', 'ALL',
+  // Plan 009 Round C wave C1: CAST(expr AS type) sugar.
+  'CAST',
 ])
 
 const AGGREGATE_FNS = new Set(['COUNT', 'SUM', 'AVG', 'MIN', 'MAX'])
-const SCALAR_FNS = new Set(['ABS', 'ROUND', 'UPPER', 'LOWER', 'COALESCE'])
+const SCALAR_FNS = new Set([
+  'ABS', 'ROUND', 'UPPER', 'LOWER', 'COALESCE',
+  // Plan 009 Round C wave C1: type-conversion functions.
+  'TO_LONG', 'TO_DOUBLE', 'TO_BOOL', 'TO_TIMESTAMP', 'TO_STRING',
+])
 const FUNCTIONS = new Set([...AGGREGATE_FNS, ...SCALAR_FNS])
 
 // Keywords that put the caret in an "expression position" when they are the last significant

@@ -951,6 +951,23 @@ internal sealed class Validator
             case "COALESCE":
                 if (f.Args.Count > 0 && GetExprKind(f.Args[0]) is { } k) _exprKind[node] = k;
                 break;
+            // Plan 009 Round C wave C1: type-conversion functions — result kind is fixed by the
+            // function name, independent of the argument's kind (unlike ABS/ROUND/COALESCE above).
+            case "TO_LONG":
+                _exprKind[node] = FieldKind.Long;
+                break;
+            case "TO_DOUBLE":
+                _exprKind[node] = FieldKind.Double;
+                break;
+            case "TO_BOOL":
+                _exprKind[node] = FieldKind.Bool;
+                break;
+            case "TO_TIMESTAMP":
+                _exprKind[node] = FieldKind.Timestamp;
+                break;
+            case "TO_STRING":
+                _exprKind[node] = FieldKind.String;
+                break;
         }
     }
 
@@ -1115,7 +1132,14 @@ internal sealed class Validator
     private static string CanonicalReserved(string name) =>
         string.Equals(name, EventRecord.TimestampField, StringComparison.OrdinalIgnoreCase) ? EventRecord.TimestampField : EventRecord.SourceField;
 
-    private static readonly HashSet<string> KnownFunctions = new(StringComparer.OrdinalIgnoreCase) { "ABS", "ROUND", "UPPER", "LOWER", "COALESCE" };
+    // Plan 009 Round C wave C1: TO_LONG/TO_DOUBLE/TO_BOOL/TO_TIMESTAMP/TO_STRING — total, never-
+    // throwing type-conversion functions (unconvertible/NULL input yields NULL); CAST(expr AS type) in
+    // Sql/Parser.cs desugars to these same names, so there is exactly one implementation.
+    private static readonly HashSet<string> KnownFunctions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ABS", "ROUND", "UPPER", "LOWER", "COALESCE",
+        "TO_LONG", "TO_DOUBLE", "TO_BOOL", "TO_TIMESTAMP", "TO_STRING",
+    };
 
     private void ValidateFunctionArity(FunctionCallExpr f)
     {
@@ -1130,6 +1154,7 @@ internal sealed class Validator
             "ABS" or "UPPER" or "LOWER" => n == 1,
             "ROUND" => n is 1 or 2,
             "COALESCE" => n >= 1,
+            "TO_LONG" or "TO_DOUBLE" or "TO_BOOL" or "TO_TIMESTAMP" or "TO_STRING" => n == 1,
             _ => true,
         };
         if (!ok)

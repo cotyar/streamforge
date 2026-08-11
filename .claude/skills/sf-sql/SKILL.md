@@ -25,7 +25,9 @@ FROM source | (SELECT …) alias [, UNNEST(expr) AS l …]
 [UNION [ALL|DISTINCT] SELECT …] …    -- top level or FROM (…) alias only; UNION (no ALL): tables only
 -- durations: N MILLISECONDS|SECONDS|MINUTES|HOURS · comments: -- · GROUP BY repeats the
 -- exact expression (no alias sugar) · aggregates: COUNT/SUM/AVG/MIN/MAX · fns: ABS/ROUND/
--- UPPER/LOWER/COALESCE · JSON: expr -> 'key' (raw) / expr ->> 'key' (text) / -> 0 (index)
+-- UPPER/LOWER/COALESCE/TO_LONG/TO_DOUBLE/TO_BOOL/TO_TIMESTAMP/TO_STRING · CAST(expr AS type)
+-- sugar for the TO_* fns (type: STRING/DOUBLE/LONG/BOOL/TIMESTAMP, also TEXT/BIGINT/INT/
+-- BOOLEAN/DOUBLE PRECISION — not JSON) · JSON: expr -> 'key' (raw) / expr ->> 'key' (text) / -> 0 (index)
 ```
 
 ## Pipeline vs table mode
@@ -68,6 +70,16 @@ FROM source | (SELECT …) alias [, UNNEST(expr) AS l …]
     match, `JSON`/timestamp only with themselves); output names come from branch 0. Legal only at
     the top level (optionally under `WITH`) and in `FROM (… UNION …) alias` position — never inside
     `IN`/`EXISTS`/scalar subqueries. A set-operation table also needs `Parallelism = 1`.
+13. **`TO_*`/`CAST` are total — unconvertible input is NULL, never an error** (`TO_LONG('abc')`,
+    `TO_DOUBLE('')`, an overflowing numeric string). `TO_BOOL`'s string rule is permissive, not a
+    fixed spelling list: `"true"`/`"false"` case-insensitively and `"0"`/`""` behave as expected, but
+    ANY other non-empty string is also `true` (matches `FieldValueCoercion.TryToBool`'s existing
+    inbound rule — same canonical implementation, `FieldValueConversion`, backs both). `TO_TIMESTAMP`
+    accepts epoch-ms (number or numeric string) or ISO-8601 text. `TO_STRING` only renders ISO-8601
+    when its argument is syntactically `TO_TIMESTAMP(...)`/`CAST(x AS TIMESTAMP)` — a bare
+    `Timestamp`-kind column has no runtime tag distinguishing it from `Long`, so `TO_STRING(col)`
+    prints a plain integer. `SUM(TO_DOUBLE(payload -> 'qty'))` is the fix for gotcha #1 above when the
+    producer quoted its numbers. Full fine print: DESIGN.md §D11.
 
 ## Working examples (live seeds — copy as templates)
 

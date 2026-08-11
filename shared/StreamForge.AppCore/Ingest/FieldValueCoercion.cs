@@ -1,5 +1,6 @@
-using System.Globalization;
 using StreamForge.Abstractions;
+using StreamForge.Engine;
+using StreamForge.Engine.Runtime;
 
 namespace StreamForge.AppCore.Ingest;
 
@@ -9,6 +10,14 @@ namespace StreamForge.AppCore.Ingest;
 /// acceptance — agrees on what each <see cref="FieldType"/> accepts. <c>ProtoWireEncoder</c> still
 /// throws on a bad value (it encodes already-accepted rows, so a bad value there is a bug, not a
 /// client error); ingest row acceptance turns a <c>false</c> return into a per-row 400 instead.
+///
+/// <para>Plan 009 C1: the conversions themselves moved DOWN into the Engine
+/// (<see cref="FieldValueConversion"/>) once the SQL dialect gained <c>TO_LONG</c>/<c>CAST</c> and
+/// needed exactly the same rules. AppCore already references the Engine, so there is one
+/// implementation rather than two that agree by convention — what remains here is the
+/// <see cref="FieldType"/> → <see cref="FieldKind"/> adapter, because the Engine deliberately knows
+/// nothing about the Contracts assembly. If these rules ever need to change, change them there:
+/// a change is visible in SQL and on every inbound path at once, which is the point.</para>
 /// </summary>
 public static class FieldValueCoercion
 {
@@ -19,84 +28,28 @@ public static class FieldValueCoercion
     /// its shape is the caller's job.</summary>
     public static bool TryCoerce(FieldType type, object value, out object? coerced)
     {
-        switch (type)
+        if (ToFieldKind(type) is not { } kind)
         {
-            case FieldType.String:
-                coerced = ToStringValue(value);
-                return true;
-            case FieldType.Double:
-                return TryToDouble(value, out coerced);
-            case FieldType.Long:
-            case FieldType.Timestamp: // epoch millis - identical wire/CLR representation to Long
-                return TryToInt64(value, out coerced);
-            case FieldType.Bool:
-                return TryToBool(value, out coerced);
-            case FieldType.Json:
-                coerced = value;
-                return true;
-            default:
-                coerced = null;
-                return false;
+            // Preserves the pre-009 default arm exactly: a value outside the enum is "no conversion
+            // applies", not "stringify it". Only reachable via a cast of an out-of-range int.
+            coerced = null;
+            return false;
         }
+
+        return FieldValueConversion.TryCoerce(kind, value, out coerced);
     }
 
-    private static string ToStringValue(object value) => value switch
+    /// <summary>The two enums are parallel by construction (same six members, same meanings); they are
+    /// separate types only because the Engine deliberately does not depend on Contracts. Null for a
+    /// value that is not a declared member — see the caller.</summary>
+    private static FieldKind? ToFieldKind(FieldType type) => type switch
     {
-        string s => s,
-        bool b => b ? "true" : "false",
-        IFormattable f => f.ToString(null, CultureInfo.InvariantCulture),
-        _ => value.ToString() ?? "",
+        FieldType.String => FieldKind.String,
+        FieldType.Double => FieldKind.Double,
+        FieldType.Long => FieldKind.Long,
+        FieldType.Bool => FieldKind.Bool,
+        FieldType.Timestamp => FieldKind.Timestamp,
+        FieldType.Json => FieldKind.Json,
+        _ => null,
     };
-
-    private static bool TryToDouble(object value, out object? coerced)
-    {
-        switch (value)
-        {
-            case double d: coerced = d; return true;
-            case float f: coerced = (double)f; return true;
-            case long l: coerced = (double)l; return true;
-            case int i: coerced = (double)i; return true;
-            case bool b: coerced = b ? 1d : 0d; return true;
-            case string s when double.TryParse(
-                s, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var parsed):
-                coerced = parsed;
-                return true;
-            default:
-                coerced = null;
-                return false;
-        }
-    }
-
-    private static bool TryToInt64(object value, out object? coerced)
-    {
-        switch (value)
-        {
-            case long l: coerced = l; return true;
-            case int i: coerced = (long)i; return true;
-            case double d: coerced = (long)d; return true;
-            case float f: coerced = (long)f; return true;
-            case bool b: coerced = b ? 1L : 0L; return true;
-            case string s when long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed):
-                coerced = parsed;
-                return true;
-            default:
-                coerced = null;
-                return false;
-        }
-    }
-
-    private static bool TryToBool(object value, out object? coerced)
-    {
-        switch (value)
-        {
-            case bool b: coerced = b; return true;
-            case long l: coerced = l != 0; return true;
-            case int i: coerced = i != 0; return true;
-            case double d: coerced = d != 0; return true;
-            case string s: coerced = bool.TryParse(s, out var parsed) ? parsed : s is not ("" or "0"); return true;
-            default:
-                coerced = null;
-                return false;
-        }
-    }
 }
