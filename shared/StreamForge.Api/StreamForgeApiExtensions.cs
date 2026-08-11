@@ -184,6 +184,7 @@ public static class StreamForgeApiExtensions
         app.MapConfigEndpoints();
         app.MapChatEndpoints();
         app.MapMetaEndpoints(options);
+        app.MapTransportsEndpoints();
         app.MapHub<StreamHub>("/hubs/stream");
 
         // Interactive user documentation (docs/index.html), served at /docs. Per decision D-F, /docs

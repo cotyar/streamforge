@@ -1,4 +1,5 @@
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Transports;
 
 namespace StreamForge.AppCore.Sinks;
 
@@ -46,6 +47,9 @@ public interface ISinkTransport
     /// <paramref name="onFailure"/> receives (destination, exception) on a publish failure, already
     /// throttled by the implementation.</summary>
     ISinkClient Create(SinkSpec spec, string entityKind, string entityName, Action<string, Exception>? onFailure);
+
+    /// <summary>Console form descriptor — see <see cref="TransportDescriptor"/> and the inbound twin.</summary>
+    TransportDescriptor Describe();
 }
 
 /// <summary>Sink-side twin of <c>InboundTransports</c> — see that class's doc comment for why this is a plain
@@ -108,4 +112,38 @@ public sealed class NatsSinkTransport : ISinkTransport
 
     public ISinkClient Create(SinkSpec spec, string entityKind, string entityName, Action<string, Exception>? onFailure) =>
         new NatsSinkClient(spec.Nats!, entityKind, entityName, onFailure);
+
+    public TransportDescriptor Describe() => new()
+    {
+        Kind = SinkKinds.Nats,
+        Label = "NATS",
+        Help = "Fire-and-forget: a slow or absent broker drops messages rather than slowing the entity down.",
+        ConfigProperty = "nats",
+        Groups =
+        [
+            new TransportGroup
+            {
+                Key = "auth",
+                Label = "Credentials",
+                Help = "All optional. If more than one is set the server applies: .creds file, then token, then username+password.",
+            },
+        ],
+        Fields =
+        [
+            new TransportField { Key = "url", Label = "Server URL", Required = true, Mono = true, Placeholder = "nats://localhost:4222" },
+            new TransportField
+            {
+                Key = "subject", Label = "Subject", Required = true, Mono = true, Placeholder = "streamforge.{name}",
+                Help = "{name} is replaced with this pipeline's id / table's name, so one spec can serve a whole catalog.",
+            },
+            new TransportField { Key = "token", Label = "Token", Type = TransportFieldTypes.Secret, Group = "auth" },
+            new TransportField { Key = "username", Label = "Username", Group = "auth" },
+            new TransportField { Key = "password", Label = "Password", Type = TransportFieldTypes.Secret, Group = "auth" },
+            new TransportField
+            {
+                Key = "credentials", Label = ".creds file contents", Type = TransportFieldTypes.Secret, Group = "auth", Mono = true,
+                Placeholder = "Paste the contents of a NATS .creds file",
+            },
+        ],
+    };
 }

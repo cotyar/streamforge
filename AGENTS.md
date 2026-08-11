@@ -3,7 +3,8 @@
 Streaming-SQL platform ("StreamForge") in two runtime flavors: `orleans/` (complete — Microsoft
 Orleans 10) and `dapr/` (complete — Dapr, for polyglot processing and runtime comparison). Both
 flavors share one runtime-agnostic core (`shared/`): Engine, Contracts, AppCore, Api, and the `web/`
-SPA. Execution plans with acceptance criteria: [`plans/`](plans/README.md). Architecture:
+SPA. Execution plans with acceptance criteria: [`plans/`](plans/README.md). Adding an ingress/egress transport
+(NATS today; the recipe is one class + one registry line): [`TRANSPORTS.md`](TRANSPORTS.md). Architecture:
 [`orleans/ARCHITECTURE.md`](orleans/ARCHITECTURE.md) · [`dapr/ARCHITECTURE.md`](dapr/ARCHITECTURE.md)
 · rationale: [`orleans/DESIGN.md`](orleans/DESIGN.md) · runtime comparison + measured latency:
 [`orleans/docs/comparison.html`](orleans/docs/comparison.html) (opened directly from the repo — see
@@ -31,7 +32,7 @@ its own note on why `/docs` doesn't serve it automatically).
 
 ```bash
 ~/.dotnet/dotnet build orleans/StreamForge.sln
-~/.dotnet/dotnet test  orleans/StreamForge.sln     # 1488 tests — the whole suite must be green
+~/.dotnet/dotnet test  orleans/StreamForge.sln     # 1508 tests — the whole suite must be green
 ~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln
 ~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 280 tests — the whole suite must be green
 cd web && bun run build

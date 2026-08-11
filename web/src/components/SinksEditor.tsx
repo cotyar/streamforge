@@ -1,33 +1,25 @@
-import type { SinkSpec } from '@/api/types'
+import { useEffect, useState } from 'react'
+import type { SinkSpec, TransportDescriptor } from '@/api/types'
+import { findDescriptor, transportsApi } from '@/api/transports'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
-import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Plus, Trash2 } from 'lucide-react'
-
-type AuthMode = 'none' | 'token' | 'password' | 'creds'
-
-function authModeOf(nats: SinkSpec['nats']): AuthMode {
-  if (nats?.token) return 'token'
-  if (nats?.credentials) return 'creds'
-  if (nats?.username) return 'password'
-  return 'none'
-}
-
-function emptySink(): SinkSpec {
-  return { kind: 'nats', enabled: true, nats: { url: '', subject: '', token: null, username: null, password: null, credentials: null } }
-}
+import { TransportConfigEditor, emptyTransportConfig, type TransportConfigValue } from '@/components/sources/TransportConfigEditor'
 
 /**
- * Outbound sinks (plan 009 B2) — the platform's first outbound concept, shared verbatim between
- * PipelineDetailPage and TableDetailPage since a `SinkSpec[]` means the same thing on both
- * (republish result rows / table deltas to a NATS subject). Only kind 'nats' exists today, so this
- * doesn't offer a kind picker — every "add" appends a NATS sink. Credentials follow the same
- * secrets-lite convention as every other connector editor: read back as "***", sending "***" back
- * keeps the stored value (see SecretsMasker.MergeSinkSecrets on the backend, matched positionally by
- * list index since a sink has no stable id).
+ * Outbound sinks (plan 009 B2) — shared verbatim between PipelineDetailPage and TableDetailPage since a
+ * `SinkSpec[]` means the same thing on both (republish result rows / table deltas).
+ *
+ * Plan 010: no longer NATS-shaped. The kind picker and every field come from `GET /api/transports`, so a
+ * sink transport registered on the backend is configurable here with no change to this file — this used to
+ * be one of the fourteen places a new transport had to touch.
+ *
+ * Credentials follow the same secrets-lite convention as every other editor: read back as "***", sending
+ * "***" back keeps the stored value (SecretsMasker.MergeSinkSecrets, matched positionally by list index
+ * since a sink has no stable id).
  */
 export function SinksEditor({
   value,
@@ -40,24 +32,67 @@ export function SinksEditor({
   isEdit: boolean
   disabled?: boolean
 }) {
+  const [descriptors, setDescriptors] = useState<TransportDescriptor[]>([])
+  const [addKind, setAddKind] = useState<string>('')
+
+  useEffect(() => {
+    let cancelled = false
+    transportsApi
+      .catalog()
+      .then((catalog) => {
+        if (cancelled) return
+        setDescriptors(catalog.outbound)
+        setAddKind((k) => k || (catalog.outbound[0]?.kind ?? ''))
+      })
+      .catch(() => {
+        /* the page around this already surfaces API failures; a missing catalog just disables "add" */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   function update(i: number, patch: Partial<SinkSpec>) {
     onChange(value.map((s, idx) => (idx === i ? { ...s, ...patch } : s)))
   }
-  function updateNats(i: number, patch: Partial<NonNullable<SinkSpec['nats']>>) {
-    const sink = value[i]
-    update(i, { nats: { ...(sink.nats ?? { url: '', subject: '' }), ...patch } })
-  }
+
   function remove(i: number) {
     onChange(value.filter((_, idx) => idx !== i))
   }
+
+  function add() {
+    const descriptor = findDescriptor(descriptors, addKind)
+    if (!descriptor) return
+    onChange([...value, { kind: descriptor.kind, enabled: true, [descriptor.configProperty]: emptyTransportConfig(descriptor) }])
+  }
+
+  const canAdd = descriptors.length > 0 && !disabled
 
   return (
     <FieldGroup className="gap-3">
       <div className="flex items-center justify-between">
         <FieldLabel className="mb-0">Sinks</FieldLabel>
-        <Button type="button" variant="ghost" size="sm" onClick={() => onChange([...value, emptySink()])} disabled={disabled}>
-          <Plus data-icon="inline-start" /> Add NATS sink
-        </Button>
+        <div className="flex items-center gap-2">
+          {descriptors.length > 1 && (
+            <Select value={addKind} onValueChange={setAddKind} disabled={disabled}>
+              <SelectTrigger size="sm" className="w-36">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {descriptors.map((d) => (
+                    <SelectItem key={d.kind} value={d.kind}>
+                      {d.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          )}
+          <Button type="button" variant="ghost" size="sm" onClick={add} disabled={!canAdd}>
+            <Plus data-icon="inline-start" /> Add sink
+          </Button>
+        </div>
       </div>
       <p className="-mt-2 text-[11px] text-muted-foreground">
         Delivery is fire-and-forget with no backpressure — a slow or absent broker drops messages rather than slowing
@@ -69,11 +104,15 @@ export function SinksEditor({
       ) : (
         <div className="flex flex-col gap-3">
           {value.map((sink, i) => {
-            const authMode = authModeOf(sink.nats)
+            const descriptor = findDescriptor(descriptors, sink.kind)
+            const config = descriptor
+              ? (((sink as unknown as Record<string, unknown>)[descriptor.configProperty] as TransportConfigValue | null) ?? {})
+              : {}
+
             return (
               <div key={i} className="flex flex-col gap-2 rounded-lg border border-border p-3">
                 <div className="flex items-center justify-between">
-                  <Badge variant="outline">nats</Badge>
+                  <Badge variant="outline">{descriptor?.label ?? sink.kind}</Badge>
                   <div className="flex items-center gap-2">
                     <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
                       <Switch checked={sink.enabled} onCheckedChange={(checked) => update(i, { enabled: checked })} disabled={disabled} />
@@ -93,118 +132,22 @@ export function SinksEditor({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  <Field>
-                    <FieldLabel htmlFor={`sink-${i}-url`}>Server URL</FieldLabel>
-                    <Input
-                      id={`sink-${i}-url`}
-                      value={sink.nats?.url ?? ''}
-                      onChange={(e) => updateNats(i, { url: e.target.value })}
-                      placeholder="nats://localhost:4222"
-                      disabled={disabled}
-                      className="font-mono"
-                    />
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor={`sink-${i}-subject`}>Subject</FieldLabel>
-                    <Input
-                      id={`sink-${i}-subject`}
-                      value={sink.nats?.subject ?? ''}
-                      onChange={(e) => updateNats(i, { subject: e.target.value })}
-                      placeholder="streamforge.{name}"
-                      disabled={disabled}
-                      className="font-mono"
-                    />
-                  </Field>
-                </div>
-                <p className="-mt-1 text-[11px] text-muted-foreground">
-                  <span className="font-mono">{'{name}'}</span> in the subject is replaced with this pipeline/table's name.
-                </p>
-
-                <Field>
-                  <FieldLabel htmlFor={`sink-${i}-auth`}>Authentication</FieldLabel>
-                  <Select
-                    value={authMode}
-                    onValueChange={(v) => {
-                      const mode = v as AuthMode
-                      updateNats(i, {
-                        token: mode === 'token' ? '' : null,
-                        username: mode === 'password' ? '' : null,
-                        password: mode === 'password' ? '' : null,
-                        credentials: mode === 'creds' ? '' : null,
-                      })
-                    }}
+                {descriptor ? (
+                  <TransportConfigEditor
+                    descriptor={descriptor}
+                    value={config}
+                    onChange={(next) => update(i, { [descriptor.configProperty]: next } as Partial<SinkSpec>)}
+                    isEdit={isEdit}
                     disabled={disabled}
-                  >
-                    <SelectTrigger id={`sink-${i}-auth`} className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup>
-                        <SelectItem value="none">None</SelectItem>
-                        <SelectItem value="token">Static token</SelectItem>
-                        <SelectItem value="password">Username / password</SelectItem>
-                        <SelectItem value="creds">.creds file</SelectItem>
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                </Field>
-
-                {authMode === 'token' && (
-                  <Field>
-                    <FieldLabel htmlFor={`sink-${i}-token`}>Token</FieldLabel>
-                    <Input
-                      id={`sink-${i}-token`}
-                      type="password"
-                      value={sink.nats?.token ?? ''}
-                      onChange={(e) => updateNats(i, { token: e.target.value })}
-                      disabled={disabled}
-                      placeholder={isEdit ? '*** keeps the stored value' : undefined}
-                    />
-                  </Field>
-                )}
-                {authMode === 'password' && (
-                  <div className="grid grid-cols-2 gap-3">
-                    <Field>
-                      <FieldLabel htmlFor={`sink-${i}-username`}>Username</FieldLabel>
-                      <Input
-                        id={`sink-${i}-username`}
-                        value={sink.nats?.username ?? ''}
-                        onChange={(e) => updateNats(i, { username: e.target.value })}
-                        disabled={disabled}
-                      />
-                    </Field>
-                    <Field>
-                      <FieldLabel htmlFor={`sink-${i}-password`}>Password</FieldLabel>
-                      <Input
-                        id={`sink-${i}-password`}
-                        type="password"
-                        value={sink.nats?.password ?? ''}
-                        onChange={(e) => updateNats(i, { password: e.target.value })}
-                        disabled={disabled}
-                        placeholder={isEdit ? '*** keeps the stored value' : undefined}
-                      />
-                    </Field>
-                  </div>
-                )}
-                {authMode === 'creds' && (
-                  <Field>
-                    <FieldLabel htmlFor={`sink-${i}-creds`}>.creds file contents</FieldLabel>
-                    <Input
-                      id={`sink-${i}-creds`}
-                      type="password"
-                      value={sink.nats?.credentials ?? ''}
-                      onChange={(e) => updateNats(i, { credentials: e.target.value })}
-                      disabled={disabled}
-                      placeholder={isEdit ? '*** keeps the stored value' : 'Paste the contents of a NATS .creds file'}
-                      className="font-mono"
-                    />
-                  </Field>
-                )}
-                {isEdit && authMode !== 'none' && (
+                    idPrefix={`sink-${i}`}
+                  />
+                ) : (
+                  // A stored sink whose kind is no longer registered (the transport was removed, or the
+                  // catalog has not loaded). Shown rather than hidden — silently dropping it on the next
+                  // save would delete configuration the user never chose to delete.
                   <p className="text-[11px] text-muted-foreground">
-                    A credential field showing <span className="font-mono">***</span> is already stored — leave it as-is
-                    to keep it.
+                    No transport registered for kind <span className="font-mono">{sink.kind}</span> — its configuration is
+                    preserved but cannot be edited here.
                   </p>
                 )}
               </div>

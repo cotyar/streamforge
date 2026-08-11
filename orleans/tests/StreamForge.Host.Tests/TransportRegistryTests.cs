@@ -3,6 +3,7 @@ using System.Text;
 using StreamForge.Abstractions;
 using StreamForge.Api;
 using StreamForge.AppCore.Config;
+using StreamForge.AppCore.Connectors.Nats;
 using StreamForge.AppCore.Connectors.Polling;
 using StreamForge.AppCore.Sinks;
 using StreamForge.AppCore.Transports;
@@ -71,6 +72,20 @@ public class TransportRegistryTests
             return new Subscription(this);
         }
 
+        public TransportDescriptor Describe() => new()
+        {
+            Kind = FizzKind,
+            Label = "Fizz",
+            ConfigProperty = "nats",
+            Groups = [new TransportGroup { Key = "opts", Label = "Options", Optional = true, ObjectKey = "jetStream" }],
+            Fields =
+            [
+                new TransportField { Key = "url", Label = "Server URL", Required = true },
+                new TransportField { Key = "token", Label = "Token", Type = TransportFieldTypes.Secret },
+                new TransportField { Key = "stream", Label = "Stream", Group = "opts" },
+            ],
+        };
+
         private sealed class Subscription(FizzTransport owner) : IInboundSubscription
         {
             public async IAsyncEnumerable<InboundMessage> SubscribeAsync([EnumeratorCancellation] CancellationToken ct)
@@ -103,6 +118,14 @@ public class TransportRegistryTests
 
         public ISinkClient Create(SinkSpec spec, string entityKind, string entityName, Action<string, Exception>? onFailure) =>
             new FizzSinkClient(entityName);
+
+        public TransportDescriptor Describe() => new()
+        {
+            Kind = FizzSinkKind,
+            Label = "Fizz sink",
+            ConfigProperty = "nats",
+            Fields = [new TransportField { Key = "url", Label = "Server URL", Required = true }],
+        };
     }
 
     private sealed class FizzSinkClient(string entityName) : ISinkClient
@@ -252,6 +275,62 @@ public class TransportRegistryTests
         Assert.Empty(SinkSelection.Active([new SinkSpec { Kind = FizzSinkKind, Enabled = false, Nats = spec.Nats }]));
         Assert.Empty(SinkSelection.Active([new SinkSpec { Kind = "unregistered", Enabled = true, Nats = spec.Nats }]));
         Assert.Empty(SinkSelection.Active([new SinkSpec { Kind = FizzSinkKind, Enabled = true, Nats = new NatsPubConfig() }]));
+    }
+
+    // ------------------------------------------------------------------
+    // Console descriptor
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void TheCatalogIncludesEveryRegisteredTransportInBothDirections()
+    {
+        // Same projection GET /api/transports serves. A transport missing a descriptor is a transport the
+        // console cannot render a form for, which would put the "no SPA change" claim back in doubt.
+        var inbound = InboundTransports.Kinds.Select(k => InboundTransports.Find(k)!.Describe()).ToList();
+        var outbound = SinkTransports.Kinds.Select(k => SinkTransports.Find(k)!.Describe()).ToList();
+
+        Assert.Contains(inbound, d => d.Kind == FizzKind);
+        Assert.Contains(inbound, d => d.Kind == SourceKinds.Nats);
+        Assert.Contains(outbound, d => d.Kind == FizzSinkKind);
+        Assert.Contains(outbound, d => d.Kind == SinkKinds.Nats);
+
+        Assert.All(inbound.Concat(outbound), d =>
+        {
+            Assert.False(string.IsNullOrWhiteSpace(d.Label));
+            Assert.False(string.IsNullOrWhiteSpace(d.ConfigProperty));
+            Assert.NotEmpty(d.Fields);
+
+            // Every field's group must exist, or the console would silently drop it into nowhere.
+            var groups = d.Groups.Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
+            Assert.All(d.Fields, f => Assert.True(f.Group is null || groups.Contains(f.Group), $"{d.Kind}.{f.Key} names an undeclared group '{f.Group}'"));
+
+            // A select must offer options; anything else must not pretend to.
+            Assert.All(d.Fields, f => Assert.Equal(f.Type == TransportFieldTypes.Select, f.Options is { Count: > 0 }));
+        });
+    }
+
+    [Fact]
+    public void EverySecretFieldInTheNatsDescriptorsMatchesAnActualSecretProperty()
+    {
+        // A field typed "secret" that is NOT a [Secret] property would render masked in the console while
+        // being exported in plaintext — the two declarations have to agree, and this is where they meet.
+        AssertSecretsAgree(new NatsInboundTransport().Describe(), typeof(NatsSubConfig));
+        AssertSecretsAgree(new NatsSinkTransport().Describe(), typeof(NatsPubConfig));
+
+        static void AssertSecretsAgree(TransportDescriptor descriptor, Type configType)
+        {
+            var declared = configType.GetProperties()
+                .Where(p => p.IsDefined(typeof(SecretAttribute), inherit: true))
+                .Select(p => char.ToLowerInvariant(p.Name[0]) + p.Name[1..])
+                .ToHashSet(StringComparer.Ordinal);
+
+            var described = descriptor.Fields
+                .Where(f => f.Type == TransportFieldTypes.Secret)
+                .Select(f => f.Key)
+                .ToHashSet(StringComparer.Ordinal);
+
+            Assert.Equal(declared, described);
+        }
     }
 
     [Fact]

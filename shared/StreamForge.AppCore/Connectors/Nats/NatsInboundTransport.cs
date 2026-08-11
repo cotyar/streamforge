@@ -80,6 +80,71 @@ public sealed class NatsInboundTransport(Func<INatsMessageSource>? sourceFactory
         }
     }
 
+    /// <summary>The console form, declared rather than coded — this replaced a 261-line hand-written
+    /// <c>NatsConfigEditor.tsx</c>. The one visible difference is that the four credential fields are shown
+    /// as themselves instead of behind an "authentication mode" picker: the config really does have four
+    /// independent slots, and the group's help states the precedence the server actually applies
+    /// (<c>NatsConnectionSettings.Build</c>: creds file &gt; token &gt; user+password), which the picker hid.</summary>
+    public TransportDescriptor Describe() => new()
+    {
+        Kind = SourceKinds.Nats,
+        Label = "NATS",
+        Help = "A persistent subject subscription — not a poll schedule, so this kind ignores Schedule.",
+        ConfigProperty = "nats",
+        Groups =
+        [
+            new TransportGroup
+            {
+                Key = "auth",
+                Label = "Credentials",
+                Help = "All optional. If more than one is set the server applies: .creds file, then token, then username+password.",
+            },
+            new TransportGroup
+            {
+                Key = "jetstream",
+                Label = "JetStream",
+                Optional = true,
+                ObjectKey = "jetStream",
+                Help = "Off is core NATS: at-most-once, no cursor, nothing to clean up server-side. On trades that for a "
+                     + "durable consumer — messages are redelivered until acked, at the cost of server-side state this "
+                     + "platform then owns and must not leave orphaned.",
+            },
+        ],
+        Fields =
+        [
+            new TransportField { Key = "url", Label = "Server URL", Required = true, Mono = true, Placeholder = "nats://localhost:4222", Help = "Comma-separate several servers." },
+            new TransportField { Key = "subject", Label = "Subject", Required = true, Mono = true, Placeholder = "trades.>", Help = "NATS wildcards (* and >) are the server's to interpret." },
+            new TransportField
+            {
+                Key = "format", Label = "Payload format", Type = TransportFieldTypes.Select,
+                Options = [FileFormats.Ndjson, FileFormats.JsonArray, FileFormats.Csv], Default = FileFormats.JsonArray,
+                Help = "How each message body is parsed, before field mapping — same vocabulary as the file/folder connectors.",
+            },
+            new TransportField
+            {
+                Key = "queueGroup", Label = "Queue group", Mono = true, Placeholder = "streamforge-ingest",
+                Help = "Two replicas sharing a queue group split the subject's messages between them instead of both "
+                     + "ingesting every message — set this when this source runs on more than one host.",
+            },
+            new TransportField { Key = "token", Label = "Token", Type = TransportFieldTypes.Secret, Group = "auth" },
+            new TransportField { Key = "username", Label = "Username", Group = "auth" },
+            new TransportField { Key = "password", Label = "Password", Type = TransportFieldTypes.Secret, Group = "auth" },
+            new TransportField
+            {
+                Key = "credentials", Label = ".creds file contents", Type = TransportFieldTypes.Secret, Group = "auth", Mono = true,
+                Placeholder = "Paste the contents of a NATS .creds file",
+                Help = "The contents, not a path — the catalog has to stay portable across hosts.",
+            },
+            new TransportField { Key = "stream", Label = "Stream", Group = "jetstream", Required = true, Mono = true },
+            new TransportField { Key = "durable", Label = "Durable consumer name", Group = "jetstream", Required = true, Mono = true },
+            new TransportField
+            {
+                Key = "maxAckPending", Label = "Max ack pending", Type = TransportFieldTypes.Number, Group = "jetstream", Default = "1000",
+                Help = "In-flight unacked messages — the JetStream-side analogue of an ingress buffer bound.",
+            },
+        ],
+    };
+
     private static NatsSubConfig ConfigOf(SourceDefinition def) =>
         def.Connector?.Nats ?? throw new InvalidOperationException($"source '{def.Name}' has kind 'nats' but no nats config");
 

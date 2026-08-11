@@ -14,5 +14,6 @@ Written against commit `49d6979` by the improve skill (focused `plan` invocation
 
 | 008 | [REST discoverability, table joins, set operations, ingress, lineage](008-rest-joins-setops-ingress-lineage.md) | DONE (W1–W5 landed) | 005, 006, 007 |
 | 009 | [Ingress hardening, NATS transport, table delta journal](009-ingress-hardening-nats-journal.md) | DONE (A1–A2, B1–B3, C1–C2, D landed; NATS verified end to end against a real broker) | 008 |
+| 010 | [Pluggable ingress/egress transports](010-pluggable-transports.md) | DONE (a transport is now one class + one registry line; recipe in [TRANSPORTS.md](../TRANSPORTS.md)) | 009 |
 
 Design tokens source of truth: `orleans/design-system/streamforge/MASTER.md`.

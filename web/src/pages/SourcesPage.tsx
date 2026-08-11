@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { ChevronRight, Database, Pencil, Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
+import { findDescriptor, transportsApi } from '../api/transports'
 import { sourcesApi } from '../api/sources'
 import type { CreateSourceRequest } from '../api/sources'
 import type {
@@ -13,6 +14,7 @@ import type {
   ScheduleSpec,
   SourceDefinition,
   SourceKind,
+  TransportDescriptor,
   Tags,
 } from '../api/types'
 import { useSourceTape } from '../hooks/useSourceTape'
@@ -43,11 +45,10 @@ import {
   type GrpcFormState,
 } from '../components/sources/GrpcConfigEditor'
 import {
-  NatsConfigEditor,
-  buildNatsConfig,
-  toNatsFormState,
-  type NatsFormState,
-} from '../components/sources/NatsConfigEditor'
+  TransportConfigEditor,
+  emptyTransportConfig,
+  type TransportConfigValue,
+} from '../components/sources/TransportConfigEditor'
 import {
   IngestConfigEditor,
   buildIngestConfig,
@@ -94,17 +95,21 @@ import {
 
 const FIELD_TYPES: FieldType[] = ['String', 'Double', 'Long', 'Bool', 'Timestamp', 'Json']
 const PROFILES: SourceDefinition['generatorProfile'][] = ['trades', 'quotes', 'orders', 'generic']
-const KINDS: SourceKind[] = ['generator', 'url', 'file', 'folder', 'grpc', 'ingest', 'nats']
-/** Kinds driven by a poll schedule (grpc/nats are persistent subscriptions instead — their Schedule,
- * if any, is ignored by the driver). */
+/** Plan 010: kinds with a driver of their own. Message-transport kinds (nats, and whatever else is
+ * registered) are NOT listed — they arrive from GET /api/transports, so this file has no per-transport
+ * line to forget. */
+const BUILTIN_KINDS: SourceKind[] = ['generator', 'url', 'file', 'folder', 'grpc', 'ingest']
+/** Kinds driven by a poll schedule (grpc and the message transports are persistent subscriptions
+ * instead — their Schedule, if any, is ignored by the driver). */
 const POLL_KINDS: SourceKind[] = ['url', 'file', 'folder']
-/** Kinds whose payload goes through MappingSpec/RecordExtractor — url/file/folder AND nats (plan 009
- * B1: a NATS message maps to a row exactly as a polled HTTP body does); grpc decodes against its own
- * schema and never reads Connector.Mapping. */
-const MAPPING_KINDS: SourceKind[] = ['url', 'file', 'folder', 'nats']
+/** Kinds whose payload goes through MappingSpec/RecordExtractor — url/file/folder AND every message
+ * transport (plan 009 B1 / 010: a transport's payload maps to a row exactly as a polled HTTP body does,
+ * by construction — that is SubscriberCore's contract); grpc decodes against its own schema and never
+ * reads Connector.Mapping. */
+const MAPPING_BUILTIN_KINDS: SourceKind[] = ['url', 'file', 'folder']
 /** Kinds that carry a `ConnectorConfig` (plan 006). `ingest` (plan 008 W4) has its own top-level
  * `SourceDefinition.ingest` field instead — a client push has no poll/subscribe config to hold. */
-const CONNECTOR_KINDS: SourceKind[] = ['url', 'file', 'folder', 'grpc', 'nats']
+const CONNECTOR_BUILTIN_KINDS: SourceKind[] = ['url', 'file', 'folder', 'grpc']
 const COERCION_POLICIES: CoercionFailurePolicy[] = ['Null', 'DropRow', 'RejectBatch']
 const COERCION_POLICY_HINT: Record<CoercionFailurePolicy, string> = {
   Null: 'A value that will not convert to its declared type becomes null — the row still lands.',
@@ -285,12 +290,23 @@ interface SourceFormState {
   file: FileFolderFormState
   folder: FileFolderFormState
   grpc: GrpcFormState
-  nats: NatsFormState
+  /** Plan 010: the selected message transport's config object, verbatim as it goes on the wire. The
+   * console does not model it — TransportConfigEditor reads and writes it by descriptor key. */
+  transport: TransportConfigValue
   ingest: IngestFormState
   onCoercionFailure: CoercionFailurePolicy
 }
 
-function toFormState(s?: SourceDefinition): SourceFormState {
+/** The stored config for whichever transport this source uses, or that transport's defaults for a new
+ * one. Reads `connector[descriptor.configProperty]` generically — the console never names "nats". */
+function transportConfigOf(s: SourceDefinition | undefined, descriptors: TransportDescriptor[]): TransportConfigValue {
+  const descriptor = findDescriptor(descriptors, s?.kind)
+  if (!descriptor) return {}
+  const stored = (s?.connector as Record<string, unknown> | undefined)?.[descriptor.configProperty]
+  return (stored as TransportConfigValue | null) ?? emptyTransportConfig(descriptor)
+}
+
+function toFormState(s: SourceDefinition | undefined, descriptors: TransportDescriptor[]): SourceFormState {
   const fields = s?.fields ?? [{ name: '', type: 'String' }]
   return {
     name: s?.name ?? '',
@@ -309,7 +325,7 @@ function toFormState(s?: SourceDefinition): SourceFormState {
     file: toFileFormState(s?.connector?.file),
     folder: toFolderFormState(s?.connector?.folder),
     grpc: toGrpcFormState(s?.connector?.grpc),
-    nats: toNatsFormState(s?.connector?.nats),
+    transport: transportConfigOf(s, descriptors),
     ingest: toIngestFormState(s?.ingest),
     onCoercionFailure: s?.onCoercionFailure ?? 'Null',
   }
@@ -326,9 +342,35 @@ function SourceModal({
   onClose: () => void
   onSaved: () => void
 }) {
-  const [form, setForm] = useState<SourceFormState>(() => toFormState(initial))
+  const [descriptors, setDescriptors] = useState<TransportDescriptor[]>([])
+  const [form, setForm] = useState<SourceFormState>(() => toFormState(initial, []))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Plan 010: the transport list and its form descriptors come from the server, so this page has no
+  // per-transport code at all. Until it arrives the modal renders every non-transport kind normally —
+  // the transport panel is the only part that waits.
+  useEffect(() => {
+    let cancelled = false
+    transportsApi
+      .catalog()
+      .then((catalog) => {
+        if (cancelled) return
+        setDescriptors(catalog.inbound)
+        // Re-seed only the transport slice: the user may already be typing into the rest of the form.
+        setForm((f) => ({ ...f, transport: transportConfigOf(initial, catalog.inbound) }))
+      })
+      .catch(() => {
+        /* leaves the built-in kinds working; the source list itself already surfaces API failures */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [initial])
+
+  const transportKinds = descriptors.map((d) => d.kind)
+  const kinds: SourceKind[] = [...BUILTIN_KINDS, ...transportKinds]
+  const transportDescriptor = findDescriptor(descriptors, form.kind)
 
   /** Fields and mapping.sourcePaths must stay index-aligned (D-B) — every place fields can change
    * (manual edit, add/remove row, OpenAPI derive, remote-schema fetch) routes through this. */
@@ -337,7 +379,8 @@ function SourceModal({
   }
 
   const isPollKind = POLL_KINDS.includes(form.kind)
-  const isMappingKind = MAPPING_KINDS.includes(form.kind)
+  const isMappingKind = MAPPING_BUILTIN_KINDS.includes(form.kind) || !!transportDescriptor
+  const isConnectorKind = CONNECTOR_BUILTIN_KINDS.includes(form.kind) || !!transportDescriptor
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -353,14 +396,15 @@ function SourceModal({
     }
 
     let connector: ConnectorConfig | undefined
-    if (CONNECTOR_KINDS.includes(form.kind)) {
+    if (isConnectorKind) {
       connector = {
         schedule: isPollKind ? form.schedule : null,
         url: form.kind === 'url' ? buildUrlConfig(form.url) : null,
         file: form.kind === 'file' ? buildFileConfig(form.file) : null,
         folder: form.kind === 'folder' ? buildFolderConfig(form.folder) : null,
         grpc: form.kind === 'grpc' ? buildGrpcConfig(form.grpc) : null,
-        nats: form.kind === 'nats' ? buildNatsConfig(form.nats) : null,
+        // Plan 010: whichever property the descriptor names, with no branch per transport.
+        ...(transportDescriptor ? { [transportDescriptor.configProperty]: form.transport } : {}),
         mapping:
           isMappingKind && form.mappingEnabled
             ? buildMappingSpec(form.fields, { ...form.mapping, sourcePaths: resyncSourcePaths(form.fields, form.mapping.sourcePaths) })
@@ -370,7 +414,7 @@ function SourceModal({
     const ingest = form.kind === 'ingest' ? buildIngestConfig(form.ingest) : undefined
     // Plan 009 C2: meaningful only where coercion actually happens — the connector poll/subscribe
     // path (url/file/folder/grpc/nats). Push ingress and the synthetic generator never read it.
-    const onCoercionFailure = CONNECTOR_KINDS.includes(form.kind) ? form.onCoercionFailure : undefined
+    const onCoercionFailure = isConnectorKind ? form.onCoercionFailure : undefined
 
     setSaving(true)
     try {
@@ -442,7 +486,7 @@ function SourceModal({
                   </SelectTrigger>
                   <SelectContent>
                     <SelectGroup>
-                      {KINDS.map((k) => (
+                      {kinds.map((k) => (
                         <SelectItem key={k} value={k}>
                           {k}
                         </SelectItem>
@@ -550,10 +594,11 @@ function SourceModal({
                 onFieldsFetched={updateFields}
               />
             )}
-            {form.kind === 'nats' && (
-              <NatsConfigEditor
-                value={form.nats}
-                onChange={(patch) => setForm((f) => ({ ...f, nats: { ...f.nats, ...patch } }))}
+            {transportDescriptor && (
+              <TransportConfigEditor
+                descriptor={transportDescriptor}
+                value={form.transport}
+                onChange={(next) => setForm((f) => ({ ...f, transport: next }))}
                 isEdit={isEdit}
                 disabled={saving}
               />
@@ -566,7 +611,7 @@ function SourceModal({
               />
             )}
 
-            {CONNECTOR_KINDS.includes(form.kind) && (
+            {isConnectorKind && (
               <Field>
                 <FieldLabel htmlFor="src-coercion">On coercion failure</FieldLabel>
                 <Select
@@ -625,7 +670,7 @@ function SourceModal({
                   onCheckedChange={(checked) => setForm((f) => ({ ...f, mappingEnabled: checked }))}
                 />
                 <FieldLabel htmlFor="src-mapping-enabled" className="font-normal">
-                  Enable field mapping (extract rows from a nested {form.kind === 'nats' ? 'message' : 'response'})
+                  Enable field mapping (extract rows from a nested {transportDescriptor ? 'message' : 'response'})
                 </FieldLabel>
               </Field>
             )}

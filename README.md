@@ -95,7 +95,8 @@ honest. Everything above it — REST, SignalR, auth, the console — is written 
 registered by both hosts with a single `AddStreamForgeApi()`.
 
 Deeper: [architecture](orleans/ARCHITECTURE.md) · [design rationale](orleans/DESIGN.md) ·
-[Dapr flavor](dapr/ARCHITECTURE.md) · [execution plans the system was built from](plans/README.md).
+[Dapr flavor](dapr/ARCHITECTURE.md) · [adding a transport](TRANSPORTS.md) ·
+[execution plans the system was built from](plans/README.md).
 
 ## What this is not
 

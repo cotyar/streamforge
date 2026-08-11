@@ -49,7 +49,11 @@ export interface SourceDefinition {
 // Plan 006: ingestion connectors. Secret values (URL header values, gRPC password/token) read
 // back as the mask '***'; sending '***' on write means "keep the stored value".
 // ============================================================================
-export type SourceKind = 'generator' | 'url' | 'file' | 'folder' | 'grpc' | 'ingest' | 'nats'
+/** Plan 010: the kinds with drivers of their own, plus `(string & {})` for any registered message
+ *  transport — the console learns those from GET /api/transports rather than from this union, so a new
+ *  transport does not need a line here. The literals stay for autocompletion and for the places that
+ *  genuinely branch on a built-in kind. */
+export type SourceKind = 'generator' | 'url' | 'file' | 'folder' | 'grpc' | 'ingest' | 'nats' | (string & {})
 export const SECRET_MASK = '***'
 export type FileFormat = 'ndjson' | 'json' | 'csv'
 
@@ -148,7 +152,8 @@ export interface NatsJetStreamConfig {
 /** Plan 009 B2: the platform's first outbound concept. Delivery is fire-and-forget — a slow or
  *  absent broker drops, it does not slow the pipeline down. */
 export interface SinkSpec {
-  kind: 'nats'
+  /** Any registered sink kind — see TransportCatalog.outbound. */
+  kind: string
   enabled: boolean
   nats?: NatsPubConfig | null
 }
@@ -161,6 +166,51 @@ export interface NatsPubConfig {
   username?: string | null
   password?: string | null
   credentials?: string | null
+}
+
+/** Plan 010: what the console needs to render a transport's config form, served by GET /api/transports.
+ *  Mirrors StreamForge.AppCore.Transports.TransportDescriptor. A transport added to the backend gets a
+ *  working editor here with no change to this file — the descriptor IS the form. */
+export interface TransportDescriptor {
+  kind: string
+  label: string
+  help?: string | null
+  /** Which property of ConnectorConfig / SinkSpec holds this transport's config object (e.g. "nats"). */
+  configProperty: string
+  fields: TransportField[]
+  groups: TransportGroup[]
+}
+
+export type TransportFieldType = 'string' | 'secret' | 'number' | 'bool' | 'select'
+
+export interface TransportField {
+  key: string
+  label: string
+  type: TransportFieldType
+  group?: string | null
+  required: boolean
+  mono: boolean
+  placeholder?: string | null
+  help?: string | null
+  options?: string[] | null
+  /** Initial value for a NEW entity, as a string coerced by `type`. */
+  default?: string | null
+}
+
+export interface TransportGroup {
+  key: string
+  label: string
+  help?: string | null
+  /** Rendered with an on/off switch; when off, `objectKey` is written as null. */
+  optional: boolean
+  /** When set, this group's fields live in a nested object under this property. */
+  objectKey?: string | null
+}
+
+/** GET /api/transports */
+export interface TransportCatalog {
+  inbound: TransportDescriptor[]
+  outbound: TransportDescriptor[]
 }
 
 /** Plan 009 C2: what an inbound row does when a value will not coerce to its declared field type.

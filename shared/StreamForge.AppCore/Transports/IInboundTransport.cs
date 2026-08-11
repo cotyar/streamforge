@@ -55,4 +55,9 @@ public interface IInboundTransport
     /// <summary>Creates (but does not connect — that happens on first enumeration) one subscription attempt.
     /// Throwing here is treated exactly like a failed connection: reported and retried with backoff.</summary>
     IInboundSubscription Open(SourceDefinition def);
+
+    /// <summary>What the console needs to render this transport's config form — see
+    /// <see cref="TransportDescriptor"/>. Implementing it is what keeps "add a transport" from also meaning
+    /// "add a React component".</summary>
+    TransportDescriptor Describe();
 }
