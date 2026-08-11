@@ -22,14 +22,15 @@ public sealed class GeneratorSupervisorService(IClusterClient client, IHostAppli
                 {
                     try
                     {
-                        // Plan 006 D-C: Kind dispatch, mirroring RegistryGrain's UpsertSourceAsync/
-                        // EnsureInitializedAsync — "generator" (or unset) pings IGeneratorGrain,
-                        // everything else pings IConnectorGrain.
+                        // Plan 006 D-C / plan 008 W4: Kind dispatch, mirroring RegistryGrain's
+                        // UpsertSourceAsync/EnsureInitializedAsync three-way split — "generator" (or
+                        // unset) pings IGeneratorGrain, "ingest" backs onto no grain at all (rows arrive
+                        // through IIngressFacade — nothing to ping), everything else pings IConnectorGrain.
                         if (string.IsNullOrEmpty(src.Kind) || src.Kind == SourceKinds.Generator)
                         {
                             await client.GetGrain<IGeneratorGrain>(src.Name).PingAsync();
                         }
-                        else
+                        else if (src.Kind != SourceKinds.Ingest)
                         {
                             await client.GetGrain<IConnectorGrain>(src.Name).PingAsync();
                         }

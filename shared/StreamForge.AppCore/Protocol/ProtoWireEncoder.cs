@@ -1,7 +1,7 @@
-using System.Globalization;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Ingest;
 
 namespace StreamForge.Host.Grpc.Dynamic;
 
@@ -141,23 +141,23 @@ public static class ProtoWireEncoder
         {
             case FieldType.String:
                 output.WriteTag(number, WireFormat.WireType.LengthDelimited);
-                output.WriteString(ToStringValue(value));
+                output.WriteString((string)CoerceOrThrow(f, path, value));
                 break;
             case FieldType.Double:
                 output.WriteTag(number, WireFormat.WireType.Fixed64);
-                output.WriteDouble(ToDouble(value));
+                output.WriteDouble((double)CoerceOrThrow(f, path, value));
                 break;
             case FieldType.Long:
                 output.WriteTag(number, WireFormat.WireType.Varint);
-                output.WriteInt64(ToInt64(value));
+                output.WriteInt64((long)CoerceOrThrow(f, path, value));
                 break;
             case FieldType.Bool:
                 output.WriteTag(number, WireFormat.WireType.Varint);
-                output.WriteBool(ToBool(value));
+                output.WriteBool((bool)CoerceOrThrow(f, path, value));
                 break;
             case FieldType.Timestamp:
                 output.WriteTag(number, WireFormat.WireType.Varint);
-                output.WriteInt64(ToInt64(value)); // already epoch millis
+                output.WriteInt64((long)CoerceOrThrow(f, path, value)); // already epoch millis
                 break;
             case FieldType.Json when f.Children is { Count: > 0 }:
                 WriteNestedMessage(output, number, path, f.Children, numbers, value);
@@ -227,43 +227,16 @@ public static class ProtoWireEncoder
         _ => throw new InvalidOperationException($"Unsupported value type in schemaless Json subtree: {value.GetType()}"),
     };
 
-    private static string ToStringValue(object value) => value switch
+    /// <summary>Scalar coercion is shared with the connector-mapping and client-push ingest paths
+    /// via <see cref="FieldValueCoercion.TryCoerce"/> (extracted plan 008 W4) — this just restores
+    /// the throwing contract this encoder always had: it encodes already-accepted rows, so a value
+    /// that cannot be coerced here is a bug upstream, not something to report per-row.</summary>
+    private static object CoerceOrThrow(FieldDef f, string path, object value)
     {
-        string s => s,
-        bool b => b ? "true" : "false",
-        IFormattable f => f.ToString(null, CultureInfo.InvariantCulture),
-        _ => value.ToString() ?? "",
-    };
-
-    private static double ToDouble(object value) => value switch
-    {
-        double d => d,
-        float f => f,
-        long l => l,
-        int i => i,
-        bool b => b ? 1 : 0,
-        string s => double.Parse(s, CultureInfo.InvariantCulture),
-        _ => throw new InvalidOperationException($"Cannot convert {value.GetType()} to double"),
-    };
-
-    private static long ToInt64(object value) => value switch
-    {
-        long l => l,
-        int i => i,
-        double d => (long)d,
-        float f => (long)f,
-        bool b => b ? 1L : 0L,
-        string s => long.Parse(s, CultureInfo.InvariantCulture),
-        _ => throw new InvalidOperationException($"Cannot convert {value.GetType()} to long"),
-    };
-
-    private static bool ToBool(object value) => value switch
-    {
-        bool b => b,
-        long l => l != 0,
-        int i => i != 0,
-        double d => d != 0,
-        string s => bool.TryParse(s, out var parsed) ? parsed : s is not ("" or "0"),
-        _ => throw new InvalidOperationException($"Cannot convert {value.GetType()} to bool"),
-    };
+        if (!FieldValueCoercion.TryCoerce(f.Type, value, out var coerced))
+        {
+            throw new InvalidOperationException($"Field \"{path}\" (type {f.Type}) cannot convert {value.GetType()} value");
+        }
+        return coerced!;
+    }
 }

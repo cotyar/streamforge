@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -109,6 +110,70 @@ public static class SourcesEndpoints
             };
         }).RequireAuthorization("Viewer");
 
+        // ---- Client-push ingress (plan 008 W4). POST holds NO policy of its own — every branch below
+        // is a 1:1 mapping of IngestOutcome onto an HTTP status per IngestModels.cs's own doc comments;
+        // all the actual admission/coercion decisions live in IIngressFacade/AppCore.Ingest. ----
+
+        group.MapPost("/{name}/events", async (string name, IngestEventsRequest req, IIngressFacade ingress, HttpContext http) =>
+        {
+            var result = await ingress.PushAsync(name, req.Events, req.Partial);
+            switch (result.Outcome)
+            {
+                case IngestOutcome.Accepted:
+                    // DepthRows/CapacityRows aren't on IngestResult (that contract is frozen) — a
+                    // second, in-memory-only GetStatusAsync call (no extra I/O; same buffer instance)
+                    // fills them in for the 202 body.
+                    var status = await ingress.GetStatusAsync(name);
+                    return Results.Json(
+                        new IngestAcceptedResponse(result.Accepted, result.Dropped, result.Invalid, status?.DepthRows ?? 0, status?.CapacityRows ?? 0),
+                        statusCode: StatusCodes.Status202Accepted);
+
+                case IngestOutcome.Invalid:
+                    return Results.Json(
+                        new IngestErrorResponse(result.Error ?? "one or more rows failed coercion", 0, result.RowErrors),
+                        statusCode: StatusCodes.Status400BadRequest);
+
+                case IngestOutcome.NotFound:
+                    return Results.NotFound();
+
+                case IngestOutcome.WrongKind:
+                    return Results.Json(
+                        new IngestErrorResponse(result.Error ?? $"source '{name}' is not ingest-kind", 0, result.RowErrors),
+                        statusCode: StatusCodes.Status409Conflict);
+
+                case IngestOutcome.TooLarge:
+                    return Results.Json(
+                        new IngestErrorResponse(result.Error ?? "batch exceeds the source's ingest limits", 0, result.RowErrors),
+                        statusCode: StatusCodes.Status413PayloadTooLarge);
+
+                case IngestOutcome.Overloaded:
+                default:
+                    // Retry-After: whole seconds clamped to [1,30] — IngestResult.RetryAfterMs is the
+                    // unclamped estimate (IngressAdmission.Decision doc), this is where it becomes an
+                    // honest HTTP header.
+                    var retryAfterSeconds = Math.Clamp((int)Math.Ceiling(result.RetryAfterMs / 1000.0), 1, 30);
+                    http.Response.Headers.RetryAfter = retryAfterSeconds.ToString(CultureInfo.InvariantCulture);
+                    return Results.Json(
+                        new IngestErrorResponse(result.Error ?? "ingress buffer has no room for this batch", retryAfterSeconds * 1000, result.RowErrors),
+                        statusCode: StatusCodes.Status429TooManyRequests);
+            }
+        }).RequireAuthorization("Editor");
+
+        // GET /{name}/ingest — ingress buffer status (plan 008 W4). Deliberately NOT overloaded onto
+        // /status above, which is the connector-runtime surface; reuses the same three-way
+        // NotFound/NoContent/Ok decision (SourceSchemaService.DecideStatusOutcome's bool overload).
+        group.MapGet("/{name}/ingest", async (string name, ICatalogFacade registry, IIngressFacade ingress) =>
+        {
+            var src = await registry.GetSourceAsync(name);
+            var status = src is null ? null : await ingress.GetStatusAsync(name);
+            return SourceSchemaService.DecideStatusOutcome(src is not null, status is not null) switch
+            {
+                SourceStatusOutcome.NotFound => Results.NotFound(),
+                SourceStatusOutcome.NoContent => Results.NoContent(),
+                _ => Results.Ok(ToIngestStatusResponse(status!)),
+            };
+        }).RequireAuthorization("Viewer");
+
         // ---- Schema helper endpoints for the UI (Editor — even mapping-validate/derive-openapi,
         // which don't themselves dial out, since they're part of the connector-authoring flow that
         // from-remote (which DOES dial out) also belongs to; keeps all three under one auth policy). ----
@@ -126,4 +191,17 @@ public static class SourcesEndpoints
             Results.Ok(await SourceSchemaService.FromRemoteAsync(request, ct))
         ).RequireAuthorization("Editor");
     }
+
+    private static IngestStatusResponse ToIngestStatusResponse(IngestStatus s) => new(
+        s.Policy.ToString(),
+        s.CapacityRows,
+        s.DepthRows,
+        s.MaxBatchRows,
+        s.TotalAccepted,
+        s.TotalRejected,
+        s.TotalDropped,
+        s.TotalInvalid,
+        s.TotalPublished,
+        s.DownstreamDropped,
+        s.LastPushMs);
 }

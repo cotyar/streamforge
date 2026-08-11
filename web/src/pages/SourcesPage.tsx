@@ -33,6 +33,13 @@ import {
   type GrpcFormState,
 } from '../components/sources/GrpcConfigEditor'
 import {
+  IngestConfigEditor,
+  buildIngestConfig,
+  toIngestFormState,
+  type IngestFormState,
+} from '../components/sources/IngestConfigEditor'
+import { IngestCard } from '../components/sources/IngestCard'
+import {
   MappingEditor,
   buildMappingSpec,
   resyncSourcePaths,
@@ -71,9 +78,12 @@ import {
 
 const FIELD_TYPES: FieldType[] = ['String', 'Double', 'Long', 'Bool', 'Timestamp', 'Json']
 const PROFILES: SourceDefinition['generatorProfile'][] = ['trades', 'quotes', 'orders', 'generic']
-const KINDS: SourceKind[] = ['generator', 'url', 'file', 'folder', 'grpc']
+const KINDS: SourceKind[] = ['generator', 'url', 'file', 'folder', 'grpc', 'ingest']
 /** Kinds driven by a poll schedule + optional mapping (grpc is a persistent subscription instead). */
 const POLL_KINDS: SourceKind[] = ['url', 'file', 'folder']
+/** Kinds that carry a `ConnectorConfig` (plan 006). `ingest` (plan 008 W4) has its own top-level
+ * `SourceDefinition.ingest` field instead — a client push has no poll/subscribe config to hold. */
+const CONNECTOR_KINDS: SourceKind[] = ['url', 'file', 'folder', 'grpc']
 
 function formatCell(v: unknown): string {
   if (v === null || v === undefined) return '—'
@@ -248,6 +258,7 @@ interface SourceFormState {
   file: FileFolderFormState
   folder: FileFolderFormState
   grpc: GrpcFormState
+  ingest: IngestFormState
 }
 
 function toFormState(s?: SourceDefinition): SourceFormState {
@@ -269,6 +280,7 @@ function toFormState(s?: SourceDefinition): SourceFormState {
     file: toFileFormState(s?.connector?.file),
     folder: toFolderFormState(s?.connector?.folder),
     grpc: toGrpcFormState(s?.connector?.grpc),
+    ingest: toIngestFormState(s?.ingest),
   }
 }
 
@@ -309,7 +321,7 @@ function SourceModal({
     }
 
     let connector: ConnectorConfig | undefined
-    if (form.kind !== 'generator') {
+    if (CONNECTOR_KINDS.includes(form.kind)) {
       connector = {
         schedule: isPollKind ? form.schedule : null,
         url: form.kind === 'url' ? buildUrlConfig(form.url) : null,
@@ -322,6 +334,7 @@ function SourceModal({
             : null,
       }
     }
+    const ingest = form.kind === 'ingest' ? buildIngestConfig(form.ingest) : undefined
 
     setSaving(true)
     try {
@@ -337,6 +350,7 @@ function SourceModal({
           metadata: form.metadata,
           kind: form.kind,
           connector,
+          ingest,
         })
       } else {
         const body: CreateSourceRequest = {
@@ -350,6 +364,7 @@ function SourceModal({
           metadata: form.metadata,
           kind: form.kind,
           connector,
+          ingest,
         }
         await sourcesApi.create(body)
       }
@@ -495,6 +510,13 @@ function SourceModal({
                 isEdit={isEdit}
                 disabled={saving}
                 onFieldsFetched={updateFields}
+              />
+            )}
+            {form.kind === 'ingest' && (
+              <IngestConfigEditor
+                value={form.ingest}
+                onChange={(patch) => setForm((f) => ({ ...f, ingest: { ...f.ingest, ...patch } }))}
+                disabled={saving}
               />
             )}
 
@@ -683,7 +705,12 @@ export function SourcesPage() {
                       </RoleGate>
                     </div>
 
-                    {isConnector && (
+                    {isConnector && s.kind === 'ingest' && (
+                      <div className="rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+                        <IngestCard source={s} />
+                      </div>
+                    )}
+                    {isConnector && s.kind !== 'ingest' && (
                       <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
                         <ConnectorStatusBadge name={s.name} />
                       </div>

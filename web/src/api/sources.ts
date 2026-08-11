@@ -3,6 +3,7 @@ import type {
   ConnectorConfig,
   ConnectorRuntimeStatus,
   FieldDef,
+  IngestConfig,
   MappingValidateRequest,
   MappingValidateResult,
   Metadata,
@@ -27,6 +28,8 @@ export interface CreateSourceRequest {
   /** Plan 006, additive: absent/'generator' preserves the pre-existing synthetic-source behavior. */
   kind?: SourceKind
   connector?: ConnectorConfig
+  /** Plan 008 W4, additive: present only when kind is 'ingest'. */
+  ingest?: IngestConfig
 }
 
 // The Host's PUT /api/sources/{name} replaces the whole SourceDefinition (name is fixed by the

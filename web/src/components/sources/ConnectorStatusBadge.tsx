@@ -2,8 +2,9 @@ import { useConnectorStatus } from '@/hooks/useConnectorStatus'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
-/** "in 12s" / "3m ago" — deliberately coarse (no sub-second precision needed for a 2 s poll). */
-function relativeFromNow(epochMs: number): string {
+/** "in 12s" / "3m ago" — deliberately coarse (no sub-second precision needed for a 2 s poll).
+ * Exported for reuse by IngestCard (lastPushMs), which polls on the same 2 s cadence. */
+export function relativeFromNow(epochMs: number): string {
   const deltaMs = epochMs - Date.now()
   const future = deltaMs >= 0
   const abs = Math.abs(deltaMs)

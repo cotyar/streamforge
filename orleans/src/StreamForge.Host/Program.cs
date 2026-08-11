@@ -71,6 +71,9 @@ builder.Host.UseOrleans(siloBuilder =>
 builder.Services.AddStreamForgeApi(builder.Configuration);
 builder.Services.AddOrleansFacades();
 builder.Services.AddHostedService<GeneratorSupervisorService>();
+// Plan 008 W4: drives SourceIngressBuffer.DrainAsync — without it a buffered push is admitted and
+// never published. See the service's own doc comment.
+builder.Services.AddHostedService<IngestDrainPumpService>();
 builder.Services.AddHostedService<StreamBridgeService>();
 
 builder.Services.AddGrpc();
@@ -85,7 +88,7 @@ var apiOptions = new StreamForgeApiOptions(
     GrpcPort: app.Configuration.GetValue("Grpc:Port", 5299),
     GrpcStaticServices:
     [
-        "SourceService", "PipelineService", "TableService", "StreamService", "DynamicStreamService", "ServerReflection",
+        "SourceService", "PipelineService", "TableService", "StreamService", "IngestService", "DynamicStreamService", "ServerReflection",
     ],
     DocsFilePath: Path.GetFullPath(Path.Combine(
         app.Environment.ContentRootPath,
@@ -103,6 +106,7 @@ app.MapGrpcService<SourceGrpcService>();
 app.MapGrpcService<PipelineGrpcService>();
 app.MapGrpcService<TableGrpcService>();
 app.MapGrpcService<StreamGrpcService>();
+app.MapGrpcService<IngestGrpcService>();
 
 // Tier 2 — dynamic (runtime-typed) gRPC surface: server reflection over BOTH the static streamforge.v1
 // descriptors and per-entity descriptors generated on the fly for the current catalog (see

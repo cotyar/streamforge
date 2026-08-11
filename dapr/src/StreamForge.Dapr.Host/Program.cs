@@ -3,6 +3,7 @@ using StreamForge.Abstractions;
 using StreamForge.Api;
 using StreamForge.Dapr.Host.Actors;
 using StreamForge.Dapr.Host.Facades;
+using StreamForge.Dapr.Host.Ingest;
 using StreamForge.Dapr.Host.Lifecycle;
 using StreamForge.Dapr.Host.Services;
 using StreamForge.Dapr.Host.Streaming;
@@ -54,6 +55,7 @@ builder.Services.AddHostedService<CatalogInitializationService>();
 // right after GeneratorRuntimeSetup since both are source-lifecycle wave seams.
 GeneratorRuntimeSetup.AddServices(builder.Services);
 ConnectorRuntimeSetup.AddServices(builder.Services);
+IngestRuntimeSetup.AddServices(builder.Services);
 StreamingRuntimeSetup.AddServices(builder.Services);
 PipelineRuntimeSetup.AddServices(builder.Services);
 TableRuntimeSetup.AddServices(builder.Services);

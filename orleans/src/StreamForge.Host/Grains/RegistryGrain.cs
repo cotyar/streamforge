@@ -92,13 +92,15 @@ public sealed class RegistryGrain(
         {
             try
             {
-                // Plan 006 D-C: Kind dispatch. "generator" (or unset — pre-006 seeds/sources) keeps the
-                // pre-existing IGeneratorGrain path unchanged; every other Kind goes to IConnectorGrain.
+                // Plan 006 D-C / plan 008 W4: three-way Kind dispatch. "generator" (or unset — pre-006
+                // seeds/sources) keeps the pre-existing IGeneratorGrain path unchanged; "ingest" starts
+                // NO grain at all (rows arrive through IIngressFacade); everything else goes to
+                // IConnectorGrain.
                 if (IsGeneratorKind(src.Kind))
                 {
                     await GrainFactory.GetGrain<IGeneratorGrain>(src.Name).StartAsync(src);
                 }
-                else
+                else if (!IsIngestKind(src.Kind))
                 {
                     await GrainFactory.GetGrain<IConnectorGrain>(src.Name).StartAsync(src);
                 }
@@ -195,6 +197,11 @@ public sealed class RegistryGrain(
                 await generator.StartAsync(def);
                 await connector.StopAsync();
             }
+            else if (IsIngestKind(def.Kind))
+            {
+                await generator.StopAsync();
+                await connector.StopAsync();
+            }
             else
             {
                 await connector.StartAsync(def);
@@ -225,9 +232,14 @@ public sealed class RegistryGrain(
 
     /// <summary>Plan 006 D-C: "generator" (the SourceDefinition.Kind default) or an unset/empty value
     /// (pre-006 persisted sources, seeds) both mean "use IGeneratorGrain" — anything else dispatches to
-    /// IConnectorGrain instead.</summary>
+    /// IConnectorGrain instead (except "ingest" — see <see cref="IsIngestKind"/>).</summary>
     private static bool IsGeneratorKind(string? kind) =>
         string.IsNullOrEmpty(kind) || kind == SourceKinds.Generator;
+
+    /// <summary>Plan 008 W4: "ingest" backs onto NEITHER IGeneratorGrain nor IConnectorGrain — rows
+    /// arrive through IIngressFacade (a host-process singleton, not a grain; see OrleansIngressFacade's
+    /// doc comment) instead of a timer or poll loop.</summary>
+    private static bool IsIngestKind(string? kind) => kind == SourceKinds.Ingest;
 
     public Task<List<PipelineDefinition>> GetPipelinesAsync() => Task.FromResult(state.State.Pipelines.ToList());
 

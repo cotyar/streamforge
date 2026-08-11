@@ -1,6 +1,6 @@
-using System.Globalization;
 using System.Text.Json;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Ingest;
 using StreamForge.AppCore.Json;
 
 namespace StreamForge.AppCore.Connectors.Mapping;
@@ -95,24 +95,16 @@ public static class RecordExtractor
     }
 
     /// <summary>"_ts" resolution: the value already extracted under the emitted field named by
-    /// <see cref="MappingSpec.TimestampField"/> — a number is epoch-ms, a string is parsed as
-    /// ISO-8601 (UTC), anything else (missing field, unparseable string, no TimestampField
-    /// configured) falls back to <paramref name="arrivalMs"/>.</summary>
+    /// <see cref="MappingSpec.TimestampField"/>, resolved via <see cref="RowTimestamp.Resolve"/>
+    /// (extracted plan 008 W4 so this and the client-push ingest path agree on what a timestamp
+    /// value means) — a number is epoch-ms, a string is parsed as ISO-8601 (UTC), anything else
+    /// (missing field, unparseable string, no TimestampField configured) falls back to
+    /// <paramref name="arrivalMs"/>.</summary>
     private static long ResolveTimestamp(Dictionary<string, object?> row, MappingSpec spec, long arrivalMs)
     {
         if (spec.TimestampField is { Length: > 0 } key && row.TryGetValue(key, out var value))
         {
-            switch (value)
-            {
-                case long l:
-                    return l;
-                case double d:
-                    return (long)d;
-                case string s when DateTimeOffset.TryParse(
-                    s, CultureInfo.InvariantCulture,
-                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dto):
-                    return dto.ToUnixTimeMilliseconds();
-            }
+            return RowTimestamp.Resolve(value, arrivalMs);
         }
 
         return arrivalMs;

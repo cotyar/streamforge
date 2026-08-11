@@ -331,3 +331,51 @@ service StreamService {
   rpc SubscribePipeline(SubscribePipelineRequest) returns (stream ResultEnvelope);
   rpc SubscribeTable(SubscribeTableRequest) returns (stream TableDeltaBatch);
 }
+
+// ============================================================================
+// IngestService — plan 008 W4: client-push ingress, bidi. Mirrors the REST
+// POST /api/sources/{name}/events surface (StreamForge.Abstractions.IIngressFacade /
+// IngestModels.cs) one IngestRequest per push, one IngestAck per response — but bidi (not unary),
+// so the server can ack a batch and signal overload WITHOUT ending the call. Overload is carried as
+// an ack field (retry_after_ms), never an RPC error status: under IngressOverflowPolicy.Block this
+// stream is the only genuine transport-level backpressure in the whole feature — the server holds
+// off reading the next IngestRequest while a push is waiting for buffer space, HTTP/2 flow control
+// then closes the window on the wire, and the client's own WriteAsync genuinely blocks.
+// ============================================================================
+
+message IngestRequest {
+  string source_name = 1;
+  repeated google.protobuf.Struct rows = 2;
+  // Admits the valid rows of a batch that has invalid ones instead of failing the whole batch —
+  // mirrors IngestEventsRequest.Partial (Dtos.cs).
+  bool partial = 3;
+}
+
+// Mirrors StreamForge.Abstractions.IngestOutcome 1:1 (IngestModels.cs) — same REST-status-code
+// mapping intent, just as a gRPC enum instead of an HTTP status.
+enum IngestOutcome {
+  INGEST_OUTCOME_ACCEPTED = 0;
+  INGEST_OUTCOME_INVALID = 1;
+  INGEST_OUTCOME_NOT_FOUND = 2;
+  INGEST_OUTCOME_WRONG_KIND = 3;
+  INGEST_OUTCOME_TOO_LARGE = 4;
+  INGEST_OUTCOME_OVERLOADED = 5;
+}
+
+// Mirrors StreamForge.Abstractions.IngestResult (IngestModels.cs): accepted + dropped + invalid
+// accounts for every row in the request. retry_after_ms is populated only for
+// INGEST_OUTCOME_OVERLOADED (the REST layer's Retry-After header clamps this to whole seconds in
+// [1,30]; this carries the honest unclamped estimate).
+message IngestAck {
+  IngestOutcome outcome = 1;
+  int32 accepted = 2;
+  int32 dropped = 3;
+  int32 invalid = 4;
+  int32 retry_after_ms = 5;
+  string error = 6;
+  repeated string row_errors = 7;
+}
+
+service IngestService {
+  rpc Ingest(stream IngestRequest) returns (stream IngestAck);
+}

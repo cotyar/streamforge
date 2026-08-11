@@ -254,8 +254,16 @@ function RestCard({ entity }: { entity: DynamicEntityMetaDto }) {
       { label: 'Get source', text: `curl -s ${origin}/api/sources/${n} -H "${auth}"` },
       { label: 'Get .proto', text: `curl -s ${origin}/api/sources/${n}/proto -H "${auth}"` },
       { label: 'Get status', text: `curl -s ${origin}/api/sources/${n}/status -H "${auth}"` },
+      { label: 'Ingress status (ingest-kind only)', text: `curl -s ${origin}/api/sources/${n}/ingest -H "${auth}"` },
+      {
+        label: 'Push events (ingest-kind only, Editor)',
+        text: `curl -s -i -X POST ${origin}/api/sources/${n}/events -H "${auth}" -H 'content-type: application/json' -d '{"events":[{"symbol":"AAPL","price":1.23}],"partial":false}'`,
+      },
     ]
-    note = "A source's live events are SignalR-only — there is deliberately no REST rows endpoint for sources."
+    note =
+      "A source's live events are SignalR-only — there is deliberately no REST rows endpoint for sources. " +
+      'The two ingest routes apply only to ingest-kind sources (204 / 409 otherwise). A push returns 202 ' +
+      '"buffered", never 200 — and 429 with Retry-After once the buffer is full, so keep the -i.'
   } else if (entity.kind === 'pipeline') {
     const id = entity.id
     routes = [

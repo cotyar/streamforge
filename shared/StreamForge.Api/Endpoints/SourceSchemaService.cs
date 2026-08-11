@@ -6,6 +6,7 @@ using StreamForge.AppCore.Connectors.Grpc;
 using StreamForge.AppCore.Connectors.Mapping;
 using StreamForge.AppCore.Connectors.OpenApi;
 using StreamForge.AppCore.Connectors.Scheduling;
+using StreamForge.AppCore.Ingest;
 
 namespace StreamForge.Api;
 
@@ -21,6 +22,7 @@ public static class SourceValidation
     private static readonly HashSet<string> KnownKinds = new(StringComparer.Ordinal)
     {
         SourceKinds.Generator, SourceKinds.Url, SourceKinds.File, SourceKinds.Folder, SourceKinds.Grpc,
+        SourceKinds.Ingest,
     };
 
     private static readonly HashSet<string> KnownFileFormats = new(StringComparer.Ordinal)
@@ -54,8 +56,16 @@ public static class SourceValidation
 
         if (!KnownKinds.Contains(def.Kind))
         {
-            errors.Add($"kind '{def.Kind}' is not recognized (expected one of: generator, url, file, folder, grpc)");
+            errors.Add($"kind '{def.Kind}' is not recognized (expected one of: generator, url, file, folder, grpc, ingest)");
             return errors;
+        }
+
+        // Plan 008 W4: Ingest is meaningful ONLY on an ingest-kind source — carrying it on any other
+        // kind is silent-dead config a client would reasonably expect to do something, so it's an
+        // error rather than a no-op (same call SourceValidation already makes for Connector: below).
+        if (def.Kind != SourceKinds.Ingest && def.Ingest is not null)
+        {
+            errors.Add("ingest configuration is only valid for kind 'ingest'");
         }
 
         if (def.Kind == SourceKinds.Generator)
@@ -65,6 +75,20 @@ public static class SourceValidation
             if (def.EventsPerSecond <= 0)
             {
                 errors.Add("eventsPerSecond must be > 0");
+            }
+
+            return errors;
+        }
+
+        if (def.Kind == SourceKinds.Ingest)
+        {
+            if (def.Ingest is null)
+            {
+                errors.Add("kind 'ingest' requires an ingest configuration");
+            }
+            else
+            {
+                ValidateIngest(def.Ingest, errors);
             }
 
             return errors;
@@ -214,6 +238,29 @@ public static class SourceValidation
         }
     }
 
+    /// <summary>Plan 008 W4: kind 'ingest' config validation. Capacity/MaxBatchRows just need to be
+    /// positive (SourceIngressBuffer trusts them at face value); MaxWaitMs is checked against the same
+    /// <see cref="IngressAdmission.MaxBlockWaitMs"/> server cap the buffer itself silently clamps to at
+    /// push time — flagging an out-of-range value HERE, at save time, is an honest error instead of a
+    /// setting that looks respected but silently isn't.</summary>
+    private static void ValidateIngest(IngestConfig ingest, List<string> errors)
+    {
+        if (ingest.CapacityRows <= 0)
+        {
+            errors.Add("ingest.capacityRows must be > 0");
+        }
+
+        if (ingest.MaxBatchRows <= 0)
+        {
+            errors.Add("ingest.maxBatchRows must be > 0");
+        }
+
+        if (ingest.MaxWaitMs <= 0 || ingest.MaxWaitMs > IngressAdmission.MaxBlockWaitMs)
+        {
+            errors.Add($"ingest.maxWaitMs must be > 0 and <= {IngressAdmission.MaxBlockWaitMs} (server cap)");
+        }
+    }
+
     private static void ValidateMapping(MappingSpec mapping, List<string> errors)
     {
         ValidatePathSyntax(mapping.ItemsPath, "connector.mapping.itemsPath", errors);
@@ -270,7 +317,14 @@ public enum SourceStatusOutcome { NotFound, NoContent, Ok }
 public static class SourceSchemaService
 {
     public static SourceStatusOutcome DecideStatusOutcome(bool sourceExists, ConnectorRuntimeStatus? status) =>
-        !sourceExists ? SourceStatusOutcome.NotFound : status is null ? SourceStatusOutcome.NoContent : SourceStatusOutcome.Ok;
+        DecideStatusOutcome(sourceExists, status is not null);
+
+    /// <summary>Same NotFound/NoContent/Ok three-way as the <see cref="ConnectorRuntimeStatus"/>
+    /// overload above, generalized over "is there a status to show" (plan 008 W4) so GET
+    /// /api/sources/{name}/ingest (whose status type is <see cref="IngestStatus"/>, not
+    /// ConnectorRuntimeStatus) can reuse the exact same decision without a fake status instance.</summary>
+    public static SourceStatusOutcome DecideStatusOutcome(bool sourceExists, bool statusPresent) =>
+        !sourceExists ? SourceStatusOutcome.NotFound : !statusPresent ? SourceStatusOutcome.NoContent : SourceStatusOutcome.Ok;
 
     // ------------------------------------------------------------------
     // POST /api/sources/schema/mapping-validate (pure — no I/O).

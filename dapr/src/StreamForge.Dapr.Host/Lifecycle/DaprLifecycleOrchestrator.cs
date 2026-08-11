@@ -2,6 +2,7 @@ using Dapr.Actors;
 using Dapr.Actors.Client;
 using Dapr.Client;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Ingest;
 using StreamForge.Dapr.Host.Actors;
 using StreamForge.Dapr.Host.Streaming;
 
@@ -52,51 +53,90 @@ public sealed partial class DaprLifecycleOrchestrator(
     DaprClient daprClient,
     Streaming.PipelineEventRouter pipelineRouter,
     Streaming.TableEventRouter tableRouter,
-    ILogger<DaprLifecycleOrchestrator> logger) : ILifecycleOrchestrator
+    ILogger<DaprLifecycleOrchestrator> logger,
+    // Plan 008 W4c: added LAST, with a default, so GeneratorLifecycleOrchestratorTests.NewOrchestrator's
+    // pre-existing 4-positional-argument construction (an existing test file — never edited for a
+    // production signature change) keeps compiling unmodified. The DI container still injects the real
+    // registered SourceIngressRegistry singleton here in the running host regardless of the default —
+    // .NET's built-in ServiceProvider only falls back to a parameter's default value when the parameter's
+    // type has NO registration at all (see IngestRuntimeSetup.AddServices, called from Program.cs before
+    // the container is built); the default only matters for the direct `new(...)` that unit test uses,
+    // where no method needing ingressRegistry is ever invoked (see that test's own class doc comment).
+    SourceIngressRegistry ingressRegistry = null!) : ILifecycleOrchestrator
 {
-    /// <summary>Plan 006 (ingestion connectors) W3-B: dispatches on <see cref="SourceDefinition.Kind"/>
-    /// via <see cref="SourceKindDispatch.Classify"/> — generator-kind (null/""/"generator") goes to
-    /// <see cref="IGeneratorActor"/>, everything else (url/file/folder/grpc) to
-    /// <see cref="IConnectorActor"/>, exactly as decision D-C specifies ("RegistryGrain/
-    /// DaprLifecycleOrchestrator dispatch on Kind: generator → existing path, else connector").
+    /// <summary>Plan 006 (ingestion connectors) W3-B, extended by plan 008 W4c to a THIRD kind:
+    /// dispatches on <see cref="SourceDefinition.Kind"/> via <see cref="SourceKindDispatch.Classify"/> —
+    /// generator-kind (null/""/"generator") goes to <see cref="IGeneratorActor"/>, connector kinds
+    /// (url/file/folder/grpc) to <see cref="IConnectorActor"/>, and <see cref="SourceKinds.Ingest"/> goes
+    /// to NEITHER — an ingest-kind source has no actor at all (see <see cref="Ingest.DaprIngressFacade"/>'s
+    /// class doc: its <see cref="SourceIngressBuffer"/> lives in a host-process singleton, not a
+    /// grain/actor).
     ///
-    /// <para><b>Always stops the OTHER kind's actor too, idempotently.</b> A source's Kind can change on
-    /// an update (<c>CatalogStore.UpsertSourceAsync</c> calls this on every upsert, including edits to an
-    /// existing source — see that method's doc comment), and this method has no cheap way to know
-    /// in-line whether THIS particular call is such a kind-change (that would mean reading the previous
-    /// definition back — the exact kind of registry-turn read-back the reentrancy decision forbids). Both
-    /// <see cref="IGeneratorActor.StopAsync"/> and <see cref="IConnectorActor.StopAsync"/> are already
-    /// documented idempotent (safe on an actor that was never started, or already stopped), so
-    /// unconditionally stopping the counterpart kind on every call is simply a no-op extra Dapr call in
-    /// the common case (Kind unchanged) and the correct cleanup in the kind-changed case — with no branch
-    /// needed to tell the two apart.</para></summary>
+    /// <para><b>Always stops/cleans up the OTHER kinds' state too, idempotently.</b> A source's Kind can
+    /// change on an update (<c>CatalogStore.UpsertSourceAsync</c> calls this on every upsert, including
+    /// edits to an existing source — see that method's doc comment), and this method has no cheap way to
+    /// know in-line whether THIS particular call is such a kind-change (that would mean reading the
+    /// previous definition back — the exact kind of registry-turn read-back the reentrancy decision
+    /// forbids). <see cref="IGeneratorActor.StopAsync"/>/<see cref="IConnectorActor.StopAsync"/> are
+    /// already documented idempotent (safe on an actor that was never started, or already stopped), and
+    /// <see cref="SourceIngressRegistry.Remove"/> is documented idempotent the same way ("a no-op if none
+    /// exists") — so unconditionally stopping/clearing every kind's state EXCEPT the one this call
+    /// actually dispatches to is simply a no-op extra call in the common case (Kind unchanged) and the
+    /// correct cleanup in the kind-changed case (including a kind changing AWAY from Ingest, which is
+    /// exactly when <see cref="SourceIngressRegistry.Remove"/>'s own doc comment says to call it), with
+    /// no branch needed to tell the two apart.</para></summary>
     public async Task NotifySourceChangedAsync(SourceDefinition def)
     {
-        if (SourceKindDispatch.Classify(def.Kind) == SourceKindDispatch.ActorKind.Generator)
-        {
-            await ConnectorActorProxy(def.Name).StopAsync();
-            var actor = GeneratorActorProxy(def.Name);
-            if (def.Enabled)
-            {
-                await actor.StartAsync(def);
-            }
-            else
-            {
-                await actor.StopAsync();
-            }
-        }
-        else
+        var kind = SourceKindDispatch.Classify(def.Kind);
+
+        if (kind != SourceKindDispatch.ActorKind.Generator)
         {
             await GeneratorActorProxy(def.Name).StopAsync();
-            var actor = ConnectorActorProxy(def.Name);
-            if (def.Enabled)
-            {
-                await actor.StartAsync(def);
-            }
-            else
-            {
-                await actor.StopAsync();
-            }
+        }
+
+        if (kind != SourceKindDispatch.ActorKind.Connector)
+        {
+            await ConnectorActorProxy(def.Name).StopAsync();
+        }
+
+        if (kind != SourceKindDispatch.ActorKind.Ingest)
+        {
+            ingressRegistry.Remove(def.Name);
+        }
+
+        switch (kind)
+        {
+            case SourceKindDispatch.ActorKind.Generator:
+                var generator = GeneratorActorProxy(def.Name);
+                if (def.Enabled)
+                {
+                    await generator.StartAsync(def);
+                }
+                else
+                {
+                    await generator.StopAsync();
+                }
+
+                break;
+
+            case SourceKindDispatch.ActorKind.Connector:
+                var connector = ConnectorActorProxy(def.Name);
+                if (def.Enabled)
+                {
+                    await connector.StartAsync(def);
+                }
+                else
+                {
+                    await connector.StopAsync();
+                }
+
+                break;
+
+            case SourceKindDispatch.ActorKind.Ingest:
+                // Nothing to start: an ingest-kind source's buffer is created lazily on its first
+                // PushAsync (or rebuilt automatically if IngestConfig changes — see
+                // SourceIngressRegistry.GetOrCreate's fingerprint check), not eagerly here.
+                break;
         }
     }
 
@@ -104,6 +144,7 @@ public sealed partial class DaprLifecycleOrchestrator(
     {
         await GeneratorActorProxy(name).StopAsync();
         await ConnectorActorProxy(name).StopAsync();
+        ingressRegistry.Remove(name);
     }
 
     private static IGeneratorActor GeneratorActorProxy(string sourceName) =>
@@ -210,16 +251,32 @@ public sealed partial class DaprLifecycleOrchestrator(
 /// </summary>
 public static class SourceKindDispatch
 {
-    public enum ActorKind { Generator, Connector }
+    /// <summary>Plan 008 W4c added <see cref="Ingest"/> as a genuine third case (not folded into
+    /// <see cref="Connector"/>) — an ingest-kind source has no actor at all, so callers that used to
+    /// assume "not Generator means Connector" (e.g. the old binary <see cref="Classify"/>) MUST switch
+    /// on all three values explicitly now; see <see cref="Lifecycle.DaprLifecycleOrchestrator.NotifySourceChangedAsync"/>
+    /// and <see cref="Facades.DaprConnectorStatusFacade"/> for the two call sites this mattered for.</summary>
+    public enum ActorKind { Generator, Connector, Ingest }
 
     /// <summary>Null/empty/"generator" → <see cref="ActorKind.Generator"/> (the pre-006 default —
     /// existing sources with no <see cref="SourceDefinition.Kind"/> set at all deserialize with an empty
     /// string before the additive default kicks in, so empty is treated identically to "generator", not
-    /// as an error). Every other value (url/file/folder/grpc, or any future kind) →
-    /// <see cref="ActorKind.Connector"/> — this dispatch is deliberately NOT an exhaustive switch over
-    /// <see cref="SourceKinds"/>' known constants, so a not-yet-invented connector kind still routes to
-    /// <see cref="IConnectorActor"/> (which is itself responsible for rejecting a kind it doesn't know how
-    /// to run) rather than silently falling through to the generator path.</summary>
-    public static ActorKind Classify(string? kind) =>
-        string.IsNullOrEmpty(kind) || kind == SourceKinds.Generator ? ActorKind.Generator : ActorKind.Connector;
+    /// as an error). <see cref="SourceKinds.Ingest"/> → <see cref="ActorKind.Ingest"/> (plan 008 W4c —
+    /// no actor at all; see <see cref="Ingest.DaprIngressFacade"/>). Every other value (url/file/folder/
+    /// grpc, or any future kind) → <see cref="ActorKind.Connector"/> — this dispatch is deliberately NOT
+    /// an exhaustive switch over every <see cref="SourceKinds"/> constant, so a not-yet-invented
+    /// connector-shaped kind still routes to <see cref="IConnectorActor"/> (which is itself responsible
+    /// for rejecting a kind it doesn't know how to run) rather than silently falling through to the
+    /// generator path. <see cref="SourceKinds.Ingest"/> is checked explicitly, ahead of that catch-all,
+    /// specifically so it does NOT fall into the connector bucket — see the defect this fixed, noted in
+    /// <see cref="Facades.DaprConnectorStatusFacade"/>'s doc comment.</summary>
+    public static ActorKind Classify(string? kind)
+    {
+        if (string.IsNullOrEmpty(kind) || kind == SourceKinds.Generator)
+        {
+            return ActorKind.Generator;
+        }
+
+        return kind == SourceKinds.Ingest ? ActorKind.Ingest : ActorKind.Connector;
+    }
 }
