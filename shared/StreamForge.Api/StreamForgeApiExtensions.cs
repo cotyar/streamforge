@@ -179,7 +179,7 @@ public static class StreamForgeApiExtensions
         app.MapAuthEndpoints();
         app.MapSourcesEndpoints();
         app.MapPipelinesEndpoints();
-        app.MapTablesEndpoints();
+        app.MapTablesEndpoints(options);
         app.MapUsersEndpoints();
         app.MapConfigEndpoints();
         app.MapChatEndpoints();

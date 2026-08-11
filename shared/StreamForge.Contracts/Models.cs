@@ -85,6 +85,12 @@ public sealed class PipelineDefinition
     [Id(9)] public List<string> Tags { get; set; } = [];
     /// <summary>User-editable free-form key-value annotations.</summary>
     [Id(10)] public Dictionary<string, string> Metadata { get; set; } = [];
+
+    /// <summary>Plan 008: real leaf source names this pipeline reads, from the last successful compile —
+    /// the pipeline-side counterpart of TableDefinition.StreamInputs/TableInputs, and what makes lineage
+    /// readable without a compile round-trip (POST /api/pipelines/validate is Editor-gated, a lineage view
+    /// is not). Derived, never user-editable; empty until the SQL compiles.</summary>
+    [Id(11)] public List<string> SourceNames { get; set; } = [];
 }
 
 /// <summary>One emitted result row. Values are primitives only (string/double/long/bool/null).</summary>

@@ -146,6 +146,8 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         def.CreatedAtMs = now;
         def.UpdatedAtMs = now;
 
+        ApplyPipelineCompileResult(def, SqlCompiler.Compile(def.Sql, BuildStreamSchemas()));
+
         state.Pipelines.Add(def);
         await orchestrator.PublishLifecycleAsync(def.Id, "created", def.Status);
         return def;
@@ -162,12 +164,19 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         var sqlChanged = existing.Sql != def.Sql;
         var wasRunning = existing.Status == PipelineStatus.Running;
 
+        // Compile-check against the prospective SQL before mutating `existing` — draft-friendly like
+        // tables' CompileTableSql/ApplyCompileResult pair: never blocks the update on its own, only
+        // populates/clears SourceNames. Mirrors RegistryGrain.UpdatePipelineAsync (plan 008 W5).
+        var compileResult = SqlCompiler.Compile(def.Sql, BuildStreamSchemas());
+
         existing.Name = def.Name;
         existing.Description = def.Description;
         existing.Sql = def.Sql;
         existing.Tags = def.Tags;
         existing.Metadata = def.Metadata;
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        ApplyPipelineCompileResult(existing, compileResult);
 
         if (sqlChanged && wasRunning)
         {
@@ -510,6 +519,12 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         var tableSchemas = BuildTableSchemas(excludeTableId);
         return SqlCompiler.CompileTable(sql, streamSchemas, tableSchemas);
     }
+
+    /// <summary>Plan 008 W5: stores SourceNames from a pipeline compile result when it compiles; leaves it
+    /// empty otherwise — the pipeline-side counterpart of <see cref="ApplyCompileResult"/> below (tables'
+    /// StreamInputs/TableInputs). Mirrors RegistryGrain's identically-named helper.</summary>
+    private static void ApplyPipelineCompileResult(PipelineDefinition def, CompileResult result) =>
+        def.SourceNames = result.Ok ? result.SourceNames.ToList() : [];
 
     private static void ApplyCompileResult(TableDefinition def, TableCompileResult result)
     {

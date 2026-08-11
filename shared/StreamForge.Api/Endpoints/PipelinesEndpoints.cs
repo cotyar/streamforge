@@ -129,6 +129,21 @@ public static class PipelinesEndpoints
             return Results.File(Encoding.UTF8.GetBytes(protoText), "text/plain; charset=utf-8", schema.FileProto.Name);
         }).RequireAuthorization("Viewer");
 
+        // Plan 008 W5: lineage + execution-plan view for the console's React Flow page. Always the
+        // logical view (Physical: false) — pipelines have no partitioned stage/edge dataflow graph, see
+        // PlanEndpointsLogic's class doc. Recompiled fresh every call; never persisted.
+        group.MapGet("/{id}/plan", async (string id, ICatalogFacade registry) =>
+        {
+            var def = await registry.GetPipelineAsync(id);
+            if (def is null)
+            {
+                return Results.NotFound();
+            }
+
+            var schemas = await BuildSchemasAsync(registry);
+            return Results.Ok(PlanEndpointsLogic.BuildPipelinePlan(def, schemas));
+        }).RequireAuthorization("Viewer");
+
         group.MapGet("/{id}/results", async (string id, int? limit, IPipelineReadFacade pipelines) =>
             Results.Ok(await pipelines.GetRecentResultsAsync(id, limit ?? 100))
         ).RequireAuthorization("Viewer");

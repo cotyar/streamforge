@@ -11,7 +11,7 @@ namespace StreamForge.Api;
 
 public static class TablesEndpoints
 {
-    public static void MapTablesEndpoints(this WebApplication app)
+    public static void MapTablesEndpoints(this WebApplication app, StreamForgeApiOptions options)
     {
         var group = app.MapGroup("/api/tables");
 
@@ -150,6 +150,24 @@ public static class TablesEndpoints
                 result.OutputSchema?.Fields.Select(f => new FieldDefDto(f.Key, f.Value.ToString())).ToList() ?? []));
         }).RequireAuthorization("Editor");
 
+        // Plan 008 W5: lineage + execution-plan view for the console's React Flow page. Physical: true
+        // only for a Parallelism >= 2 table on the Orleans flavor whose plan shape supports partitioning
+        // (see PlanEndpointsLogic's class doc for the full degradation matrix) — otherwise the logical
+        // view (planSummary + inputs) with an explanatory UnavailableReason. Recompiled fresh every call
+        // (following OrleansArrangementMetaFacade.GetArrangementsAsync's precedent); never persisted.
+        group.MapGet("/{id}/plan", async (string id, ICatalogFacade registry) =>
+        {
+            var def = await registry.GetTableAsync(id);
+            if (def is null)
+            {
+                return Results.NotFound();
+            }
+
+            var streamSchemas = await BuildStreamSchemasAsync(registry);
+            var tableSchemas = await BuildTableSchemasAsync(registry, excludeTableId: def.Id);
+            return Results.Ok(PlanEndpointsLogic.BuildTablePlan(def, streamSchemas, tableSchemas, options.Flavor));
+        }).RequireAuthorization("Viewer");
+
         group.MapGet("/{id}/rows", async (string id, int? limit, int? offset, ICatalogFacade registry, ITableReadFacade tables) =>
         {
             var def = await registry.GetTableAsync(id);
@@ -277,11 +295,15 @@ public static class TablesEndpoints
         return schemas;
     }
 
-    private static async Task<Dictionary<string, SourceSchema>> BuildTableSchemasAsync(ICatalogFacade registry)
+    // excludeTableId (plan 008 W5, additive/optional — default null keeps the pre-existing /validate
+    // call site unchanged): the /{id}/plan endpoint recompiles an EXISTING table's SQL, so its own
+    // OutputFields shouldn't appear as a candidate FROM/JOIN target for itself — mirrors
+    // RegistryGrain.CompileTableSql/BuildTableSchemas's excludeTableId parameter for updates.
+    private static async Task<Dictionary<string, SourceSchema>> BuildTableSchemasAsync(ICatalogFacade registry, string? excludeTableId = null)
     {
         var tables = await registry.GetTablesAsync();
         var schemas = new Dictionary<string, SourceSchema>();
-        foreach (var t in tables.Where(t => t.OutputFields.Count > 0))
+        foreach (var t in tables.Where(t => t.Id != excludeTableId && t.OutputFields.Count > 0))
         {
             var fields = t.OutputFields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type));
             schemas[t.Name] = new SourceSchema(t.Name, fields);

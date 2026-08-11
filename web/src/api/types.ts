@@ -184,6 +184,10 @@ export interface PipelineDefinition {
   updatedAtMs: number
   tags: Tags
   metadata: Metadata
+  /** Plan 008 W5: real leaf source names this pipeline reads, from the last successful compile — the
+   * pipeline-side counterpart of TableDefinition's streamInputs/tableInputs. Optional/additive — absent
+   * on responses from a pre-W5 backend; empty until the SQL compiles. */
+  sourceNames?: string[]
 }
 
 export interface JsonObject {
@@ -396,6 +400,56 @@ export interface TableValidateResponse {
   streamInputs: string[]
   tableInputs: string[]
   outputSchema: TableOutputField[]
+}
+
+// ============================================================================
+// Plan 008 W5: GET /api/pipelines/{id}/plan and GET /api/tables/{id}/plan — lineage + execution-plan
+// view for the console's React Flow page. Shape pinned verbatim against the backend
+// (shared/StreamForge.Api/Dtos.cs's ExecutionPlanResponse/PlanStageDto/PlanEdgeDto/PlanStageInEdgeDto) —
+// do not rename fields without updating both sides. `physical` is true only when `stages`/`edges` carry
+// a real compiled stage/edge graph (a parallelism >= 2 table on the Orleans flavor whose plan shape
+// supports partitioning); otherwise they're empty arrays and `unavailableReason` explains why. A
+// pipeline's plan is ALWAYS the logical view (`physical: false`) — pipelines have no partitioned
+// dataflow graph concept at all.
+// ============================================================================
+
+export interface PlanStageInEdge {
+  edgeId: number
+  role: string
+}
+
+/** kind mirrors StreamForge.Engine.Dataflow.TableStageKind: 'Ingest' | 'Join' | 'SemiAnti' | 'Unnest' |
+ * 'FilterProject' | 'Reduce' | 'LatestBy'. */
+export interface PlanStage {
+  stageId: number
+  kind: string
+  alias: string
+  inEdges: PlanStageInEdge[]
+}
+
+/** mode mirrors StreamForge.Engine.Dataflow.TableEdgeMode: 'Local' | 'HashPartition' | 'Broadcast' |
+ * 'Gather'. fromStageId/toStageId == -1 mean "external input" / "terminal output" respectively, same as
+ * the engine type. arrangeKeyFields is null for every non-arrangeable edge. */
+export interface PlanEdge {
+  edgeId: number
+  fromStageId: number
+  toStageId: number
+  role: string
+  mode: string
+  externalInputNames: string[]
+  arrangeKeyFields: string[] | null
+}
+
+export interface ExecutionPlanResponse {
+  planSummary: string | null
+  /** pipeline: sourceNames; table: streamInputs ∪ tableInputs. Populated whenever the SQL compiles,
+   * independent of `physical`. */
+  inputs: string[]
+  stages: PlanStage[]
+  edges: PlanEdge[]
+  parallelism: number
+  physical: boolean
+  unavailableReason?: string | null
 }
 
 // SignalR hub `/hubs/stream` (tables) — client→server: SubscribeTable(name),

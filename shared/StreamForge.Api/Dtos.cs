@@ -79,3 +79,49 @@ public sealed record TableRowsResponse(IReadOnlyList<TableRowDto> Rows, int Tota
 // row-identity key from it (TableGroupKeyExtractor + RowKeyCodec), so the client never needs to know
 // whether/how a table's GROUP BY identity was derived.
 public sealed record HistoryLookupRequest(Dictionary<string, object?> Row);
+
+// ============================================================================
+// Plan 008 W5: GET /api/pipelines/{id}/plan and GET /api/tables/{id}/plan — lineage + execution-plan
+// DTOs. Shape pinned verbatim for the console's React Flow lineage/plan page (a concurrent agent codes
+// against this exact JSON — do not rename fields). See PlanEndpointsLogic for how these are built.
+// ============================================================================
+
+/// <summary>One inbound edge reference on a <see cref="PlanStageDto"/> — just enough (edge id + role)
+/// for the UI to draw the arrow into this stage; the edge's own endpoints/mode/etc. live on the matching
+/// entry in <see cref="ExecutionPlanResponse.Edges"/> (looked up by <see cref="EdgeId"/>).</summary>
+public sealed record PlanStageInEdgeDto(int EdgeId, string Role);
+
+/// <summary>One node in a table's partitioned dataflow graph — projected 1:1 from
+/// <see cref="StreamForge.Engine.Dataflow.TableStageDescriptor"/> (Kind stringified via ToString(), same
+/// PascalCase-enum-as-string convention the rest of this API's DTOs use, e.g. TableSearchMode).</summary>
+public sealed record PlanStageDto(int StageId, string Kind, string Alias, IReadOnlyList<PlanStageInEdgeDto> InEdges);
+
+/// <summary>One directed edge in a table's partitioned dataflow graph — projected 1:1 from
+/// <see cref="StreamForge.Engine.Dataflow.TableEdgeDescriptor"/>. FromStageId/ToStageId == -1 have the
+/// same "external input" / "terminal output" meaning as the engine type. ArrangeKeyFields is null for
+/// every non-arrangeable edge.</summary>
+public sealed record PlanEdgeDto(
+    int EdgeId,
+    int FromStageId,
+    int ToStageId,
+    string Role,
+    string Mode,
+    IReadOnlyList<string> ExternalInputNames,
+    IReadOnlyList<string>? ArrangeKeyFields);
+
+/// <summary>GET /api/pipelines/{id}/plan and GET /api/tables/{id}/plan response. <see cref="Physical"/>
+/// is true only when <see cref="Stages"/>/<see cref="Edges"/> carry a real compiled stage/edge graph
+/// (a Parallelism &gt;= 2 table on the Orleans flavor whose plan shape supports partitioning); otherwise
+/// they're empty and <see cref="UnavailableReason"/> explains why (a pipeline — no partitioned dataflow
+/// concept at all; a Parallelism == 1 table — the classic single-grain path; the Dapr flavor —
+/// partitioned execution is Orleans-only, decision D-F; or SQL that doesn't currently compile).
+/// <see cref="Inputs"/> is always populated when the SQL compiles (pipeline: SourceNames; table:
+/// StreamInputs ∪ TableInputs), independent of Physical.</summary>
+public sealed record ExecutionPlanResponse(
+    string? PlanSummary,
+    IReadOnlyList<string> Inputs,
+    IReadOnlyList<PlanStageDto> Stages,
+    IReadOnlyList<PlanEdgeDto> Edges,
+    int Parallelism,
+    bool Physical,
+    string? UnavailableReason);
