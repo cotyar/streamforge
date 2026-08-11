@@ -81,6 +81,43 @@ public sealed record TableRowsResponse(IReadOnlyList<TableRowDto> Rows, int Tota
 public sealed record HistoryLookupRequest(Dictionary<string, object?> Row);
 
 // ============================================================================
+// Plan 008 W4: client-push ingress. POST /api/sources/{name}/events (Editor) and
+// GET /api/sources/{name}/ingest (Viewer). Shapes pinned verbatim — concurrent agents code the
+// backend, the gRPC service and the SPA card against exactly this JSON. Semantics live on the
+// contracts side (StreamForge.Contracts/IngestModels.cs); these are the wire shapes only.
+// ============================================================================
+
+/// <summary>POST body. Deliberately NOT the frozen SourceEventsEnvelope — that is an internal
+/// transport shape and must not become a public request contract. <paramref name="Partial"/> admits
+/// the valid rows of a batch that has invalid ones; the default fails the whole batch instead.</summary>
+public sealed record IngestEventsRequest(List<Dictionary<string, object?>> Events, bool Partial = false);
+
+/// <summary>202 body. Success is "buffered", never "processed" — see IngestModels.cs's header on why
+/// no honest 200 exists here. Dropped is non-zero only under DropNewest/DropOldest.</summary>
+public sealed record IngestAcceptedResponse(int Accepted, int Dropped, int Invalid, int DepthRows, int CapacityRows);
+
+/// <summary>Body for 400/409/413/429. <paramref name="RetryAfterMs"/> is 0 except on 429, where it
+/// mirrors the Retry-After header (which is whole seconds clamped to [1,30]).</summary>
+public sealed record IngestErrorResponse(string Error, int RetryAfterMs, IReadOnlyList<string> RowErrors);
+
+/// <summary>GET /api/sources/{name}/ingest. 404 unknown source, 204 source exists but is not
+/// ingest-kind, 200 otherwise — reusing DecideStatusOutcome's existing three-way convention.
+/// <paramref name="DownstreamDropped"/> is the second loss point (the transport's own drops), exposed
+/// so it is visible rather than discovered later as missing rows.</summary>
+public sealed record IngestStatusResponse(
+    string Policy,
+    int CapacityRows,
+    int DepthRows,
+    int MaxBatchRows,
+    long TotalAccepted,
+    long TotalRejected,
+    long TotalDropped,
+    long TotalInvalid,
+    long TotalPublished,
+    long DownstreamDropped,
+    long LastPushMs);
+
+// ============================================================================
 // Plan 008 W5: GET /api/pipelines/{id}/plan and GET /api/tables/{id}/plan — lineage + execution-plan
 // DTOs. Shape pinned verbatim for the console's React Flow lineage/plan page (a concurrent agent codes
 // against this exact JSON — do not rename fields). See PlanEndpointsLogic for how these are built.

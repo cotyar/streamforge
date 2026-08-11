@@ -14,6 +14,9 @@ public static class SourceKinds
     public const string File = "file";
     public const string Folder = "folder";
     public const string Grpc = "grpc";
+    /// <summary>Plan 008 W4: client-push ingress. The only kind that is not pull-based — there is no
+    /// connector and no timer; rows arrive through IIngressFacade. See <see cref="IngestConfig"/>.</summary>
+    public const string Ingest = "ingest";
 
     /// <summary>The masked placeholder for secrets-lite values (D-H).</summary>
     public const string SecretMask = "***";

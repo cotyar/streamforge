@@ -64,6 +64,9 @@ public sealed class SourceDefinition
     [Id(8)] public string Kind { get; set; } = SourceKinds.Generator;
     /// <summary>Connector configuration; null for generator-kind sources (plan 006).</summary>
     [Id(9)] public ConnectorConfig? Connector { get; set; }
+    /// <summary>Client-push ingress configuration (plan 008 W4); non-null only for
+    /// <see cref="SourceKinds.Ingest"/> sources.</summary>
+    [Id(10)] public IngestConfig? Ingest { get; set; }
 }
 
 [GenerateSerializer]

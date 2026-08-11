@@ -39,13 +39,15 @@ export interface SourceDefinition {
   kind?: SourceKind
   /** Connector configuration; absent for generator-kind sources (plan 006). */
   connector?: ConnectorConfig
+  /** Client-push ingress config (plan 008 W4); present only for 'ingest'-kind sources. */
+  ingest?: IngestConfig
 }
 
 // ============================================================================
 // Plan 006: ingestion connectors. Secret values (URL header values, gRPC password/token) read
 // back as the mask '***'; sending '***' on write means "keep the stored value".
 // ============================================================================
-export type SourceKind = 'generator' | 'url' | 'file' | 'folder' | 'grpc'
+export type SourceKind = 'generator' | 'url' | 'file' | 'folder' | 'grpc' | 'ingest'
 export const SECRET_MASK = '***'
 export type FileFormat = 'ndjson' | 'json' | 'csv'
 
@@ -530,3 +532,62 @@ export interface ChatResponse {
 /** Verbatim 503 body when Gemini:ApiKey/GEMINI_API_KEY is unset — match this text, not just the status. */
 export const CHAT_NOT_CONFIGURED_MESSAGE =
   'AI chat is not configured — set GEMINI_API_KEY (or Gemini:ApiKey) and restart.'
+
+// ============================================================================
+// Plan 008 W4: client-push ingress. Mirrors shared/StreamForge.Api/Dtos.cs's
+// IngestEventsRequest/IngestAcceptedResponse/IngestErrorResponse/IngestStatusResponse and
+// StreamForge.Contracts/IngestModels.cs's IngestConfig.
+//
+// NOTE the casing: the backend serializes enums as PascalCase strings (JsonStringEnumConverter with
+// no naming policy), exactly like TableSearchMode and TablePersistenceMode. Lowercasing these here
+// desynchronizes the UI from the server on every save.
+// ============================================================================
+
+export type IngressOverflowPolicy = 'Reject' | 'Block' | 'DropNewest' | 'DropOldest' | 'Inline'
+
+export interface IngestConfig {
+  policy: IngressOverflowPolicy
+  capacityRows: number
+  /** Only meaningful for 'Block'; server-capped at 30s. */
+  maxWaitMs: number
+  maxBatchRows: number
+  rejectUnknownFields: boolean
+}
+
+/** POST /api/sources/{name}/events. Success is 202 "buffered", never 200. */
+export interface IngestEventsRequest {
+  events: Record<string, unknown>[]
+  /** Admit the valid rows of a batch that has invalid ones; default fails the whole batch. */
+  partial?: boolean
+}
+
+export interface IngestAcceptedResponse {
+  accepted: number
+  dropped: number
+  invalid: number
+  depthRows: number
+  capacityRows: number
+}
+
+/** 400/409/413/429 body. retryAfterMs is 0 except on 429. */
+export interface IngestErrorResponse {
+  error: string
+  retryAfterMs: number
+  rowErrors: string[]
+}
+
+/** GET /api/sources/{name}/ingest — 404 unknown, 204 not ingest-kind, 200 otherwise.
+ *  downstreamDropped is the SECOND loss point (the transport's own drops), surfaced deliberately. */
+export interface IngestStatusResponse {
+  policy: IngressOverflowPolicy
+  capacityRows: number
+  depthRows: number
+  maxBatchRows: number
+  totalAccepted: number
+  totalRejected: number
+  totalDropped: number
+  totalInvalid: number
+  totalPublished: number
+  downstreamDropped: number
+  lastPushMs: number
+}
