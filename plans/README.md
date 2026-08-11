@@ -12,6 +12,6 @@ Written against commit `49d6979` by the improve skill (focused `plan` invocation
 | 006 | [Ingestion connectors + config import/export](006-connectors-and-config.md) | DONE (W0–W7; four real connector kinds + config import/export live on both flavors; headline cross-flavor federation — Dapr subscribed an Orleans table by id over gRPC, real rows flowing) | 005 (shared core + both flavors) |
 | 007 | [Containers + Cloud Run prep, admin app, AI control chat](007-cloudrun-admin-aichat.md) | DONE (both flavors containerized + Cloud Run-ready; admin app drove both stacks live; Gemini AI control chat on both flavors with audit-trace UI) | 005, 006 |
 
-| 008 | [REST discoverability, table joins, set operations, ingress, lineage](008-rest-joins-setops-ingress-lineage.md) | IN PROGRESS (P done; W1–W5 pending) | 005, 006, 007 |
+| 008 | [REST discoverability, table joins, set operations, ingress, lineage](008-rest-joins-setops-ingress-lineage.md) | DONE (W1–W5 landed) | 005, 006, 007 |
 
 Design tokens source of truth: `orleans/design-system/streamforge/MASTER.md`.
