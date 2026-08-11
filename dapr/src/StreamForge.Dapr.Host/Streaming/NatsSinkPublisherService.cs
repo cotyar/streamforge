@@ -45,7 +45,7 @@ public sealed class NatsSinkPublisherService(
 {
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(15);
 
-    private sealed record EntrySinks(string Signature, List<NatsSinkClient> Clients);
+    private sealed record EntrySinks(string Signature, List<ISinkClient> Clients);
 
     private readonly Dictionary<string, EntrySinks> _pipelineSinks = new();
     private readonly Dictionary<string, EntrySinks> _tableSinks = new();
@@ -68,7 +68,7 @@ public sealed class NatsSinkPublisherService(
             }
         } while (await timer.WaitForNextTickAsync(stoppingToken));
 
-        List<NatsSinkClient> toDispose;
+        List<ISinkClient> toDispose;
         lock (_gate)
         {
             toDispose = [.. _pipelineSinks.Values.SelectMany(e => e.Clients), .. _tableSinks.Values.SelectMany(e => e.Clients)];
@@ -100,11 +100,11 @@ public sealed class NatsSinkPublisherService(
         Dictionary<string, EntrySinks> map, IEnumerable<(string Key, List<SinkSpec> Sinks)> running, string entityKind)
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        var toDisposeOld = new List<NatsSinkClient>();
+        var toDisposeOld = new List<ISinkClient>();
 
         foreach (var (key, sinks) in running)
         {
-            var active = SinkSelection.ActiveNats(sinks);
+            var active = SinkSelection.Active(sinks);
             if (active.Count == 0)
             {
                 continue;
@@ -148,11 +148,13 @@ public sealed class NatsSinkPublisherService(
         }
     }
 
-    private NatsSinkClient NewClient(SinkSpec spec, string entityKind, string entityName) =>
-        new(spec.Nats!, entityKind, entityName, (subject, ex) => logger.LogWarning(
+    /// <summary>Plan 010: see the Orleans twin — the sink's KIND selects the client implementation, and
+    /// SinkSelection.Active guarantees a registered transport exists for it.</summary>
+    private ISinkClient NewClient(SinkSpec spec, string entityKind, string entityName) =>
+        SinkTransports.Find(spec.Kind)!.Create(spec, entityKind, entityName, (destination, ex) => logger.LogWarning(
             ex,
-            "NATS sink publish failed for {EntityKind} '{EntityName}' subject '{Subject}' — the {EntityKindRepeat} itself keeps running; this sink is dropping messages until the broker/credentials/subject are fixed.",
-            entityKind, entityName, subject, entityKind));
+            "{Kind} sink publish failed for {EntityKind} '{EntityName}' destination '{Destination}' — the {EntityKindRepeat} itself keeps running; this sink is dropping messages until the broker/credentials/destination are fixed.",
+            spec.Kind, entityKind, entityName, destination, entityKind));
 
     // ------------------------------------------------------------------
     // Topic dispatch (called from StreamingRuntimeSetup — see this class's own doc for why the two
@@ -164,7 +166,7 @@ public sealed class NatsSinkPublisherService(
     /// <see cref="NatsPipelineRowMessage"/>'s doc for why per-row rather than per-batch.</summary>
     public async Task OnPipelineResultsAsync(PipelineResultsEnvelope envelope)
     {
-        List<NatsSinkClient>? clients;
+        List<ISinkClient>? clients;
         lock (_gate)
         {
             _pipelineSinks.TryGetValue(envelope.PipelineId, out var entry);
@@ -199,7 +201,7 @@ public sealed class NatsSinkPublisherService(
     /// batch seq on this flavor, unlike Orleans — see <see cref="NatsTableDeltaMessage"/>'s doc).</summary>
     public async Task OnTableDeltaAsync(TableDeltaEnvelope envelope)
     {
-        List<NatsSinkClient>? clients;
+        List<ISinkClient>? clients;
         lock (_gate)
         {
             _tableSinks.TryGetValue(envelope.Table, out var entry);

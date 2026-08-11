@@ -7,6 +7,7 @@ using StreamForge.AppCore.Connectors.Mapping;
 using StreamForge.AppCore.Connectors.OpenApi;
 using StreamForge.AppCore.Connectors.Scheduling;
 using StreamForge.AppCore.Ingest;
+using StreamForge.AppCore.Transports;
 
 namespace StreamForge.Api;
 
@@ -19,11 +20,17 @@ namespace StreamForge.Api;
 /// </summary>
 public static class SourceValidation
 {
-    private static readonly HashSet<string> KnownKinds = new(StringComparer.Ordinal)
+    /// <summary>Kinds with a driver of their own. Message-transport kinds are NOT listed here — they come
+    /// from <see cref="InboundTransports.Kinds"/> (plan 010), so registering a transport makes its kind
+    /// valid, validated and listed in the error message below without editing this file.</summary>
+    private static readonly HashSet<string> BuiltInKinds = new(StringComparer.Ordinal)
     {
         SourceKinds.Generator, SourceKinds.Url, SourceKinds.File, SourceKinds.Folder, SourceKinds.Grpc,
-        SourceKinds.Ingest, SourceKinds.Nats,
+        SourceKinds.Ingest,
     };
+
+    private static bool IsKnownKind(string kind) =>
+        BuiltInKinds.Contains(kind) || InboundTransports.Find(kind) is not null;
 
     private static readonly HashSet<string> KnownFileFormats = new(StringComparer.Ordinal)
     {
@@ -54,9 +61,10 @@ public static class SourceValidation
             errors.Add("at least one field is required");
         }
 
-        if (!KnownKinds.Contains(def.Kind))
+        if (!IsKnownKind(def.Kind))
         {
-            errors.Add($"kind '{def.Kind}' is not recognized (expected one of: generator, url, file, folder, grpc, ingest, nats)");
+            var known = string.Join(", ", BuiltInKinds.Concat(InboundTransports.Kinds));
+            errors.Add($"kind '{def.Kind}' is not recognized (expected one of: {known})");
             return errors;
         }
 
@@ -115,13 +123,15 @@ public static class SourceValidation
             case SourceKinds.Grpc:
                 ValidateGrpc(connector, errors);
                 break;
-            case SourceKinds.Nats:
-                ValidateNats(connector, errors);
+            default:
+                // Plan 010: every message-transport kind validates itself — the rules for "is this nats
+                // config usable" live next to the code that uses it, not in a switch arm here.
+                InboundTransports.Find(def.Kind)?.Validate(def, errors);
                 break;
         }
 
-        // Schedule applies to poll-driven kinds only — grpc/nats are persistent subscriptions; their
-        // Schedule (if any) is ignored by the driver (ConnectorConfig doc comment).
+        // Schedule applies to poll-driven kinds only — grpc and the message transports are persistent
+        // subscriptions; their Schedule (if any) is ignored by the driver (ConnectorConfig doc comment).
         if (def.Kind is SourceKinds.Url or SourceKinds.File or SourceKinds.Folder)
         {
             // An absent Schedule is valid — the driver applies a documented 30 s default; only
@@ -135,10 +145,11 @@ public static class SourceValidation
             }
         }
 
-        // Mapping applies to url/file/folder AND nats (plan 009 B1 — a NATS message goes through the
-        // exact same mapping path a polled body does); grpc decodes against its own schema and never
-        // reads Connector.Mapping at all.
-        if (def.Kind is SourceKinds.Url or SourceKinds.File or SourceKinds.Folder or SourceKinds.Nats
+        // Mapping applies to url/file/folder AND every message transport (plan 009 B1 / 010 — a transport's
+        // payload goes through the exact same mapping path a polled body does, by construction: that is
+        // SubscriberCore's contract); grpc decodes against its own schema and never reads
+        // Connector.Mapping at all.
+        if ((def.Kind is SourceKinds.Url or SourceKinds.File or SourceKinds.Folder || InboundTransports.Find(def.Kind) is not null)
             && connector.Mapping is not null)
         {
             ValidateMapping(connector.Mapping, errors);
@@ -244,54 +255,8 @@ public static class SourceValidation
         }
     }
 
-    /// <summary>Plan 009 B1: kind 'nats' config validation — url + subject are required (a NATS
-    /// subscription with no server to dial or subject to listen on cannot possibly do anything); Format
-    /// must be a known connector format (same vocabulary as file/folder); JetStream, when present,
-    /// needs BOTH Stream and Durable (a durable consumer with either missing cannot be created — see
-    /// <see cref="NatsJetStreamConfig"/>'s own doc comment on why JetStream is opt-in in the first
-    /// place).</summary>
-    private static void ValidateNats(ConnectorConfig connector, List<string> errors)
-    {
-        var nats = connector.Nats;
-        if (nats is null)
-        {
-            errors.Add("kind 'nats' requires connector.nats");
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(nats.Url))
-        {
-            errors.Add("connector.nats.url is required");
-        }
-
-        if (string.IsNullOrWhiteSpace(nats.Subject))
-        {
-            errors.Add("connector.nats.subject is required");
-        }
-
-        if (!KnownFileFormats.Contains(nats.Format))
-        {
-            errors.Add($"connector.nats.format '{nats.Format}' is not recognized (expected one of: ndjson, json, csv)");
-        }
-
-        if (nats.JetStream is { } js)
-        {
-            if (string.IsNullOrWhiteSpace(js.Stream))
-            {
-                errors.Add("connector.nats.jetStream.stream is required when jetStream is set");
-            }
-
-            if (string.IsNullOrWhiteSpace(js.Durable))
-            {
-                errors.Add("connector.nats.jetStream.durable is required when jetStream is set");
-            }
-
-            if (js.MaxAckPending <= 0)
-            {
-                errors.Add("connector.nats.jetStream.maxAckPending must be > 0");
-            }
-        }
-    }
+    // Plan 010: kind 'nats' validation moved to NatsInboundTransport.Validate — see the default arm of the
+    // switch above. Every message transport owns its own rules now.
 
     /// <summary>Plan 008 W4: kind 'ingest' config validation. Capacity/MaxBatchRows just need to be
     /// positive (SourceIngressBuffer trusts them at face value); MaxWaitMs is checked against the same

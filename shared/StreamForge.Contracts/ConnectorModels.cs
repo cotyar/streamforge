@@ -25,9 +25,14 @@ public static class SourceKinds
     public const string SecretMask = "***";
 }
 
-/// <summary>Per-kind connector config container. Exactly one of Url/File/Folder/Grpc is set,
+/// <summary>Per-kind connector config container. Exactly one of Url/File/Folder/Grpc/Nats is set,
 /// matching <see cref="SourceDefinition.Kind"/>. Schedule applies to url/file/folder kinds (grpc
-/// is a persistent subscription — its Schedule is ignored). Mapping applies to url/file/folder.</summary>
+/// is a persistent subscription — its Schedule is ignored). Mapping applies to url/file/folder/nats.
+///
+/// <para>Plan 010: a new message-transport kind adds its config property here (next free
+/// <c>[Id(n)]</c>, <c>[Secret]</c> on its credential fields) and one <c>IInboundTransport</c>
+/// implementation. Nothing in SecretsMasker, the connector drivers, or the validator needs editing —
+/// see <c>InboundTransports</c>.</para></summary>
 [GenerateSerializer]
 public sealed class ConnectorConfig
 {
@@ -59,11 +64,11 @@ public sealed class NatsSubConfig
     [Id(2)] public string QueueGroup { get; set; } = "";
     /// <summary>Payload format, same vocabulary as the file/folder connectors ("ndjson" | "json" | "csv").</summary>
     [Id(3)] public string Format { get; set; } = "json";
-    [Id(4)] public string? Token { get; set; }
+    [Id(4)] [Secret] public string? Token { get; set; }
     [Id(5)] public string? Username { get; set; }
-    [Id(6)] public string? Password { get; set; }
+    [Id(6)] [Secret] public string? Password { get; set; }
     /// <summary>Contents of a .creds file, not a path — the catalog has to be portable across hosts.</summary>
-    [Id(7)] public string? Credentials { get; set; }
+    [Id(7)] [Secret] public string? Credentials { get; set; }
     /// <summary>Null (default) = core NATS subscribe: at-most-once, no cursor, nothing left behind on
     /// the server. Non-null opts into a JetStream durable consumer, which gets redelivery and acks at
     /// the price of server-side state this platform then owns.</summary>
@@ -109,10 +114,10 @@ public sealed class NatsPubConfig
     /// <summary>Subject to publish to. May contain <c>{name}</c>, replaced with the pipeline/table
     /// name, so one spec can serve a whole catalog.</summary>
     [Id(1)] public string Subject { get; set; } = "";
-    [Id(2)] public string? Token { get; set; }
+    [Id(2)] [Secret] public string? Token { get; set; }
     [Id(3)] public string? Username { get; set; }
-    [Id(4)] public string? Password { get; set; }
-    [Id(5)] public string? Credentials { get; set; }
+    [Id(4)] [Secret] public string? Password { get; set; }
+    [Id(5)] [Secret] public string? Credentials { get; set; }
 }
 
 /// <summary>Cron (5/6-field, UTC, Cronos) XOR fixed interval; IntervalMs floor is 1000 (D-E).</summary>
@@ -185,9 +190,9 @@ public sealed class GrpcSubConfig
     [Id(1)] public string EntityKey { get; set; } = "";
     /// <summary>Login for the remote's /api/auth/login (re-login on expiry). XOR Token.</summary>
     [Id(2)] public string? Username { get; set; }
-    [Id(3)] public string? Password { get; set; }
+    [Id(3)] [Secret] public string? Password { get; set; }
     /// <summary>Static bearer token alternative (no re-login possible — documented).</summary>
-    [Id(4)] public string? Token { get; set; }
+    [Id(4)] [Secret] public string? Token { get; set; }
     /// <summary>"reflection" (default) | "proto". Reflection walks the remote's v1alpha service;
     /// "proto" parses <see cref="ProtoText"/> (StreamForge-generated files only).</summary>
     [Id(5)] public string SchemaSource { get; set; } = "reflection";

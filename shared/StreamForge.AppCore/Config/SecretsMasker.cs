@@ -3,13 +3,22 @@ using StreamForge.Abstractions;
 namespace StreamForge.AppCore.Config;
 
 /// <summary>
-/// Plan 006 (D-H): secrets-lite masking for the two secret slots on a connector-kind source —
-/// <see cref="UrlPollConfig.Headers"/> VALUES and <see cref="GrpcSubConfig.Password"/> /
-/// <see cref="GrpcSubConfig.Token"/>. Secrets are stored plaintext at rest (no KMS, no encryption —
+/// Plan 006 (D-H): secrets-lite masking. Secrets are stored plaintext at rest (no KMS, no encryption —
 /// documented ceiling) and masked as <see cref="SourceKinds.SecretMask"/> ("***") on every read
 /// path (GET/list/export); a written "***" value means "keep the stored value" — see
 /// <see cref="MergeSecrets"/>, which implements that half of the contract for the PUT-replaces-
 /// whole-object GET→edit→PUT cycle.
+///
+/// <para><b>Plan 010: which values are secret is declared on the contracts, not listed here.</b> Every
+/// per-transport credential carries <see cref="SecretAttribute"/> and is found by <see cref="SecretWalk"/>,
+/// so adding a transport adds ZERO lines to this file. Before that change the same slot had to be named in
+/// three places per direction (mask / merge / has-masked), and a slot missed in any one of them leaked a
+/// plaintext credential through an export — a silent failure nobody would notice until it mattered.</para>
+///
+/// <para>Two secret shapes remain hand-written because they are collections with their own matching rules
+/// rather than plain properties, and neither multiplies with transports: <see cref="UrlPollConfig.Headers"/>
+/// (dictionary VALUES, matched by key) and <c>IngestConfig.Keys[].Hash/.Salt</c> (matched by
+/// <c>IngestKey.Id</c>).</para>
 /// </summary>
 public static class SecretsMasker
 {
@@ -40,36 +49,14 @@ public static class SecretsMasker
             }
         }
 
-        if (connector.Grpc is { } grpc)
+        // Plan 010: every per-transport credential (grpc Password/Token, nats Token/Password/Credentials,
+        // and whatever a future transport declares) is found by its [Secret] attribute rather than named
+        // here — see SecretWalk. Url.Headers stays above because its secrets are dictionary VALUES.
+        foreach (var slot in SecretWalk.Slots(connector))
         {
-            if (!string.IsNullOrEmpty(grpc.Password))
+            if (!string.IsNullOrEmpty(slot.Value))
             {
-                grpc.Password = SourceKinds.SecretMask;
-            }
-
-            if (!string.IsNullOrEmpty(grpc.Token))
-            {
-                grpc.Token = SourceKinds.SecretMask;
-            }
-        }
-
-        // Plan 009 B1: Token/Password/Credentials are secrets (a .creds file's contents are as
-        // sensitive as a password); Url/Subject/QueueGroup/Format/Username are not.
-        if (connector.Nats is { } nats)
-        {
-            if (!string.IsNullOrEmpty(nats.Token))
-            {
-                nats.Token = SourceKinds.SecretMask;
-            }
-
-            if (!string.IsNullOrEmpty(nats.Password))
-            {
-                nats.Password = SourceKinds.SecretMask;
-            }
-
-            if (!string.IsNullOrEmpty(nats.Credentials))
-            {
-                nats.Credentials = SourceKinds.SecretMask;
+                slot.Set(SourceKinds.SecretMask);
             }
         }
 
@@ -132,35 +119,15 @@ public static class SecretsMasker
             }
         }
 
-        if (connector.Grpc is { } grpc && storedConnector.Grpc is { } storedGrpc)
+        // Plan 010: the "a written *** means keep the stored value" rule, applied to every [Secret] slot
+        // reachable from the connector — the incoming and stored graphs are walked in lockstep by property
+        // name. HasStored being false means the stored graph had no corresponding object at all (e.g. the
+        // kind changed), so there is nothing to keep and the mask is left standing.
+        foreach (var slot in SecretWalk.Slots(connector, storedConnector))
         {
-            if (grpc.Password == SourceKinds.SecretMask)
+            if (slot.Value == SourceKinds.SecretMask && slot.HasStored)
             {
-                grpc.Password = storedGrpc.Password;
-            }
-
-            if (grpc.Token == SourceKinds.SecretMask)
-            {
-                grpc.Token = storedGrpc.Token;
-            }
-        }
-
-        // Plan 009 B1 — same "a written *** means keep the stored value" rule as Grpc above.
-        if (connector.Nats is { } nats && storedConnector.Nats is { } storedNats)
-        {
-            if (nats.Token == SourceKinds.SecretMask)
-            {
-                nats.Token = storedNats.Token;
-            }
-
-            if (nats.Password == SourceKinds.SecretMask)
-            {
-                nats.Password = storedNats.Password;
-            }
-
-            if (nats.Credentials == SourceKinds.SecretMask)
-            {
-                nats.Credentials = storedNats.Credentials;
+                slot.Set(slot.StoredValue);
             }
         }
 
@@ -224,18 +191,7 @@ public static class SecretsMasker
             return true;
         }
 
-        if (connector.Grpc is { } grpc && (grpc.Password == SourceKinds.SecretMask || grpc.Token == SourceKinds.SecretMask))
-        {
-            return true;
-        }
-
-        if (connector.Nats is { } nats &&
-            (nats.Token == SourceKinds.SecretMask || nats.Password == SourceKinds.SecretMask || nats.Credentials == SourceKinds.SecretMask))
-        {
-            return true;
-        }
-
-        return false;
+        return SecretWalk.Slots(connector).Any(s => s.Value == SourceKinds.SecretMask);
     }
 
     // ------------------------------------------------------------------
@@ -283,26 +239,11 @@ public static class SecretsMasker
     /// sequence exists exactly once.</summary>
     private static void MaskSinksInPlace(List<SinkSpec> sinks)
     {
-        foreach (var sink in sinks)
+        foreach (var slot in sinks.SelectMany(sink => SecretWalk.Slots(sink)))
         {
-            if (sink.Nats is not { } nats)
+            if (!string.IsNullOrEmpty(slot.Value))
             {
-                continue;
-            }
-
-            if (!string.IsNullOrEmpty(nats.Token))
-            {
-                nats.Token = SourceKinds.SecretMask;
-            }
-
-            if (!string.IsNullOrEmpty(nats.Password))
-            {
-                nats.Password = SourceKinds.SecretMask;
-            }
-
-            if (!string.IsNullOrEmpty(nats.Credentials))
-            {
-                nats.Credentials = SourceKinds.SecretMask;
+                slot.Set(SourceKinds.SecretMask);
             }
         }
     }
@@ -326,24 +267,12 @@ public static class SecretsMasker
 
         for (var i = 0; i < clone.Count && i < stored.Count; i++)
         {
-            if (clone[i].Nats is not { } nats || stored[i].Nats is not { } storedNats)
+            foreach (var slot in SecretWalk.Slots(clone[i], stored[i]))
             {
-                continue;
-            }
-
-            if (nats.Token == SourceKinds.SecretMask)
-            {
-                nats.Token = storedNats.Token;
-            }
-
-            if (nats.Password == SourceKinds.SecretMask)
-            {
-                nats.Password = storedNats.Password;
-            }
-
-            if (nats.Credentials == SourceKinds.SecretMask)
-            {
-                nats.Credentials = storedNats.Credentials;
+                if (slot.Value == SourceKinds.SecretMask && slot.HasStored)
+                {
+                    slot.Set(slot.StoredValue);
+                }
             }
         }
 
@@ -355,6 +284,5 @@ public static class SecretsMasker
     /// sources: decide whether an imported/PUT-ed Sinks list needs <see cref="MergeSinkSecrets"/>
     /// applied before comparing/persisting it.</summary>
     public static bool HasMaskedSinkValues(List<SinkSpec>? sinks) =>
-        (sinks ?? []).Any(s => s.Nats is { } n &&
-            (n.Token == SourceKinds.SecretMask || n.Password == SourceKinds.SecretMask || n.Credentials == SourceKinds.SecretMask));
+        (sinks ?? []).SelectMany(s => SecretWalk.Slots(s)).Any(slot => slot.Value == SourceKinds.SecretMask);
 }

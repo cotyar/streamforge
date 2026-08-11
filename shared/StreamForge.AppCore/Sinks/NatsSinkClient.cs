@@ -37,7 +37,7 @@ namespace StreamForge.AppCore.Sinks;
 /// callback way), and this type follows that same convention rather than being the first file in the
 /// project to add one.</para>
 /// </summary>
-public sealed class NatsSinkClient : IAsyncDisposable
+public sealed class NatsSinkClient : ISinkClient
 {
     /// <summary>Upper bound on how long ONE publish attempt may take, including any time
     /// <see cref="NatsConnection"/> would otherwise spend waiting for a disconnected connection to come

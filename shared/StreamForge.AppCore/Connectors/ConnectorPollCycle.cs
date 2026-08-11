@@ -94,6 +94,13 @@ public static class ConnectorPollCycle
     public static PollCycleResult ExecuteNatsMessage(SourceDefinition def, string format, string payloadText, DedupTracker dedup, long nowMs)
         => ParseAndExtract(def, format, payloadText, dedup, nowMs);
 
+    /// <summary>Plan 010: the transport-neutral name for the call above — this path never depended on NATS
+    /// for anything, only on "a payload, in a known format", which is exactly what every message transport
+    /// hands over. <see cref="SubscriberCore"/> calls this one; <see cref="ExecuteNatsMessage"/> remains as
+    /// the original name it shipped under.</summary>
+    public static PollCycleResult ExecuteMessage(SourceDefinition def, string format, string payloadText, DedupTracker dedup, long nowMs)
+        => ParseAndExtract(def, format, payloadText, dedup, nowMs);
+
     private static PollCycleResult ParseAndExtract(SourceDefinition def, string format, string text, DedupTracker dedup, long nowMs)
     {
         List<JsonElement> items;

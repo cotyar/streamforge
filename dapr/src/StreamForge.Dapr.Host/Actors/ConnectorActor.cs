@@ -7,7 +7,7 @@ using StreamForge.Abstractions;
 using StreamForge.Abstractions.Streaming;
 using StreamForge.AppCore.Connectors;
 using StreamForge.AppCore.Connectors.Grpc;
-using StreamForge.AppCore.Connectors.Nats;
+using StreamForge.AppCore.Transports;
 using StreamForge.AppCore.Connectors.Polling;
 using StreamForge.AppCore.Connectors.Scheduling;
 using StreamForge.Dapr.Host.Streaming;
@@ -81,7 +81,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
     private ConnectorActorState _state = new();
     private bool _timerArmed;
     private CancellationTokenSource? _grpcCts;
-    private CancellationTokenSource? _natsCts;
+    private CancellationTokenSource? _transportCts;
 
     protected override async Task OnActivateAsync()
     {
@@ -97,9 +97,9 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
             {
                 StartGrpcSubscriber(_state.Def);
             }
-            else if (_state.Def.Kind == SourceKinds.Nats)
+            else if (InboundTransports.Find(_state.Def.Kind) is { } transport)
             {
-                StartNatsSubscriber(_state.Def);
+                StartTransportSubscriber(_state.Def, transport);
             }
             else
             {
@@ -112,7 +112,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
     {
         await DisarmTimerIfArmedAsync();
         StopGrpcSubscriberIfRunning();
-        StopNatsSubscriberIfRunning();
+        StopTransportSubscriberIfRunning();
 
         _state.Def = def;
         _state.Running = def.Enabled;
@@ -129,9 +129,10 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
             return;
         }
 
-        if (def.Kind == SourceKinds.Nats)
+        // Plan 010: any registered message transport, not a hardcoded nats branch.
+        if (InboundTransports.Find(def.Kind) is { } transport)
         {
-            StartNatsSubscriber(def);
+            StartTransportSubscriber(def, transport);
             return;
         }
 
@@ -150,7 +151,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
     {
         await DisarmTimerIfArmedAsync();
         StopGrpcSubscriberIfRunning();
-        StopNatsSubscriberIfRunning();
+        StopTransportSubscriberIfRunning();
         _state.Running = false;
         await SaveAsync();
     }
@@ -437,20 +438,14 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
     }
 
     // ------------------------------------------------------------------
-    // nats kind: persistent background subscriber (no timer) — plan 009 B1
+    // message-transport kinds: persistent background subscriber (no timer) — plan 009 B1, generalized
+    // over IInboundTransport in plan 010
     // ------------------------------------------------------------------
 
-    private void StartNatsSubscriber(SourceDefinition def)
+    private void StartTransportSubscriber(SourceDefinition def, IInboundTransport transport)
     {
-        var config = def.Connector?.Nats;
-        if (config is null)
-        {
-            logger.LogWarning("ConnectorActor[{Source}]: kind 'nats' but no nats config — not starting subscriber.", def.Name);
-            return;
-        }
-
         var cts = new CancellationTokenSource();
-        _natsCts = cts;
+        _transportCts = cts;
         var name = def.Name;
 
         // Closure-local dedup tracker seeded from the persisted snapshot at subscribe-start — the
@@ -460,13 +455,13 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         // ad hoc marshal point.
         var dedup = new DedupTracker(_state.DedupKeys);
 
-        var core = new NatsSubscriberCore(
-            def, dedup,
+        var core = new SubscriberCore(
+            def, transport, dedup,
             onRows: async (rows, _) =>
             {
-                // NatsSubscriberCore already ran these rows through ConnectorPollCycle.Emit (parse/
-                // extract/coerce/dedup/"_source"/"_ts" stamping) — unlike gRPC above, nothing left to do
-                // here but publish and persist the dedup snapshot.
+                // SubscriberCore already ran these rows through ConnectorPollCycle.Emit (parse/extract/
+                // coerce/dedup/"_source"/"_ts" stamping) — unlike gRPC above, nothing left to do here but
+                // publish and persist the dedup snapshot.
                 var envelope = new SourceEventsEnvelope { Source = name, Events = rows.ToList() };
                 await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, StreamingRuntimeSetup.SourcesTopic, envelope);
                 await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + name, envelope);
@@ -483,16 +478,16 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         _ = Task.Run(() => core.RunAsync(cts.Token));
     }
 
-    private void StopNatsSubscriberIfRunning()
+    private void StopTransportSubscriberIfRunning()
     {
-        if (_natsCts is null)
+        if (_transportCts is null)
         {
             return;
         }
 
-        _natsCts.Cancel();
-        _natsCts.Dispose();
-        _natsCts = null;
+        _transportCts.Cancel();
+        _transportCts.Dispose();
+        _transportCts = null;
     }
 
     private async Task RecordStatusBestEffortAsync(string sourceName, string status, string? error)

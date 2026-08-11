@@ -4,7 +4,7 @@ using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Connectors;
 using StreamForge.AppCore.Connectors.Grpc;
-using StreamForge.AppCore.Connectors.Nats;
+using StreamForge.AppCore.Transports;
 using StreamForge.AppCore.Connectors.Polling;
 using StreamForge.AppCore.Connectors.Scheduling;
 using StreamForge.Engine;
@@ -86,8 +86,8 @@ public sealed class ConnectorGrain(
     private IGrainTimer? _timer;
     private CancellationTokenSource? _grpcCts;
     private Task? _grpcTask;
-    private CancellationTokenSource? _natsCts;
-    private Task? _natsTask;
+    private CancellationTokenSource? _transportCts;
+    private Task? _transportTask;
     private DedupTracker? _dedup;
     private FileLedger? _ledger;
 
@@ -116,7 +116,7 @@ public sealed class ConnectorGrain(
         _timer?.Dispose();
         _timer = null;
         CancelGrpc();
-        CancelNats();
+        CancelTransport();
 
         ArmForKind(def, persistNextRun: true);
         await state.WriteStateAsync();
@@ -133,7 +133,7 @@ public sealed class ConnectorGrain(
         _timer?.Dispose();
         _timer = null;
         CancelGrpc();
-        CancelNats();
+        CancelTransport();
         await state.WriteStateAsync();
     }
 
@@ -265,9 +265,10 @@ public sealed class ConnectorGrain(
             return;
         }
 
-        if (def.Kind == SourceKinds.Nats)
+        // Plan 010: any registered message transport, not a hardcoded nats branch.
+        if (InboundTransports.Find(def.Kind) is { } transport)
         {
-            StartNatsSubscriber(def);
+            StartTransportSubscriber(def, transport);
             return;
         }
 
@@ -393,30 +394,28 @@ public sealed class ConnectorGrain(
         }
     }
 
-    private void StartNatsSubscriber(SourceDefinition def)
+    /// <summary>Plan 010: the driver half of a message-transport source, for ANY registered transport —
+    /// previously a nats-shaped copy of this method. <see cref="SubscriberCore"/> already runs rows through
+    /// ConnectorPollCycle (parse/extract/coerce/dedup/stamp) internally, so — unlike gRPC above — the onRows
+    /// callback here just forwards already-finished rows straight to EmitRowsAsync (its own "_source"/"_ts"
+    /// TryAdd stamping is a harmless no-op on rows that already carry both).</summary>
+    private void StartTransportSubscriber(SourceDefinition def, IInboundTransport transport)
     {
-        _ = def.Connector?.Nats
-            ?? throw new InvalidOperationException($"source '{def.Name}' has kind 'nats' but no nats config");
-
-        _natsCts?.Cancel();
-        _natsCts?.Dispose();
-        _natsCts = new CancellationTokenSource();
-        var ct = _natsCts.Token;
+        _transportCts?.Cancel();
+        _transportCts?.Dispose();
+        _transportCts = new CancellationTokenSource();
+        var ct = _transportCts.Token;
 
         var self = this.AsReference<IConnectorGrain>();
         var statusSink = this.AsReference<IConnectorStatusSink>();
 
-        // NatsSubscriberCore already runs rows through ConnectorPollCycle.Emit (parse/extract/coerce/
-        // dedup/stamp) internally, so — unlike gRPC above — the onRows callback here just forwards
-        // already-finished rows straight to EmitRowsAsync (its own "_source"/"_ts" TryAdd stamping is a
-        // harmless no-op on rows that already carry both).
-        var core = new NatsSubscriberCore(
-            def, _dedup!,
+        var core = new SubscriberCore(
+            def, transport, _dedup!,
             (rows, seq) => self.EmitRowsAsync(rows.ToList(), seq),
             (status, error) => _ = SafeReportStatusAsync(statusSink, status, error),
             onCoercionFailures: n => _ = statusSink.ReportCoercionFailuresAsync(n));
 
-        _natsTask = Task.Run(async () =>
+        _transportTask = Task.Run(async () =>
         {
             try
             {
@@ -428,23 +427,23 @@ public sealed class ConnectorGrain(
             }
             catch
             {
-                // Best-effort — NatsSubscriberCore.RunAsync already catches and status-reports every
-                // failure it can attribute to a specific reconnect attempt; anything escaping here is
-                // unexpected but must not crash the background task's thread.
+                // Best-effort — SubscriberCore.RunAsync already catches and status-reports every failure it
+                // can attribute to a specific reconnect attempt; anything escaping here is unexpected but
+                // must not crash the background task's thread.
             }
         }, CancellationToken.None);
     }
 
-    private void CancelNats()
+    private void CancelTransport()
     {
-        if (_natsCts is null)
+        if (_transportCts is null)
         {
             return;
         }
-        _natsCts.Cancel();
-        _natsCts.Dispose();
-        _natsCts = null;
-        _natsTask = null;
+        _transportCts.Cancel();
+        _transportCts.Dispose();
+        _transportCts = null;
+        _transportTask = null;
     }
 
     private static async Task SafeReportStatusAsync(IConnectorStatusSink sink, string status, string? error)

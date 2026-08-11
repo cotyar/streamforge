@@ -17,18 +17,21 @@ public static class SinkSelection
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
-    /// <summary>The subset of <paramref name="sinks"/> this publisher can act on right now: Enabled,
-    /// <c>Kind == SinkKinds.Nats</c>, and a non-null <c>Nats</c> config with a non-blank Url/Subject. A
-    /// half-filled sink (e.g. created via the API before its Url is set) is treated as "not yet
-    /// configured" — nothing to connect to — rather than as a sink that gets attempted and immediately
-    /// fails; that distinction matters because the latter would produce a spurious failure counter/log
-    /// for a sink nobody has finished setting up yet.</summary>
-    public static List<SinkSpec> ActiveNats(IEnumerable<SinkSpec>? sinks) =>
-        [.. (sinks ?? [])
-            .Where(s =>
-                s.Enabled &&
-                string.Equals(s.Kind, SinkKinds.Nats, StringComparison.OrdinalIgnoreCase) &&
-                s.Nats is { } n && !string.IsNullOrWhiteSpace(n.Url) && !string.IsNullOrWhiteSpace(n.Subject))];
+    /// <summary>The subset of <paramref name="sinks"/> the publishers can act on right now: Enabled, of a
+    /// kind some <see cref="ISinkTransport"/> is registered for, and configured enough for that transport to
+    /// connect (<see cref="ISinkTransport.IsConfigured"/> — see its doc for why a half-filled sink is
+    /// "not yet configured" rather than "attempted and failing").
+    ///
+    /// <para>Plan 010: the eligibility rule used to be spelled out here in terms of NATS' own fields, which
+    /// meant a second sink kind could not be added without editing this file. It is now the registry's
+    /// question to answer.</para></summary>
+    public static List<SinkSpec> Active(IEnumerable<SinkSpec>? sinks) =>
+        [.. (sinks ?? []).Where(s => s.Enabled && SinkTransports.Find(s.Kind) is { } t && t.IsConfigured(s))];
+
+    /// <summary>The name this filter shipped under in plan 009 B2, when NATS was the only sink kind — kept
+    /// because <c>SinkSelectionTests</c> pins it, and identical to <see cref="Active"/> in behavior. New call
+    /// sites should use <see cref="Active"/>.</summary>
+    public static List<SinkSpec> ActiveNats(IEnumerable<SinkSpec>? sinks) => Active(sinks);
 
     /// <summary>A string that is equal for two active-sink lists if and only if their content is equal —
     /// used purely as a cheap change-detector so a periodic refresh only tears down and recreates a

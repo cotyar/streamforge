@@ -39,10 +39,10 @@ public sealed class NatsPublisherService(
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(30);
 
     private sealed record PipelineSinkState(
-        string Signature, List<NatsSinkClient> Clients, StreamSubscriptionHandle<List<ResultEnvelope>> Handle);
+        string Signature, List<ISinkClient> Clients, StreamSubscriptionHandle<List<ResultEnvelope>> Handle);
 
     private sealed record TableSinkState(
-        string Signature, List<NatsSinkClient> Clients, StreamSubscriptionHandle<List<TableDeltaDto>> Handle);
+        string Signature, List<ISinkClient> Clients, StreamSubscriptionHandle<List<TableDeltaDto>> Handle);
 
     private readonly Dictionary<string, PipelineSinkState> _pipelineSinks = new();
     private readonly Dictionary<string, TableSinkState> _tableSinks = new();
@@ -104,7 +104,7 @@ public sealed class NatsPublisherService(
                 continue; // not producing output; any existing subscription is cleaned up in the sweep below.
             }
 
-            var active = SinkSelection.ActiveNats(p.Sinks);
+            var active = SinkSelection.Active(p.Sinks);
             if (active.Count == 0)
             {
                 continue;
@@ -190,7 +190,7 @@ public sealed class NatsPublisherService(
                 continue;
             }
 
-            var active = SinkSelection.ActiveNats(t.Sinks);
+            var active = SinkSelection.Active(t.Sinks);
             if (active.Count == 0)
             {
                 continue;
@@ -274,13 +274,15 @@ public sealed class NatsPublisherService(
     // Shared
     // ------------------------------------------------------------------
 
-    private NatsSinkClient NewClient(SinkSpec spec, string entityKind, string entityName) =>
-        new(spec.Nats!, entityKind, entityName, (subject, ex) => logger.LogWarning(
+    /// <summary>Plan 010: the sink's KIND decides which client type this is — SinkSelection.Active only
+    /// returns specs a registered transport claims, so the lookup below cannot miss.</summary>
+    private ISinkClient NewClient(SinkSpec spec, string entityKind, string entityName) =>
+        SinkTransports.Find(spec.Kind)!.Create(spec, entityKind, entityName, (destination, ex) => logger.LogWarning(
             ex,
-            "NATS sink publish failed for {EntityKind} '{EntityName}' subject '{Subject}' — the {EntityKind} itself keeps running; this sink is dropping messages until the broker/credentials/subject are fixed.",
-            entityKind, entityName, subject, entityKind));
+            "{Kind} sink publish failed for {EntityKind} '{EntityName}' destination '{Destination}' — the {EntityKind} itself keeps running; this sink is dropping messages until the broker/credentials/destination are fixed.",
+            spec.Kind, entityKind, entityName, destination, entityKind));
 
-    private static async Task TeardownAsync(IEnumerable<NatsSinkClient> clients)
+    private static async Task TeardownAsync(IEnumerable<ISinkClient> clients)
     {
         foreach (var c in clients)
         {
