@@ -48,5 +48,9 @@ public interface IConnectorActor : IActor
     /// the background subscriber task cannot safely write actor state directly (see this class's own
     /// reentrancy discipline doc on <see cref="ConnectorActor"/>), so persisting it has to go through
     /// this same marshal point rather than a second one.</summary>
-    Task RecordSubscriberBatchAsync(int rowCount, string status, string? error, List<string>? dedupKeys = null);
+    /// <param name="coercionFailures">Plan 009 C2: field-level coercion failures in this batch, added to
+    /// the cumulative counter. Additive with a zero default, so every pre-009 call site keeps its exact
+    /// meaning.</param>
+    Task RecordSubscriberBatchAsync(
+        int rowCount, string status, string? error, List<string>? dedupKeys = null, int coercionFailures = 0);
 }

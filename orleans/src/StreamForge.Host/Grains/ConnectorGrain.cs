@@ -25,6 +25,8 @@ public sealed class ConnectorGrainState
     public string LastStatus { get; set; } = "never";
     public string? LastError { get; set; }
     public long EventsEmittedTotal { get; set; }
+    /// <summary>Plan 009 C2: cumulative field coercion failures — see ConnectorRuntimeStatus's own doc.</summary>
+    public long CoercionFailuresTotal { get; set; }
     public int LastBatchCount { get; set; }
 }
 
@@ -40,6 +42,11 @@ public sealed class ConnectorGrainState
 public interface IConnectorStatusSink : IGrainWithStringKey
 {
     Task ReportStatusAsync(string status, string? error);
+
+    /// <summary>Plan 009 C2: accumulate coercion failures WITHOUT touching status or LastError. Separate
+    /// from ReportStatusAsync on purpose — the two would otherwise race for LastError and the counting
+    /// call, arriving second, would erase the very note the status call had just written.</summary>
+    Task ReportCoercionFailuresAsync(int count);
 }
 
 /// <summary>Key = source name. The Orleans driver for connector-kind sources (plan 006 W3A) — mirrors
@@ -141,6 +148,7 @@ public sealed class ConnectorGrain(
         LastError = state.State.LastError,
         ConsecutiveFailures = state.State.ConsecutiveFailures,
         EventsEmittedTotal = state.State.EventsEmittedTotal,
+        CoercionFailuresTotal = state.State.CoercionFailuresTotal,
         LastBatchCount = state.State.LastBatchCount,
     });
 
@@ -220,6 +228,22 @@ public sealed class ConnectorGrain(
             state.State.ConsecutiveFailures = 0;
         }
 
+        await state.WriteStateAsync();
+    }
+
+    /// <summary>Plan 009 C2: the queryable half of "counted and surfaced". The subscriber kinds (grpc,
+    /// nats) reach ConnectorRuntimeStatus only through the status channel, so without this their
+    /// coercion failures would exist as a LastError string and nowhere countable, while the polled kinds
+    /// — which report through EmitRowsAsync's cycle handler — had a real counter. A counter that is
+    /// accurate for some source kinds and silently zero for others is worse than no counter.</summary>
+    public async Task ReportCoercionFailuresAsync(int count)
+    {
+        if (count <= 0 || state.State.Def is null)
+        {
+            return;
+        }
+
+        state.State.CoercionFailuresTotal += count;
         await state.WriteStateAsync();
     }
 
@@ -365,6 +389,7 @@ public sealed class ConnectorGrain(
         {
             await SafeReportStatusAsync(
                 statusSink, "ok", $"{coercion.FailureCount} field coercion failure(s) this batch; policy={def.OnCoercionFailure}");
+            try { await statusSink.ReportCoercionFailuresAsync(coercion.FailureCount); } catch { /* best-effort, same as the status report above */ }
         }
     }
 
@@ -388,7 +413,8 @@ public sealed class ConnectorGrain(
         var core = new NatsSubscriberCore(
             def, _dedup!,
             (rows, seq) => self.EmitRowsAsync(rows.ToList(), seq),
-            (status, error) => _ = SafeReportStatusAsync(statusSink, status, error));
+            (status, error) => _ = SafeReportStatusAsync(statusSink, status, error),
+            onCoercionFailures: n => _ = statusSink.ReportCoercionFailuresAsync(n));
 
         _natsTask = Task.Run(async () =>
         {
@@ -491,9 +517,10 @@ public sealed class ConnectorGrain(
             state.State.ConsecutiveFailures = 0;
             state.State.LastStatus = "ok";
             // Plan 009 C2: a coercion failure under Null/DropRow never produces a non-null Error above
-            // (only RejectBatch does, via ConnectorPollCycle.Emit) — this is the only other channel back
-            // to ConnectorRuntimeStatus.LastError (no dedicated counter field exists on that frozen
-            // contract), so a clean cycle still surfaces a non-zero count here instead of going quiet.
+            // (only RejectBatch does, via ConnectorPollCycle.Emit). It is counted in
+            // CoercionFailuresTotal — the queryable channel — and ALSO restated in LastError so an
+            // operator reading the status line sees it without knowing to look at a counter.
+            state.State.CoercionFailuresTotal += result.CoercionFailures;
             state.State.LastError = result.CoercionFailures > 0
                 ? $"{result.CoercionFailures} field coercion failure(s) this cycle; policy={def.OnCoercionFailure}"
                 : null;

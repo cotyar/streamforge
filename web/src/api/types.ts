@@ -177,6 +177,10 @@ export interface ConnectorRuntimeStatus {
   consecutiveFailures: number
   eventsEmittedTotal: number
   lastBatchCount: number
+  /** Plan 009 C2: cumulative field coercion failures — rows or fields that would not convert to their
+   *  declared type. Under DropRow/RejectBatch these are rows that did not land, so the counter is the
+   *  queryable half of "counted and surfaced". Absent from a pre-009 backend. */
+  coercionFailuresTotal?: number
 }
 
 /** POST /api/sources/schema/mapping-validate */

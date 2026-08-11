@@ -42,6 +42,13 @@ public sealed class NatsSubscriberCore
     private readonly DedupTracker _dedup;
     private readonly Func<IReadOnlyList<Dictionary<string, object?>>, long, Task> _onRows;
     private readonly Action<string, string?> _onStatus;
+
+    /// <summary>Plan 009 C2: the COUNTING half of "counted and surfaced", separate from
+    /// <see cref="_onStatus"/> on purpose. Folding a count into the status callback would have widened a
+    /// shape several call sites and tests already depend on, to carry a value that is zero on every
+    /// status transition and non-zero only here. Optional: a driver that does not count still gets the
+    /// note through the status channel.</summary>
+    private readonly Action<int>? _onCoercionFailures;
     private readonly Func<INatsMessageSource> _sourceFactory;
 
     public NatsSubscriberCore(
@@ -49,13 +56,15 @@ public sealed class NatsSubscriberCore
         DedupTracker dedup,
         Func<IReadOnlyList<Dictionary<string, object?>>, long, Task> onRows,
         Action<string, string?> onStatus,
-        Func<INatsMessageSource>? sourceFactory = null)
+        Func<INatsMessageSource>? sourceFactory = null,
+        Action<int>? onCoercionFailures = null)
     {
         _def = def ?? throw new ArgumentNullException(nameof(def));
         _config = def.Connector?.Nats ?? throw new InvalidOperationException($"source '{def.Name}' has kind 'nats' but no nats config");
         _dedup = dedup ?? throw new ArgumentNullException(nameof(dedup));
         _onRows = onRows ?? throw new ArgumentNullException(nameof(onRows));
         _onStatus = onStatus ?? throw new ArgumentNullException(nameof(onStatus));
+        _onCoercionFailures = onCoercionFailures;
         _sourceFactory = sourceFactory ?? (() => new NatsClientMessageSource($"streamforge-source-{def.Name}"));
     }
 
@@ -163,6 +172,7 @@ public sealed class NatsSubscriberCore
             // this loop's only channel back to the driver (ConnectorGrain/ConnectorActor), which folds
             // it into ConnectorRuntimeStatus.LastError.
             _onStatus("ok", $"{result.CoercionFailures} field coercion failure(s) on this message; policy={_def.OnCoercionFailure}");
+            _onCoercionFailures?.Invoke(result.CoercionFailures);
         }
 
         if (msg.AckAsync is not null)

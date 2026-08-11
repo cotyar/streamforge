@@ -166,12 +166,19 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         LastError = _state.LastError,
         ConsecutiveFailures = _state.ConsecutiveFailures,
         EventsEmittedTotal = _state.EventsEmittedTotal,
+        CoercionFailuresTotal = _state.CoercionFailuresTotal,
         LastBatchCount = _state.LastBatchCount,
     });
 
-    public async Task RecordSubscriberBatchAsync(int rowCount, string status, string? error, List<string>? dedupKeys = null)
+    public async Task RecordSubscriberBatchAsync(
+        int rowCount, string status, string? error, List<string>? dedupKeys = null, int coercionFailures = 0)
     {
         ConnectorBookkeeping.ApplySubscriberBatch(_state, rowCount, status, error, dedupKeys);
+        // Plan 009 C2: the queryable half of "counted and surfaced". The subscriber kinds (grpc, nats)
+        // never pass through the poll-cycle handler that counts for the polled kinds, so without this
+        // their coercion failures would live only as a LastError string. A counter that is accurate for
+        // some source kinds and silently zero for others is worse than no counter.
+        _state.CoercionFailuresTotal += Math.Max(0, coercionFailures);
         await SaveAsync();
     }
 
@@ -413,7 +420,8 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
                     stamped.Count, "ok",
                     coercion.FailureCount > 0
                         ? $"{coercion.FailureCount} field coercion failure(s) this batch; policy={def.OnCoercionFailure}"
-                        : null);
+                        : null,
+                    coercionFailures: coercion.FailureCount);
             },
             onStatus: (status, error) =>
             {
@@ -468,7 +476,9 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
             onStatus: (status, error) =>
             {
                 _ = RecordStatusBestEffortAsync(name, status, error);
-            });
+            },
+            onCoercionFailures: n =>
+                _ = ConnectorActorProxy(name).RecordSubscriberBatchAsync(0, "ok", null, null, n));
 
         _ = Task.Run(() => core.RunAsync(cts.Token));
     }
@@ -542,6 +552,8 @@ public sealed class ConnectorActorState
     public string? LastError { get; set; }
 
     public long EventsEmittedTotal { get; set; }
+    /// <summary>Plan 009 C2: cumulative field coercion failures — see ConnectorRuntimeStatus's own doc.</summary>
+    public long CoercionFailuresTotal { get; set; }
 
     public int LastBatchCount { get; set; }
 }
@@ -579,6 +591,7 @@ public static class ConnectorBookkeeping
             // RejectBatch does, inside ConnectorPollCycle.Emit) — this is the only other channel back to
             // ConnectorRuntimeStatus.LastError (no dedicated counter field exists on that frozen
             // contract), so a clean cycle still surfaces a non-zero count instead of going quiet.
+            state.CoercionFailuresTotal += result.CoercionFailures;
             state.LastError = result.CoercionFailures > 0
                 ? $"{result.CoercionFailures} field coercion failure(s) this cycle; policy={state.Def?.OnCoercionFailure}"
                 : null;

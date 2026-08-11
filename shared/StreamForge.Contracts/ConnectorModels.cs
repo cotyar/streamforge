@@ -238,6 +238,15 @@ public sealed class ConnectorRuntimeStatus
     [Id(5)] public int ConsecutiveFailures { get; set; }
     [Id(6)] public long EventsEmittedTotal { get; set; }
     [Id(7)] public int LastBatchCount { get; set; }
+
+    /// <summary>Plan 009 C2: cumulative field-level coercion failures on this source's inbound rows —
+    /// a value that would not convert to its declared type. A queryable counter rather than only a note
+    /// in <see cref="LastError"/>, because under
+    /// <see cref="CoercionFailurePolicy.DropRow"/>/<see cref="CoercionFailurePolicy.RejectBatch"/> these
+    /// are rows that did not land, and "counted and surfaced" was the whole condition for letting a
+    /// policy discard anything. Cumulative since activation, like
+    /// <see cref="EventsEmittedTotal"/>.</summary>
+    [Id(8)] public long CoercionFailuresTotal { get; set; }
 }
 
 // ---- REST helper DTOs (cross HTTP only, but follow house serialization style anyway) ----
