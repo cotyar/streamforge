@@ -3,6 +3,7 @@ import type {
   ExecutionPlanResponse,
   Metadata,
   ResultRow,
+  SinkSpec,
   Tags,
   TableDefinition,
   TableHistoryMode,
@@ -37,6 +38,11 @@ export interface CreateTableRequest {
   persistence?: TablePersistenceMode
   /** Flush interval in ms for batched/fireAndForget; 0 or absent = 2000. */
   flushMs?: number
+  /** Plan 009 A2: compaction threshold for persistence 'Journaled'. 0/absent = server default. */
+  journalMaxEntries?: number
+  /** Plan 009 B2: where this table's deltas are republished. Absent on create = none; absent on
+   * update = leave unchanged, same convention as CreatePipelineRequest.sinks. */
+  sinks?: SinkSpec[]
 }
 
 export type UpdateTableRequest = CreateTableRequest

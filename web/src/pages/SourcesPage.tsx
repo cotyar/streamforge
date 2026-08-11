@@ -4,7 +4,17 @@ import { ChevronRight, Database, Pencil, Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { sourcesApi } from '../api/sources'
 import type { CreateSourceRequest } from '../api/sources'
-import type { ConnectorConfig, FieldDef, FieldType, Metadata, ScheduleSpec, SourceDefinition, SourceKind, Tags } from '../api/types'
+import type {
+  ConnectorConfig,
+  CoercionFailurePolicy,
+  FieldDef,
+  FieldType,
+  Metadata,
+  ScheduleSpec,
+  SourceDefinition,
+  SourceKind,
+  Tags,
+} from '../api/types'
 import { useSourceTape } from '../hooks/useSourceTape'
 import { Topbar } from '../components/Topbar'
 import { RoleGate } from '../components/RoleGate'
@@ -32,6 +42,12 @@ import {
   toGrpcFormState,
   type GrpcFormState,
 } from '../components/sources/GrpcConfigEditor'
+import {
+  NatsConfigEditor,
+  buildNatsConfig,
+  toNatsFormState,
+  type NatsFormState,
+} from '../components/sources/NatsConfigEditor'
 import {
   IngestConfigEditor,
   buildIngestConfig,
@@ -78,12 +94,23 @@ import {
 
 const FIELD_TYPES: FieldType[] = ['String', 'Double', 'Long', 'Bool', 'Timestamp', 'Json']
 const PROFILES: SourceDefinition['generatorProfile'][] = ['trades', 'quotes', 'orders', 'generic']
-const KINDS: SourceKind[] = ['generator', 'url', 'file', 'folder', 'grpc', 'ingest']
-/** Kinds driven by a poll schedule + optional mapping (grpc is a persistent subscription instead). */
+const KINDS: SourceKind[] = ['generator', 'url', 'file', 'folder', 'grpc', 'ingest', 'nats']
+/** Kinds driven by a poll schedule (grpc/nats are persistent subscriptions instead — their Schedule,
+ * if any, is ignored by the driver). */
 const POLL_KINDS: SourceKind[] = ['url', 'file', 'folder']
+/** Kinds whose payload goes through MappingSpec/RecordExtractor — url/file/folder AND nats (plan 009
+ * B1: a NATS message maps to a row exactly as a polled HTTP body does); grpc decodes against its own
+ * schema and never reads Connector.Mapping. */
+const MAPPING_KINDS: SourceKind[] = ['url', 'file', 'folder', 'nats']
 /** Kinds that carry a `ConnectorConfig` (plan 006). `ingest` (plan 008 W4) has its own top-level
  * `SourceDefinition.ingest` field instead — a client push has no poll/subscribe config to hold. */
-const CONNECTOR_KINDS: SourceKind[] = ['url', 'file', 'folder', 'grpc']
+const CONNECTOR_KINDS: SourceKind[] = ['url', 'file', 'folder', 'grpc', 'nats']
+const COERCION_POLICIES: CoercionFailurePolicy[] = ['Null', 'DropRow', 'RejectBatch']
+const COERCION_POLICY_HINT: Record<CoercionFailurePolicy, string> = {
+  Null: 'A value that will not convert to its declared type becomes null — the row still lands.',
+  DropRow: 'A row with an unconvertible value is dropped; the rest of the batch still lands.',
+  RejectBatch: 'A single unconvertible value rejects the whole batch — nothing in it lands.',
+}
 
 function formatCell(v: unknown): string {
   if (v === null || v === undefined) return '—'
@@ -258,7 +285,9 @@ interface SourceFormState {
   file: FileFolderFormState
   folder: FileFolderFormState
   grpc: GrpcFormState
+  nats: NatsFormState
   ingest: IngestFormState
+  onCoercionFailure: CoercionFailurePolicy
 }
 
 function toFormState(s?: SourceDefinition): SourceFormState {
@@ -280,7 +309,9 @@ function toFormState(s?: SourceDefinition): SourceFormState {
     file: toFileFormState(s?.connector?.file),
     folder: toFolderFormState(s?.connector?.folder),
     grpc: toGrpcFormState(s?.connector?.grpc),
+    nats: toNatsFormState(s?.connector?.nats),
     ingest: toIngestFormState(s?.ingest),
+    onCoercionFailure: s?.onCoercionFailure ?? 'Null',
   }
 }
 
@@ -306,6 +337,7 @@ function SourceModal({
   }
 
   const isPollKind = POLL_KINDS.includes(form.kind)
+  const isMappingKind = MAPPING_KINDS.includes(form.kind)
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -328,13 +360,17 @@ function SourceModal({
         file: form.kind === 'file' ? buildFileConfig(form.file) : null,
         folder: form.kind === 'folder' ? buildFolderConfig(form.folder) : null,
         grpc: form.kind === 'grpc' ? buildGrpcConfig(form.grpc) : null,
+        nats: form.kind === 'nats' ? buildNatsConfig(form.nats) : null,
         mapping:
-          isPollKind && form.mappingEnabled
+          isMappingKind && form.mappingEnabled
             ? buildMappingSpec(form.fields, { ...form.mapping, sourcePaths: resyncSourcePaths(form.fields, form.mapping.sourcePaths) })
             : null,
       }
     }
     const ingest = form.kind === 'ingest' ? buildIngestConfig(form.ingest) : undefined
+    // Plan 009 C2: meaningful only where coercion actually happens — the connector poll/subscribe
+    // path (url/file/folder/grpc/nats). Push ingress and the synthetic generator never read it.
+    const onCoercionFailure = CONNECTOR_KINDS.includes(form.kind) ? form.onCoercionFailure : undefined
 
     setSaving(true)
     try {
@@ -351,6 +387,7 @@ function SourceModal({
           kind: form.kind,
           connector,
           ingest,
+          onCoercionFailure,
         })
       } else {
         const body: CreateSourceRequest = {
@@ -365,6 +402,7 @@ function SourceModal({
           kind: form.kind,
           connector,
           ingest,
+          onCoercionFailure,
         }
         await sourcesApi.create(body)
       }
@@ -512,12 +550,45 @@ function SourceModal({
                 onFieldsFetched={updateFields}
               />
             )}
+            {form.kind === 'nats' && (
+              <NatsConfigEditor
+                value={form.nats}
+                onChange={(patch) => setForm((f) => ({ ...f, nats: { ...f.nats, ...patch } }))}
+                isEdit={isEdit}
+                disabled={saving}
+              />
+            )}
             {form.kind === 'ingest' && (
               <IngestConfigEditor
                 value={form.ingest}
                 onChange={(patch) => setForm((f) => ({ ...f, ingest: { ...f.ingest, ...patch } }))}
                 disabled={saving}
               />
+            )}
+
+            {CONNECTOR_KINDS.includes(form.kind) && (
+              <Field>
+                <FieldLabel htmlFor="src-coercion">On coercion failure</FieldLabel>
+                <Select
+                  value={form.onCoercionFailure}
+                  onValueChange={(v) => setForm((f) => ({ ...f, onCoercionFailure: v as CoercionFailurePolicy }))}
+                  disabled={saving}
+                >
+                  <SelectTrigger id="src-coercion" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {COERCION_POLICIES.map((p) => (
+                        <SelectItem key={p} value={p}>
+                          {p}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <p className="mt-1 text-[11px] text-muted-foreground">{COERCION_POLICY_HINT[form.onCoercionFailure]}</p>
+              </Field>
             )}
 
             <Field>
@@ -530,9 +601,9 @@ function SourceModal({
               <FieldEditor
                 fields={form.fields}
                 onChange={updateFields}
-                sourcePaths={isPollKind && form.mappingEnabled ? form.mapping.sourcePaths : undefined}
+                sourcePaths={isMappingKind && form.mappingEnabled ? form.mapping.sourcePaths : undefined}
                 onSourcePathChange={
-                  isPollKind && form.mappingEnabled
+                  isMappingKind && form.mappingEnabled
                     ? (i, path) =>
                         setForm((f) => ({
                           ...f,
@@ -546,7 +617,7 @@ function SourceModal({
               </p>
             </Field>
 
-            {isPollKind && (
+            {isMappingKind && (
               <Field orientation="horizontal" className="items-center pb-1.5">
                 <Switch
                   id="src-mapping-enabled"
@@ -554,11 +625,11 @@ function SourceModal({
                   onCheckedChange={(checked) => setForm((f) => ({ ...f, mappingEnabled: checked }))}
                 />
                 <FieldLabel htmlFor="src-mapping-enabled" className="font-normal">
-                  Enable field mapping (extract rows from a nested response)
+                  Enable field mapping (extract rows from a nested {form.kind === 'nats' ? 'message' : 'response'})
                 </FieldLabel>
               </Field>
             )}
-            {isPollKind && form.mappingEnabled && (
+            {isMappingKind && form.mappingEnabled && (
               <MappingEditor
                 fields={form.fields}
                 state={form.mapping}

@@ -53,6 +53,11 @@ export function ConnectorStatusBadge({ name }: { name: string }) {
         <span>
           <span className="font-mono text-foreground">{status.eventsEmittedTotal}</span> events emitted
         </span>
+        {!!status.coercionFailuresTotal && (
+          <span className="text-warning" title="Field values that would not convert to their declared type — counted per the source's coercion policy">
+            <span className="font-mono">{status.coercionFailuresTotal}</span> coercion failures
+          </span>
+        )}
       </div>
       {status.lastError && (
         <p className="truncate text-destructive" title={status.lastError}>

@@ -11,6 +11,7 @@ import type {
   Metadata,
   ResultRow,
   RowValue,
+  SinkSpec,
   SourceDefinition,
   SqlDiagnostic,
   Tags,
@@ -31,6 +32,7 @@ import { RoleGate } from '../components/RoleGate'
 import { MetadataEditor } from '../components/MetadataEditor'
 import { RowHistorySheet } from '../components/RowHistorySheet'
 import { DataflowPanel } from '../components/DataflowPanel'
+import { SinksEditor } from '../components/SinksEditor'
 import { cn } from '@/lib/utils'
 import { formatEpochMs, isEpochMsColumn } from '@/lib/format'
 import { Card, CardContent } from '@/components/ui/card'
@@ -312,12 +314,24 @@ function SearchAndView({
   // as the other quick-toggle drafts above. Absent on the wire means the pre-008 default.
   const [persistenceDraft, setPersistenceDraft] = useState<TablePersistenceMode>(table.persistence ?? 'Batched')
   const [flushMsDraft, setFlushMsDraft] = useState(table.flushMs ?? 0)
+  // Plan 009 A2: compaction threshold, meaningful only for persistence 'Journaled'.
+  const [journalMaxEntriesDraft, setJournalMaxEntriesDraft] = useState(table.journalMaxEntries ?? 0)
   const [persistenceApplying, setPersistenceApplying] = useState(false)
 
   useEffect(() => {
     setPersistenceDraft(table.persistence ?? 'Batched')
     setFlushMsDraft(table.flushMs ?? 0)
-  }, [table.persistence, table.flushMs])
+    setJournalMaxEntriesDraft(table.journalMaxEntries ?? 0)
+  }, [table.persistence, table.flushMs, table.journalMaxEntries])
+
+  // Plan 009 B2: outbound sinks draft — same resync-on-fresh-definition pattern as the other
+  // quick-toggle drafts above.
+  const [sinksDraft, setSinksDraft] = useState<SinkSpec[]>(table.sinks ?? [])
+  const [sinksApplying, setSinksApplying] = useState(false)
+
+  useEffect(() => {
+    setSinksDraft(table.sinks ?? [])
+  }, [table.sinks])
 
   useEffect(() => {
     setHistoryDraftEnabled(table.historyEnabled)
@@ -397,6 +411,8 @@ function SearchAndView({
       parallelism: table.parallelism,
       persistence: table.persistence ?? 'Batched',
       flushMs: table.flushMs ?? 0,
+      journalMaxEntries: table.journalMaxEntries ?? 0,
+      sinks: table.sinks ?? [],
       ...overrides,
     }
   }
@@ -415,20 +431,40 @@ function SearchAndView({
     }
   }
 
-  async function applyPersistence(nextMode: TablePersistenceMode, nextFlushMs: number) {
+  async function applyPersistence(nextMode: TablePersistenceMode, nextFlushMs: number, nextJournalMaxEntries: number) {
     const clampedFlushMs = Math.max(0, nextFlushMs)
+    const clampedJournalMaxEntries = Math.max(0, nextJournalMaxEntries)
     setPersistenceDraft(nextMode)
     setFlushMsDraft(clampedFlushMs)
+    setJournalMaxEntriesDraft(clampedJournalMaxEntries)
     setPersistenceApplying(true)
     try {
-      const saved = await tablesApi.update(table.id, fullUpdateBody({ persistence: nextMode, flushMs: clampedFlushMs }))
+      const saved = await tablesApi.update(
+        table.id,
+        fullUpdateBody({ persistence: nextMode, flushMs: clampedFlushMs, journalMaxEntries: clampedJournalMaxEntries }),
+      )
       onTableChange(saved)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to update persistence settings.')
       setPersistenceDraft(table.persistence ?? 'Batched')
       setFlushMsDraft(table.flushMs ?? 0)
+      setJournalMaxEntriesDraft(table.journalMaxEntries ?? 0)
     } finally {
       setPersistenceApplying(false)
+    }
+  }
+
+  async function applySinks(next: SinkSpec[]) {
+    setSinksDraft(next)
+    setSinksApplying(true)
+    try {
+      const saved = await tablesApi.update(table.id, fullUpdateBody({ sinks: next }))
+      onTableChange(saved)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update sinks.')
+      setSinksDraft(table.sinks ?? [])
+    } finally {
+      setSinksApplying(false)
     }
   }
 
@@ -786,15 +822,16 @@ function SearchAndView({
                 size="sm"
                 value={persistenceDraft}
                 disabled={persistenceApplying}
-                onValueChange={(v) => v && void applyPersistence(v as TablePersistenceMode, flushMsDraft)}
+                onValueChange={(v) => v && void applyPersistence(v as TablePersistenceMode, flushMsDraft, journalMaxEntriesDraft)}
                 aria-label="Persistence mode"
               >
                 <ToggleGroupItem value="Batched">Batched</ToggleGroupItem>
                 <ToggleGroupItem value="FireAndForget">Fire-and-forget</ToggleGroupItem>
                 <ToggleGroupItem value="MemoryOnly">Memory-only</ToggleGroupItem>
+                <ToggleGroupItem value="Journaled">Journaled</ToggleGroupItem>
               </ToggleGroup>
 
-              {(persistenceDraft === 'Batched' || persistenceDraft === 'FireAndForget') && (
+              {persistenceDraft !== 'MemoryOnly' && (
                 <Field orientation="horizontal" className="items-center gap-1.5">
                   <FieldLabel htmlFor="tbl-flush-ms" className="text-xs font-normal text-muted-foreground">
                     Flush (ms)
@@ -808,7 +845,26 @@ function SearchAndView({
                     value={flushMsDraft}
                     disabled={persistenceApplying}
                     onChange={(e) => setFlushMsDraft(Math.max(0, Number(e.target.value) || 0))}
-                    onBlur={() => void applyPersistence(persistenceDraft, flushMsDraft)}
+                    onBlur={() => void applyPersistence(persistenceDraft, flushMsDraft, journalMaxEntriesDraft)}
+                  />
+                </Field>
+              )}
+
+              {persistenceDraft === 'Journaled' && (
+                <Field orientation="horizontal" className="items-center gap-1.5">
+                  <FieldLabel htmlFor="tbl-journal-max-entries" className="text-xs font-normal text-muted-foreground">
+                    Compact past (entries)
+                  </FieldLabel>
+                  <Input
+                    id="tbl-journal-max-entries"
+                    type="number"
+                    min={0}
+                    step={100}
+                    className="w-24"
+                    value={journalMaxEntriesDraft}
+                    disabled={persistenceApplying}
+                    onChange={(e) => setJournalMaxEntriesDraft(Math.max(0, Number(e.target.value) || 0))}
+                    onBlur={() => void applyPersistence(persistenceDraft, flushMsDraft, journalMaxEntriesDraft)}
                   />
                 </Field>
               )}
@@ -822,7 +878,8 @@ function SearchAndView({
 
             <p className="text-[11px] text-muted-foreground">
               {PERSISTENCE_HINT[persistenceDraft]}
-              {(persistenceDraft === 'Batched' || persistenceDraft === 'FireAndForget') && ' Flush 0 = 2000ms default.'}
+              {persistenceDraft !== 'MemoryOnly' && ' Flush 0 = 2000ms default.'}
+              {persistenceDraft === 'Journaled' && ' Compaction threshold 0 = a sensible default.'}
               {' Changing this restarts the table.'}
             </p>
 
@@ -835,6 +892,37 @@ function SearchAndView({
               </Alert>
             )}
           </RoleGate>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Sinks</h3>
+            {sinksApplying && (
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Spinner className="size-3.5" /> Applying…
+              </span>
+            )}
+          </div>
+
+          {!canEdit && sinksDraft.length === 0 && <span className="text-xs text-muted-foreground">Nothing is republished.</span>}
+
+          {canEdit ? (
+            <SinksEditor value={sinksDraft} onChange={(next) => void applySinks(next)} isEdit disabled={sinksApplying} />
+          ) : (
+            sinksDraft.map((s, i) => (
+              <div key={i} className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-xs">
+                <span>
+                  <Badge variant="outline" className="mr-2">
+                    {s.kind}
+                  </Badge>
+                  {s.nats?.subject}
+                </span>
+                <Badge variant={s.enabled ? 'default' : 'secondary'}>{s.enabled ? 'enabled' : 'disabled'}</Badge>
+              </div>
+            ))
+          )}
         </CardContent>
       </Card>
 
@@ -1031,8 +1119,8 @@ export function TableDetailPage() {
       // History config isn't editable from this form (see the right-panel "Row history" card, which
       // applies its own changes immediately) — carry the currently-persisted values through so a
       // plain Save never resets them back to the request DTO's defaults (history-off). Same for
-      // parallelism and persistence/flushMs, editable only via the right-panel "Execution" and
-      // "Persistence" cards.
+      // parallelism, persistence/flushMs/journalMaxEntries, and sinks — editable only via the
+      // right-panel "Execution", "Persistence" and "Sinks" cards.
       const body = {
         name: name.trim(),
         description,
@@ -1049,6 +1137,8 @@ export function TableDetailPage() {
         parallelism: table?.parallelism ?? 1,
         persistence: table?.persistence ?? ('Batched' as TablePersistenceMode),
         flushMs: table?.flushMs ?? 0,
+        journalMaxEntries: table?.journalMaxEntries ?? 0,
+        sinks: table?.sinks ?? [],
       }
       let saved: TableDefinition
       if (isNew) {

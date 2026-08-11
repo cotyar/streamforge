@@ -4,7 +4,7 @@ import { Check, CircleAlert, Play, Trash2, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import { pipelinesApi } from '../api/pipelines'
 import { sourcesApi } from '../api/sources'
-import type { Metadata, PipelineDefinition, SourceDefinition, SqlDiagnostic, Tags } from '../api/types'
+import type { Metadata, PipelineDefinition, SinkSpec, SourceDefinition, SqlDiagnostic, Tags } from '../api/types'
 import { useAuth } from '../api/auth'
 import { usePipelineResults } from '../hooks/usePipelineResults'
 import { useMetricsStream } from '../hooks/useMetricsStream'
@@ -17,6 +17,7 @@ import { MetricsBar } from '../components/MetricsBar'
 import { LiveChart } from '../components/LiveChart'
 import { RoleGate } from '../components/RoleGate'
 import { MetadataEditor } from '../components/MetadataEditor'
+import { SinksEditor } from '../components/SinksEditor'
 import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -59,6 +60,7 @@ export function PipelineDetailPage() {
   const [builderState, setBuilderState] = useState<BuilderState>(emptyBuilderState())
   const [tags, setTags] = useState<Tags>([])
   const [metadata, setMetadata] = useState<Metadata>({})
+  const [sinks, setSinks] = useState<SinkSpec[]>([])
 
   const [diagnostics, setDiagnostics] = useState<SqlDiagnostic[] | null>(null)
   const [planSummary, setPlanSummary] = useState<string | null>(null)
@@ -94,6 +96,7 @@ export function PipelineDetailPage() {
       setBuilderState(emptyBuilderState())
       setTags([])
       setMetadata({})
+      setSinks([])
       setLoading(false)
       return
     }
@@ -107,6 +110,7 @@ export function PipelineDetailPage() {
         setSql(p.sql)
         setTags(p.tags)
         setMetadata(p.metadata)
+        setSinks(p.sinks ?? [])
       })
       .finally(() => setLoading(false))
   }, [id, isNew])
@@ -149,7 +153,7 @@ export function PipelineDetailPage() {
     }
     setSaving(true)
     try {
-      const body = { name: name.trim(), description, sql: effectiveSql, tags, metadata }
+      const body = { name: name.trim(), description, sql: effectiveSql, tags, metadata, sinks }
       let saved: PipelineDefinition
       if (isNew) {
         saved = await pipelinesApi.create(body)
@@ -295,6 +299,12 @@ export function PipelineDetailPage() {
                   ))}
                 </ul>
               )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardContent>
+              <SinksEditor value={sinks} onChange={setSinks} isEdit={!isNew} disabled={!canEdit || saving} />
             </CardContent>
           </Card>
 

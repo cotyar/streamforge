@@ -5,6 +5,7 @@ import type { IngestPushResult } from '@/api/ingest'
 import type { SourceDefinition } from '@/api/types'
 import { useIngestStatus } from '@/hooks/useIngestStatus'
 import { relativeFromNow } from './ConnectorStatusBadge'
+import { IngestKeysPanel } from './IngestKeysPanel'
 import { RoleGate } from '@/components/RoleGate'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -152,6 +153,7 @@ export function IngestCard({ source }: { source: SourceDefinition }) {
 
   const depthPct = status.capacityRows > 0 ? Math.min(100, Math.round((status.depthRows / status.capacityRows) * 100)) : 0
   const nearCapacity = depthPct >= 90
+  const aggregated = status.aggregated ?? false
 
   return (
     <div className="flex flex-col gap-3">
@@ -175,12 +177,24 @@ export function IngestCard({ source }: { source: SourceDefinition }) {
         />
       </div>
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      {/* Plan 009 A1.3: the buffer is process memory, so under more than one replica every counter
+       * below is a per-replica view — say so plainly rather than presenting it as a global total. */}
+      <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+        <span>{aggregated ? 'Aggregated across all replicas.' : 'This replica only — not aggregated cluster-wide.'}</span>
+        {status.instanceId && <span className="truncate font-mono" title={status.instanceId}>{status.instanceId}</span>}
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
         <Stat label="Accepted" value={status.totalAccepted.toLocaleString()} />
         <Stat label="Rejected" value={status.totalRejected.toLocaleString()} />
         <Stat label="Dropped" value={status.totalDropped.toLocaleString()} />
         <Stat label="Invalid" value={status.totalInvalid.toLocaleString()} />
+        <Stat label="Duplicate" value={(status.totalDuplicate ?? 0).toLocaleString()} />
       </div>
+      <p className="-mt-2 text-[11px] text-muted-foreground">
+        Three distinct reasons a row didn't land: dropped is capacity, invalid is coercion, duplicate is row-level
+        dedup — none share a counter.
+      </p>
 
       <div className="flex items-center justify-between gap-2 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5">
         <div className="flex flex-col">
@@ -196,6 +210,8 @@ export function IngestCard({ source }: { source: SourceDefinition }) {
         <span className="font-mono text-foreground">{status.totalPublished.toLocaleString()}</span> published downstream ·{' '}
         max batch <span className="font-mono text-foreground">{status.maxBatchRows}</span> rows
       </p>
+
+      <IngestKeysPanel sourceName={source.name} />
 
       <TestPushPanel name={source.name} />
     </div>

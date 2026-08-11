@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { ExecutionPlanResponse, Metadata, PipelineDefinition, ResultEnvelope, Tags, ValidateResponse } from './types'
+import type { ExecutionPlanResponse, Metadata, PipelineDefinition, ResultEnvelope, SinkSpec, Tags, ValidateResponse } from './types'
 
 export interface CreatePipelineRequest {
   name: string
@@ -7,6 +7,10 @@ export interface CreatePipelineRequest {
   sql: string
   tags?: Tags
   metadata?: Metadata
+  /** Plan 009 B2: where this pipeline's result rows are republished. Absent on create = none;
+   * absent on update = leave unchanged (mirrors tags/metadata's null-means-unchanged convention). A
+   * "***" credential round-tripped from a masked GET is restored server-side from the stored value. */
+  sinks?: SinkSpec[]
 }
 
 export type UpdatePipelineRequest = CreatePipelineRequest

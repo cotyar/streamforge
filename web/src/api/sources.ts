@@ -1,9 +1,13 @@
 import { api } from './client'
 import type {
+  CoercionFailurePolicy,
   ConnectorConfig,
   ConnectorRuntimeStatus,
+  CreatedIngestKeyResponse,
+  CreateIngestKeyRequest,
   FieldDef,
   IngestConfig,
+  IngestKey,
   MappingValidateRequest,
   MappingValidateResult,
   Metadata,
@@ -30,6 +34,9 @@ export interface CreateSourceRequest {
   connector?: ConnectorConfig
   /** Plan 008 W4, additive: present only when kind is 'ingest'. */
   ingest?: IngestConfig
+  /** Plan 009 C2, additive: meaningful only for connector-kind sources (url/file/folder/grpc/nats).
+   * Absent = 'Null'. */
+  onCoercionFailure?: CoercionFailurePolicy
 }
 
 // The Host's PUT /api/sources/{name} replaces the whole SourceDefinition (name is fixed by the
@@ -55,4 +62,12 @@ export const sourcesApi = {
     api.post<MappingValidateResult>('/api/sources/schema/mapping-validate', body),
   deriveOpenApi: (body: SchemaDeriveRequest) => api.post<SchemaDeriveResult>('/api/sources/schema/derive-openapi', body),
   fetchRemoteSchema: (body: RemoteSchemaRequest) => api.post<RemoteSchemaResult>('/api/sources/schema/from-remote', body),
+
+  // ---- Plan 009 A1.2: per-source ingest keys (Editor). POST returns the secret exactly once —
+  // nothing can ever read it back after this call returns. ----
+  generateIngestKey: (name: string, body: CreateIngestKeyRequest) =>
+    api.post<CreatedIngestKeyResponse>(`/api/sources/${encodeURIComponent(name)}/ingest/keys`, body),
+  listIngestKeys: (name: string) => api.get<IngestKey[]>(`/api/sources/${encodeURIComponent(name)}/ingest/keys`),
+  revokeIngestKey: (name: string, id: string) =>
+    api.del<void>(`/api/sources/${encodeURIComponent(name)}/ingest/keys/${encodeURIComponent(id)}`),
 }

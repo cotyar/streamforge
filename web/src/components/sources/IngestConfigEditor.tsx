@@ -1,4 +1,4 @@
-import type { IngestConfig, IngressOverflowPolicy } from '@/api/types'
+import type { IngestConfig, IngestKey, IngressOverflowPolicy } from '@/api/types'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
@@ -20,6 +20,14 @@ export interface IngestFormState {
   maxWaitMs: number
   maxBatchRows: number
   rejectUnknownFields: boolean
+  dedupEnabled: boolean
+  dedupKeyField: string
+  dedupWindow: number
+  /** Plan 009 A1.2: carried through UNCHANGED (not rebuilt field-by-field) — the objects the backend
+   * returns also carry a masked hash/salt this TS type doesn't declare, and a save must round-trip
+   * them verbatim or the PUT would blank out every stored key's credential. Key generation/revocation
+   * happens through the dedicated endpoints (IngestKeysPanel), never through this form. */
+  keys: IngestKey[]
 }
 
 export function toIngestFormState(cfg?: IngestConfig | null): IngestFormState {
@@ -29,6 +37,10 @@ export function toIngestFormState(cfg?: IngestConfig | null): IngestFormState {
     maxWaitMs: cfg?.maxWaitMs ?? 5_000,
     maxBatchRows: cfg?.maxBatchRows ?? 1_000,
     rejectUnknownFields: cfg?.rejectUnknownFields ?? false,
+    dedupEnabled: !!cfg?.dedupKeyField,
+    dedupKeyField: cfg?.dedupKeyField ?? '',
+    dedupWindow: cfg?.dedupWindow ?? 0,
+    keys: cfg?.keys ?? [],
   }
 }
 
@@ -39,6 +51,9 @@ export function buildIngestConfig(state: IngestFormState): IngestConfig {
     maxWaitMs: state.maxWaitMs,
     maxBatchRows: state.maxBatchRows,
     rejectUnknownFields: state.rejectUnknownFields,
+    dedupKeyField: state.dedupEnabled ? state.dedupKeyField.trim() || null : null,
+    dedupWindow: state.dedupWindow,
+    keys: state.keys,
   }
 }
 
@@ -128,6 +143,51 @@ export function IngestConfigEditor({
           Reject rows with undeclared fields (otherwise dropped-and-counted silently)
         </FieldLabel>
       </Field>
+
+      <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
+        <Field orientation="horizontal" className="items-center">
+          <Switch
+            id="ingest-cfg-dedup-enabled"
+            checked={value.dedupEnabled}
+            onCheckedChange={(checked) => onChange({ dedupEnabled: checked })}
+            disabled={disabled}
+          />
+          <FieldLabel htmlFor="ingest-cfg-dedup-enabled" className="font-normal">
+            Row-level dedup (for at-least-once upstreams)
+          </FieldLabel>
+        </Field>
+        <p className="text-[11px] text-muted-foreground">
+          Suppresses a row already seen by the declared key field, counted as <span className="font-mono">duplicate</span> —
+          a different reason than dropped (capacity) or invalid (coercion). Runs after coercion, before admission.
+        </p>
+        {value.dedupEnabled && (
+          <div className="grid grid-cols-2 gap-3">
+            <Field>
+              <FieldLabel htmlFor="ingest-cfg-dedup-field">Dedup key field</FieldLabel>
+              <Input
+                id="ingest-cfg-dedup-field"
+                value={value.dedupKeyField}
+                onChange={(e) => onChange({ dedupKeyField: e.target.value })}
+                placeholder="eventId"
+                disabled={disabled}
+                className="font-mono"
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="ingest-cfg-dedup-window">Remembered keys</FieldLabel>
+              <Input
+                id="ingest-cfg-dedup-window"
+                type="number"
+                min={0}
+                value={value.dedupWindow}
+                onChange={(e) => onChange({ dedupWindow: Math.max(0, Number(e.target.value) || 0) })}
+                disabled={disabled}
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground">0 = the tracker's own bound.</p>
+            </Field>
+          </div>
+        )}
+      </div>
     </FieldGroup>
   )
 }
