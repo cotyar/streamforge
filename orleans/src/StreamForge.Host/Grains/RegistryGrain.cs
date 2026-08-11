@@ -257,50 +257,49 @@ public sealed class RegistryGrain(
 
     public async Task<PipelineDefinition?> UpdatePipelineAsync(PipelineDefinition def)
     {
-        var existing = state.State.Pipelines.FirstOrDefault(p => p.Id == def.Id);
-        if (existing is null)
+        var idx = state.State.Pipelines.FindIndex(p => p.Id == def.Id);
+        if (idx < 0)
         {
             return null;
         }
 
+        var existing = state.State.Pipelines[idx];
         var sqlChanged = existing.Sql != def.Sql;
         var wasRunning = existing.Status == PipelineStatus.Running;
 
-        // Compile-check against the prospective SQL before mutating `existing` — draft-friendly like
+        // Compile-check against the prospective SQL before anything is stored — draft-friendly like
         // tables' CompileTableSql/ApplyCompileResult pair: never blocks the update on its own, only
         // populates/clears SourceNames.
         var compileResult = SqlCompiler.Compile(def.Sql, BuildStreamSchemas());
 
-        existing.Name = def.Name;
-        existing.Description = def.Description;
-        existing.Sql = def.Sql;
-        existing.Tags = def.Tags;
-        existing.Metadata = def.Metadata;
-        existing.Sinks = def.Sinks; // plan 009 B2 — without this a PUT silently reverts sink edits
-        existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // See CarryServerOwnedFields' doc comment: the incoming definition IS the new record, with only
+        // the server-owned fields carried over from the stored one — rather than a hand-written list of
+        // editable fields copied onto the stored record.
+        CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        state.State.Pipelines[idx] = def;
 
-        ApplyPipelineCompileResult(existing, compileResult);
+        ApplyPipelineCompileResult(def, compileResult);
 
         if (sqlChanged && wasRunning)
         {
-            var pipelineGrain = GrainFactory.GetGrain<IPipelineGrain>(existing.Id);
+            var pipelineGrain = GrainFactory.GetGrain<IPipelineGrain>(def.Id);
             try
             {
                 await pipelineGrain.StopAsync();
-                await pipelineGrain.StartAsync(existing);
-                existing.Status = PipelineStatus.Running;
-                existing.Error = null;
+                await pipelineGrain.StartAsync(def);
+                def.Status = PipelineStatus.Running;
+                def.Error = null;
             }
             catch (Exception ex)
             {
-                existing.Status = PipelineStatus.Failed;
-                existing.Error = ex.Message;
+                def.Status = PipelineStatus.Failed;
+                def.Error = ex.Message;
             }
         }
 
         await state.WriteStateAsync();
-        await PublishLifecycleAsync(existing.Id, "updated", existing.Status);
-        return existing;
+        await PublishLifecycleAsync(def.Id, "updated", def.Status);
+        return def;
     }
 
     public async Task<bool> DeletePipelineAsync(string id)
@@ -414,12 +413,13 @@ public sealed class RegistryGrain(
 
     public async Task<TableDefinition?> UpdateTableAsync(TableDefinition def)
     {
-        var existing = state.State.Tables.FirstOrDefault(t => t.Id == def.Id);
-        if (existing is null)
+        var idx = state.State.Tables.FindIndex(t => t.Id == def.Id);
+        if (idx < 0)
         {
             return null;
         }
 
+        var existing = state.State.Tables[idx];
         if (!string.Equals(existing.Name, def.Name, StringComparison.Ordinal))
         {
             ValidateUniqueTableName(def.Name, excludeTableId: existing.Id);
@@ -455,26 +455,12 @@ public sealed class RegistryGrain(
             existing.HistoryWindowMs != def.HistoryWindowMs;
         var wasRunning = existing.Status == PipelineStatus.Running;
 
-        existing.Name = def.Name;
-        existing.Description = def.Description;
-        existing.Sql = def.Sql;
-        existing.SearchEnabled = def.SearchEnabled;
-        existing.SearchMode = def.SearchMode;
-        existing.HistoryEnabled = def.HistoryEnabled;
-        existing.HistoryMode = def.HistoryMode;
-        existing.HistoryLimit = def.HistoryLimit;
-        existing.HistoryByField = def.HistoryByField;
-        existing.HistoryWindowMs = def.HistoryWindowMs;
-        existing.Tags = def.Tags;
-        existing.Metadata = def.Metadata;
-        existing.Parallelism = def.Parallelism;
-        existing.Persistence = def.Persistence;
-        existing.FlushMs = def.FlushMs;
-        existing.JournalMaxEntries = def.JournalMaxEntries; // plan 009 A2
-        existing.Sinks = def.Sinks;                          // plan 009 B2
-        existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // See CarryServerOwnedFields' doc comment: the incoming definition IS the new record, with only
+        // the server-owned fields carried over from the stored one.
+        CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        state.State.Tables[idx] = def;
 
-        ApplyCompileResult(existing, compileResult);
+        ApplyCompileResult(def, compileResult);
 
         // A running table's grain only picks up SQL/search config/parallelism/persistence changes on
         // (re)StartAsync — mirror the SQL-changed restart below for search config, parallelism, and
@@ -482,18 +468,18 @@ public sealed class RegistryGrain(
         // Running table takes effect immediately instead of only on the next manual stop/start.
         if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged) && wasRunning)
         {
-            var tableGrain = GrainFactory.GetGrain<ITableGrain>(existing.Name);
+            var tableGrain = GrainFactory.GetGrain<ITableGrain>(def.Name);
             try
             {
                 await tableGrain.StopAsync();
-                await tableGrain.StartAsync(existing);
-                existing.Status = PipelineStatus.Running;
-                existing.Error = null;
+                await tableGrain.StartAsync(def);
+                def.Status = PipelineStatus.Running;
+                def.Error = null;
             }
             catch (Exception ex)
             {
-                existing.Status = PipelineStatus.Failed;
-                existing.Error = ex.Message;
+                def.Status = PipelineStatus.Failed;
+                def.Error = ex.Message;
             }
         }
 
@@ -502,21 +488,21 @@ public sealed class RegistryGrain(
         // SQL/search-config change restarts the table's own grain above.
         if (sqlChanged || historyConfigChanged)
         {
-            await GrainFactory.GetGrain<ITableHistoryGrain>(existing.Name).ResetAsync(existing);
+            await GrainFactory.GetGrain<ITableHistoryGrain>(def.Name).ResetAsync(def);
         }
-        else if (persistenceChanged && existing.HistoryEnabled)
+        else if (persistenceChanged && def.HistoryEnabled)
         {
             // Plan 008 W2.5: a Persistence/FlushMs-only change doesn't invalidate the row-identity mapping
             // or retention policy, so use ResumeAsync (not ResetAsync) — it re-reads Persistence/FlushMs
-            // from `existing` and re-registers the flush timer with the new interval/mode, but (unlike
+            // from the updated definition and re-registers the flush timer with the new interval/mode, but (unlike
             // ResetAsync) deliberately leaves Entries/Seq untouched, so accumulated history survives a mode
             // tweak the same way it survives a silo restart.
-            await GrainFactory.GetGrain<ITableHistoryGrain>(existing.Name).ResumeAsync(existing);
+            await GrainFactory.GetGrain<ITableHistoryGrain>(def.Name).ResumeAsync(def);
         }
 
         await state.WriteStateAsync();
-        await PublishLifecycleAsync(existing.Name, "table-updated", existing.Status);
-        return existing;
+        await PublishLifecycleAsync(def.Name, "table-updated", def.Status);
+        return def;
     }
 
     public async Task<bool> DeleteTableAsync(string id)

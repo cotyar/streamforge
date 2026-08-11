@@ -155,12 +155,13 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
     public async Task<PipelineDefinition?> UpdatePipelineAsync(PipelineDefinition def)
     {
-        var existing = state.Pipelines.FirstOrDefault(p => p.Id == def.Id);
-        if (existing is null)
+        var idx = state.Pipelines.FindIndex(p => p.Id == def.Id);
+        if (idx < 0)
         {
             return null;
         }
 
+        var existing = state.Pipelines[idx];
         var sqlChanged = existing.Sql != def.Sql;
         var wasRunning = existing.Status == PipelineStatus.Running;
 
@@ -169,37 +170,31 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         // populates/clears SourceNames. Mirrors RegistryGrain.UpdatePipelineAsync (plan 008 W5).
         var compileResult = SqlCompiler.Compile(def.Sql, BuildStreamSchemas());
 
-        existing.Name = def.Name;
-        existing.Description = def.Description;
-        existing.Sql = def.Sql;
-        existing.Tags = def.Tags;
-        existing.Metadata = def.Metadata;
-        // Plan 009 B2: without this, a PUT that only changes Sinks (add/remove/reconfigure a NATS sink
-        // on an already-Running pipeline) would silently keep the old Sinks list forever — every other
-        // field here already flows from `def`, Sinks was simply missing.
-        existing.Sinks = def.Sinks;
-        existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // Plan 009: the incoming definition IS the new record — see CatalogRecordMerge's doc comment for
+        // why this is an inversion of the old field-by-field copy, and which three fields that shape lost.
+        CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        state.Pipelines[idx] = def;
 
-        ApplyPipelineCompileResult(existing, compileResult);
+        ApplyPipelineCompileResult(def, compileResult);
 
         if (sqlChanged && wasRunning)
         {
-            await orchestrator.StopPipelineAsync(existing.Id);
-            var outcome = await orchestrator.StartPipelineAsync(existing, state.Sources);
+            await orchestrator.StopPipelineAsync(def.Id);
+            var outcome = await orchestrator.StartPipelineAsync(def, state.Sources);
             if (outcome.Ok)
             {
-                existing.Status = PipelineStatus.Running;
-                existing.Error = null;
+                def.Status = PipelineStatus.Running;
+                def.Error = null;
             }
             else
             {
-                existing.Status = PipelineStatus.Failed;
-                existing.Error = outcome.Error;
+                def.Status = PipelineStatus.Failed;
+                def.Error = outcome.Error;
             }
         }
 
-        await orchestrator.PublishLifecycleAsync(existing.Id, "updated", existing.Status);
-        return existing;
+        await orchestrator.PublishLifecycleAsync(def.Id, "updated", def.Status);
+        return def;
     }
 
     public async Task<bool> DeletePipelineAsync(string id)
@@ -294,12 +289,13 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
     public async Task<TableDefinition?> UpdateTableAsync(TableDefinition def)
     {
-        var existing = state.Tables.FirstOrDefault(t => t.Id == def.Id);
-        if (existing is null)
+        var tableIdx = state.Tables.FindIndex(t => t.Id == def.Id);
+        if (tableIdx < 0)
         {
             return null;
         }
 
+        var existing = state.Tables[tableIdx];
         if (!string.Equals(existing.Name, def.Name, StringComparison.Ordinal))
         {
             ValidateUniqueTableName(def.Name, excludeTableId: existing.Id);
@@ -319,7 +315,8 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         // shape is). Table-history's own copy of these two fields is NOT restarted this way — it converges
         // separately, in place (no Entries loss), via TableHistorySupervisorService's ~15s sweep calling
         // ITableHistoryActor.EnsureConfiguredAsync (see that method's plan-008 addendum).
-        var persistenceChanged = existing.Persistence != def.Persistence || existing.FlushMs != def.FlushMs;
+        var persistenceChanged = existing.Persistence != def.Persistence || existing.FlushMs != def.FlushMs
+            || existing.JournalMaxEntries != def.JournalMaxEntries; // plan 009 A2 — this flavor was missing it entirely
         var historyConfigChanged =
             existing.HistoryEnabled != def.HistoryEnabled ||
             existing.HistoryMode != def.HistoryMode ||
@@ -328,51 +325,35 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             existing.HistoryWindowMs != def.HistoryWindowMs;
         var wasRunning = existing.Status == PipelineStatus.Running;
 
-        existing.Name = def.Name;
-        existing.Description = def.Description;
-        existing.Sql = def.Sql;
-        existing.SearchEnabled = def.SearchEnabled;
-        existing.SearchMode = def.SearchMode;
-        existing.HistoryEnabled = def.HistoryEnabled;
-        existing.HistoryMode = def.HistoryMode;
-        existing.HistoryLimit = def.HistoryLimit;
-        existing.HistoryByField = def.HistoryByField;
-        existing.HistoryWindowMs = def.HistoryWindowMs;
-        existing.Tags = def.Tags;
-        existing.Metadata = def.Metadata;
-        existing.Parallelism = def.Parallelism;
-        existing.Persistence = def.Persistence;
-        existing.FlushMs = def.FlushMs;
-        // Plan 009 B2: see the identical note in UpdatePipelineAsync above — without this a PUT that
-        // only touches Sinks silently keeps the old list.
-        existing.Sinks = def.Sinks;
-        existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // Plan 009: see the note in UpdatePipelineAsync above and CatalogRecordMerge's own doc comment.
+        CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        state.Tables[tableIdx] = def;
 
-        ApplyCompileResult(existing, compileResult);
+        ApplyCompileResult(def, compileResult);
 
         if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged) && wasRunning)
         {
-            await orchestrator.StopTableAsync(existing.Name);
-            var outcome = await orchestrator.StartTableAsync(existing, state.Sources, state.Tables);
+            await orchestrator.StopTableAsync(def.Name);
+            var outcome = await orchestrator.StartTableAsync(def, state.Sources, state.Tables);
             if (outcome.Ok)
             {
-                existing.Status = PipelineStatus.Running;
-                existing.Error = null;
+                def.Status = PipelineStatus.Running;
+                def.Error = null;
             }
             else
             {
-                existing.Status = PipelineStatus.Failed;
-                existing.Error = outcome.Error;
+                def.Status = PipelineStatus.Failed;
+                def.Error = outcome.Error;
             }
         }
 
         if (sqlChanged || historyConfigChanged)
         {
-            await orchestrator.ResetTableHistoryAsync(existing);
+            await orchestrator.ResetTableHistoryAsync(def);
         }
 
-        await orchestrator.PublishLifecycleAsync(existing.Name, "table-updated", existing.Status);
-        return existing;
+        await orchestrator.PublishLifecycleAsync(def.Name, "table-updated", def.Status);
+        return def;
     }
 
     public async Task<bool> DeleteTableAsync(string id)

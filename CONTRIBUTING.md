@@ -9,7 +9,7 @@ questions and small PRs are welcome; large redesigns are probably better as a fo
    flavor, so a change there has to pass both suites:
    ```bash
    dotnet test orleans/StreamForge.sln      # 1488 tests
-   dotnet test dapr/StreamForge.Dapr.sln    # 277 tests
+   dotnet test dapr/StreamForge.Dapr.sln    # 280 tests
    ```
 2. **Never edit an existing test to make a refactor pass.** Behavior-preserving changes keep the
    old assertions green, unmodified. New behavior gets new tests.

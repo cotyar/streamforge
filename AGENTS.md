@@ -33,7 +33,7 @@ its own note on why `/docs` doesn't serve it automatically).
 ~/.dotnet/dotnet build orleans/StreamForge.sln
 ~/.dotnet/dotnet test  orleans/StreamForge.sln     # 1488 tests — the whole suite must be green
 ~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln
-~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 277 tests — the whole suite must be green
+~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 280 tests — the whole suite must be green
 cd web && bun run build
 ~/.dotnet/dotnet run --project orleans/src/StreamForge.Host   # :5199 + :5299
 cd dapr && ./tools/run.sh                                      # :5399 (needs `dapr init` done once)
