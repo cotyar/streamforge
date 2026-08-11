@@ -139,6 +139,58 @@ on pipeline and table detail pages; the `Journaled` mode in the persistence togg
 
 ---
 
+---
+
+## Round C — typed values out of stringly-typed messages
+
+Real feeds arrive with every field a string: CSV, form-encoded HTTP, JSON written by a producer that
+quoted its numbers, a NATS payload from a system with no schema. Today such a field can only be
+declared `String`, and then it cannot be summed, compared numerically, or windowed on.
+
+Two complementary answers, because they solve it at different moments.
+
+### Wave C1 — conversion functions in the SQL dialect *(Engine-exclusive)*
+
+The declarative answer, usable on any existing stream or table without re-declaring a schema.
+
+- **Functions**: `TO_LONG`, `TO_DOUBLE`, `TO_BOOL`, `TO_TIMESTAMP`, and the inverse `TO_STRING`.
+  Added to `Validator.KnownFunctions` + its arity/result-kind switches and to
+  `ExpressionEvaluator`'s dispatch — the same three seams `ABS`/`ROUND`/`COALESCE` already use.
+- **`CAST(expr AS type)` as sugar** desugaring to those same nodes, because that is what people type.
+  Cheap in a recursive-descent parser; `AS` is already a keyword.
+- **Total, never throwing**: an unconvertible value yields `NULL`, not an error. A streaming operator
+  cannot throw per row without killing the pipeline for everyone, and `COALESCE` already covers
+  "supply a default". This goes in DESIGN §D11's honesty list — silent NULL on bad input is a real
+  tradeoff, not a detail.
+- **JSON leaves are in scope**: `payload -> 'qty'` yields a JSON scalar, and casting that is exactly
+  the case this wave exists for — it is also the repo's own documented `->` vs `->>` gotcha, which
+  these functions make survivable.
+- **`TO_TIMESTAMP`** accepts epoch-ms (numeric or numeric string) and ISO-8601, reusing the rules
+  `AppCore/Ingest/RowTimestamp.Resolve` already applies on the inbound path. **`TO_STRING`** is
+  culture-invariant and ISO-8601 for timestamps: locale-dependent formatting inside a data pipeline
+  is a bug factory.
+- **One implementation, not two.** `AppCore/Ingest/FieldValueCoercion.TryCoerce` already implements
+  exactly these conversions for every inbound path. The dependency runs **AppCore → Engine** (it is
+  right there in the csproj), so the canonical version moves *down* into the Engine — keyed on
+  `FieldKind`, since the Engine may not reference Contracts either — and `FieldValueCoercion` becomes
+  a `FieldType` → `FieldKind` adapter over it. Same for `RowTimestamp.Resolve` and `TO_TIMESTAMP`.
+  Behavior must not change in the move: `Timestamp` and `Long` share one epoch-millis representation,
+  `Json` is structural and passes through unconverted, and the contract is a non-throwing
+  `bool TryX(..., out …)` over an already-JSON-normalized leaf.
+
+### Wave C2 — declare the type, let the inbound path parse *(with round B, shares connector files)*
+
+The imperative answer, for when the producer will never change: declare the field as `Long`/`Double`/
+`Timestamp` and have ingestion coerce on arrival, uniformly across **every** inbound path — push
+ingress, the four connector kinds, and NATS. Push ingress already does this; the connector/mapping
+path does not, which is the actual gap.
+
+A per-source `OnCoercionFailure` policy — `Null` (default), `DropRow`, or `RejectBatch` — with the
+failures counted and surfaced, never silently dropped. Round A's rule stands: coerce before admission,
+so a rejection leaves nothing behind.
+
+---
+
 ## Cross-cutting rules
 
 Same as plan 008: Sonnet 5 subagents at high effort with strictly disjoint file ownership; contracts

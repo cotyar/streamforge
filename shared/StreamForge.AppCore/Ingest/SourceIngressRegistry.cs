@@ -84,7 +84,10 @@ public sealed class SourceIngressRegistry
     }
 
     /// <summary>Every field that changes buffer behavior, joined so two configs that differ in any
-    /// of them never compare equal.</summary>
+    /// of them never compare equal. Plan 009 A1.1 adds DedupKeyField/DedupWindow: either changing
+    /// means the buffer's row-level dedup tracker must start fresh, same as any other behavior
+    /// change here — see SourceIngressBuffer's own DedupTracker field doc.</summary>
     private static string Fingerprint(IngestConfig c)
-        => string.Join('|', c.Policy, c.CapacityRows, c.MaxWaitMs, c.MaxBatchRows, c.RejectUnknownFields);
+        => string.Join('|', c.Policy, c.CapacityRows, c.MaxWaitMs, c.MaxBatchRows, c.RejectUnknownFields,
+            c.DedupKeyField, c.DedupWindow);
 }

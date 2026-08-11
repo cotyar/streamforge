@@ -1,6 +1,7 @@
 using Orleans;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Ingest;
+using StreamForge.Host.Facades;
 
 namespace StreamForge.Host.Services;
 
@@ -25,6 +26,7 @@ namespace StreamForge.Host.Services;
 public sealed class IngestDrainPumpService(
     IClusterClient client,
     SourceIngressRegistry ingress,
+    IngressStatsReportTracker statsTracker,
     IConfiguration configuration,
     IHostApplicationLifetime lifetime,
     ILogger<IngestDrainPumpService> logger) : BackgroundService
@@ -41,6 +43,7 @@ public sealed class IngestDrainPumpService(
             {
                 var sources = await client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey).GetSourcesAsync();
                 await SweepAsync(sources, ingress, logger, stoppingToken);
+                await ReportStatsAsync(sources, ingress, client, statsTracker, logger, stoppingToken);
             }
             catch (Exception ex)
             {
@@ -77,6 +80,53 @@ public sealed class IngestDrainPumpService(
                 // Per-source, mirroring GeneratorSupervisorService: one buffer's publish failure must
                 // never stop the sweep from reaching the rest.
                 logger.LogDebug(ex, "IngestDrainPumpService: drain failed for source '{Source}' — will retry next tick.", name);
+            }
+        }
+    }
+
+    /// <summary>Plan 009 A1.3: reports every ingest source's LOCAL counter delta (since this replica's
+    /// own last report — <see cref="IngressStatsReportTracker"/>) into its per-source
+    /// <see cref="IIngressStatsGrain"/>. Split out from <see cref="SweepAsync"/> — that method's
+    /// signature is pinned by existing tests (<c>IngestDrainPumpTests</c>), so this is additive rather
+    /// than folded into it. A source with no local buffer (never pushed to on this replica) has
+    /// nothing to report and is skipped; an empty delta (nothing changed since the last tick) is
+    /// skipped too, to avoid paying a grain call for a no-op.</summary>
+    public static async Task ReportStatsAsync(
+        IReadOnlyList<SourceDefinition> sources,
+        SourceIngressRegistry ingress,
+        IClusterClient client,
+        IngressStatsReportTracker statsTracker,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        foreach (var name in sources.Where(s => s.Kind == SourceKinds.Ingest).Select(s => s.Name))
+        {
+            var buffer = ingress.TryGet(name);
+            if (buffer is null)
+            {
+                continue;
+            }
+
+            var current = buffer.GetStatus();
+            var baseline = statsTracker.GetBaseline(name);
+            var delta = IngressStatsReportTracker.ComputeDelta(baseline, current);
+            if (delta.IsEmpty)
+            {
+                continue;
+            }
+
+            try
+            {
+                await client.GetGrain<IIngressStatsGrain>(name).ReportDeltaAsync(delta);
+                statsTracker.SetBaseline(name, current);
+            }
+            catch (Exception ex)
+            {
+                // Best-effort, same per-source isolation as SweepAsync's own drain try/catch — one
+                // source's grain call failing must never stop the tick from reporting the rest, and
+                // the baseline is left UNMOVED on failure so the next tick's delta naturally includes
+                // whatever this one failed to report (nothing is lost, only delayed).
+                logger.LogDebug(ex, "IngestDrainPumpService: stats report failed for source '{Source}' — will retry next tick.", name);
             }
         }
     }

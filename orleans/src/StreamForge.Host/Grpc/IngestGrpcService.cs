@@ -1,5 +1,6 @@
 using Grpc.Core;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
 using V1 = StreamForge.Host.Grpc.V1;
 
@@ -7,10 +8,14 @@ namespace StreamForge.Host.Grpc;
 
 /// <summary>
 /// gRPC bidi ingest surface for client-push sources (plan 008 W4) — see streamforge.proto's
-/// IngestService section for the wire-shape rationale. Method-level [Authorize(Policy = "Editor")]:
-/// every other gRPC RPC in this codebase that reaches actual row data (StreamGrpcService's three
-/// server-streaming subscriptions) is Viewer-only, since they only ever read; this is the first one
-/// that writes, so it needs the same bar POST /api/sources/{name}/events does.
+/// IngestService section for the wire-shape rationale.
+///
+/// <para>Plan 009 A1.2: NO method-level [Authorize] — per-message dual auth instead (Editor JWT via
+/// the real "Editor" policy, resolved through <see cref="IAuthorizationService"/> so this can't drift
+/// from what SourcesEndpoints.IsAuthorizedToPushAsync checks; else the "x-sf-ingest-key" call metadata
+/// against THAT message's source). Per-MESSAGE, not per-call, because <see cref="V1.IngestRequest.SourceName"/>
+/// travels on every message, not just the first — the same bidi stream could in principle carry
+/// pushes for different sources, and a key only ever authorizes ONE source.</para>
 ///
 /// Bidi (not unary/client-streaming) so the server can ack per pushed batch and signal overload
 /// WITHOUT ending the call — overload rides an ack field (retry_after_ms), never an RPC error status
@@ -22,20 +27,43 @@ namespace StreamForge.Host.Grpc;
 /// fills, HTTP/2 flow control stops advertising window credit on the wire, and the client's own
 /// RequestStream.WriteAsync genuinely blocks — no client-side polling or throttle needed.
 /// </summary>
-public sealed class IngestGrpcService(IIngressFacade ingress) : V1.IngestService.IngestServiceBase
+public sealed class IngestGrpcService(IIngressFacade ingress, IAuthorizationService authz) : V1.IngestService.IngestServiceBase
 {
-    [Authorize(Policy = "Editor")]
     public override async Task Ingest(
         IAsyncStreamReader<V1.IngestRequest> requestStream,
         IServerStreamWriter<V1.IngestAck> responseStream,
         ServerCallContext context)
     {
+        var httpContext = context.GetHttpContext();
+
         await foreach (var request in requestStream.ReadAllAsync(context.CancellationToken).ConfigureAwait(false))
         {
+            if (!await IsAuthorizedAsync(httpContext, context, request.SourceName).ConfigureAwait(false))
+            {
+                throw new RpcException(new Status(StatusCode.Unauthenticated, "an Editor JWT or a valid X-SF-Ingest-Key for this source is required"));
+            }
+
             var rows = request.Rows.Select(GrpcValueConverter.FromStruct).ToList();
-            var result = await ingress.PushAsync(request.SourceName, rows, request.Partial).ConfigureAwait(false);
+            var idempotencyKey = string.IsNullOrEmpty(request.IdempotencyKey) ? null : request.IdempotencyKey;
+            var result = await ingress.PushAsync(request.SourceName, rows, request.Partial, idempotencyKey).ConfigureAwait(false);
             await responseStream.WriteAsync(ToAck(result)).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>Same two-step check as SourcesEndpoints.IsAuthorizedToPushAsync — resolved through
+    /// the real "Editor" policy first (so Admin still counts, and role-claim shape can't drift between
+    /// REST and gRPC), then a per-source key. Metadata lookup is case-insensitive
+    /// (<see cref="Metadata.GetValue"/>).</summary>
+    private async Task<bool> IsAuthorizedAsync(HttpContext httpContext, ServerCallContext context, string sourceName)
+    {
+        var editorResult = await authz.AuthorizeAsync(httpContext.User, "Editor").ConfigureAwait(false);
+        if (editorResult.Succeeded)
+        {
+            return true;
+        }
+
+        var presentedKey = context.RequestHeaders.GetValue("x-sf-ingest-key");
+        return await ingress.ValidateKeyAsync(sourceName, presentedKey).ConfigureAwait(false);
     }
 
     private static V1.IngestAck ToAck(IngestResult result)
@@ -48,6 +76,8 @@ public sealed class IngestGrpcService(IIngressFacade ingress) : V1.IngestService
             Invalid = result.Invalid,
             RetryAfterMs = result.RetryAfterMs,
             Error = result.Error ?? "",
+            Duplicate = result.Duplicate,
+            Replayed = result.Replayed,
         };
         ack.RowErrors.AddRange(result.RowErrors);
         return ack;

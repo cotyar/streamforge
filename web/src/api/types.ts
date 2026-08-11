@@ -322,14 +322,18 @@ export interface TableDefinition {
   persistence?: TablePersistenceMode
   /** Flush interval in ms for Batched/FireAndForget; 0 or absent = 2000. */
   flushMs?: number
+  /** Plan 009 A2: journal length that triggers compaction, for 'Journaled' only. 0/absent = default. */
+  journalMaxEntries?: number
 }
 
 /** Plan 008: how a table's snapshot reaches storage (wire values are PascalCase — confirmed against
  * the running backend's JsonStringEnumConverter, same convention as TableSearchMode). 'Batched' awaits
  * the write inside the grain turn (durable, but the stall grows with the row count); 'FireAndForget'
  * returns the turn immediately and writes in the background (a crash loses the unwritten tail);
- * 'MemoryOnly' never writes, so a restart brings the table back empty. */
-export type TablePersistenceMode = 'Batched' | 'FireAndForget' | 'MemoryOnly'
+ * 'MemoryOnly' never writes, so a restart brings the table back empty; 'Journaled' (plan 009) has
+ * Batched's durability but writes only the rows that changed, compacting to a full snapshot when the
+ * journal outgrows journalMaxEntries. */
+export type TablePersistenceMode = 'Batched' | 'FireAndForget' | 'MemoryOnly' | 'Journaled'
 
 export interface TableRowDto {
   row: ResultRow
@@ -552,6 +556,34 @@ export interface IngestConfig {
   maxWaitMs: number
   maxBatchRows: number
   rejectUnknownFields: boolean
+  /** Plan 009 A1: declared field identifying a row, for at-least-once upstreams. Null/absent = off. */
+  dedupKeyField?: string | null
+  /** How many recent row keys to remember; 0/absent = DedupTracker's own bound. */
+  dedupWindow?: number
+  /** Per-source push credentials. Read back masked — the secret exists in the clear exactly once,
+   *  in the response to POST /api/sources/{name}/ingest/keys. */
+  keys?: IngestKey[]
+}
+
+/** Never carries the secret. Generate returns it once; after that a lost key is regenerated. */
+export interface IngestKey {
+  id: string
+  label: string
+  createdAtMs: number
+  /** 0 = never used. Best-effort, per replica. */
+  lastUsedMs: number
+}
+
+export interface CreateIngestKeyRequest {
+  label: string
+}
+
+export interface CreatedIngestKeyResponse {
+  id: string
+  label: string
+  /** The only time this value is ever returned. */
+  secret: string
+  createdAtMs: number
 }
 
 /** POST /api/sources/{name}/events. Success is 202 "buffered", never 200. */
@@ -559,6 +591,8 @@ export interface IngestEventsRequest {
   events: Record<string, unknown>[]
   /** Admit the valid rows of a batch that has invalid ones; default fails the whole batch. */
   partial?: boolean
+  /** Plan 009 A1: repeating a push with the same key replays the original result and admits nothing. */
+  idempotencyKey?: string
 }
 
 export interface IngestAcceptedResponse {
@@ -567,6 +601,11 @@ export interface IngestAcceptedResponse {
   invalid: number
   depthRows: number
   capacityRows: number
+  /** Plan 009 A1: suppressed by row-level dedup — a different reason from dropped (capacity) and
+   *  invalid (coercion). Absent from a pre-009 backend. */
+  duplicate?: number
+  /** True when this 202 restates an earlier push's counts rather than reporting a new admission. */
+  replayed?: boolean
 }
 
 /** 400/409/413/429 body. retryAfterMs is 0 except on 429. */
@@ -590,4 +629,9 @@ export interface IngestStatusResponse {
   totalPublished: number
   downstreamDropped: number
   lastPushMs: number
+  totalDuplicate?: number
+  /** Which process produced these numbers. Plan 008's counters were per-replica while reading as
+   *  global; when aggregated is false they describe this instance alone. */
+  instanceId?: string
+  aggregated?: boolean
 }

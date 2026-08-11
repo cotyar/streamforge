@@ -51,7 +51,9 @@ public sealed record CreateTableRequest(
     // Plan 008: durability policy for the materialized snapshot, and the flush cadence for the two
     // modes that write. Defaults reproduce the pre-008 behavior exactly. See TablePersistenceMode.
     TablePersistenceMode Persistence = TablePersistenceMode.Batched,
-    int FlushMs = 0);
+    int FlushMs = 0,
+    // Plan 009 A2: compaction threshold for TablePersistenceMode.Journaled. 0 = default.
+    int JournalMaxEntries = 0);
 
 public sealed record TableSearchResponse(IReadOnlyList<TableRowDto> Rows, string Mode, bool Enabled, int Total);
 
@@ -90,11 +92,37 @@ public sealed record HistoryLookupRequest(Dictionary<string, object?> Row);
 /// <summary>POST body. Deliberately NOT the frozen SourceEventsEnvelope — that is an internal
 /// transport shape and must not become a public request contract. <paramref name="Partial"/> admits
 /// the valid rows of a batch that has invalid ones; the default fails the whole batch instead.</summary>
-public sealed record IngestEventsRequest(List<Dictionary<string, object?>> Events, bool Partial = false);
+/// <param name="IdempotencyKey">Plan 009 A1. Repeating a push with the same key replays the original
+/// result instead of admitting anything again — what makes "retry the identical body after a 429" safe.
+/// Also accepted as the <c>Idempotency-Key</c> header; the body wins if both are present.</param>
+public sealed record IngestEventsRequest(
+    List<Dictionary<string, object?>> Events,
+    bool Partial = false,
+    string? IdempotencyKey = null);
 
 /// <summary>202 body. Success is "buffered", never "processed" — see IngestModels.cs's header on why
 /// no honest 200 exists here. Dropped is non-zero only under DropNewest/DropOldest.</summary>
-public sealed record IngestAcceptedResponse(int Accepted, int Dropped, int Invalid, int DepthRows, int CapacityRows);
+public sealed record IngestAcceptedResponse(
+    int Accepted,
+    int Dropped,
+    int Invalid,
+    int DepthRows,
+    int CapacityRows,
+    // Plan 009 A1, additive. Duplicate = suppressed by row-level dedup, a distinct reason from Dropped
+    // (capacity) and Invalid (coercion). Replayed = this 202 restates an earlier push's counts.
+    int Duplicate = 0,
+    bool Replayed = false);
+
+// ----- Plan 009 A1: per-source push keys. POST returns the secret ONCE; nothing can read it back. -----
+
+public sealed record CreateIngestKeyRequest(string Label);
+
+/// <summary>The one and only time <paramref name="Secret"/> exists outside the client — it is stored
+/// hashed and salted, so a lost key is regenerated, never recovered.</summary>
+public sealed record CreatedIngestKeyResponse(string Id, string Label, string Secret, long CreatedAtMs);
+
+/// <summary>Listing shape: identity and usage, never the secret or its hash.</summary>
+public sealed record IngestKeyResponse(string Id, string Label, long CreatedAtMs, long LastUsedMs);
 
 /// <summary>Body for 400/409/413/429. <paramref name="RetryAfterMs"/> is 0 except on 429, where it
 /// mirrors the Retry-After header (which is whole seconds clamped to [1,30]).</summary>
@@ -115,7 +143,12 @@ public sealed record IngestStatusResponse(
     long TotalInvalid,
     long TotalPublished,
     long DownstreamDropped,
-    long LastPushMs);
+    long LastPushMs,
+    // Plan 009 A1, additive. InstanceId/Aggregated exist because plan 008 shipped counters that are
+    // per-replica while reading as global — see IngestStatus.InstanceId's doc comment.
+    long TotalDuplicate = 0,
+    string InstanceId = "",
+    bool Aggregated = false);
 
 // ============================================================================
 // Plan 008 W5: GET /api/pipelines/{id}/plan and GET /api/tables/{id}/plan — lineage + execution-plan

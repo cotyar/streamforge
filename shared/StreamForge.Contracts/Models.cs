@@ -210,6 +210,12 @@ public sealed class TableDefinition
     /// <see cref="TablePersistenceMode.FireAndForget"/>. 0 = the 2000 ms default. Ignored for
     /// <see cref="TablePersistenceMode.MemoryOnly"/>. Changing it restarts the table.</summary>
     [Id(23)] public int FlushMs { get; set; }
+
+    /// <summary>Plan 009 A2: journal length that triggers a compaction, for
+    /// <see cref="TablePersistenceMode.Journaled"/> only. 0 = a sensible default. Too small and every
+    /// flush degenerates into a full snapshot write (i.e. Batched with extra steps); too large and
+    /// activation spends its time replaying.</summary>
+    [Id(24)] public int JournalMaxEntries { get; set; }
 }
 
 /// <summary>Plan 008: per-table durability policy. State is the materialized snapshot; the question is only
@@ -236,6 +242,16 @@ public enum TablePersistenceMode
     /// — it does not replay history, so this suits tables that are naturally re-derivable or short-lived, and
     /// nothing else.</summary>
     MemoryOnly,
+
+    /// <summary>Plan 009 A2. Same durability as <see cref="Batched"/>, but a flush writes only the rows that
+    /// CHANGED since the last compaction (a separate, small journal state) instead of rewriting the whole
+    /// snapshot — so write cost becomes O(changed) rather than O(|table|), which is what makes the flush
+    /// interval stop being a latency knob on large tables. When the journal outgrows
+    /// <see cref="TableDefinition.JournalMaxEntries"/> it is compacted: the full snapshot is written once
+    /// and the journal truncated. Activation loads the snapshot and replays the journal over it, so the
+    /// resumed state is identical to Batched's — the restart-resume limitation in TableGrain's class doc
+    /// (output rows only, no operator internals) is unchanged and applies here too.</summary>
+    Journaled,
 }
 
 /// <summary>Plan 003 M2: one partition's contribution to a partitioned table's aggregate

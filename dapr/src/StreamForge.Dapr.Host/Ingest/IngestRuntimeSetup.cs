@@ -19,6 +19,10 @@ public static class IngestRuntimeSetup
     public static void AddServices(IServiceCollection services)
     {
         services.AddSingleton<SourceIngressRegistry>();
+        // Plan 009 A1: idempotency cache + per-source push-key usage tracker, same host-process
+        // singleton lifetime as SourceIngressRegistry — see each class's own doc comment.
+        services.AddSingleton<IngestIdempotencyCache>();
+        services.AddSingleton<IngestKeyUsageTracker>();
         services.AddSingleton<IIngressFacade, DaprIngressFacade>();
         services.AddHostedService<IngestDrainPumpService>();
     }

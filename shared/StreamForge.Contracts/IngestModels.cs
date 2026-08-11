@@ -53,6 +53,44 @@ public sealed class IngestConfig
     /// <summary>When true an undeclared field fails its row instead of being dropped-and-counted. The
     /// encoder can only write declared fields either way — this only chooses silence vs. an error.</summary>
     [Id(4)] public bool RejectUnknownFields { get; set; }
+
+    // --- Plan 009 A1, additive ---
+
+    /// <summary>Plan 009 A1: name of a declared field whose value identifies a row, for at-least-once
+    /// upstreams. Null (default) disables row-level dedup entirely — the pre-009 behavior. Deduped rows
+    /// are counted as <see cref="IngestResult.Duplicate"/>, which is deliberately NOT the same counter
+    /// as Dropped (capacity) or Invalid (coercion): three different reasons a row didn't land must stay
+    /// distinguishable.</summary>
+    [Id(5)] public string? DedupKeyField { get; set; }
+
+    /// <summary>How many recent row keys to remember. Bounded by design — see DedupTracker.MaxKeys,
+    /// which this reuses rather than reimplementing. 0 means that default.</summary>
+    [Id(6)] public int DedupWindow { get; set; }
+
+    /// <summary>Plan 009 A1: per-source push credentials. A valid key authorizes pushes to THIS source
+    /// and nothing else — which is the point: a machine pushing telemetry should not carry a token that
+    /// can also rewrite SQL. The Editor-JWT path keeps working unchanged. Never contains plaintext: the
+    /// secret is shown exactly once, at generation.</summary>
+    [Id(7)] public List<IngestKey> Keys { get; set; } = [];
+}
+
+/// <summary>One per-source push credential. Hashed with <c>AppCore/Auth/PasswordHasher</c> — the same
+/// primitive user passwords use — so a catalog export (or a leaked state file) never yields a usable
+/// key. Read-back through the REST layer masks <see cref="Hash"/>/<see cref="Salt"/> with
+/// <see cref="SourceKinds.SecretMask"/>, following the secrets-lite convention plan 006 established
+/// for connector credentials.</summary>
+[GenerateSerializer]
+public sealed class IngestKey
+{
+    /// <summary>Opaque public identifier — safe to log, safe to show, used to revoke.</summary>
+    [Id(0)] public string Id { get; set; } = "";
+    [Id(1)] public string Hash { get; set; } = "";
+    [Id(2)] public string Salt { get; set; } = "";
+    /// <summary>Free-form label so a human can tell two keys apart ("prod collector", "laptop").</summary>
+    [Id(3)] public string Label { get; set; } = "";
+    [Id(4)] public long CreatedAtMs { get; set; }
+    /// <summary>0 = never used. Best-effort: updated on successful pushes, per replica.</summary>
+    [Id(5)] public long LastUsedMs { get; set; }
 }
 
 /// <summary>Outcome of one push. Maps 1:1 onto the REST status codes so the endpoint layer holds no
@@ -92,6 +130,15 @@ public sealed class IngestResult
     [Id(5)] public string? Error { get; set; }
     /// <summary>Per-row messages for the rows that failed coercion (bounded — do not echo the batch).</summary>
     [Id(6)] public List<string> RowErrors { get; set; } = [];
+
+    /// <summary>Plan 009 A1: rows suppressed by row-level dedup (<see cref="IngestConfig.DedupKeyField"/>).
+    /// Accepted + Dropped + Invalid + Duplicate accounts for every row in the request.</summary>
+    [Id(7)] public int Duplicate { get; set; }
+
+    /// <summary>Plan 009 A1: true when this result was REPLAYED from the idempotency cache rather than
+    /// produced by admitting anything — the counts describe the original push. Surfaced so a client can
+    /// tell "my retry was recognized" from "my retry was a second push".</summary>
+    [Id(8)] public bool Replayed { get; set; }
 }
 
 /// <summary>Backs GET /api/sources/{name}/ingest. Deliberately NOT overloaded onto /status, which is
@@ -113,6 +160,21 @@ public sealed class IngestStatus
     /// published them (Orleans PushStreamBus.TotalDropped). Counted today and exposed nowhere else.</summary>
     [Id(9)] public long DownstreamDropped { get; set; }
     [Id(10)] public long LastPushMs { get; set; }
+
+    // --- Plan 009 A1, additive ---
+
+    /// <summary>Rows suppressed by row-level dedup.</summary>
+    [Id(11)] public long TotalDuplicate { get; set; }
+
+    /// <summary>Which process produced these numbers. Plan 008 shipped counters that are per-replica
+    /// while looking global; an unlabelled number that silently means "this replica only" is the same
+    /// failure mode as an unexplained zero, so the label is part of the contract.</summary>
+    [Id(12)] public string InstanceId { get; set; } = "";
+
+    /// <summary>True when the counters cover every replica (Orleans: summed through IIngressStatsGrain,
+    /// a cluster singleton per source). False on the Dapr flavor and on any single-process run, where
+    /// they describe <see cref="InstanceId"/> alone.</summary>
+    [Id(13)] public bool Aggregated { get; set; }
 }
 
 /// <summary>Client-push ingress (plan 008 W4). A NEW interface rather than an ICatalogFacade
@@ -125,7 +187,19 @@ public interface IIngressFacade
     /// <summary>Coerce, admit, and (for Inline) publish one batch. Coercion happens BEFORE admission so
     /// a 400 never leaves partial state. <paramref name="partial"/> admits the valid rows of a batch
     /// that has invalid ones instead of failing the whole batch.</summary>
-    Task<IngestResult> PushAsync(string sourceName, IReadOnlyList<Dictionary<string, object?>> events, bool partial);
+    /// <param name="idempotencyKey">Plan 009 A1. When non-null, a repeat of the same (source, key) pair
+    /// returns the ORIGINAL result verbatim (<see cref="IngestResult.Replayed"/> = true) and admits
+    /// nothing — the only shape under which "retry the identical body after a 429" is safe.</param>
+    Task<IngestResult> PushAsync(
+        string sourceName,
+        IReadOnlyList<Dictionary<string, object?>> events,
+        bool partial,
+        string? idempotencyKey = null);
+
+    /// <summary>Plan 009 A1: validates a presented per-source push key against
+    /// <see cref="IngestConfig.Keys"/>. Null/blank key, unknown source, non-ingest source and no
+    /// configured keys all return false — an ingest source with zero keys is JWT-only, not open.</summary>
+    Task<bool> ValidateKeyAsync(string sourceName, string? presentedKey);
 
     /// <summary>Null when the source does not exist or is not ingest-kind.</summary>
     Task<IngestStatus?> GetStatusAsync(string sourceName);

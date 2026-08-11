@@ -349,6 +349,10 @@ message IngestRequest {
   // Admits the valid rows of a batch that has invalid ones instead of failing the whole batch —
   // mirrors IngestEventsRequest.Partial (Dtos.cs).
   bool partial = 3;
+  // Plan 009 A1.1: mirrors IngestEventsRequest.IdempotencyKey — a repeat of the same
+  // (source_name, idempotency_key) pair replays the original ack instead of admitting anything
+  // again. Empty string means "no idempotency key" (proto3 has no null for scalar fields).
+  string idempotency_key = 4;
 }
 
 // Mirrors StreamForge.Abstractions.IngestOutcome 1:1 (IngestModels.cs) — same REST-status-code
@@ -374,6 +378,12 @@ message IngestAck {
   int32 retry_after_ms = 5;
   string error = 6;
   repeated string row_errors = 7;
+  // Plan 009 A1.1: mirrors IngestResult.Duplicate — rows suppressed by row-level dedup, a distinct
+  // reason from dropped (capacity) and invalid (coercion).
+  int32 duplicate = 8;
+  // Plan 009 A1.1: mirrors IngestResult.Replayed — true when this ack restates an earlier push's
+  // counts from the idempotency cache rather than a new admission.
+  bool replayed = 9;
 }
 
 service IngestService {

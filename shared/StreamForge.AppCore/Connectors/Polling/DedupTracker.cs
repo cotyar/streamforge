@@ -6,18 +6,31 @@ namespace StreamForge.AppCore.Connectors.Polling;
 /// O(1) <see cref="Seen"/> via a HashSet mirrored by an insertion-order Queue for eviction.</summary>
 public sealed class DedupTracker
 {
-    /// <summary>Bound on the number of remembered keys (D-D).</summary>
+    /// <summary>Bound on the number of remembered keys (D-D) — the DEFAULT bound; see
+    /// <see cref="_maxKeys"/> for the plan 009 A1 per-instance override.</summary>
     public const int MaxKeys = 10_000;
 
     private readonly HashSet<string> _keys;
     private readonly Queue<string> _order;
+    private readonly int _maxKeys;
 
     /// <param name="persisted">Previously-persisted keys in insertion (oldest-first) order, as
     /// returned by <see cref="ToPersistable"/>. Null starts empty.</param>
-    public DedupTracker(List<string>? persisted = null)
+    /// <param name="maxKeys">Plan 009 A1: overrides <see cref="MaxKeys"/> for this instance — row-
+    /// level ingress dedup (IngestConfig.DedupWindow) needs a per-source bound smaller than the 10k
+    /// default; null/non-positive keeps the default. Additive: every pre-009 caller (polling
+    /// connectors) omits this and gets byte-identical behavior.</param>
+    public DedupTracker(List<string>? persisted = null, int? maxKeys = null)
     {
+        _maxKeys = maxKeys is > 0 ? maxKeys.Value : MaxKeys;
         _order = new Queue<string>(persisted ?? []);
         _keys = new HashSet<string>(_order);
+        // A persisted list longer than a SMALLER custom bound is trimmed from the head immediately —
+        // otherwise Seen() wouldn't evict down to _maxKeys until _maxKeys+1 more calls.
+        while (_order.Count > _maxKeys)
+        {
+            _keys.Remove(_order.Dequeue());
+        }
     }
 
     /// <summary>True if <paramref name="key"/> was already seen (no state change). False if it is
@@ -28,7 +41,7 @@ public sealed class DedupTracker
             return true;
 
         _order.Enqueue(key);
-        if (_order.Count > MaxKeys)
+        if (_order.Count > _maxKeys)
             _keys.Remove(_order.Dequeue());
 
         return false;

@@ -1,4 +1,5 @@
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Connectors.Polling;
 
 namespace StreamForge.AppCore.Ingest;
 
@@ -12,6 +13,11 @@ namespace StreamForge.AppCore.Ingest;
 /// <see cref="IngressOverflowPolicy.Block"/>'s timeout and the drain-rate estimate are testable
 /// without sleeping for real.
 /// </summary>
+/// <summary>Result of <see cref="SourceIngressBuffer.FilterRowLevelDuplicates"/>: <paramref name="Kept"/>
+/// is what should reach admission; <paramref name="DuplicateCount"/> is reported as
+/// <see cref="IngestResult.Duplicate"/>.</summary>
+public sealed record RowLevelDedupResult(List<Dictionary<string, object?>> Kept, int DuplicateCount);
+
 public sealed class SourceIngressBuffer
 {
     public string SourceName { get; }
@@ -28,6 +34,14 @@ public sealed class SourceIngressBuffer
     private readonly Func<IReadOnlyList<Dictionary<string, object?>>, CancellationToken, Task> _drain;
     private readonly long _createdAtMs;
 
+    /// <summary>Plan 009 A1.1: per-source row-level dedup tracker, present only when
+    /// <see cref="IngestConfig.DedupKeyField"/> is configured — reuses
+    /// <see cref="DedupTracker"/> rather than a second implementation (per the plan brief).
+    /// Rebuilt (fresh, empty) whenever this buffer itself is rebuilt (config fingerprint change),
+    /// same "no stale state survives an edit" tradeoff <see cref="SourceIngressRegistry"/>'s own doc
+    /// comment already accepts for admission policy.</summary>
+    private readonly DedupTracker? _dedup;
+
     private int _depth;
     private long _totalAccepted;
     private long _totalRejected;
@@ -35,6 +49,7 @@ public sealed class SourceIngressBuffer
     private long _totalInvalid;
     private long _totalPublished;
     private long _downstreamDropped;
+    private long _totalDuplicate;
     private long _lastPushMs;
 
     private TaskCompletionSource<bool> _spaceSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -64,6 +79,9 @@ public sealed class SourceIngressBuffer
         _clock = clock ?? (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         _delay = delay ?? Task.Delay;
         _createdAtMs = _clock();
+        _dedup = string.IsNullOrEmpty(config.DedupKeyField)
+            ? null
+            : new DedupTracker(maxKeys: config.DedupWindow > 0 ? config.DedupWindow : null);
     }
 
     public int DepthRows { get { lock (_gate) return _depth; } }
@@ -181,6 +199,50 @@ public sealed class SourceIngressBuffer
         lock (_gate) { _totalInvalid += count; }
     }
 
+    /// <summary>Plan 009 A1.1: row-level dedup — called with the already-COERCED rows of a batch
+    /// (i.e. after <c>IngressRowAcceptance.AcceptBatch</c>, before <see cref="PushAsync"/>), so a
+    /// duplicate never consumes buffer capacity and never shows up as coercion-invalid either. A no-op
+    /// (every row kept, zero duplicates) when this source has no <see cref="IngestConfig.DedupKeyField"/>
+    /// configured. A row missing the configured key field, or holding a null value for it, cannot be
+    /// deduped and is kept as-is — silently admitting it is more forgiving than failing the whole
+    /// row over an absent optional field.</summary>
+    public RowLevelDedupResult FilterRowLevelDuplicates(IReadOnlyList<Dictionary<string, object?>> rows)
+    {
+        if (_dedup is null || rows.Count == 0)
+        {
+            return new RowLevelDedupResult([.. rows], 0);
+        }
+
+        var kept = new List<Dictionary<string, object?>>(rows.Count);
+        var duplicateCount = 0;
+        foreach (var row in rows)
+        {
+            if (row.TryGetValue(Config.DedupKeyField!, out var value) && value is not null && _dedup.Seen(DedupKeyToString(value)))
+            {
+                duplicateCount++;
+            }
+            else
+            {
+                kept.Add(row);
+            }
+        }
+
+        if (duplicateCount > 0)
+        {
+            lock (_gate) { _totalDuplicate += duplicateCount; }
+        }
+
+        return new RowLevelDedupResult(kept, duplicateCount);
+    }
+
+    private static string DedupKeyToString(object value) => value switch
+    {
+        string s => s,
+        bool b => b ? "true" : "false",
+        IFormattable f => f.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
+        _ => value.ToString() ?? "",
+    };
+
     /// <summary>The SECOND loss point (IngestModels.cs's header): rows the transport dropped AFTER
     /// a successful publish. The host reads this from its own transport (e.g. Orleans'
     /// PushStreamBus.TotalDropped) and reports the delta here.</summary>
@@ -206,6 +268,7 @@ public sealed class SourceIngressBuffer
                 TotalInvalid = _totalInvalid,
                 TotalPublished = _totalPublished,
                 DownstreamDropped = _downstreamDropped,
+                TotalDuplicate = _totalDuplicate,
                 LastPushMs = _lastPushMs,
             };
         }

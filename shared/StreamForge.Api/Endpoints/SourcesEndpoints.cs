@@ -1,9 +1,13 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Config;
+using StreamForge.AppCore.Ingest;
+using StreamForge.Host.Auth;
 using StreamForge.Host.Grpc.Dynamic;
 
 namespace StreamForge.Api;
@@ -114,9 +118,27 @@ public static class SourcesEndpoints
         // is a 1:1 mapping of IngestOutcome onto an HTTP status per IngestModels.cs's own doc comments;
         // all the actual admission/coercion decisions live in IIngressFacade/AppCore.Ingest. ----
 
-        group.MapPost("/{name}/events", async (string name, IngestEventsRequest req, IIngressFacade ingress, HttpContext http) =>
+        // Plan 009 A1.2: this route deliberately does NOT `.RequireAuthorization("Editor")` — a
+        // machine pushing telemetry may authenticate with a per-source push key instead of an Editor
+        // JWT (AllowAnonymous below, then a manual dual check: Editor JWT OR a valid X-SF-Ingest-Key
+        // for THIS source). An ingest source with zero configured keys is JWT-only, not open — see
+        // IsAuthorizedToPushAsync/IIngressFacade.ValidateKeyAsync's own doc comment.
+        group.MapPost("/{name}/events", async (
+            string name, IngestEventsRequest req, IIngressFacade ingress,
+            IAuthorizationService authz, HttpContext http) =>
         {
-            var result = await ingress.PushAsync(name, req.Events, req.Partial);
+            if (!await IsAuthorizedToPushAsync(name, http, authz, ingress))
+            {
+                return Results.Unauthorized();
+            }
+
+            // Plan 009 A1.1: body wins over the header when both are present (IngestEventsRequest's
+            // own doc comment).
+            var idempotencyKey = !string.IsNullOrEmpty(req.IdempotencyKey)
+                ? req.IdempotencyKey
+                : http.Request.Headers["Idempotency-Key"].FirstOrDefault();
+
+            var result = await ingress.PushAsync(name, req.Events, req.Partial, idempotencyKey);
             switch (result.Outcome)
             {
                 case IngestOutcome.Accepted:
@@ -125,7 +147,9 @@ public static class SourcesEndpoints
                     // fills them in for the 202 body.
                     var status = await ingress.GetStatusAsync(name);
                     return Results.Json(
-                        new IngestAcceptedResponse(result.Accepted, result.Dropped, result.Invalid, status?.DepthRows ?? 0, status?.CapacityRows ?? 0),
+                        new IngestAcceptedResponse(
+                            result.Accepted, result.Dropped, result.Invalid, status?.DepthRows ?? 0, status?.CapacityRows ?? 0,
+                            result.Duplicate, result.Replayed),
                         statusCode: StatusCodes.Status202Accepted);
 
                 case IngestOutcome.Invalid:
@@ -157,7 +181,7 @@ public static class SourcesEndpoints
                         new IngestErrorResponse(result.Error ?? "ingress buffer has no room for this batch", retryAfterSeconds * 1000, result.RowErrors),
                         statusCode: StatusCodes.Status429TooManyRequests);
             }
-        }).RequireAuthorization("Editor");
+        }).AllowAnonymous(); // real gate is the manual dual check above, not route-level authorization
 
         // GET /{name}/ingest — ingress buffer status (plan 008 W4). Deliberately NOT overloaded onto
         // /status above, which is the connector-runtime surface; reuses the same three-way
@@ -173,6 +197,82 @@ public static class SourcesEndpoints
                 _ => Results.Ok(ToIngestStatusResponse(status!)),
             };
         }).RequireAuthorization("Viewer");
+
+        // ---- Per-source push keys (plan 009 A1.2). All three Editor — key material is a credential-
+        // management concern, the same bar as every other source-mutating endpoint in this file. ----
+
+        // POST generates a fresh secret, stores only its salted hash (AppCore/Auth/PasswordHasher —
+        // the same primitive user passwords use), and returns the plaintext secret EXACTLY ONCE. There
+        // is no other way to ever read it back — GET below only ever returns identity + usage.
+        group.MapPost("/{name}/ingest/keys", async (string name, CreateIngestKeyRequest req, ICatalogFacade registry) =>
+        {
+            var src = await registry.GetSourceAsync(name);
+            if (src is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (src.Kind != SourceKinds.Ingest)
+            {
+                return Results.Json(new ErrorResponse($"source '{name}' is not ingest-kind"), statusCode: StatusCodes.Status409Conflict);
+            }
+
+            var secret = GenerateIngestKeySecret();
+            var (hash, salt) = PasswordHasher.Hash(secret);
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var key = new IngestKey
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Hash = hash,
+                Salt = salt,
+                Label = req.Label ?? "",
+                CreatedAtMs = nowMs,
+            };
+
+            src.Ingest ??= new IngestConfig();
+            src.Ingest.Keys.Add(key);
+            await registry.UpsertSourceAsync(src);
+
+            return Results.Ok(new CreatedIngestKeyResponse(key.Id, key.Label, secret, key.CreatedAtMs));
+        }).RequireAuthorization("Editor");
+
+        // GET lists identity + best-effort usage only (IngestKeyUsageTracker.GetLastUsedMs overlays
+        // this replica's own in-memory view on top of whatever was last durably stored — see that
+        // class's doc comment for why LastUsedMs isn't round-tripped through UpsertSourceAsync on
+        // every push).
+        group.MapGet("/{name}/ingest/keys", async (string name, ICatalogFacade registry, IngestKeyUsageTracker usage) =>
+        {
+            var src = await registry.GetSourceAsync(name);
+            if (src is null)
+            {
+                return Results.NotFound();
+            }
+
+            var keys = (src.Ingest?.Keys ?? [])
+                .Select(k => new IngestKeyResponse(k.Id, k.Label, k.CreatedAtMs, Math.Max(k.LastUsedMs, usage.GetLastUsedMs(name, k.Id))))
+                .ToList();
+            return Results.Ok(keys);
+        }).RequireAuthorization("Editor");
+
+        // DELETE revokes — the key immediately stops authorizing pushes to this source (ValidateKeyAsync
+        // only ever checks IngestConfig.Keys as currently stored).
+        group.MapDelete("/{name}/ingest/keys/{id}", async (string name, string id, ICatalogFacade registry) =>
+        {
+            var src = await registry.GetSourceAsync(name);
+            if (src is null)
+            {
+                return Results.NotFound();
+            }
+
+            var removed = (src.Ingest?.Keys.RemoveAll(k => k.Id == id) ?? 0) > 0;
+            if (!removed)
+            {
+                return Results.NotFound();
+            }
+
+            await registry.UpsertSourceAsync(src);
+            return Results.NoContent();
+        }).RequireAuthorization("Editor");
 
         // ---- Schema helper endpoints for the UI (Editor — even mapping-validate/derive-openapi,
         // which don't themselves dial out, since they're part of the connector-authoring flow that
@@ -203,5 +303,32 @@ public static class SourcesEndpoints
         s.TotalInvalid,
         s.TotalPublished,
         s.DownstreamDropped,
-        s.LastPushMs);
+        s.LastPushMs,
+        s.TotalDuplicate,
+        s.InstanceId,
+        s.Aggregated);
+
+    /// <summary>Plan 009 A1.2: the dual auth check POST /{name}/events runs instead of a route-level
+    /// <c>RequireAuthorization("Editor")</c> — an Editor JWT (checked via the REAL "Editor" policy
+    /// through <see cref="IAuthorizationService"/>, not a hand-rolled role check, so Admin still
+    /// satisfies it exactly like every other Editor-gated endpoint) always suffices; otherwise the
+    /// <c>X-SF-Ingest-Key</c> header is validated against THIS source's configured keys. An ingest
+    /// source with zero configured keys is JWT-only, not open — that rule lives in
+    /// <see cref="IIngressFacade.ValidateKeyAsync"/>, not here, so REST and gRPC can't drift.</summary>
+    private static async Task<bool> IsAuthorizedToPushAsync(string sourceName, HttpContext http, IAuthorizationService authz, IIngressFacade ingress)
+    {
+        var editorResult = await authz.AuthorizeAsync(http.User, "Editor");
+        if (editorResult.Succeeded)
+        {
+            return true;
+        }
+
+        var presentedKey = http.Request.Headers["X-SF-Ingest-Key"].FirstOrDefault();
+        return await ingress.ValidateKeyAsync(sourceName, presentedKey);
+    }
+
+    /// <summary>Plan 009 A1.2: cryptographically secure secret generation — 32 random bytes, hex-
+    /// encoded, with a stable "sfk_" prefix so a leaked secret is recognizable as a StreamForge ingest
+    /// key at a glance (same spirit as Stripe/GitHub-style prefixed tokens).</summary>
+    private static string GenerateIngestKeySecret() => "sfk_" + RandomNumberGenerator.GetHexString(64, lowercase: true);
 }

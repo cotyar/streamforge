@@ -3,6 +3,7 @@ using Dapr.Client;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Ingest;
 using StreamForge.Dapr.Host.Streaming;
+using StreamForge.Host.Auth;
 
 // Plan 008 W4c: every other facade in this project (DaprCatalogFacade, DaprConnectorStatusFacade, ...) is
 // internal and untested directly — only their pure helper classes (e.g. SourceKindDispatch) get unit
@@ -43,7 +44,9 @@ internal sealed class DaprIngressFacade(
     ICatalogFacade catalog,
     SourceIngressRegistry registry,
     DaprClient daprClient,
-    ILogger<DaprIngressFacade> logger) : IIngressFacade
+    ILogger<DaprIngressFacade> logger,
+    IngestIdempotencyCache? idempotency = null,
+    IngestKeyUsageTracker? keyUsage = null) : IIngressFacade
 {
     /// <summary>Same literal as <see cref="Actors.ConnectorActor"/>'s private <c>EgressTopicPrefix</c> —
     /// duplicated rather than shared for the same reason that class's own doc comment gives for ITS copy
@@ -53,7 +56,19 @@ internal sealed class DaprIngressFacade(
     /// across wave-owned files.</summary>
     private const string EgressTopicPrefix = "sf-source-";
 
-    public async Task<IngestResult> PushAsync(string sourceName, IReadOnlyList<Dictionary<string, object?>> events, bool partial)
+    // Plan 009 A1: optional trailing constructor params (defaulting to a fresh instance) so the
+    // existing 4-arg `new(...)` call in DaprIngressFacadeTests keeps compiling unmodified — DI
+    // (IngestRuntimeSetup.AddServices) supplies the REAL host-process singletons explicitly.
+    private readonly IngestIdempotencyCache _idempotency = idempotency ?? new IngestIdempotencyCache();
+    private readonly IngestKeyUsageTracker _keyUsage = keyUsage ?? new IngestKeyUsageTracker();
+
+    /// <summary>Plan 009 A1.1: the idempotency check runs BEFORE anything else — even source lookup —
+    /// per <see cref="IngestIdempotencyCache"/>'s own doc comment: a repeat of the same key always
+    /// replays the ORIGINAL outcome verbatim, never re-derives one.</summary>
+    public Task<IngestResult> PushAsync(string sourceName, IReadOnlyList<Dictionary<string, object?>> events, bool partial, string? idempotencyKey = null) =>
+        IngestIdempotencyCache.RunAsync(_idempotency, sourceName, idempotencyKey, () => PushCoreAsync(sourceName, events, partial));
+
+    private async Task<IngestResult> PushCoreAsync(string sourceName, IReadOnlyList<Dictionary<string, object?>> events, bool partial)
     {
         var def = await catalog.GetSourceAsync(sourceName);
         if (def is null)
@@ -93,16 +108,55 @@ internal sealed class DaprIngressFacade(
         var buffer = registry.GetOrCreate(sourceName, config, (rows, ct) => DrainAsync(sourceName, rows, ct));
         buffer.RecordInvalid(batch.RowErrors.Count);
 
-        var result = await buffer.PushAsync(batch.Accepted);
-        // Accepted + Dropped + Invalid must account for every row in the ORIGINAL request
+        // Plan 009 A1.1: row-level dedup runs AFTER coercion, BEFORE admission — a duplicate never
+        // consumes buffer capacity, mirroring the ordering rule in IngestModels.cs's header.
+        var dedup = buffer.FilterRowLevelDuplicates(batch.Accepted);
+        var result = await buffer.PushAsync(dedup.Kept);
+        // Accepted + Dropped + Invalid + Duplicate must account for every row in the ORIGINAL request
         // (IngestResult's own doc comment) — batch.RowErrors are rows the buffer never saw at all.
         result.Invalid = batch.RowErrors.Count;
         if (batch.RowErrors.Count > 0)
         {
             result.RowErrors = batch.RowErrors;
         }
+        result.Duplicate = dedup.DuplicateCount;
 
         return result;
+    }
+
+    /// <summary>Plan 009 A1.2: null/blank key, unknown source, non-ingest source, and a source with no
+    /// configured keys all return false (IIngressFacade.ValidateKeyAsync's own doc comment — an ingest
+    /// source with zero keys is JWT-only, not open). Hash comparison is
+    /// <see cref="PasswordHasher.Verify"/>'s own fixed-time compare, so this doesn't leak by timing.</summary>
+    public async Task<bool> ValidateKeyAsync(string sourceName, string? presentedKey)
+    {
+        if (string.IsNullOrEmpty(presentedKey))
+        {
+            return false;
+        }
+
+        var def = await catalog.GetSourceAsync(sourceName);
+        if (def is null || def.Kind != SourceKinds.Ingest)
+        {
+            return false;
+        }
+
+        var keys = def.Ingest?.Keys;
+        if (keys is null || keys.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var key in keys)
+        {
+            if (PasswordHasher.Verify(presentedKey, key.Hash, key.Salt))
+            {
+                _keyUsage.RecordUse(sourceName, key.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Null when the source doesn't exist or isn't ingest-kind. A source that IS ingest-kind but
@@ -119,25 +173,35 @@ internal sealed class DaprIngressFacade(
 
         var config = def.Ingest ?? new IngestConfig();
         var buffer = registry.TryGet(sourceName);
+        IngestStatus status;
         if (buffer is null)
         {
-            return new IngestStatus
+            status = new IngestStatus
             {
                 Policy = config.Policy,
                 CapacityRows = config.CapacityRows,
                 MaxBatchRows = config.MaxBatchRows,
             };
         }
+        else
+        {
+            // IngestStatus.DownstreamDropped is always 0 on this flavor, and deliberately so — not a
+            // placeholder. Dapr's PublishEventAsync (in DrainAsync below) reports only the sidecar hop, not
+            // whether the in-host router or any downstream subscriber kept up; there is no Dapr equivalent of
+            // Orleans' PushStreamBus.TotalDropped to sample, so SourceIngressBuffer.RecordDownstreamDropped is
+            // simply never called on this flavor. The zero returned here is therefore honest ("we cannot
+            // observe this loss point"), not "nothing is being lost" — same convention as
+            // IArrangementMetaFacade's "always returns an empty list" note (decision D-F) for other
+            // Orleans-only observability this flavor cannot honestly provide.
+            status = buffer.GetStatus();
+        }
 
-        // IngestStatus.DownstreamDropped is always 0 on this flavor, and deliberately so — not a
-        // placeholder. Dapr's PublishEventAsync (in DrainAsync below) reports only the sidecar hop, not
-        // whether the in-host router or any downstream subscriber kept up; there is no Dapr equivalent of
-        // Orleans' PushStreamBus.TotalDropped to sample, so SourceIngressBuffer.RecordDownstreamDropped is
-        // simply never called on this flavor. The zero returned here is therefore honest ("we cannot
-        // observe this loss point"), not "nothing is being lost" — same convention as
-        // IArrangementMetaFacade's "always returns an empty list" note (decision D-F) for other
-        // Orleans-only observability this flavor cannot honestly provide.
-        return buffer.GetStatus();
+        // Plan 009 A1.3: this flavor has no cluster, so there is nothing to aggregate INTO — every
+        // number above is already the whole (single-process) picture, labelled honestly as such. Same
+        // Orleans-only-capability convention IArrangementMetaFacade documents for decision D-F.
+        status.InstanceId = IngressInstanceId.Value;
+        status.Aggregated = false;
+        return status;
     }
 
     private async Task DrainAsync(string sourceName, IReadOnlyList<Dictionary<string, object?>> rows, CancellationToken ct)

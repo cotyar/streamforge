@@ -4,6 +4,7 @@ using StreamForge.Abstractions;
 using StreamForge.AppCore.Ingest;
 using StreamForge.Engine;
 using StreamForge.Engine.Dataflow;
+using StreamForge.Host.Auth;
 using StreamForge.Host.Grains;
 using StreamForge.Host.Streaming;
 
@@ -45,6 +46,13 @@ public static class OrleansFacadesExtensions
         // registry (one SourceIngressBuffer per ingest-kind source); OrleansIngressFacade is the thin
         // Orleans-side adapter IIngressFacade callers (SourcesEndpoints, IngestGrpcService) depend on.
         services.AddSingleton<SourceIngressRegistry>();
+        // Plan 009 A1: idempotency cache + per-source push-key usage tracker (both host-process
+        // singletons, same lifetime as SourceIngressRegistry) and the "last reported to the stats
+        // grain" baseline tracker IngestDrainPumpService/OrleansIngressFacade share — see each class's
+        // own doc comment.
+        services.AddSingleton<IngestIdempotencyCache>();
+        services.AddSingleton<IngestKeyUsageTracker>();
+        services.AddSingleton<IngressStatsReportTracker>();
         services.AddSingleton<IIngressFacade, OrleansIngressFacade>();
         return services;
     }
@@ -119,9 +127,21 @@ internal sealed class OrleansConnectorStatusFacade(IClusterClient client) : ICon
 /// PushStreamHostingExtensions' doc on why that equivalence holds for this co-hosted process) — one
 /// EventRecord per row, so every existing subscriber (pipelines, tables, SignalR, gRPC StreamService)
 /// sees an ingest source exactly like a generator or connector one.</summary>
-internal sealed class OrleansIngressFacade(IClusterClient client, SourceIngressRegistry registry, IServiceProvider services) : IIngressFacade
+internal sealed class OrleansIngressFacade(
+    IClusterClient client,
+    SourceIngressRegistry registry,
+    IngestIdempotencyCache idempotency,
+    IngestKeyUsageTracker keyUsage,
+    IngressStatsReportTracker statsTracker,
+    IServiceProvider services) : IIngressFacade
 {
-    public async Task<IngestResult> PushAsync(string sourceName, IReadOnlyList<Dictionary<string, object?>> events, bool partial)
+    /// <summary>Plan 009 A1.1: the idempotency check runs BEFORE anything else — even source lookup —
+    /// per <see cref="IngestIdempotencyCache"/>'s own doc comment: a repeat of the same key always
+    /// replays the ORIGINAL outcome verbatim, never re-derives one.</summary>
+    public Task<IngestResult> PushAsync(string sourceName, IReadOnlyList<Dictionary<string, object?>> events, bool partial, string? idempotencyKey = null) =>
+        IngestIdempotencyCache.RunAsync(idempotency, sourceName, idempotencyKey, () => PushCoreAsync(sourceName, events, partial));
+
+    private async Task<IngestResult> PushCoreAsync(string sourceName, IReadOnlyList<Dictionary<string, object?>> events, bool partial)
     {
         var def = await GetSourceDefAsync(sourceName);
         if (def is null)
@@ -154,7 +174,12 @@ internal sealed class OrleansIngressFacade(IClusterClient client, SourceIngressR
         }
 
         var buffer = registry.GetOrCreate(sourceName, config, (rows, ct) => DrainAsync(sourceName, rows, ct));
-        var result = await buffer.PushAsync(batch.Accepted);
+
+        // Plan 009 A1.1: row-level dedup runs AFTER coercion, BEFORE admission — a duplicate never
+        // consumes buffer capacity and (together with the whole-batch-Invalid return above) a 400
+        // still leaves nothing behind either way.
+        var dedup = buffer.FilterRowLevelDuplicates(batch.Accepted);
+        var result = await buffer.PushAsync(dedup.Kept);
 
         if (batch.RowErrors.Count > 0)
         {
@@ -163,9 +188,53 @@ internal sealed class OrleansIngressFacade(IClusterClient client, SourceIngressR
             result.RowErrors = batch.RowErrors;
         }
 
+        result.Duplicate = dedup.DuplicateCount;
         return result;
     }
 
+    /// <summary>Plan 009 A1.2: null/blank key, unknown source, non-ingest source, and a source with no
+    /// configured keys all return false (IIngressFacade.ValidateKeyAsync's own doc comment — an ingest
+    /// source with zero keys is JWT-only, not open). Hash comparison is
+    /// <see cref="PasswordHasher.Verify"/>'s own fixed-time compare, so this doesn't leak by timing.</summary>
+    public async Task<bool> ValidateKeyAsync(string sourceName, string? presentedKey)
+    {
+        if (string.IsNullOrEmpty(presentedKey))
+        {
+            return false;
+        }
+
+        var def = await GetSourceDefAsync(sourceName);
+        if (def is null || def.Kind != SourceKinds.Ingest)
+        {
+            return false;
+        }
+
+        var keys = def.Ingest?.Keys;
+        if (keys is null || keys.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var key in keys)
+        {
+            if (PasswordHasher.Verify(presentedKey, key.Hash, key.Salt))
+            {
+                // Best-effort, in-memory, per-replica — see IngestKeyUsageTracker's own doc comment
+                // for why this is never round-tripped through UpsertSourceAsync on the hot path.
+                keyUsage.RecordUse(sourceName, key.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Plan 009 A1.3: DepthRows/Policy/CapacityRows/MaxBatchRows/LastPushMs stay THIS
+    /// replica's own local view (they aren't cumulative counters, so summing them across replicas
+    /// wouldn't mean anything); every TotalX/DownstreamDropped counter is answered from
+    /// <see cref="IIngressStatsGrain"/> plus whatever this replica hasn't reported yet — see
+    /// <see cref="IngressStatsReportTracker"/>'s own doc comment for why that combination, not the
+    /// grain alone, is what keeps a push-then-immediately-GET on the same replica accurate.</summary>
     public async Task<IngestStatus?> GetStatusAsync(string sourceName)
     {
         var def = await GetSourceDefAsync(sourceName);
@@ -175,15 +244,27 @@ internal sealed class OrleansIngressFacade(IClusterClient client, SourceIngressR
         }
 
         var buffer = registry.TryGet(sourceName);
-        if (buffer is not null)
-        {
-            return buffer.GetStatus();
-        }
-
-        // Never pushed to yet (SourceIngressRegistry.TryGet's own doc): report the configured
-        // shape with zeroed counters instead of creating a buffer as a side effect of a GET.
         var config = def.Ingest ?? new IngestConfig();
-        return new IngestStatus { Policy = config.Policy, CapacityRows = config.CapacityRows, MaxBatchRows = config.MaxBatchRows };
+
+        // Never pushed to on THIS replica yet (SourceIngressRegistry.TryGet's own doc): report the
+        // configured shape with zeroed local counters instead of creating a buffer as a side effect of
+        // a GET — the aggregation below can still show other replicas' totals for this source.
+        var local = buffer?.GetStatus() ?? new IngestStatus { Policy = config.Policy, CapacityRows = config.CapacityRows, MaxBatchRows = config.MaxBatchRows };
+
+        var snapshot = await client.GetGrain<IIngressStatsGrain>(sourceName).GetSnapshotAsync();
+        var baseline = statsTracker.GetBaseline(sourceName);
+        var pending = IngressStatsReportTracker.ComputeDelta(baseline, local);
+
+        local.TotalAccepted = snapshot.TotalAccepted + pending.Accepted;
+        local.TotalRejected = snapshot.TotalRejected + pending.Rejected;
+        local.TotalDropped = snapshot.TotalDropped + pending.Dropped;
+        local.TotalInvalid = snapshot.TotalInvalid + pending.Invalid;
+        local.TotalPublished = snapshot.TotalPublished + pending.Published;
+        local.DownstreamDropped = snapshot.DownstreamDropped + pending.DownstreamDropped;
+        local.TotalDuplicate = snapshot.TotalDuplicate + pending.Duplicate;
+        local.InstanceId = IngressInstanceId.Value;
+        local.Aggregated = true;
+        return local;
     }
 
     private Task<SourceDefinition?> GetSourceDefAsync(string sourceName) =>
