@@ -128,6 +128,25 @@ public static class SeedCatalog
         // PART_FILL, PART_FILL, ..., FILLED/CANCELED) for a clicked order, i.e. the recent-versions trail,
         // not a peak+latest pair. MaxBy(stage_rank) would only ever retain 2 entries (the FILLED/CANCELED
         // extreme + itself as latest) and lose the PART_FILL steps in between — LastN(8) keeps the walk.
+        //
+        // PLAN 011 WAVE C — KNOWN, UNFIXED, AND DELIBERATELY WRITTEN DOWN HERE: this is the one seeded
+        // entry whose STOCK configuration grows without bound. `order_id` is a fresh GUID-derived string
+        // per order (MarketDataProfiles.SpawnOrder), an order goes terminal and is never re-emitted
+        // (LifecycleGeneratorTests asserts exactly that finality), and `LATEST BY (order_id)` has no
+        // eviction — so a table seeded RUNNING gains roughly one PERMANENT row per second, forever, with up
+        // to 8 retained history versions behind each. A host left running overnight on the stock seed will
+        // eventually exhaust memory; that is not a hypothetical, it is the reproduction of the reported
+        // failure. Wave C removed the AMPLIFIER (the whole-table snapshot rebuild every FlushMs — see
+        // TableGrain.CaptureSnapshotIntoState), so the growth is now proportional to the row set instead of
+        // to the row set times the clock, but the row set itself is still unbounded.
+        //
+        // WHY IT IS NOT FIXED HERE, rather than left silently broken: both honest fixes are blocked by
+        // pre-existing tests that this wave may not modify. Seeding it Stopped contradicts
+        // LifecycleSeedClusterTests / StreamBridgeServiceStartupRaceTests, which assert it seeds Running;
+        // bounding the key space by recycling order ids contradicts LifecycleGeneratorTests' terminal-
+        // finality invariant. The mechanism that fixes it without touching either — a per-table row
+        // retention policy (max rows and/or TTL, default off) applied where consolidation already runs — is
+        // plan 011 wave C2. When it lands, this table is its first customer.
         orderStates.HistoryEnabled = true;
         orderStates.HistoryMode = TableHistoryMode.LastN;
         orderStates.HistoryLimit = 8;

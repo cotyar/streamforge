@@ -205,6 +205,24 @@ public sealed class TableJournalState
 /// behind for some LATER switch back to Journaled to incorrectly replay. That unconditional clear is what
 /// makes BOTH directions of a mode switch leave the table consistent.
 ///
+/// PLAN 011 WAVE C — THE FLUSH CAPTURE IS O(CHANGED) IN EVERY MODE, AND WHAT THAT DOES *NOT* FIX. The
+/// per-tick capture described above (<see cref="CaptureSnapshotIntoState"/>) no longer rebuilds the whole
+/// mirror; it applies only the row keys whose ledger entry changed since the previous capture
+/// (<see cref="_touchedRowKeys"/> — see that field's and the capture's own doc comments for the invariant).
+/// No persistence mode's CONTRACT moves: Batched still awaits a full state write on its interval,
+/// FireAndForget still backgrounds it under the same single-flight guard, Journaled still writes only its
+/// small journal and compacts on the same threshold, MemoryOnly still never touches storage (and, per
+/// <see cref="RecordTouchedRowKeys"/>, does not even accumulate the touched-key set). What changed is the
+/// ALLOCATION each tick pays, from O(|table|) to O(rows changed this interval).
+///
+/// Honestly stated, because it is the difference between a fix and a claim: this bounds the RATE of garbage,
+/// not the SIZE of the table. Batched/FireAndForget still SERIALIZE the whole snapshot on every write — that
+/// IS Batched's contract (JsonFileGrainStorage, like Dapr's state store, rewrites a whole state object; see
+/// the Journaled paragraph above), and a table whose key space grows without bound still grows without
+/// bound in memory: the executor's own ledger, the search index, and this mirror are all O(distinct keys).
+/// Bounding the key space itself needs a retention policy (plan 011 wave C2) or per-key sharding (wave D).
+/// Every unbounded structure in the table path is now enumerated in orleans/DESIGN.md's "Known ceilings".
+///
 /// [MayInterleave] ON OnOutputBatchAsync (plan 003 M4, mirrors RegistryGrain's identical fix for an
 /// identical shape of problem — see that class's doc comment): TableOutputGrain.PublishAsync calls back
 /// into THIS grain (the same one orchestrating TableOutputGrain/TableStageGrain's own start/stop) — without
@@ -264,6 +282,24 @@ public sealed class TableGrain(
     /// transiently, between a delta batch landing and the next <see cref="JournalFlushAsync"/> merging it
     /// into the persisted journal — <see cref="TablePersistenceMode.Journaled"/> only.</summary>
     private readonly Dictionary<string, TableJournalEntry> _pendingJournalEntries = [];
+
+    /// <summary>Plan 011 wave C — canonical row keys touched since the last <see cref="CaptureSnapshotIntoState"/>,
+    /// i.e. exactly the set of entries in <c>state.State.Snapshot</c> that are currently out of date with
+    /// respect to the live ledger. This is what makes the periodic capture O(changed) instead of
+    /// O(|table|) for EVERY persistence mode, not just <see cref="TablePersistenceMode.Journaled"/> — see
+    /// <see cref="CaptureSnapshotIntoState"/>'s own doc comment for the invariant and why it holds.
+    ///
+    /// NOT maintained for <see cref="TablePersistenceMode.MemoryOnly"/>: that mode never captures at all
+    /// (no flush timer, no final flush), so the set would never be drained and would itself become one more
+    /// unbounded per-key structure — the exact class of bug this wave exists to remove.</summary>
+    private readonly HashSet<string> _touchedRowKeys = new(StringComparer.Ordinal);
+
+    /// <summary>Plan 011 wave C — forces the next <see cref="CaptureSnapshotIntoState"/> to rebuild
+    /// <c>state.State.Snapshot</c> wholesale instead of applying <see cref="_touchedRowKeys"/>. Set on every
+    /// StartClassicAsync/StartCoordinatorAsync (where the ledger and the mirror are both empty, so the
+    /// "full" rebuild is free) so the incremental path never has to trust state carried across a
+    /// start/stop cycle; cleared by the capture itself.</summary>
+    private bool _fullCaptureNeeded = true;
 
     // Plan 003 M2 — Parallelism >= 2 coordinator-mode state (see class doc). Unused, always default, on
     // the Parallelism==1 path.
@@ -360,6 +396,12 @@ public sealed class TableGrain(
 
         await ClearStaleJournalAsync();
 
+        // Plan 011 wave C: the incremental capture's invariant is re-established from scratch here — a
+        // brand-new (empty) TableExecutor above and an empty state.State.Snapshot either way, so the one
+        // forced full capture this schedules is O(0). See CaptureSnapshotIntoState's doc comment.
+        _touchedRowKeys.Clear();
+        _fullCaptureNeeded = true;
+
         // Either branch above leaves the current row set empty (fresh start, or reset-for-rebuild), so a
         // freshly built (empty) index is accurate here — it fills back in incrementally as
         // ApplyAndPublishAsync observes deltas going forward, exactly like state.State.Snapshot does via
@@ -424,6 +466,11 @@ public sealed class TableGrain(
         }
 
         await ClearStaleJournalAsync();
+
+        // Plan 011 wave C: same re-establishment the classic path does — _coordinatorLedger was just
+        // cleared above and state.State.Snapshot is empty either way. See CaptureSnapshotIntoState.
+        _touchedRowKeys.Clear();
+        _fullCaptureNeeded = true;
 
         _searchIndex = def.SearchEnabled ? new TableSearchIndex(def.SearchMode) : null;
 
@@ -819,14 +866,19 @@ public sealed class TableGrain(
             _rebuilding = false; // real traffic observed since resume — mirrors the classic path's own rule (empty epoch markers do NOT clear this)
             _dirty = true;
 
+            // Plan 011 wave C: one key-derivation pass per batch feeds all three consumers (was up to two
+            // separate passes) — see TouchedKeys' own doc comment.
+            var touched = TouchedKeys(allDeltas);
+            RecordTouchedRowKeys(touched);
+
             if (_persistenceMode == TablePersistenceMode.Journaled)
             {
-                RecordJournalEntries(allDeltas);
+                RecordJournalEntries(touched);
             }
 
             if (_searchIndex is not null)
             {
-                ReflectDeltasInSearchIndex(allDeltas);
+                ReflectDeltasInSearchIndex(touched);
             }
         }
 
@@ -857,14 +909,19 @@ public sealed class TableGrain(
         _dirty = true;
         _deltasOut += deltas.Count;
 
+        // Plan 011 wave C: one key-derivation pass per batch, shared by the search index, the journal and
+        // the incremental snapshot capture — see TouchedKeys' own doc comment.
+        var touched = TouchedKeys(deltas);
+        RecordTouchedRowKeys(touched);
+
         if (_searchIndex is not null)
         {
-            ReflectDeltasInSearchIndex(deltas);
+            ReflectDeltasInSearchIndex(touched);
         }
 
         if (_persistenceMode == TablePersistenceMode.Journaled)
         {
-            RecordJournalEntries(deltas);
+            RecordJournalEntries(touched);
         }
 
         var dtos = deltas.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight }).ToList();
@@ -873,19 +930,44 @@ public sealed class TableGrain(
         await stream.OnNextAsync(dtos);
     }
 
+    /// <summary>Plan 011 wave C — the distinct canonical row keys one delta batch touched, derived ONCE
+    /// and then shared by every per-batch consumer (<see cref="ReflectDeltasInSearchIndex"/>,
+    /// <see cref="RecordJournalEntries"/>, <see cref="RecordTouchedRowKeys"/>). Each of those used to
+    /// re-derive the same keys itself (CanonicalRowKey hashes the whole row, so that was a real per-delta
+    /// cost paid two or three times over); the dedup-by-key `seen` set each of them carried is now this
+    /// one. Order is batch order, first occurrence wins — the same order the per-consumer loops produced
+    /// before, so nothing downstream sees a different sequence.</summary>
+    private List<string> TouchedKeys(IReadOnlyList<TableDelta> deltas)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var keys = new List<string>(deltas.Count);
+        foreach (var delta in deltas)
+        {
+            var key = _executor!.CanonicalRowKey(delta.Row);
+            if (seen.Add(key)) keys.Add(key); // a batch can touch the same row's key more than once
+        }
+        return keys;
+    }
+
+    /// <summary>Plan 011 wave C — accumulates this batch's touched keys into <see cref="_touchedRowKeys"/>
+    /// so the next <see cref="CaptureSnapshotIntoState"/> can be O(changed). Skipped entirely for
+    /// <see cref="TablePersistenceMode.MemoryOnly"/>, which never captures — see the field's own doc
+    /// comment for why accumulating there would be a leak rather than an optimization.</summary>
+    private void RecordTouchedRowKeys(List<string> touched)
+    {
+        if (_persistenceMode == TablePersistenceMode.MemoryOnly) return;
+        foreach (var key in touched) _touchedRowKeys.Add(key);
+    }
+
     /// <summary>Keeps the search index in sync with the consolidated Z-set as deltas land: for each row
     /// touched by this batch, look its canonical key up in the (already-updated, O(1) live) consolidated
     /// snapshot — present with weight &gt; 0 means Add/update, absent means the row's weight returned to 0
     /// (Remove). Only rows actually touched by this batch are re-checked, not the whole table.</summary>
-    private void ReflectDeltasInSearchIndex(IReadOnlyList<TableDelta> deltas)
+    private void ReflectDeltasInSearchIndex(List<string> touched)
     {
         IReadOnlyDictionary<string, (EventRecord Row, long Weight)> snapshot = _coordinatorMode ? _coordinatorLedger.Visible : _executor!.Snapshot();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var delta in deltas)
+        foreach (var key in touched)
         {
-            var key = _executor.CanonicalRowKey(delta.Row);
-            if (!seen.Add(key)) continue; // a batch can touch the same row's key more than once
-
             if (snapshot.TryGetValue(key, out var current))
             {
                 _searchIndex!.Add(key, current.Row);
@@ -906,15 +988,11 @@ public sealed class TableGrain(
     /// key's running weight just dropped to &lt;= 0, recorded as an explicit removal tombstone (Weight = 0) —
     /// see <see cref="TableJournalEntry"/>'s own doc comment for why skipping this instead would resurrect
     /// the row on replay.</summary>
-    private void RecordJournalEntries(IReadOnlyList<TableDelta> deltas)
+    private void RecordJournalEntries(List<string> touched)
     {
         IReadOnlyDictionary<string, (EventRecord Row, long Weight)> snapshot = _coordinatorMode ? _coordinatorLedger.Visible : _executor!.Snapshot();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var delta in deltas)
+        foreach (var key in touched)
         {
-            var key = _executor!.CanonicalRowKey(delta.Row);
-            if (!seen.Add(key)) continue; // a batch can touch the same row's key more than once
-
             _pendingJournalEntries[key] = snapshot.TryGetValue(key, out var current)
                 ? new TableJournalEntry { Row = new Dictionary<string, object?>(current.Row), Weight = current.Weight }
                 : new TableJournalEntry { Row = [], Weight = 0 };
@@ -1031,7 +1109,31 @@ public sealed class TableGrain(
     /// grain turn: <see cref="_executor"/>/<see cref="_coordinatorLedger"/> are not thread-safe and this is
     /// the only safe place to read them. Returns false (and clears <see cref="_dirty"/> without touching
     /// state.State) when there is nothing to capture, exactly like the pre-008 FlushAsync's own null-executor
-    /// guard.</summary>
+    /// guard.
+    ///
+    /// PLAN 011 WAVE C — O(CHANGED), NOT O(|TABLE|). This used to rebuild a brand-new dictionary containing
+    /// a brand-new <c>Dictionary&lt;string, object?&gt;</c> PER ROW from the whole ledger, on the grain turn,
+    /// every <see cref="TableDefinition.FlushMs"/> (default 2000ms). At N rows that allocated N row
+    /// dictionaries and threw the previous N away every tick, forever — allocation proportional to the
+    /// TABLE, at a rate set by the CLOCK, so a table that merely grows linearly produced quadratic total
+    /// allocation and eventually a GC/LOH stall (which is what "the machine froze" actually was, ahead of
+    /// any real heap exhaustion). It now applies only <see cref="_touchedRowKeys"/> — the keys whose ledger
+    /// entry changed since the previous capture — leaving every untouched row's already-captured
+    /// <see cref="TableRowDto"/> in place, untouched and un-reallocated.
+    ///
+    /// THE INVARIANT this relies on: <c>state.State.Snapshot</c>, with <see cref="_touchedRowKeys"/> applied,
+    /// always equals the live consolidated ledger. It holds because (a) the ONLY writers of the ledger are
+    /// ApplyAndPublishAsync/OnOutputBatchAsync, both of which record every key they touch via
+    /// <see cref="RecordTouchedRowKeys"/> before returning; (b) this method drains that set in the same
+    /// synchronous, no-await body that reads the ledger, so no turn can slip in between; and (c) the only
+    /// places <c>state.State.Snapshot</c> is otherwise replaced — StartClassicAsync/StartCoordinatorAsync's
+    /// resume reset — set <see cref="_fullCaptureNeeded"/> at a point where BOTH sides are empty. A key
+    /// present in the set but absent from the ledger means its running weight fell to &lt;= 0, i.e. removal,
+    /// exactly the tombstone rule <see cref="RecordJournalEntries"/> already encodes.
+    ///
+    /// The captured value is still a COPY of the ledger's row (never an alias): a background
+    /// FireAndForget write can be serializing <c>state.State</c> while the ledger keeps mutating, and the
+    /// persisted mirror must not move under it. What changed is only HOW MANY copies each tick makes.</summary>
     private bool CaptureSnapshotIntoState()
     {
         if (_executor is null)
@@ -1041,9 +1143,29 @@ public sealed class TableGrain(
         }
 
         var snapshot = _coordinatorMode ? _coordinatorLedger.Visible : _executor.Snapshot();
-        state.State.Snapshot = snapshot.ToDictionary(
-            kv => kv.Key,
-            kv => new TableRowDto { Row = new Dictionary<string, object?>(kv.Value.Row), Weight = kv.Value.Weight });
+        if (_fullCaptureNeeded)
+        {
+            state.State.Snapshot = snapshot.ToDictionary(
+                kv => kv.Key,
+                kv => new TableRowDto { Row = new Dictionary<string, object?>(kv.Value.Row), Weight = kv.Value.Weight });
+            _fullCaptureNeeded = false;
+        }
+        else
+        {
+            foreach (var key in _touchedRowKeys)
+            {
+                if (snapshot.TryGetValue(key, out var current))
+                {
+                    state.State.Snapshot[key] = new TableRowDto { Row = new Dictionary<string, object?>(current.Row), Weight = current.Weight };
+                }
+                else
+                {
+                    state.State.Snapshot.Remove(key);
+                }
+            }
+        }
+
+        _touchedRowKeys.Clear();
         state.State.Seq++;
         _dirty = false;
         return true;

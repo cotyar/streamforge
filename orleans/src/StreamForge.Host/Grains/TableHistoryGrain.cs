@@ -92,6 +92,15 @@ public sealed class TableHistoryGrainState
 /// boundary is safe) from <c>_liveEntries</c> into <c>state.State.Entries</c> at every capture, and nothing
 /// ever mutates <c>state.State.Entries</c> in place again afterward — exactly the invariant a background
 /// write needs to be safe.
+///
+/// PLAN 011 WAVE C: that clone is now INCREMENTAL — only the entries actually touched since the previous
+/// capture are re-cloned (see <see cref="CaptureSnapshotIntoState"/> and <see cref="_touchedKeys"/>). The
+/// invariant above is unchanged and still exactly what makes a background write safe; what changed is that
+/// a 2s tick no longer allocates a fresh RowHistoryEntry + Versions list for every retained key in the
+/// table. What it does NOT fix, stated plainly: <see cref="_liveEntries"/>' KEY COUNT is still unbounded —
+/// per-key VERSION counts are capped (TableRowHistoryRetention, AllModeCap/HistoryLimit) but nothing ever
+/// removes a key, so a table over an unbounded key space still accumulates one entry per key it has ever
+/// seen, here and in TableGrain alike. See orleans/DESIGN.md's "Known ceilings".
 /// </summary>
 public sealed class TableHistoryGrain(
     [PersistentState("tableHistory", StreamConstants.StorageName)] IPersistentState<TableHistoryGrainState> state,
@@ -109,6 +118,23 @@ public sealed class TableHistoryGrain(
     /// <summary>The live counterpart of state.State.Seq (see TableHistoryGrainState.Seq's own doc comment) —
     /// incremented once per observed delta, mirrored into state.State.Seq only at capture time.</summary>
     private long _liveSeq;
+
+    /// <summary>Plan 011 wave C — the row-identity keys whose <see cref="RowHistoryEntry"/> changed since the
+    /// last <see cref="CaptureSnapshotIntoState"/>, i.e. exactly the entries of <c>state.State.Entries</c>
+    /// that are currently out of date. Drained by the capture, which re-clones only those — see the
+    /// capture's own doc comment for the invariant and for why the old whole-map deep clone was the single
+    /// biggest allocation source on this grain's turn.
+    ///
+    /// NOT accumulated for <see cref="TablePersistenceMode.MemoryOnly"/> (which never captures), for the
+    /// same reason TableGrain's <c>_touchedRowKeys</c> is not: an undrained set is one more unbounded
+    /// per-key structure.</summary>
+    private readonly HashSet<string> _touchedKeys = new(StringComparer.Ordinal);
+
+    /// <summary>Plan 011 wave C — forces the next capture to re-clone the whole map instead of applying
+    /// <see cref="_touchedKeys"/>. Set wherever <c>_liveEntries</c> and <c>state.State.Entries</c> are
+    /// (re)established as two independent object graphs — ResetAsync, ResumeAsync, DisableAsync — so the
+    /// incremental path never has to trust state carried across those transitions.</summary>
+    private bool _fullCaptureNeeded = true;
 
     // Plan 008 W2.5 — per-table persistence mode, re-read from the owning table's TableDefinition on every
     // ResetAsync/ResumeAsync (same refresh rule TableGrain uses for its own copies of these fields).
@@ -136,6 +162,8 @@ public sealed class TableHistoryGrain(
         _liveEntries.Clear();
         _liveSeq = 0;
         _dirty = false;
+        _touchedKeys.Clear();
+        _fullCaptureNeeded = true;
         _persistenceMode = def.Persistence;
         _flushInterval = TimeSpan.FromMilliseconds(def.FlushMs > 0 ? def.FlushMs : 2000);
         await state.WriteStateAsync();
@@ -190,6 +218,10 @@ public sealed class TableHistoryGrain(
             _liveEntries[key] = new RowHistoryEntry { Versions = new List<HistoryVersion>(entry.Versions), RetractionCount = entry.RetractionCount };
         }
         _liveSeq = state.State.Seq;
+        // Plan 011 wave C: the two graphs were just re-established as exact (deep-cloned) mirrors of each
+        // other, so the incremental capture's invariant starts clean from here.
+        _touchedKeys.Clear();
+        _fullCaptureNeeded = true;
 
         await state.WriteStateAsync();
 
@@ -215,6 +247,8 @@ public sealed class TableHistoryGrain(
         _liveEntries.Clear();
         _liveSeq = 0;
         _dirty = false;
+        _touchedKeys.Clear();
+        _fullCaptureNeeded = true;
         await state.WriteStateAsync();
         this.DelayDeactivation(TimeSpan.Zero);
     }
@@ -230,7 +264,16 @@ public sealed class TableHistoryGrain(
             });
         }
 
+        // Plan 011 wave C: prune-on-read mutates the LIVE entry in place, so its captured clone is stale
+        // from here on. This deliberately does NOT set _dirty — a read has never forced a write and still
+        // doesn't; it only makes sure that whenever the next capture does happen, this entry is included
+        // rather than silently skipped by the incremental path.
+        var beforeVersions = entry.Versions.Count;
         TableRowHistoryRetention.PruneWindow(entry, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), state.State.HistoryWindowMs);
+        if (entry.Versions.Count != beforeVersions && _persistenceMode != TablePersistenceMode.MemoryOnly)
+        {
+            _touchedKeys.Add(key);
+        }
 
         // Newest-first for the UI timeline; limit <= 0 means "all retained versions".
         var ordered = entry.Versions.OrderByDescending(v => v.Seq).ToList();
@@ -284,6 +327,10 @@ public sealed class TableHistoryGrain(
                 _liveEntries[key] = entry;
             }
 
+            // Plan 011 wave C: this entry's clone in state.State.Entries is now stale — mark it so the next
+            // capture re-clones exactly it, and not the other N-1 entries that did not change.
+            if (_persistenceMode != TablePersistenceMode.MemoryOnly) _touchedKeys.Add(key);
+
             if (delta.Weight > 0)
             {
                 var version = new HistoryVersion(new Dictionary<string, object?>(delta.Row), nowMs, _liveSeq);
@@ -299,16 +346,55 @@ public sealed class TableHistoryGrain(
         return Task.CompletedTask;
     }
 
-    /// <summary>Deep-clones _liveEntries into state.State.Entries — see class doc's persistence-mode
-    /// paragraph for why this MUST be a full clone (fresh dictionary + fresh RowHistoryEntry/Versions-list
-    /// objects), never a reference copy: once captured, state.State.Entries must never be mutated in place
-    /// again, so a background write serializing it can never race a later OnDeltaBatchAsync mutation (which
-    /// only ever touches _liveEntries, a completely separate object graph from this point on).</summary>
+    /// <summary>Clones _liveEntries into state.State.Entries — see class doc's persistence-mode
+    /// paragraph for why each captured entry MUST be a fresh <see cref="RowHistoryEntry"/> with a fresh
+    /// Versions list, never a reference copy: once captured, state.State.Entries must never be mutated in
+    /// place again, so a background write serializing it can never race a later OnDeltaBatchAsync mutation
+    /// (which only ever touches _liveEntries, a completely separate object graph from this point on).
+    ///
+    /// PLAN 011 WAVE C — CLONES ONLY WHAT CHANGED. This used to deep-clone the ENTIRE map on every flush
+    /// tick: at K retained row keys that is K fresh RowHistoryEntry objects and K fresh
+    /// List&lt;HistoryVersion&gt; allocations every FlushMs (default 2000ms), thrown away 2s later, forever —
+    /// allocation proportional to the whole history at a rate set by the clock, and the second half (with
+    /// TableGrain's own capture) of what turned a slowly-growing table into a GC stall. It now re-clones
+    /// only <see cref="_touchedKeys"/>: the entries whose Versions list or RetractionCount actually moved.
+    ///
+    /// THE INVARIANT: state.State.Entries, with _touchedKeys re-cloned from _liveEntries, always equals
+    /// _liveEntries. It holds because the only mutators of a live entry are OnDeltaBatchAsync and
+    /// GetHistoryAsync's prune-on-read, both of which record the key; the only places the two maps are
+    /// re-established wholesale (ResetAsync/ResumeAsync/DisableAsync) set <see cref="_fullCaptureNeeded"/>;
+    /// and a key present in _touchedKeys but absent from _liveEntries cannot happen, because nothing ever
+    /// REMOVES a live entry (which is precisely why the key count is unbounded — see orleans/DESIGN.md's
+    /// "Known ceilings"). The removal branch below is kept anyway so the invariant survives any future
+    /// eviction (wave C2's retention) without silently leaving a resurrected entry in the mirror.
+    ///
+    /// The capture stays fully synchronous on the grain turn, exactly as before — the whole point is that
+    /// nothing else may touch these two graphs mid-clone.</summary>
     private void CaptureSnapshotIntoState()
     {
-        state.State.Entries = _liveEntries.ToDictionary(
-            kv => kv.Key,
-            kv => new RowHistoryEntry { Versions = new List<HistoryVersion>(kv.Value.Versions), RetractionCount = kv.Value.RetractionCount });
+        if (_fullCaptureNeeded)
+        {
+            state.State.Entries = _liveEntries.ToDictionary(
+                kv => kv.Key,
+                kv => new RowHistoryEntry { Versions = new List<HistoryVersion>(kv.Value.Versions), RetractionCount = kv.Value.RetractionCount });
+            _fullCaptureNeeded = false;
+        }
+        else
+        {
+            foreach (var key in _touchedKeys)
+            {
+                if (_liveEntries.TryGetValue(key, out var live))
+                {
+                    state.State.Entries[key] = new RowHistoryEntry { Versions = new List<HistoryVersion>(live.Versions), RetractionCount = live.RetractionCount };
+                }
+                else
+                {
+                    state.State.Entries.Remove(key);
+                }
+            }
+        }
+
+        _touchedKeys.Clear();
         state.State.Seq = _liveSeq;
         _dirty = false;
     }

@@ -47,6 +47,20 @@ namespace StreamForge.Dapr.Host.Actors;
 /// always live) — the flush timer is never even armed for a MemoryOnly table, since it would have no
 /// purpose (see <see cref="ArmFlushTimerAsync"/>'s guard).</para>
 ///
+/// <para><b>Plan 011 wave C — deliberately NOT changed here, and why.</b> The amplifier this wave removed
+/// from <c>TableGrain</c>/<c>TableHistoryGrain</c>/<see cref="TableActor"/> was a per-tick, O(whole table)
+/// CLONE on the default path. This actor has no such clone on its default path: <see cref="TablePersistenceMode.
+/// Batched"/> hands <see cref="_state"/> itself to <c>StateManager</c>, and the only whole-map deep clone —
+/// <see cref="TableHistoryApplication.CloneForBackgroundPersist"/> — runs solely for
+/// <see cref="TablePersistenceMode.FireAndForget"/>, where it is not an optimization but a CORRECTNESS
+/// requirement (see the paragraph above: the Versions lists are mutated in place by later turns while the
+/// background write is in flight). Making that clone incremental would need a retained shadow copy of the
+/// whole state living between writes — a second full materialization, i.e. more resident memory, to save
+/// allocation on a non-default mode. Not worth it; the honest note is that a FireAndForget history actor
+/// still pays O(retained keys) per background write, and that what actually grows without bound on both
+/// flavors is the KEY COUNT (per-key version counts are capped; nothing evicts keys). See
+/// orleans/DESIGN.md's "Known ceilings".</para>
+///
 /// <para><b>Self-heal on reactivation — same rationale as <see cref="GeneratorActor"/>/
 /// <see cref="PipelineActor"/>'s own doc comments: Dapr actor timers do NOT survive deactivation/
 /// reactivation.</b> <see cref="OnActivateAsync"/> reloads persisted state and, if history was left
@@ -204,6 +218,18 @@ public sealed class TableHistoryActor(ActorHost host, ILogger<TableHistoryActor>
                 // MemoryOnly (the timer is never armed for it in practice — see ArmFlushTimerAsync's
                 // guard — this branch exists for defensiveness only), or a FireAndForget write already in
                 // flight: leave _dirty set so the next tick retries once that write completes.
+                //
+                // PLAN 011 WAVE C — FOUND, NOT FIXED, WRITTEN DOWN: TablePersistAction.JournalWrite also
+                // lands here, because this actor has no journal. The consequence is real: a table
+                // configured Persistence = Journaled never persists its HISTORY at all on this flavor — the
+                // tick leaves _dirty set and retries forever, so the entries live only in this activation
+                // and are gone after a deactivation. (Orleans' TableHistoryGrain differs: its flush
+                // dispatch has no journal branch either, but its `else` falls through to a full awaited
+                // write, so Journaled behaves as Batched there — durable, just not O(changed).) Fixing this
+                // is out of wave C's scope because it is a CHOICE, not a bug fix: either give history its
+                // own journal state, or make Journaled fall back to a full write here the way Orleans
+                // does. Either way it is a durability-contract decision, and this wave changed no
+                // contracts.
                 break;
         }
     }

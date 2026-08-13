@@ -175,3 +175,62 @@ Table-mode CROSS JOIN needs Parallelism = 1 · single-node topology · generator
 arrangement partitions each subscribe the full input stream (filter-at-consumer) · no exactly-once
 replay · JSON path keys are literals · correlated subqueries beyond equality rejected ·
 pipeline names not enforced unique (name-resolution falls back only on unambiguous match).
+
+## Memory ceilings — what grows without bound, and with what (plan 011 wave C)
+
+Written down because none of it was, and because a long run on the *stock seed* exhausts memory: the
+seeded `order_states` table is `LATEST BY (order_id)` over a fresh-GUID key, seeded Running, so it gains
+roughly one permanent row per second forever (see `SeedCatalog.Tables()`' own comment for why the fix is
+wave C2's, not this wave's). Everything below is **by design** — table mode is a materialized view, and a
+materialized view over an unbounded key space is unbounded. The defect was never that these grow; it was
+that nobody could find out that they do.
+
+Wave C fixed the **amplifier**, which is a different thing from the ceiling and worth keeping distinct:
+`TableGrain`/`TableHistoryGrain` (and their Dapr mirrors) used to rebuild their whole persisted mirror —
+a fresh dictionary per row — on the grain turn every `FlushMs` (default 2000 ms), and `JsonFileGrainStorage`
+then serialized it with `WriteIndented = true`. That made allocation proportional to the *table* at a rate
+set by the *clock*, so a table growing linearly produced quadratic total allocation and a GC/LOH stall long
+before any real heap exhaustion. Both captures are now O(rows changed since the last flush) and the storage
+format is compact.
+
+**Measured**, `tools/soak/run-soak.sh`, 5-minute window, 100 ev/s, one `order_states`-shaped table
+(`LATEST BY` an unbounded key, history `LastN(8)`), same machine, ~27 000 rows accumulated in each run:
+
+| run | RSS slope | RSS peak | RSS added per row | state dir growth |
+|---|---|---|---|---|
+| before (master, `Batched`) | 287 MB/min | 1728 MB | 43.3 KB | 5.1 MB/min |
+| after (`Batched`, the default) | 109 MB/min | 1009 MB | 28.8 KB | 3.6 MB/min |
+| after (`Journaled`) | 90 MB/min | 814 MB | 23.9 KB | 3.4 MB/min |
+
+Flatter, not flat — and the difference matters. What remains is (a) the row set itself, which grows by
+~5 000 rows/min in this load and is the ceiling, not the amplifier; and (b) the **whole-state JSON
+serialization** every `FlushMs`, which is `Batched`'s contract, not a defect: `JsonFileGrainStorage`
+rewrites a whole state object per write. `Journaled` removes that for the table's own snapshot but not for
+its history — `TableHistoryGrain`'s flush has no journal branch and falls through to a full awaited write
+(and on the Dapr flavor the same gap is worse: `TableHistoryActor` has no `JournalWrite` case at all, so a
+Journaled table's history is never persisted there — see that switch's own comment). Wave C did not change
+either, because giving history a journal is a durability-contract decision, not a memory fix.
+
+What none of it does is bound anything below.
+
+| Structure | Grows with | Evicts? |
+|---|---|---|
+| `TableExecutorImpl._ledger` (`Runtime/TableExecutorImpl.cs`) | distinct output rows | never |
+| `TableLatestByOp.Current` | distinct `LATEST BY` keys | never |
+| `TableReduceOp.Groups` | distinct GROUP BY keys ("groups live forever" — its own doc) | never |
+| `TableJoinOp` / `TableOuterJoinOp` / `TableSemiAntiOp` ZSet indexes | distinct join keys on both sides | never — no `WITHIN` eviction in table mode; `OnFrontier` is a documented no-op |
+| `TableDistinctOp._weights` | distinct rows | never |
+| `TableGrainState.Snapshot` (the persisted mirror) | distinct output rows — a **second** full copy alongside the ledger for `Batched`/`FireAndForget` (`MemoryOnly`/`Journaled` read live and hold one) | with its ledger |
+| `TableHistoryGrain._liveEntries` | distinct row identities. Per-key *version* counts ARE capped (`HistoryLimit`, `AllModeCap = 1000`); the **key count is not** | never |
+| `TableSearchIndex`'s five row-keyed maps (`AppCore/Search/TableSearchIndex.cs`) | distinct rows, ~4–5× multiplier on whatever the table holds | with the table's rows |
+| `ArrangementGrain._index` | distinct arranged keys | never |
+| `EpochBuffer._pending` + `TableStageGrain._originByBatch` | (stall duration × ingest rate) while any one upstream partition holds the frontier back | on frontier advance only — no cap, no backpressure, no status; see EpochBuffer's class doc |
+| Table-path grains generally | — | nothing deactivates: every grain in the table path calls `DelayDeactivation(TimeSpan.FromDays(365))` |
+
+Rules of thumb that follow: a table's resident cost is roughly *(distinct output rows) × (2 copies for the
+default persistence mode + 4–5× again if `SearchEnabled` + up to `HistoryLimit` versions if
+`HistoryEnabled`)*; `Persistence = MemoryOnly` or `Journaled` removes one of those copies; `SearchEnabled`
+is the single most expensive flag on a wide table. The two mechanisms that will actually bound the row set
+rather than shrink its constant factor are a per-table **row retention policy** (wave C2) and **per-key
+sharding with deactivatable shards** (wave D). Until then, the honest operational guidance is: keep an eye
+on a table whose key space is unbounded, and measure with `tools/soak/run-soak.sh`.

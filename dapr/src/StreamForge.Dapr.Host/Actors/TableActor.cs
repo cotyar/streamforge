@@ -134,6 +134,18 @@ namespace StreamForge.Dapr.Host.Actors;
 /// last-known row set. The journal is then unconditionally cleared (in memory immediately; on disk via the
 /// caller's own follow-up save) whenever it held anything, exactly like <c>TableGrain</c>'s
 /// <c>ClearStaleJournalAsync</c>.</para>
+///
+/// <para><b>Plan 011 wave C — the read-cache refresh is O(changed), in every mode.</b> The per-tick
+/// <see cref="CaptureSnapshot"/> no longer rebuilds <see cref="_flushed"/> from the whole executor snapshot;
+/// it applies only the row keys whose entry changed since the previous capture (<see cref="_touchedRowKeys"/>).
+/// This mirrors <c>TableGrain.CaptureSnapshotIntoState</c> — same fix, same invariant, same reason: the old
+/// shape allocated one fresh row dictionary PER ROW every FlushMs forever, i.e. allocation proportional to
+/// the table at a rate set by the clock. No persistence mode's contract moves; the one flavor-specific
+/// consequence (FireAndForget's background write can no longer alias _flushed) is handled in
+/// <see cref="StartBackgroundPersist"/>. What this does NOT fix, stated plainly: the executor's ledger,
+/// _flushed, and the search index are all still O(distinct keys) and nothing evicts — a table over an
+/// unbounded key space still grows without bound. See orleans/DESIGN.md's "Known ceilings", which covers
+/// both flavors.</para>
 /// </summary>
 public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<TableActor> logger)
     : Actor(host), ITableActor
@@ -195,6 +207,21 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     /// from the same call site that feeds <see cref="ReflectDeltasInSearchIndex"/>. Only ever non-empty
     /// transiently, between a delta batch landing and the next <see cref="JournalFlushAsync"/> merging it in.</summary>
     private readonly Dictionary<string, TableJournalEntry> _pendingJournalEntries = [];
+
+    /// <summary>Plan 011 wave C — canonical row keys touched since the last <see cref="CaptureSnapshot"/>,
+    /// i.e. exactly the entries of <see cref="_flushed"/> that are currently out of date with respect to the
+    /// live executor. This is what makes the per-tick read-cache refresh O(changed) instead of O(|table|).
+    /// Unlike the Orleans mirror's equivalent set, this one is maintained for EVERY persistence mode
+    /// including <see cref="TablePersistenceMode.MemoryOnly"/> — on this flavor _flushed is the READ source,
+    /// not just a durability mirror, so it is refreshed on every dirty tick regardless of mode (see
+    /// <see cref="CaptureSnapshot"/>'s own doc comment) and the set is therefore always drained.</summary>
+    private readonly HashSet<string> _touchedRowKeys = new(StringComparer.Ordinal);
+
+    /// <summary>Plan 011 wave C — forces the next <see cref="CaptureSnapshot"/> to rebuild
+    /// <see cref="_flushed"/> wholesale instead of applying <see cref="_touchedRowKeys"/>. Set by
+    /// <see cref="ActivateExecutor"/>, where a brand-new executor and a reset _flushed are both empty, so
+    /// the incremental path never has to trust state carried across an activation or a restart-resume.</summary>
+    private bool _fullCaptureNeeded = true;
 
     /// <summary>Plan 009 A2 — set by <see cref="ActivateExecutor"/> when it found (and in-memory-cleared) a
     /// non-empty <see cref="_journalEntries"/> during resume; <see cref="StartAsync"/>/<see cref="OnActivateAsync"/>'s
@@ -496,6 +523,12 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             _journalEntries = [];
         }
 
+        // Plan 011 wave C: re-establish the incremental capture's invariant from scratch — a brand-new
+        // (empty) executor above and an empty _flushed either way, so the one forced full capture this
+        // schedules is O(0). See CaptureSnapshot's doc comment.
+        _touchedRowKeys.Clear();
+        _fullCaptureNeeded = true;
+
         // Either branch above leaves the row set empty (fresh start, or reset-for-rebuild) — see
         // TableGrain's identical comment — so rebuilding the index from _flushed here is accurate (empty
         // in, empty out); it fills back in incrementally as Process*Async observes deltas going forward.
@@ -515,14 +548,20 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         _dirty = true;
         _deltasOut += deltas.Count;
 
+        // Plan 011 wave C: one key-derivation pass per batch, shared by the search index, the journal and
+        // the incremental read-cache refresh — see TouchedKeys' own doc comment (verbatim port of
+        // TableGrain's).
+        var touched = TouchedKeys(deltas);
+        foreach (var key in touched) _touchedRowKeys.Add(key);
+
         if (_searchIndex is not null)
         {
-            ReflectDeltasInSearchIndex(deltas);
+            ReflectDeltasInSearchIndex(touched);
         }
 
         if (_def?.Persistence == TablePersistenceMode.Journaled)
         {
-            RecordJournalEntries(deltas);
+            RecordJournalEntries(touched);
         }
 
         _deltaSeq++;
@@ -548,15 +587,11 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     /// of <c>TableGrain.ReflectDeltasInSearchIndex</c>: for each row touched by this batch, look its
     /// canonical key up in the already-updated, live <see cref="TableExecutor.Snapshot"/> — present with
     /// weight &gt; 0 means Add/update, absent means the row's weight returned to 0 (Remove).</summary>
-    private void ReflectDeltasInSearchIndex(IReadOnlyList<TableDelta> deltas)
+    private void ReflectDeltasInSearchIndex(List<string> touched)
     {
         var snapshot = _executor!.Snapshot();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var delta in deltas)
+        foreach (var key in touched)
         {
-            var key = _executor.CanonicalRowKey(delta.Row);
-            if (!seen.Add(key)) continue; // a batch can touch the same row's key more than once
-
             if (snapshot.TryGetValue(key, out var current))
             {
                 _searchIndex!.Add(key, current.Row);
@@ -568,6 +603,22 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         }
     }
 
+    /// <summary>Plan 011 wave C — the distinct canonical row keys one delta batch touched, derived ONCE and
+    /// then shared by every per-batch consumer (search index, journal, incremental capture). Verbatim port
+    /// of <c>TableGrain.TouchedKeys</c>; see its doc comment. Order is batch order, first occurrence wins —
+    /// the same order the per-consumer loops produced before.</summary>
+    private List<string> TouchedKeys(IReadOnlyList<TableDelta> deltas)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var keys = new List<string>(deltas.Count);
+        foreach (var delta in deltas)
+        {
+            var key = _executor!.CanonicalRowKey(delta.Row);
+            if (seen.Add(key)) keys.Add(key); // a batch can touch the same row's key more than once
+        }
+        return keys;
+    }
+
     /// <summary>Plan 009 A2 — populates <see cref="_pendingJournalEntries"/>; callers only invoke this when
     /// <c>_def.Persistence == Journaled</c> (mirrors <see cref="ReflectDeltasInSearchIndex"/>'s guard shape —
     /// same per-batch, dedup-by-key pattern, verbatim port of <c>TableGrain.RecordJournalEntries</c>). Looks
@@ -575,15 +626,11 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     /// weight &gt; 0 records a live entry; absent means the key's running weight just dropped to &lt;= 0,
     /// recorded as an explicit removal tombstone (Weight = 0) — see <see cref="TableJournalEntry"/>'s own
     /// doc comment for why skipping this instead would resurrect the row on replay.</summary>
-    private void RecordJournalEntries(IReadOnlyList<TableDelta> deltas)
+    private void RecordJournalEntries(List<string> touched)
     {
         var snapshot = _executor!.Snapshot();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var delta in deltas)
+        foreach (var key in touched)
         {
-            var key = _executor.CanonicalRowKey(delta.Row);
-            if (!seen.Add(key)) continue; // a batch can touch the same row's key more than once
-
             _pendingJournalEntries[key] = snapshot.TryGetValue(key, out var current)
                 ? new TableJournalEntry { Row = new Dictionary<string, object?>(current.Row), Weight = current.Weight }
                 : new TableJournalEntry { Row = [], Weight = 0 };
@@ -594,7 +641,23 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     /// executor and clears <see cref="_dirty"/> — pure in-process work, no I/O. Split out from the old
     /// "FlushAsync" specifically so this always runs (keeping <see cref="GetRowsAsync"/> et al. fresh) even
     /// for <see cref="TablePersistenceMode.MemoryOnly"/>, which skips only the durability WRITE below, never
-    /// this read-cache refresh — see class doc's plan-008 paragraph.</summary>
+    /// this read-cache refresh — see class doc's plan-008 paragraph.
+    ///
+    /// <para>PLAN 011 WAVE C — O(CHANGED), NOT O(|TABLE|), mirroring <c>TableGrain.CaptureSnapshotIntoState</c>
+    /// exactly (see its doc comment for the full argument). This used to rebuild <see cref="_flushed"/>
+    /// wholesale — a fresh <c>Dictionary&lt;string, object?&gt;</c> per row from the whole executor snapshot,
+    /// on the actor turn, every <see cref="TableDefinition.FlushMs"/> — so allocation was proportional to the
+    /// TABLE at a rate set by the CLOCK. It now applies only <see cref="_touchedRowKeys"/>. The invariant:
+    /// _flushed with _touchedRowKeys applied always equals the live executor snapshot, because the only
+    /// writer of that snapshot is <see cref="ApplyAndPublishAsync"/> (which records every key it touched
+    /// before returning) and the only place _flushed is otherwise replaced is <see cref="ActivateExecutor"/>
+    /// (which sets <see cref="_fullCaptureNeeded"/> where both sides are empty). A key in the set but absent
+    /// from the snapshot means its running weight fell to &lt;= 0, i.e. removal — the same tombstone rule
+    /// <see cref="RecordJournalEntries"/> encodes.</para>
+    ///
+    /// <para>ONE FLAVOR-SPECIFIC CONSEQUENCE, handled in <see cref="StartBackgroundPersist"/>: because
+    /// _flushed is now mutated IN PLACE rather than replaced, a <see cref="TablePersistenceMode.FireAndForget"/>
+    /// background write can no longer just capture a reference to it — see that method's own doc comment.</para></summary>
     private void CaptureSnapshot()
     {
         if (_executor is null)
@@ -604,9 +667,29 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         }
 
         var snapshot = _executor.Snapshot();
-        _flushed = snapshot.ToDictionary(
-            kv => kv.Key,
-            kv => new TableRowDto { Row = new Dictionary<string, object?>(kv.Value.Row), Weight = kv.Value.Weight });
+        if (_fullCaptureNeeded)
+        {
+            _flushed = snapshot.ToDictionary(
+                kv => kv.Key,
+                kv => new TableRowDto { Row = new Dictionary<string, object?>(kv.Value.Row), Weight = kv.Value.Weight });
+            _fullCaptureNeeded = false;
+        }
+        else
+        {
+            foreach (var key in _touchedRowKeys)
+            {
+                if (snapshot.TryGetValue(key, out var current))
+                {
+                    _flushed[key] = new TableRowDto { Row = new Dictionary<string, object?>(current.Row), Weight = current.Weight };
+                }
+                else
+                {
+                    _flushed.Remove(key);
+                }
+            }
+        }
+
+        _touchedRowKeys.Clear();
         _seq++;
         _dirty = false;
     }
@@ -657,7 +740,15 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     /// before this is ever called); a failure is always logged, never silently swallowed.</summary>
     private void StartBackgroundPersist()
     {
+        // Plan 011 wave C: BuildState() aliases _flushed, and _flushed is now mutated IN PLACE by
+        // CaptureSnapshot (it used to be replaced wholesale, which is what made a bare reference safe).
+        // The single-flight guard stops a second WRITE from starting, but not the next tick's capture — so
+        // hand the background task its own dictionary. This is a SHALLOW copy on purpose: the TableRowDto
+        // values are never mutated in place (a changed row replaces its map entry with a new DTO), so
+        // copying N references is enough for the serializer to see a stable graph, and it costs one array
+        // rather than the N per-row dictionaries the old whole-snapshot rebuild allocated every tick.
         var state = BuildState();
+        state.Snapshot = new Dictionary<string, TableRowDto>(_flushed);
         _persistInProgress = true;
         _inFlightPersist = Task.Run(async () =>
         {

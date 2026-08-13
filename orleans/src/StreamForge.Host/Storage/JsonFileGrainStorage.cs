@@ -13,7 +13,15 @@ namespace StreamForge.Host.Storage;
 /// </summary>
 public sealed partial class JsonFileGrainStorage(string name, string dataDir) : IGrainStorage
 {
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    /// <summary>Plan 011 wave C: <c>WriteIndented</c> is deliberately OFF. This is a storage format, not a
+    /// document — every table's state file is rewritten in full on every flush tick (see TableGrain's
+    /// persistence-mode doc), and indentation on a wide row-per-line snapshot is pure per-flush bytes and
+    /// per-flush serializer work for nobody's benefit. Reading is unaffected in both directions:
+    /// <see cref="JsonSerializer"/> ignores insignificant whitespace, so state files written by any earlier
+    /// (indented) build still deserialize through this same options object unchanged — see
+    /// JsonFileGrainStorageTests' round-trip-an-indented-file test. If a human ever needs to read one,
+    /// `jq .` on the file does the job without making every process pay for it.</summary>
+    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
 
     /// <summary>The named provider identity, kept for diagnostics/logging.</summary>
     public string Name { get; } = name;

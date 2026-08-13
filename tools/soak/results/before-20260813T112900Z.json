@@ -1,0 +1,50 @@
+{
+  "label": "before",
+  "generatedAtIso": "2026-08-13T11:34:24.034Z",
+  "window": {
+    "minutes": 5,
+    "intervalSeconds": 5,
+    "warmupSeconds": 20,
+    "samples": 59
+  },
+  "load": {
+    "eventsPerSecond": 100,
+    "table": "soak_states",
+    "shape": "LATEST BY (orderId), history LastN(8) — the seeded order_states configuration"
+  },
+  "series": {
+    "rss": {
+      "name": "rss_mb",
+      "first": 188,
+      "last": 1263,
+      "max": 1728,
+      "slopePerMin": 287.295
+    },
+    "state": {
+      "name": "state_kb",
+      "first": 1876,
+      "last": 28764,
+      "max": 28764,
+      "slopePerMin": 5145.003
+    },
+    "rows": {
+      "name": "rows",
+      "first": 1745,
+      "last": 27147,
+      "max": 27147,
+      "slopePerMin": 5184.426
+    },
+    "deltas": {
+      "name": "deltas_in",
+      "first": 1754,
+      "last": 27173,
+      "max": 27173,
+      "slopePerMin": 5187.421
+    }
+  },
+  "derived": {
+    "rssKbPerRowAdded": 43.34,
+    "stateKbPerRowAdded": 1.058
+  },
+  "tsv": "/Users/yuriyhabarov/work/crates-foundation/tools/soak/results/before-20260813T112900Z.tsv"
+}
