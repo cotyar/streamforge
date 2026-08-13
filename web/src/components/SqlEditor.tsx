@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ChangeEvent, KeyboardEvent, SyntheticEvent, UIEvent } from 'react'
+import type { ChangeEvent, KeyboardEvent, ReactNode, SyntheticEvent, UIEvent } from 'react'
+import { WandSparkles } from 'lucide-react'
 import type { FieldDef, FieldType, SourceDefinition, SqlDiagnostic } from '../api/types'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
 import { findCaretScope, innerProjection, parseCtes } from './sqlScope'
 import type { CteDef, ScopeFromItem } from './sqlScope'
 
@@ -619,6 +621,8 @@ export function SqlEditor({
   minRows = 14,
   placeholder,
   sources = [],
+  onFormat,
+  toolbarEnd,
 }: {
   value: string
   onChange: (value: string) => void
@@ -627,6 +631,14 @@ export function SqlEditor({
   minRows?: number
   placeholder?: string
   sources?: SourceDefinition[]
+  /** When set (and not readOnly), shows a "Format" button in a small toolbar above the editor —
+   *  the host page owns the actual formatting (see `lib/sqlFormat.ts`) and calls `onChange` itself. */
+  onFormat?: () => void
+  /** Extra controls rendered in the same toolbar, left of Format (e.g. a page's Revert button) —
+   *  kept in the SqlEditor's toolbar so every host page's editor-adjacent controls line up the same
+   *  way. Absent entirely (and no toolbar rendered at all) when neither this nor onFormat is set —
+   *  LineageDetailPanel's read-only usage is unaffected either way. */
+  toolbarEnd?: ReactNode
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const preRef = useRef<HTMLPreElement>(null)
@@ -771,11 +783,24 @@ export function SqlEditor({
 
   const activeOptionId = showPopup && autocomplete ? `sql-ac-opt-${Math.min(activeIndex, autocomplete.suggestions.length - 1)}` : undefined
 
+  const showToolbar = !readOnly && (onFormat || toolbarEnd)
+
   return (
-    <div
-      ref={containerRef}
-      className="relative overflow-hidden rounded-lg border border-input bg-input/20 font-mono text-[13px] leading-6 transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50"
-    >
+    <div className="flex flex-col gap-1.5">
+      {showToolbar && (
+        <div className="flex items-center justify-end gap-2">
+          {toolbarEnd}
+          {onFormat && (
+            <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={onFormat}>
+              <WandSparkles className="size-3.5" /> Format
+            </Button>
+          )}
+        </div>
+      )}
+      <div
+        ref={containerRef}
+        className="relative overflow-hidden rounded-lg border border-input bg-input/20 font-mono text-[13px] leading-6 transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50"
+      >
       <pre
         ref={preRef}
         aria-hidden
@@ -852,6 +877,7 @@ export function SqlEditor({
           })}
         </div>
       )}
+      </div>
     </div>
   )
 }

@@ -47,7 +47,7 @@
  * text (so keywords, parens, and commas *inside* a string never get mistaken for structure) while
  * still being able to slice the *original* text using the same indices for content extraction.
  */
-function maskLiteralsAndComments(text: string): string {
+export function maskLiteralsAndComments(text: string): string {
   let out = ''
   let i = 0
   const n = text.length

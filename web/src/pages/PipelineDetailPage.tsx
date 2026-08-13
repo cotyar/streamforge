@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Check, CircleAlert, Play, Trash2, TriangleAlert } from 'lucide-react'
+import { Check, CircleAlert, Play, Trash2, TriangleAlert, Undo2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { pipelinesApi } from '../api/pipelines'
 import { sourcesApi } from '../api/sources'
@@ -41,6 +41,7 @@ import {
 import type { BuilderState } from '../builder/types'
 import { emptyBuilderState } from '../builder/types'
 import { builderStateToSql } from '../builder/sqlgen'
+import { formatSql } from '../lib/sqlFormat'
 
 type Mode = 'sql' | 'builder'
 
@@ -58,6 +59,12 @@ export function PipelineDetailPage() {
   const [sql, setSql] = useState('')
   const [mode, setMode] = useState<Mode>('sql')
   const [builderState, setBuilderState] = useState<BuilderState>(emptyBuilderState())
+  // True only once the user actually edits something in the Builder tab — distinct from
+  // `builderState` merely existing, since the builder is never seeded from loaded SQL (out of
+  // scope: no SQL→builder parser) and starts out an honest, empty "SELECT * FROM <source>" render.
+  // Switching SQL → Builder → SQL must never clobber real SQL with that empty render, so
+  // `switchToSql` (below) only writes builder→SQL back when this is true.
+  const [builderTouched, setBuilderTouched] = useState(false)
   const [tags, setTags] = useState<Tags>([])
   const [metadata, setMetadata] = useState<Metadata>({})
   const [sinks, setSinks] = useState<SinkSpec[]>([])
@@ -94,6 +101,7 @@ export function PipelineDetailPage() {
       setDescription('')
       setSql('')
       setBuilderState(emptyBuilderState())
+      setBuilderTouched(false)
       setTags([])
       setMetadata({})
       setSinks([])
@@ -108,6 +116,9 @@ export function PipelineDetailPage() {
         setName(p.name)
         setDescription(p.description)
         setSql(p.sql)
+        setMode('sql')
+        setBuilderState(emptyBuilderState())
+        setBuilderTouched(false)
         setTags(p.tags)
         setMetadata(p.metadata)
         setSinks(p.sinks ?? [])
@@ -115,7 +126,10 @@ export function PipelineDetailPage() {
       .finally(() => setLoading(false))
   }, [id, isNew])
 
-  const effectiveSql = mode === 'builder' ? builderStateToSql(builderState) : sql
+  // While the Builder tab is open but untouched, its render is an honest placeholder — never what
+  // should be validated or saved. Only once the user has actually edited the builder does its
+  // render become the thing of record (see `builderTouched`'s doc above).
+  const effectiveSql = mode === 'builder' && builderTouched ? builderStateToSql(builderState) : sql
 
   useEffect(() => {
     if (!effectiveSql.trim()) {
@@ -141,8 +155,27 @@ export function PipelineDetailPage() {
   }, [effectiveSql])
 
   function switchToSql() {
-    if (mode === 'builder') setSql(builderStateToSql(builderState))
+    // Only write the builder's render back over `sql` if the user actually touched the builder —
+    // otherwise this is the clobber bug: an untouched builder renders "SELECT * FROM <source>" and
+    // would silently overwrite real SQL on every SQL⇄Builder round trip.
+    if (mode === 'builder' && builderTouched) setSql(builderStateToSql(builderState))
     setMode('sql')
+  }
+
+  // Baseline for both "is the editor dirty" and Revert: the persisted copy for an existing
+  // pipeline, or '' for a new/unsaved one — no new persisted state, per plan.
+  const baselineSql = pipeline?.sql ?? ''
+  const editorDirty = effectiveSql !== baselineSql
+
+  function handleRevert() {
+    setSql(baselineSql)
+    setMode('sql')
+    setBuilderState(emptyBuilderState())
+    setBuilderTouched(false)
+  }
+
+  function handleFormat() {
+    setSql((prev) => formatSql(prev))
   }
 
   async function handleSave(startAfter: boolean) {
@@ -252,15 +285,36 @@ export function PipelineDetailPage() {
               else setMode('builder')
             }}
           >
-            <TabsList>
-              <TabsTrigger value="sql">SQL</TabsTrigger>
-              <TabsTrigger value="builder">Builder</TabsTrigger>
-            </TabsList>
+            <div className="flex items-center justify-between gap-2">
+              <TabsList>
+                <TabsTrigger value="sql">SQL</TabsTrigger>
+                <TabsTrigger value="builder">Builder</TabsTrigger>
+              </TabsList>
+              {canEdit && (
+                <Button type="button" variant="outline" size="sm" onClick={handleRevert} disabled={!editorDirty}>
+                  <Undo2 data-icon="inline-start" /> Revert
+                </Button>
+              )}
+            </div>
             <TabsContent value="sql">
-              <SqlEditor value={sql} onChange={setSql} diagnostics={diagnostics ?? []} readOnly={!canEdit} sources={sources} />
+              <SqlEditor
+                value={sql}
+                onChange={setSql}
+                diagnostics={diagnostics ?? []}
+                readOnly={!canEdit}
+                sources={sources}
+                onFormat={canEdit ? handleFormat : undefined}
+              />
             </TabsContent>
             <TabsContent value="builder">
-              <PipelineBuilder state={builderState} onChange={setBuilderState} sources={sources} />
+              <PipelineBuilder
+                state={builderState}
+                onChange={(next) => {
+                  setBuilderState(next)
+                  setBuilderTouched(true)
+                }}
+                sources={sources}
+              />
             </TabsContent>
           </Tabs>
 

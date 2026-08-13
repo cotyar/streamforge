@@ -16,7 +16,11 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 
 const POLL_MS = 2000
-const COLUMN_WIDTH = 240
+// Node width is capped at 176px (LineageNode.tsx's `w-44`); the extra headroom here keeps a gap
+// between one column's nodes and the next column's incoming edges even at that cap, so long-range
+// edges routed behind a column are never fully occluded by an opaque node (React Flow renders
+// edges beneath the node layer).
+const COLUMN_WIDTH = 280
 const ROW_HEIGHT = 84
 
 /** One catalog entity as a lineage-graph vertex: what it depends on (by node id), so edges and rank

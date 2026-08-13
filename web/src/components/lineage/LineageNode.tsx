@@ -38,15 +38,15 @@ export function LineageNode({ data, selected }: NodeProps<LineageFlowNode>) {
   return (
     <div
       className={cn(
-        'flex min-w-44 items-center gap-2 rounded-lg border border-l-4 bg-card px-3 py-2 text-left shadow-sm',
+        'flex w-44 max-w-44 items-center gap-2 rounded-lg border border-l-4 bg-card px-3 py-2 text-left shadow-sm',
         KIND_ACCENT[data.kind],
         selected ? 'border-primary ring-1 ring-primary' : 'border-border',
       )}
     >
       {data.kind !== 'source' && <Handle type="target" position={Position.Left} className="!bg-muted-foreground" />}
       <Icon className="size-4 shrink-0 text-muted-foreground" />
-      <div className="flex min-w-0 flex-col">
-        <span className="truncate text-xs font-medium text-foreground">{data.label}</span>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate text-xs font-medium text-foreground" title={data.label}>{data.label}</span>
         <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
           {data.kind === 'source' ? (
             data.enabled ? 'enabled' : 'disabled'

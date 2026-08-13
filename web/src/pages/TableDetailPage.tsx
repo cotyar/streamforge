@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Check, CircleAlert, Play, Search, Trash2, TriangleAlert, X } from 'lucide-react'
+import { Check, CircleAlert, Play, Search, Trash2, TriangleAlert, Undo2, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { tablesApi } from '../api/tables'
 import type { UpdateTableRequest } from '../api/tables'
@@ -24,6 +24,7 @@ import type {
 } from '../api/types'
 import { useAuth } from '../api/auth'
 import { useTableRows } from '../hooks/useTableRows'
+import { formatSql } from '../lib/sqlFormat'
 import { useTableMetrics } from '../hooks/useTableMetrics'
 import { Topbar } from '../components/Topbar'
 import { StatusBadge } from '../components/StatusBadge'
@@ -1108,6 +1109,19 @@ export function TableDetailPage() {
     return () => clearTimeout(timer)
   }, [sql])
 
+  // Baseline for both "is the editor dirty" and Revert: the persisted copy for an existing table,
+  // or '' for a new/unsaved one — no new persisted state, per plan.
+  const baselineSql = table?.sql ?? ''
+  const editorDirty = sql !== baselineSql
+
+  function handleRevert() {
+    setSql(baselineSql)
+  }
+
+  function handleFormat() {
+    setSql((prev) => formatSql(prev))
+  }
+
   async function handleSave(startAfter: boolean) {
     setFormError(null)
     if (!name.trim()) {
@@ -1255,7 +1269,21 @@ export function TableDetailPage() {
             readOnly={!canEdit}
           />
 
-          <SqlEditor value={sql} onChange={setSql} diagnostics={diagnostics ?? []} readOnly={!canEdit} sources={editorSources} />
+          <SqlEditor
+            value={sql}
+            onChange={setSql}
+            diagnostics={diagnostics ?? []}
+            readOnly={!canEdit}
+            sources={editorSources}
+            onFormat={canEdit ? handleFormat : undefined}
+            toolbarEnd={
+              canEdit && (
+                <Button type="button" variant="outline" size="sm" onClick={handleRevert} disabled={!editorDirty}>
+                  <Undo2 data-icon="inline-start" /> Revert
+                </Button>
+              )
+            }
+          />
 
           <Card>
             <CardContent>
