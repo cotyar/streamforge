@@ -52,11 +52,29 @@ public static class StreamForgeApiExtensions
                 {
                     OnMessageReceived = context =>
                     {
+                        var request = context.HttpContext.Request;
+
+                        // SignalR cannot send an Authorization header on its WebSocket/SSE handshake, so
+                        // the hubs — and only the hubs — take the token from the query string.
                         var accessToken = context.Request.Query["access_token"];
-                        if (!string.IsNullOrEmpty(accessToken) &&
-                            context.HttpContext.Request.Path.StartsWithSegments("/hubs"))
+                        if (!string.IsNullOrEmpty(accessToken) && request.Path.StartsWithSegments("/hubs"))
                         {
                             context.Token = accessToken;
+                            return Task.CompletedTask;
+                        }
+
+                        // The same problem one shape over: a Scalar page cannot send a header either, on
+                        // its own navigation or on the plain fetch it loads its document with. So the
+                        // per-entity documentation paths — and only those, read-only every one of them —
+                        // fall back to the httpOnly cookie login issued alongside the token. A header, when
+                        // present, still wins; see DocsAuthCookie for why this cannot authenticate anything
+                        // that changes state.
+                        if (string.IsNullOrEmpty(request.Headers.Authorization) &&
+                            DocsAuthCookie.IsDocumentationPath(request.Path) &&
+                            request.Cookies.TryGetValue(DocsAuthCookie.Name, out var docsToken) &&
+                            !string.IsNullOrEmpty(docsToken))
+                        {
+                            context.Token = docsToken;
                         }
 
                         return Task.CompletedTask;
@@ -171,8 +189,13 @@ public static class StreamForgeApiExtensions
         // route parameter, and OpenApiRoutePattern is chosen per request from its value. No CDN is
         // involved — Scalar.AspNetCore serves its own bundle from embedded resources under each prefix,
         // and each MapScalarApiReference call maps that static-asset route under its own prefix, so the
-        // four pages coexist. Scalar's page fetches its document without an Authorization header, which
-        // is why the document routes are anonymous; see EntityOpenApiEndpoints' reachability note.
+        // four pages coexist.
+        //
+        // These pages are Viewer-gated, like the documents they render — a per-entity document describes
+        // one named entity's shape and sources are addressed by a guessable name, so it is not something
+        // to hand to the open internet. Scalar cannot send an Authorization header, so what satisfies the
+        // policy here is the httpOnly cookie issued at login (DocsAuthCookie): the browser sends it on
+        // this navigation and on the document fetch, and nowhere it would matter.
         foreach (var (segment, parameter) in
                  new[] { ("tables", "id"), ("pipelines", "id"), ("sources", "name") })
         {
@@ -182,7 +205,7 @@ public static class StreamForgeApiExtensions
                 o.Title = $"StreamForge — {segment}/{key}";
                 o.Theme = ScalarTheme.Kepler;
                 o.OpenApiRoutePattern = $"/api/{segment}/{Uri.EscapeDataString(key)}/{EntityOpenApiEndpoints.RouteSuffix}";
-            });
+            }).RequireAuthorization("Viewer");
         }
 
         // Anonymous liveness/readiness probe (plan 007 W0): used by the admin app, docker compose

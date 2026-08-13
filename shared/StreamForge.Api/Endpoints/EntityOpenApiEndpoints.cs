@@ -23,13 +23,19 @@ namespace StreamForge.Api;
 /// rather than hand-authored, so it cannot drift from the routes it describes. All the reshaping lives
 /// in <see cref="EntityOpenApiLogic"/>.</para>
 ///
-/// <para><b>Reachability note.</b> These routes are anonymous, exactly like <c>/openapi/v1.json</c> that
-/// they are carved out of, and unlike the catalog reads they describe. This is forced, not chosen: a
-/// Scalar page fetches its document from the browser with no Authorization header (verified against
-/// Scalar 2.16's <c>scalar.aspnetcore.js</c>), so a Viewer-gated document is a page that renders 401.
-/// The additional exposure over the already-anonymous application document is the entity's output field
-/// names and types for an id the caller must already know; the data itself stays Viewer-gated, and every
-/// operation in the document still carries the Bearer requirement.</para>
+/// <para><b>Reachability note.</b> These routes are <c>Viewer</c>-gated, like the catalog reads they
+/// describe, and unlike the whole-application <c>/openapi/v1.json</c> they are carved out of. A
+/// per-entity document names one entity's output fields and their types, and a source is addressed by
+/// name rather than by a GUID, so the set of them is guessable in a way an id is not — not something to
+/// serve to the open internet from a deployed instance.</para>
+///
+/// <para>What makes that gate compatible with the feature is <see cref="Auth.DocsAuthCookie"/>: a Scalar
+/// page fetches its document from the browser with a plain <c>fetch</c> and no Authorization header
+/// (verified against Scalar 2.16's own bundle), but a plain <c>fetch</c> does send a same-origin cookie,
+/// and login issues an httpOnly one carrying the same JWT. The JWT wiring honours that cookie on these
+/// paths and on the Scalar pages, and on nothing else — so a signed-in browser renders the page, an
+/// anonymous caller gets 401, and no state-changing endpoint has become cookie-reachable. Every
+/// operation inside the document still carries the Bearer requirement, which is what "try it" uses.</para>
 /// </summary>
 public static class EntityOpenApiEndpoints
 {
@@ -59,7 +65,7 @@ public static class EntityOpenApiEndpoints
                 // same source the .proto download uses. Empty until the table's SQL has compiled once.
                 EntityOpenApiLogic.RowSchemaFromFields(def.OutputFields, $"One row of table \"{def.Name}\"."),
                 ct);
-        }).AllowAnonymous();
+        }).RequireAuthorization("Viewer");
 
         app.MapGet($"/api/pipelines/{{id}}/{RouteSuffix}", async (
             string id, ICatalogFacade registry, IServiceProvider services, CancellationToken ct) =>
@@ -100,7 +106,7 @@ public static class EntityOpenApiEndpoints
                     ? null
                     : EntityOpenApiLogic.RowSchemaFromFields(fields, $"One output row of pipeline \"{def.Name}\"."),
                 ct);
-        }).AllowAnonymous();
+        }).RequireAuthorization("Viewer");
 
         app.MapGet($"/api/sources/{{name}}/{RouteSuffix}", async (
             string name, ICatalogFacade registry, IServiceProvider services, CancellationToken ct) =>
@@ -122,7 +128,7 @@ public static class EntityOpenApiEndpoints
                 // lands on the ingest push body — which is exactly where a caller needs it.
                 EntityOpenApiLogic.RowSchemaFromFields(src.Fields, $"One event of source \"{src.Name}\"."),
                 ct);
-        }).AllowAnonymous();
+        }).RequireAuthorization("Viewer");
     }
 
     private static async Task<IResult> DocumentAsync(

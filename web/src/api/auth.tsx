@@ -40,7 +40,20 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [auth, setAuth] = useState<StoredAuth | null>(() => readStoredAuth())
 
+  // Plan 011 wave G: signing in also sets an httpOnly `sf_docs` cookie, which is the ONLY way the
+  // per-entity Scalar pages can authenticate (a page navigation and Scalar's own document fetch can
+  // neither of them send an Authorization header — see DocsAuthCookie). Clearing localStorage cannot
+  // clear an httpOnly cookie, so signing out has to ask the server to: without this call the cookie
+  // would outlive an in-app sign-out by its full 12h lifetime, on a shared browser.
+  const clearDocsCookie = () => {
+    void fetch('/api/auth/logout', { method: 'POST' }).catch(() => {
+      /* best-effort: the cookie expiring on its own is the fallback, and a failed sign-out must never
+         block clearing the client-side session below */
+    })
+  }
+
   const logout = useCallback(() => {
+    clearDocsCookie()
     localStorage.removeItem(AUTH_STORAGE_KEY)
     setAuth(null)
     void disconnectHub()
@@ -48,6 +61,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
+      clearDocsCookie()
       localStorage.removeItem(AUTH_STORAGE_KEY)
       setAuth(null)
       void disconnectHub()

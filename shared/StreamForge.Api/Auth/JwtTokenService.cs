@@ -10,6 +10,10 @@ namespace StreamForge.Api.Auth;
 /// <summary>Issues HS256 JWTs for authenticated users. 12h expiry.</summary>
 public sealed class JwtTokenService(IConfiguration config)
 {
+    /// <summary>How long an issued token stays valid. Exposed so anything that has to expire in step
+    /// with it — the documentation cookie in <see cref="DocsAuthCookie"/> — says 12h only once.</summary>
+    public static readonly TimeSpan Lifetime = TimeSpan.FromHours(12);
+
     public string CreateToken(UserRecord user)
     {
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(config["Jwt:Key"]!));
@@ -30,7 +34,7 @@ public sealed class JwtTokenService(IConfiguration config)
             issuer: config["Jwt:Issuer"],
             audience: config["Jwt:Audience"],
             claims: claims,
-            expires: DateTime.UtcNow.AddHours(12),
+            expires: DateTime.UtcNow.Add(Lifetime),
             signingCredentials: creds);
 
         return new JwtSecurityTokenHandler().WriteToken(token);

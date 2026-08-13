@@ -297,8 +297,9 @@ function RestCard({ entity }: { entity: DynamicEntityMetaDto }) {
   }
 
   // Same idea as the .proto download one row up, in REST's own currency: this entity's endpoints as a
-  // standalone OpenAPI document. Anonymous (a Scalar page fetches it without headers), so no -H here.
-  routes.push({ label: 'Get OpenAPI document', text: `curl -s ${origin}${specPath}` })
+  // standalone OpenAPI document. Viewer-gated like every other route here, so it carries the token too —
+  // the Scalar page below reaches it with the sign-in cookie instead, since it cannot send a header.
+  routes.push({ label: 'Get OpenAPI document', text: `curl -s ${origin}${specPath} -H "${auth}"` })
 
   return (
     <Card>
@@ -324,8 +325,9 @@ function RestCard({ entity }: { entity: DynamicEntityMetaDto }) {
           <SnippetRow text={`${origin}${scalarPath}`} />
           <p className="mt-1 text-[11px] text-muted-foreground">
             Scalar rendering only this {entity.kind}'s document ({specPath}): every path already carries{' '}
-            <code className="font-mono">{key}</code>, and the row payloads use its real output schema. Paste the token
-            from the login call into Scalar's auth box to send requests.
+            <code className="font-mono">{key}</code>, and the row payloads use its real output schema. Both the page and
+            its document are Viewer-gated, so open it in this browser while signed in here — the sign-in cookie is what
+            lets it through. Paste the token from the login call into Scalar's auth box to send requests.
           </p>
         </div>
         <div>
