@@ -105,7 +105,7 @@ export function ShardingPanel({
 
           <span className="text-xs text-muted-foreground">
             {sharded
-              ? 'Each key’s rows and version trail live in their own grain, which deactivates when idle — so history stops being resident without anything being deleted.'
+              ? 'Each key’s rows and version trail live in their own grain, which deactivates when idle — per-key reads are exact and wake only that key. This is query locality, not a memory saving: measured, it never reduced total process memory, and below ~100 versions per key it costs more. Use it for keys with long trails that go quiet.'
               : 'Every row and every version trail stays resident in one grain, as usual.'}
           </span>
 

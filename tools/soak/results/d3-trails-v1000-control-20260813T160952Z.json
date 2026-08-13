@@ -1,0 +1,82 @@
+{
+  "label": "d3-trails-v1000-control",
+  "generatedAtIso": "2026-08-13T16:18:19.533Z",
+  "window": {
+    "minutes": 8,
+    "intervalSeconds": 5,
+    "warmupSeconds": 20,
+    "samples": 95
+  },
+  "load": {
+    "eventsPerSecond": 200,
+    "persistence": "Batched",
+    "retentionMaxRows": 0,
+    "shardBy": "",
+    "shardIdleSeconds": 90,
+    "shardQuantumSeconds": 0,
+    "table": "soak_states",
+    "shape": "trails",
+    "trailCohortMs": 43000,
+    "trailConcurrency": 8,
+    "shapeNote": "LATEST BY (retiring wall-clock cohort x concurrency) — a bounded key set whose keys accumulate long version trails and then go quiet, history All; trail depth swept by --trail-cohort-ms at fixed total event volume"
+  },
+  "series": {
+    "rss": {
+      "name": "rss_mb",
+      "first": 336,
+      "last": 330,
+      "max": 364,
+      "slopePerMin": 1.146
+    },
+    "state": {
+      "name": "state_kb",
+      "first": 676,
+      "last": 14376,
+      "max": 14376,
+      "slopePerMin": 1696.431
+    },
+    "rows": {
+      "name": "rows",
+      "first": 16,
+      "last": 104,
+      "max": 104,
+      "slopePerMin": 11.21
+    },
+    "deltas": {
+      "name": "deltas_in",
+      "first": 3516,
+      "last": 85367,
+      "max": 85367,
+      "slopePerMin": 10420.364
+    },
+    "shardCount": {
+      "name": "shard_count",
+      "first": -1,
+      "last": -1,
+      "max": -1,
+      "slopePerMin": 0
+    },
+    "resident": {
+      "name": "resident_shards",
+      "first": -1,
+      "last": -1,
+      "max": -1,
+      "slopePerMin": 0
+    },
+    "activations": {
+      "name": "shard_activations",
+      "first": -1,
+      "last": -1,
+      "max": -1,
+      "slopePerMin": 0
+    }
+  },
+  "derived": {
+    "rssKbPerRowAdded": -69.82,
+    "stateKbPerRowAdded": 155.682,
+    "residentFractionAtEnd": null,
+    "residentPeak": null,
+    "versionsPerKeyAtEnd": 820.8
+  },
+  "tsv": "/Users/yuriyhabarov/work/crates-foundation/tools/soak/results/d3-trails-v1000-control-20260813T160952Z.tsv"
+}

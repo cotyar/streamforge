@@ -25,7 +25,8 @@
 # Usage: tools/soak/run-soak.sh --label before [--minutes 8] [--interval-s 5] [--eps 200]
 #                               [--http-port 7511] [--grpc-port 7512] [--persistence Batched]
 #                               [--retention-max-rows 0] [--shard-by orderId] [--shard-idle-s 90]
-#                               [--shard-quantum-s 0] [--shape orders|instruments]
+#                               [--shard-quantum-s 0] [--shape orders|instruments|trails]
+#                               [--trail-cohort-ms 4300] [--trail-concurrency 8]
 #
 # --shape (plan 011 wave D2) picks WHICH TABLE is under load, because the two shapes answer different
 # questions and reporting only one of them would flatter the feature:
@@ -41,6 +42,31 @@
 #     query is "everything for this key" and the memory that hurts is versions x keys. Here the resident
 #     set is bounded by the ACTIVE key set while the unsharded control holds every version of every key
 #     resident forever.
+#
+#   trails (plan 011 wave D3) — the shape D2's conclusion pointed at and never measured. D2 found the
+#     shard tier LOSING at ~8.5 versions per key and estimated a crossover at HUNDREDS of versions per
+#     key; the workload this feature exists for (a financial instrument as a state machine: bounded key
+#     set, ~1000 changes each, full history kept) sits on the far side of that estimate. This shape puts
+#     the run there. Two knobs decide the point on the curve, and TOTAL EVENT VOLUME IS HELD FIXED across
+#     the whole sweep, so every point stores the same number of versions in total and only their
+#     DISTRIBUTION over keys changes — which is precisely the variable the crossover is a function of:
+#
+#       --trail-cohort-ms B   how long one COHORT of keys stays live. The key is a wall-clock bucket
+#                             (`ts_ms - ts_ms % B`), so a cohort takes ~E*B/T events and then is never
+#                             touched again. Bigger B = deeper trails and fewer keys.
+#       --trail-concurrency G how many keys are live AT ONCE inside a cohort (`instrument % G`), i.e. the
+#                             working set. G>1 keeps this from degenerating into "exactly one hot key".
+#
+#     Distinct keys K = (T/B)*G and versions per key = E/K, so B alone sweeps trail depth at fixed E:
+#     B=430ms -> ~10 versions/key, B=4300ms -> ~100, B=43000ms -> ~1000 (at T=8min, E~90k).
+#
+#     WHY A RETIRING COHORT AND NOT A UNIFORMLY-HOT BOUNDED KEY SET: the shard tier's entire mechanism is
+#     deactivating an IDLE key. With uniform random keys over a bounded space, mean inter-arrival per key
+#     is K/eps seconds, so at the deep-trail end (K=90, 200 eps) every key is touched every 0.45s and
+#     NOTHING is ever idle long enough to deactivate — the mechanism is switched off by construction and
+#     the run measures nothing. A cohort that goes quiet forever is both realistic (an instrument's state
+#     machine finishes) and the BEST case for sharding, which is what makes a negative result here
+#     conclusive rather than an artefact of an unfriendly access pattern.
 #
 # --shard-by (plan 011 wave D1) turns the soak table into a SHARDED table keyed by the named column(s),
 # and adds two sampled series that only mean anything for one: shard_count (distinct keys the directory
@@ -93,6 +119,8 @@ SHARD_BY=""
 SHARD_IDLE_S="90"
 SHARD_QUANTUM_S="0"
 SHAPE="orders"
+TRAIL_COHORT_MS="4300"
+TRAIL_CONCURRENCY="8"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -109,6 +137,8 @@ while [[ $# -gt 0 ]]; do
     --shard-idle-s) SHARD_IDLE_S="$2"; shift 2 ;;
     --shard-quantum-s) SHARD_QUANTUM_S="$2"; shift 2 ;;
     --shape) SHAPE="$2"; shift 2 ;;
+    --trail-cohort-ms) TRAIL_COHORT_MS="$2"; shift 2 ;;
+    --trail-concurrency) TRAIL_CONCURRENCY="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -156,6 +186,7 @@ TSV="$RESULTS_DIR/$LABEL-$TS.tsv"
 JSON="$RESULTS_DIR/$LABEL-$TS.json"
 HOSTLOG="$RESULTS_DIR/$LABEL-$TS.host.log"
 
+[[ "$SHAPE" == "trails" ]] && log "trails: cohort=${TRAIL_COHORT_MS}ms, concurrency=$TRAIL_CONCURRENCY (keys ~ (${MINUTES}m/cohort)*concurrency)"
 log "=== soak '$LABEL': shape=$SHAPE, ${MINUTES}m @ ${INTERVAL_S}s samples, ${EPS} eps, $PERSISTENCE, retentionMaxRows=$RETENTION_MAX_ROWS, shardBy='${SHARD_BY:-none}', :$HTTP_PORT/:$GRPC_PORT ==="
 log "DataDir: $DATADIR"
 log "Host log: $HOSTLOG"
@@ -218,7 +249,39 @@ else
 fi
 
 log "Creating soak source (shape=$SHAPE, eps=$EPS) and table..."
-if [[ "$SHAPE" == "instruments" ]]; then
+if [[ "$SHAPE" == "trails" ]]; then
+  # The key is a RETIRING COHORT (see the header): a wall-clock bucket of width --trail-cohort-ms, crossed
+  # with --trail-concurrency live keys inside it. `ts_ms` is a declared Timestamp field, which the generic
+  # generator synthesises as epoch-millis, and `x - x % B` floors it WITHOUT leaving long arithmetic (the
+  # evaluator's `/` always promotes to double, which would make every distinct millisecond its own key).
+  #
+  # The SELECT expression text must be character-identical (modulo whitespace) to the LATEST BY key text:
+  # TableGroupKeyExtractor maps LATEST BY keys onto output columns by normalised expression text, and a
+  # mismatch silently falls back to whole-row identity — which would make every event its own logical row
+  # and destroy the very thing being measured (a long version trail per key).
+  curl -s -o /dev/null -X POST "$BASE/api/sources" "${AUTH[@]}" -H 'Content-Type: application/json' -d '{
+    "name": "soak_trails",
+    "description": "Plan 011 wave D3 soak driver: bounded key set, ~1000-version trails per key.",
+    "eventsPerSecond": '"$EPS"',
+    "fields": [
+      {"name":"ts_ms","type":"Timestamp"},
+      {"name":"instrument","type":"Long"},
+      {"name":"stage","type":"String"},
+      {"name":"notional","type":"Double"}
+    ]
+  }'
+  TRAIL_KEY_SQL="ts_ms - ts_ms % $TRAIL_COHORT_MS, instrument % $TRAIL_CONCURRENCY"
+  TABLE_JSON=$(curl -s -X POST "$BASE/api/tables" "${AUTH[@]}" -H 'Content-Type: application/json' -d '{
+    "name": "soak_states",
+    "description": "Plan 011 wave D3 soak driver: long version trails over a bounded, retiring key set.",
+    "sql": "SELECT ts_ms - ts_ms % '"$TRAIL_COHORT_MS"' AS cohort, instrument % '"$TRAIL_CONCURRENCY"' AS grp, stage, notional FROM soak_trails LATEST BY ('"$TRAIL_KEY_SQL"')",
+    "historyEnabled": true,
+    "historyMode": "All",
+    "persistence": "'"$PERSISTENCE"'",
+    "retentionMaxRows": '"$RETENTION_MAX_ROWS"',
+    "shardBy": '"$SHARD_BY_JSON"'
+  }')
+elif [[ "$SHAPE" == "instruments" ]]; then
   # The generic generator branch synthesises a Long field as Random(0, 10_000) — a BOUNDED key space,
   # which is the whole point of this shape. Each key is therefore revisited many times over the run and
   # accumulates a long version trail (history All, unbounded), while at any moment only the keys touched
@@ -365,7 +428,7 @@ const out = {
   label: '$LABEL',
   generatedAtIso: new Date().toISOString(),
   window: { minutes: Number('$MINUTES'), intervalSeconds: Number('$INTERVAL_S'), warmupSeconds: Number('$WARMUP_S'), samples: rows.length },
-  load: { eventsPerSecond: Number('$EPS'), persistence: '$PERSISTENCE', retentionMaxRows: Number('$RETENTION_MAX_ROWS'), shardBy: '$SHARD_BY', shardIdleSeconds: Number('$SHARD_IDLE_S'), shardQuantumSeconds: Number('$SHARD_QUANTUM_S'), table: 'soak_states', shape: '$SHAPE', shapeNote: '$SHAPE' === 'instruments' ? 'LATEST BY (instrument) over a ~10k bounded key space, history All (unbounded trails) — the instrument-with-legs shape the shard tier targets' : 'LATEST BY (orderId), history LastN(8) — the seeded order_states configuration, an unbounded key space with one row and one version per key' },
+  load: { eventsPerSecond: Number('$EPS'), persistence: '$PERSISTENCE', retentionMaxRows: Number('$RETENTION_MAX_ROWS'), shardBy: '$SHARD_BY', shardIdleSeconds: Number('$SHARD_IDLE_S'), shardQuantumSeconds: Number('$SHARD_QUANTUM_S'), table: 'soak_states', shape: '$SHAPE', trailCohortMs: Number('$TRAIL_COHORT_MS'), trailConcurrency: Number('$TRAIL_CONCURRENCY'), shapeNote: '$SHAPE' === 'trails' ? 'LATEST BY (retiring wall-clock cohort x concurrency) — a bounded key set whose keys accumulate long version trails and then go quiet, history All; trail depth swept by --trail-cohort-ms at fixed total event volume' : '$SHAPE' === 'instruments' ? 'LATEST BY (instrument) over a ~10k bounded key space, history All (unbounded trails) — the instrument-with-legs shape the shard tier targets' : 'LATEST BY (orderId), history LastN(8) — the seeded order_states configuration, an unbounded key space with one row and one version per key' },
   series: { rss, state, rows: rowsS, deltas, shardCount, resident, activations },
   derived: {
     rssKbPerRowAdded: Number(((rss.last - rss.first) * 1024 / rowsGrown).toFixed(2)),
@@ -375,6 +438,10 @@ const out = {
     // being reloaded), is the shape the wave claims.
     residentFractionAtEnd: shardCount.last > 0 ? Number((resident.last / shardCount.last).toFixed(4)) : null,
     residentPeak: resident.max > 0 ? resident.max : null,
+    // The point of the 'trails' sweep: rows = distinct keys (LATEST BY yields one row per key), so
+    // deltas/rows is the ACHIEVED trail depth. Reported rather than assumed — the cohort width only
+    // predicts it, the generator's actual rate decides it.
+    versionsPerKeyAtEnd: rowsS.last > 0 ? Number((deltas.last / rowsS.last).toFixed(1)) : null,
   },
   tsv: '$TSV',
 };

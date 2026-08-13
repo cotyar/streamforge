@@ -1,0 +1,82 @@
+{
+  "label": "d3-trails-v1000-sharded",
+  "generatedAtIso": "2026-08-13T16:26:44.461Z",
+  "window": {
+    "minutes": 8,
+    "intervalSeconds": 5,
+    "warmupSeconds": 20,
+    "samples": 94
+  },
+  "load": {
+    "eventsPerSecond": 200,
+    "persistence": "Batched",
+    "retentionMaxRows": 0,
+    "shardBy": "cohort,grp",
+    "shardIdleSeconds": 15,
+    "shardQuantumSeconds": 5,
+    "table": "soak_states",
+    "shape": "trails",
+    "trailCohortMs": 43000,
+    "trailConcurrency": 8,
+    "shapeNote": "LATEST BY (retiring wall-clock cohort x concurrency) — a bounded key set whose keys accumulate long version trails and then go quiet, history All; trail depth swept by --trail-cohort-ms at fixed total event volume"
+  },
+  "series": {
+    "rss": {
+      "name": "rss_mb",
+      "first": 286,
+      "last": 273,
+      "max": 314,
+      "slopePerMin": -4.343
+    },
+    "state": {
+      "name": "state_kb",
+      "first": 592,
+      "last": 13896,
+      "max": 13896,
+      "slopePerMin": 1677.34
+    },
+    "rows": {
+      "name": "rows",
+      "first": 16,
+      "last": 104,
+      "max": 104,
+      "slopePerMin": 11.129
+    },
+    "deltas": {
+      "name": "deltas_in",
+      "first": 3230,
+      "last": 77925,
+      "max": 77925,
+      "slopePerMin": 9465.798
+    },
+    "shardCount": {
+      "name": "shard_count",
+      "first": 16,
+      "last": 104,
+      "max": 104,
+      "slopePerMin": 11.129
+    },
+    "resident": {
+      "name": "resident_shards",
+      "first": 16,
+      "last": 16,
+      "max": 16,
+      "slopePerMin": -0.164
+    },
+    "activations": {
+      "name": "shard_activations",
+      "first": 16,
+      "last": 104,
+      "max": 104,
+      "slopePerMin": 11.129
+    }
+  },
+  "derived": {
+    "rssKbPerRowAdded": -151.27,
+    "stateKbPerRowAdded": 151.182,
+    "residentFractionAtEnd": 0.1538,
+    "residentPeak": 16,
+    "versionsPerKeyAtEnd": 749.3
+  },
+  "tsv": "/Users/yuriyhabarov/work/crates-foundation/tools/soak/results/d3-trails-v1000-sharded-20260813T161820Z.tsv"
+}

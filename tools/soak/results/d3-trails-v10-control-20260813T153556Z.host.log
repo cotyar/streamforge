@@ -1,0 +1,16 @@
+/Users/yuriyhabarov/work/crates-foundation/shared/StreamForge.Api/StreamForge.Api.csproj : warning NU1903: Package 'Microsoft.OpenApi' 2.0.0 has a known high severity vulnerability, https://github.com/advisories/GHSA-v5pm-xwqc-g5wc [/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Host/StreamForge.Host.csproj]
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Host/StreamForge.Host.csproj : warning NU1903: Package 'Microsoft.OpenApi' 2.0.0 has a known high severity vulnerability, https://github.com/advisories/GHSA-v5pm-xwqc-g5wc
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Host/StreamForge.Host.csproj : warning NU1903: Package 'Microsoft.OpenApi' 2.0.0 has a known high severity vulnerability, https://github.com/advisories/GHSA-v5pm-xwqc-g5wc
+/Users/yuriyhabarov/work/crates-foundation/shared/StreamForge.Api/StreamForge.Api.csproj : warning NU1903: Package 'Microsoft.OpenApi' 2.0.0 has a known high severity vulnerability, https://github.com/advisories/GHSA-v5pm-xwqc-g5wc
+info: Microsoft.Hosting.Lifetime[14]
+      Now listening on: http://localhost:7911
+info: Microsoft.Hosting.Lifetime[14]
+      Now listening on: http://localhost:7912
+info: Microsoft.Hosting.Lifetime[0]
+      Application started. Press Ctrl+C to shut down.
+info: Microsoft.Hosting.Lifetime[0]
+      Hosting environment: Production
+info: Microsoft.Hosting.Lifetime[0]
+      Content root path: /Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Host
+info: Microsoft.Hosting.Lifetime[0]
+      Application is shutting down...

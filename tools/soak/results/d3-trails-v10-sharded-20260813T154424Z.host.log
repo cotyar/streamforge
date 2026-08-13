@@ -1,0 +1,70 @@
+/Users/yuriyhabarov/work/crates-foundation/shared/StreamForge.Api/StreamForge.Api.csproj : warning NU1903: Package 'Microsoft.OpenApi' 2.0.0 has a known high severity vulnerability, https://github.com/advisories/GHSA-v5pm-xwqc-g5wc [/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Host/StreamForge.Host.csproj]
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Host/StreamForge.Host.csproj : warning NU1903: Package 'Microsoft.OpenApi' 2.0.0 has a known high severity vulnerability, https://github.com/advisories/GHSA-v5pm-xwqc-g5wc
+/Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Host/StreamForge.Host.csproj : warning NU1903: Package 'Microsoft.OpenApi' 2.0.0 has a known high severity vulnerability, https://github.com/advisories/GHSA-v5pm-xwqc-g5wc
+/Users/yuriyhabarov/work/crates-foundation/shared/StreamForge.Api/StreamForge.Api.csproj : warning NU1903: Package 'Microsoft.OpenApi' 2.0.0 has a known high severity vulnerability, https://github.com/advisories/GHSA-v5pm-xwqc-g5wc
+info: Microsoft.Hosting.Lifetime[14]
+      Now listening on: http://localhost:7911
+info: Microsoft.Hosting.Lifetime[14]
+      Now listening on: http://localhost:7912
+info: Microsoft.Hosting.Lifetime[0]
+      Application started. Press Ctrl+C to shut down.
+info: Microsoft.Hosting.Lifetime[0]
+      Hosting environment: Production
+info: Microsoft.Hosting.Lifetime[0]
+      Content root path: /Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Host
+info: Microsoft.Hosting.Lifetime[0]
+      Application is shutting down...
+warn: Orleans.Runtime.Placement.PlacementService[100506]
+      AllActiveSilos SiloStatusOracle.GetApproximateSiloStatuses empty
+warn: Orleans.Runtime.Placement.PlacementService[100506]
+      AllActiveSilos SiloStatusOracle.GetApproximateSiloStatuses empty
+warn: Orleans.Runtime.Placement.PlacementService[100506]
+      AllActiveSilos SiloStatusOracle.GetApproximateSiloStatuses empty
+warn: Orleans.Messaging[101032]
+      Failed to forward message Request [S127.0.0.1:11111:145640666 generator/order_events]->[S127.0.0.1:11111:145640666 memorystreamqueue/4ce8b44cb0f352d50200004002000000] Orleans.Providers.IMemoryStreamQueueGrain.Enqueue(Orleans.Providers.MemoryMessageData) #09D3780B406D9755[ForwardCount=2] from [GrainAddress GrainId memorystreamqueue/4ce8b44cb0f352d50200004002000000, ActivationId: @00000000000000000000000000000000, SiloAddress: S127.0.0.1:11111:145640666] to (unknown) after Unable to create local activation. Attempt 2
+warn: Orleans.Messaging[101032]
+      Failed to forward message Request [S127.0.0.1:11111:145640666 generator/soak_trails]->[S127.0.0.1:11111:145640666 memorystreamqueue/4ce8b44cb0f352d50200004002000000] Orleans.Providers.IMemoryStreamQueueGrain.Enqueue(Orleans.Providers.MemoryMessageData) #09D3780B406D976B[ForwardCount=2] from [GrainAddress GrainId memorystreamqueue/4ce8b44cb0f352d50200004002000000, ActivationId: @00000000000000000000000000000000, SiloAddress: S127.0.0.1:11111:145640666] to (unknown) after Unable to create local activation. Attempt 2
+fail: Microsoft.Extensions.Logging.ILogger[200401]
+      Exception thrown in MemoryAdapterFactory.QueueMessageBatchAsync.
+      Orleans.Runtime.OrleansMessageRejectionException: Forwarding failed: tried to forward message Request [S127.0.0.1:11111:145640666 generator/order_events]->[S127.0.0.1:11111:145640666 memorystreamqueue/4ce8b44cb0f352d50200004002000000] Orleans.Providers.IMemoryStreamQueueGrain.Enqueue(Orleans.Providers.MemoryMessageData) #09D3780B406D9755[ForwardCount=2] for 2 times after "Unable to create local activation" to invalid activation. Rejecting now. 
+         at System.Threading.Tasks.ValueTask.ValueTaskSourceAsTask.<>c.<.cctor>b__4_0(Object state)
+      --- End of stack trace from previous location ---
+         at Orleans.Providers.MemoryAdapterFactory`1.QueueMessageBatchAsync[T](StreamId streamId, IEnumerable`1 events, StreamSequenceToken token, Dictionary`2 requestContext) in /_/src/Orleans.Streaming/MemoryStreams/MemoryAdapterFactory.cs:line 165
+fail: Microsoft.Extensions.Logging.ILogger[200401]
+      Exception thrown in MemoryAdapterFactory.QueueMessageBatchAsync.
+      Orleans.Runtime.OrleansMessageRejectionException: Forwarding failed: tried to forward message Request [S127.0.0.1:11111:145640666 generator/soak_trails]->[S127.0.0.1:11111:145640666 memorystreamqueue/4ce8b44cb0f352d50200004002000000] Orleans.Providers.IMemoryStreamQueueGrain.Enqueue(Orleans.Providers.MemoryMessageData) #09D3780B406D976B[ForwardCount=2] for 2 times after "Unable to create local activation" to invalid activation. Rejecting now. 
+         at System.Threading.Tasks.ValueTask.ValueTaskSourceAsTask.<>c.<.cctor>b__4_0(Object state)
+      --- End of stack trace from previous location ---
+         at Orleans.Providers.MemoryAdapterFactory`1.QueueMessageBatchAsync[T](StreamId streamId, IEnumerable`1 events, StreamSequenceToken token, Dictionary`2 requestContext) in /_/src/Orleans.Streaming/MemoryStreams/MemoryAdapterFactory.cs:line 165
+warn: Orleans.Runtime.GrainTimer[101413]
+      Caught and ignored exception thrown from timer callback for timer '[Orleans.Runtime.GrainTimer`1[System.Func`1[System.Threading.Tasks.Task]]] Grain: '[Activation: S127.0.0.1:11111:145640666/generator/soak_trails@d86ee2ceee8142b382f32d45bd0edcd7#GrainType=StreamForge.Host.Grains.GeneratorGrain,StreamForge.Host Placement=ResourceOptimizedPlacement State=Deactivating]' Callback: 'Orleans.GrainBaseExtensions+<>c.System.Threading.Tasks.Task <RegisterGrainTimer>b__4_0(System.Func`1[System.Threading.Tasks.Task], System.Threading.CancellationToken)'. State: 'System.Func`1[System.Threading.Tasks.Task]''.
+      Orleans.Runtime.OrleansMessageRejectionException: Forwarding failed: tried to forward message Request [S127.0.0.1:11111:145640666 generator/soak_trails]->[S127.0.0.1:11111:145640666 memorystreamqueue/4ce8b44cb0f352d50200004002000000] Orleans.Providers.IMemoryStreamQueueGrain.Enqueue(Orleans.Providers.MemoryMessageData) #09D3780B406D976B[ForwardCount=2] for 2 times after "Unable to create local activation" to invalid activation. Rejecting now. 
+         at System.Threading.Tasks.ValueTask.ValueTaskSourceAsTask.<>c.<.cctor>b__4_0(Object state)
+      --- End of stack trace from previous location ---
+         at Orleans.Providers.MemoryAdapterFactory`1.QueueMessageBatchAsync[T](StreamId streamId, IEnumerable`1 events, StreamSequenceToken token, Dictionary`2 requestContext) in /_/src/Orleans.Streaming/MemoryStreams/MemoryAdapterFactory.cs:line 165
+         at StreamForge.Host.Grains.GeneratorGrain.TickAsync() in /Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Host/Grains/GeneratorGrain.cs:line 52
+         at Orleans.Runtime.GrainTimer.AwaitCallbackTask(Task task) in /_/src/Orleans.Runtime/Timers/GrainTimer.cs:line 180
+warn: Orleans.Runtime.GrainTimer[101413]
+      Caught and ignored exception thrown from timer callback for timer '[Orleans.Runtime.GrainTimer`1[System.Func`1[System.Threading.Tasks.Task]]] Grain: '[Activation: S127.0.0.1:11111:145640666/generator/order_events@795f0a8c02324daf8c80cc03191c4525#GrainType=StreamForge.Host.Grains.GeneratorGrain,StreamForge.Host Placement=ResourceOptimizedPlacement State=Deactivating]' Callback: 'Orleans.GrainBaseExtensions+<>c.System.Threading.Tasks.Task <RegisterGrainTimer>b__4_0(System.Func`1[System.Threading.Tasks.Task], System.Threading.CancellationToken)'. State: 'System.Func`1[System.Threading.Tasks.Task]''.
+      Orleans.Runtime.OrleansMessageRejectionException: Forwarding failed: tried to forward message Request [S127.0.0.1:11111:145640666 generator/order_events]->[S127.0.0.1:11111:145640666 memorystreamqueue/4ce8b44cb0f352d50200004002000000] Orleans.Providers.IMemoryStreamQueueGrain.Enqueue(Orleans.Providers.MemoryMessageData) #09D3780B406D9755[ForwardCount=2] for 2 times after "Unable to create local activation" to invalid activation. Rejecting now. 
+         at System.Threading.Tasks.ValueTask.ValueTaskSourceAsTask.<>c.<.cctor>b__4_0(Object state)
+      --- End of stack trace from previous location ---
+         at Orleans.Providers.MemoryAdapterFactory`1.QueueMessageBatchAsync[T](StreamId streamId, IEnumerable`1 events, StreamSequenceToken token, Dictionary`2 requestContext) in /_/src/Orleans.Streaming/MemoryStreams/MemoryAdapterFactory.cs:line 165
+         at StreamForge.Host.Grains.GeneratorGrain.TickAsync() in /Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Host/Grains/GeneratorGrain.cs:line 52
+         at Orleans.Runtime.GrainTimer.AwaitCallbackTask(Task task) in /_/src/Orleans.Runtime/Timers/GrainTimer.cs:line 180
+warn: Orleans.Grain.InvokeException[100322]
+      Exception during Grain method call of message OneWay [S127.0.0.1:11111:145640666 generator/soak_trails]->[S127.0.0.1:11111:145640666 generator/soak_trails] [Orleans.Runtime.GrainTimer`1[System.Func`1[System.Threading.Tasks.Task]]] Grain: '[Activation: S127.0.0.1:11111:145640666/generator/soak_trails@d86ee2ceee8142b382f32d45bd0edcd7#GrainType=StreamForge.Host.Grains.GeneratorGrain,StreamForge.Host Placement=ResourceOptimizedPlacement State=Deactivating]' Callback: 'Orleans.GrainBaseExtensions+<>c.System.Threading.Tasks.Task <RegisterGrainTimer>b__4_0(System.Func`1[System.Threading.Tasks.Task], System.Threading.CancellationToken)'. State: 'System.Func`1[System.Threading.Tasks.Task]' #09D3780B406D9768: 
+      Orleans.Runtime.OrleansMessageRejectionException: Forwarding failed: tried to forward message Request [S127.0.0.1:11111:145640666 generator/soak_trails]->[S127.0.0.1:11111:145640666 memorystreamqueue/4ce8b44cb0f352d50200004002000000] Orleans.Providers.IMemoryStreamQueueGrain.Enqueue(Orleans.Providers.MemoryMessageData) #09D3780B406D976B[ForwardCount=2] for 2 times after "Unable to create local activation" to invalid activation. Rejecting now. 
+         at System.Threading.Tasks.ValueTask.ValueTaskSourceAsTask.<>c.<.cctor>b__4_0(Object state)
+      --- End of stack trace from previous location ---
+         at Orleans.Providers.MemoryAdapterFactory`1.QueueMessageBatchAsync[T](StreamId streamId, IEnumerable`1 events, StreamSequenceToken token, Dictionary`2 requestContext) in /_/src/Orleans.Streaming/MemoryStreams/MemoryAdapterFactory.cs:line 165
+         at StreamForge.Host.Grains.GeneratorGrain.TickAsync() in /Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Host/Grains/GeneratorGrain.cs:line 52
+         at Orleans.Runtime.GrainTimer.AwaitCallbackTask(Task task) in /_/src/Orleans.Runtime/Timers/GrainTimer.cs:line 180
+warn: Orleans.Grain.InvokeException[100322]
+      Exception during Grain method call of message OneWay [S127.0.0.1:11111:145640666 generator/order_events]->[S127.0.0.1:11111:145640666 generator/order_events] [Orleans.Runtime.GrainTimer`1[System.Func`1[System.Threading.Tasks.Task]]] Grain: '[Activation: S127.0.0.1:11111:145640666/generator/order_events@795f0a8c02324daf8c80cc03191c4525#GrainType=StreamForge.Host.Grains.GeneratorGrain,StreamForge.Host Placement=ResourceOptimizedPlacement State=Deactivating]' Callback: 'Orleans.GrainBaseExtensions+<>c.System.Threading.Tasks.Task <RegisterGrainTimer>b__4_0(System.Func`1[System.Threading.Tasks.Task], System.Threading.CancellationToken)'. State: 'System.Func`1[System.Threading.Tasks.Task]' #09D3780B406D976A: 
+      Orleans.Runtime.OrleansMessageRejectionException: Forwarding failed: tried to forward message Request [S127.0.0.1:11111:145640666 generator/order_events]->[S127.0.0.1:11111:145640666 memorystreamqueue/4ce8b44cb0f352d50200004002000000] Orleans.Providers.IMemoryStreamQueueGrain.Enqueue(Orleans.Providers.MemoryMessageData) #09D3780B406D9755[ForwardCount=2] for 2 times after "Unable to create local activation" to invalid activation. Rejecting now. 
+         at System.Threading.Tasks.ValueTask.ValueTaskSourceAsTask.<>c.<.cctor>b__4_0(Object state)
+      --- End of stack trace from previous location ---
+         at Orleans.Providers.MemoryAdapterFactory`1.QueueMessageBatchAsync[T](StreamId streamId, IEnumerable`1 events, StreamSequenceToken token, Dictionary`2 requestContext) in /_/src/Orleans.Streaming/MemoryStreams/MemoryAdapterFactory.cs:line 165
+         at StreamForge.Host.Grains.GeneratorGrain.TickAsync() in /Users/yuriyhabarov/work/crates-foundation/orleans/src/StreamForge.Host/Grains/GeneratorGrain.cs:line 52
+         at Orleans.Runtime.GrainTimer.AwaitCallbackTask(Task task) in /_/src/Orleans.Runtime/Timers/GrainTimer.cs:line 180

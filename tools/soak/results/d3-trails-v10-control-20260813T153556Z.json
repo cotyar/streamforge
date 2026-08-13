@@ -1,0 +1,82 @@
+{
+  "label": "d3-trails-v10-control",
+  "generatedAtIso": "2026-08-13T15:44:23.712Z",
+  "window": {
+    "minutes": 8,
+    "intervalSeconds": 5,
+    "warmupSeconds": 20,
+    "samples": 95
+  },
+  "load": {
+    "eventsPerSecond": 200,
+    "persistence": "Batched",
+    "retentionMaxRows": 0,
+    "shardBy": "",
+    "shardIdleSeconds": 90,
+    "shardQuantumSeconds": 0,
+    "table": "soak_states",
+    "shape": "trails",
+    "trailCohortMs": 430,
+    "trailConcurrency": 8,
+    "shapeNote": "LATEST BY (retiring wall-clock cohort x concurrency) — a bounded key set whose keys accumulate long version trails and then go quiet, history All; trail depth swept by --trail-cohort-ms at fixed total event volume"
+  },
+  "series": {
+    "rss": {
+      "name": "rss_mb",
+      "first": 274,
+      "last": 328,
+      "max": 344,
+      "slopePerMin": 0.609
+    },
+    "state": {
+      "name": "state_kb",
+      "first": 808,
+      "last": 18512,
+      "max": 18512,
+      "slopePerMin": 2203.789
+    },
+    "rows": {
+      "name": "rows",
+      "first": 376,
+      "last": 9272,
+      "max": 9272,
+      "slopePerMin": 1116.135
+    },
+    "deltas": {
+      "name": "deltas_in",
+      "first": 3533,
+      "last": 86836,
+      "max": 86836,
+      "slopePerMin": 10432.942
+    },
+    "shardCount": {
+      "name": "shard_count",
+      "first": -1,
+      "last": -1,
+      "max": -1,
+      "slopePerMin": 0
+    },
+    "resident": {
+      "name": "resident_shards",
+      "first": -1,
+      "last": -1,
+      "max": -1,
+      "slopePerMin": 0
+    },
+    "activations": {
+      "name": "shard_activations",
+      "first": -1,
+      "last": -1,
+      "max": -1,
+      "slopePerMin": 0
+    }
+  },
+  "derived": {
+    "rssKbPerRowAdded": 6.22,
+    "stateKbPerRowAdded": 1.99,
+    "residentFractionAtEnd": null,
+    "residentPeak": null,
+    "versionsPerKeyAtEnd": 9.4
+  },
+  "tsv": "/Users/yuriyhabarov/work/crates-foundation/tools/soak/results/d3-trails-v10-control-20260813T153556Z.tsv"
+}

@@ -286,13 +286,20 @@ stopped growing (29× less write per minute). Rows/min fell from 5 204 to 3.2.
 Operational guidance, unchanged for a table WITHOUT a policy: keep an eye on one whose key space is
 unbounded, and measure with `tools/soak/run-soak.sh`.
 
-### Sharded tables — bounding what is RESIDENT, without deleting anything (plan 011 wave D1)
+### Sharded tables — per-key locality and swap-out, NOT a memory optimisation (plan 011 wave D)
 
 `TableDefinition.ShardBy`, **empty = off by default**, and off means byte-for-byte today's behavior — the
 same opt-in discipline `Parallelism` established (D9). Orleans-only: the Dapr flavor stores the field but
 refuses to *start* a table carrying it (`TableActor.StartAsync`; see that guard and
 `CatalogStore.ValidateParallelism`'s doc for why the refusal sits at start rather than at upsert on that
 flavor).
+
+**READ THIS FIRST — the memory claim was measured and it does not hold.** `ShardBy` was built to cut
+resident memory. Across waves D1, D2 and D3 it never once reduced total process RSS beyond the noise
+floor, and below roughly 100 versions per key it actively *costs* — up to +68% RSS. The feature is real
+and useful, but it is **per-key query locality and swap-out of cold keys to disk**, and it must be
+described that way. See "The measurement, and the verdict" at the end of this section for the curve and
+the cost model before enabling it on anything.
 
 **This is not retention, and confusing the two wastes the feature.** Retention DELETES rows to bound a
 table. Sharding KEEPS everything and bounds what is *resident*. The case it was built for is a financial
@@ -372,6 +379,52 @@ half the tables and silently not for the other half.
   it out. Honored literally, since that is already what the mode's contract says; not blocked.
 - **Disk grows, on purpose.** "Keep everything, just not resident" means one state file per shard key,
   forever. That is the trade, not a leak.
+
+**The measurement, and the verdict (plan 011 wave D3).** `tools/soak/run-soak.sh --shape trails` sweeps
+trail depth at FIXED total event volume — only the distribution over keys changes, which is the variable
+the answer depends on. The key is a retiring cohort (an instrument's state machine finishes and the key
+goes quiet forever), which is both realistic and sharding's *best* case. 8 min @ 200 ev/s, `Batched`,
+`history All`, `--shard-idle-s 15`. `meanRSS` is the mean over the second half; the least-squares slope is
+GC-dominated at this size (several are negative). Control run-to-run spread on identical volume was
+277/271/308 MB, so **the noise floor is ±37 MB** — anything smaller is not a result.
+
+| versions/key | keys | control meanRSS | sharded meanRSS | Δ | resident/known | activations |
+|---|---|---|---|---|---|---|
+| 9.4 | 9 272 | 277 MB | 465 MB | **+188 MB** | 368/9 232 (4.0%) | 19.4/s |
+| 89 | ~930 | 271 MB | 293 MB | +22 MB | 40/936 (4.3%) | 2.0/s |
+| ~800 | 104 | 308 MB | 259 MB | −49 MB (noise) | 16/104 (15.4%) | 0.2/s |
+
+**The penalty disappears between 10 and 100 versions per key. A benefit never appears anywhere in range.**
+Wave D2's estimate of a crossover "in the hundreds" was right about where sharding stops costing and wrong
+to imply it then starts paying.
+
+**The cost model, which is the useful output.** The overhead tracks the shard ACTIVATION RATE, not the key
+count and not the resident set — and activation rate = key-creation rate ≈ `events-per-sec ÷
+versions-per-key`, so the cost curve is `1/x`:
+
+| activations/s | RSS penalty |
+|---|---|
+| 128 (D2 `instruments`, uniform random keys — 6 reloads per key) | +69 MB/min slope |
+| 19.4 | +188 MB |
+| 2.0 | +22 MB |
+| 0.2 | −49 MB (noise) |
+
+At v10 only 4% of shards were resident and the arm still lost 188 MB: the cost is not residency, it is
+9 232 activate/serialize/deactivate cycles in 8 minutes. In `trails` each key activates exactly once and
+never reloads, so the sharded arm pays *zero* reload cost and still loses. This is the same finding as
+D2's "per-key JSON rewrite is the wrong storage shape", now with the axis named.
+
+**What the measurement cannot show, stated so nobody over-reads it.** At this dataset size there was
+nothing to save: the full content is 14 MB on disk (~172 B/version, 85 k versions) against a ~270 MB
+baseline RSS — about 5%. Perfect swap-out of *everything* would save less than the ±37 MB noise floor, so
+the v100/v1000 points honestly read "no penalty", not "a win", and could not have read "a win" by
+construction. A single `GeneratorGrain` emits one event per timer tick (1 ms floor ⇒ ~200 ev/s), so at a
+fixed window trail depth and key count trade off directly and the top point is 104 keys × ~800 versions,
+not 1000 × 1000. Extrapolating (NOT measured): 1000 instruments × 1000 changes ≈ 1 M versions ≈ 170 MB on
+disk, plausibly 350–700 MB resident — the first scale at which a 15% resident set could matter. Testing it
+needs hours of soak, or the REST ingest path to get past the generator's rate ceiling.
+
+**So: enable `ShardBy` for keys with long trails that go quiet, and never for a fast-churning key space.**
 
 **Measured**, `tools/soak/run-soak.sh`, 6-minute window, 100 ev/s, `Batched`, same machine and the same
 `order_states`-shaped table as the C1/C2 rows above; the sharded arm adds `--shard-by orderId

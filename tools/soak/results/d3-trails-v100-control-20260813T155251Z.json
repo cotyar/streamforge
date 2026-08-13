@@ -1,0 +1,82 @@
+{
+  "label": "d3-trails-v100-control",
+  "generatedAtIso": "2026-08-13T16:01:21.872Z",
+  "window": {
+    "minutes": 8,
+    "intervalSeconds": 5,
+    "warmupSeconds": 20,
+    "samples": 95
+  },
+  "load": {
+    "eventsPerSecond": 200,
+    "persistence": "Batched",
+    "retentionMaxRows": 0,
+    "shardBy": "",
+    "shardIdleSeconds": 90,
+    "shardQuantumSeconds": 0,
+    "table": "soak_states",
+    "shape": "trails",
+    "trailCohortMs": 4300,
+    "trailConcurrency": 8,
+    "shapeNote": "LATEST BY (retiring wall-clock cohort x concurrency) — a bounded key set whose keys accumulate long version trails and then go quiet, history All; trail depth swept by --trail-cohort-ms at fixed total event volume"
+  },
+  "series": {
+    "rss": {
+      "name": "rss_mb",
+      "first": 323,
+      "last": 302,
+      "max": 373,
+      "slopePerMin": -4.817
+    },
+    "state": {
+      "name": "state_kb",
+      "first": 620,
+      "last": 14672,
+      "max": 14672,
+      "slopePerMin": 1734.827
+    },
+    "rows": {
+      "name": "rows",
+      "first": 40,
+      "last": 928,
+      "max": 928,
+      "slopePerMin": 111.446
+    },
+    "deltas": {
+      "name": "deltas_in",
+      "first": 3181,
+      "last": 82869,
+      "max": 82869,
+      "slopePerMin": 10045.04
+    },
+    "shardCount": {
+      "name": "shard_count",
+      "first": -1,
+      "last": -1,
+      "max": -1,
+      "slopePerMin": 0
+    },
+    "resident": {
+      "name": "resident_shards",
+      "first": -1,
+      "last": -1,
+      "max": -1,
+      "slopePerMin": 0
+    },
+    "activations": {
+      "name": "shard_activations",
+      "first": -1,
+      "last": -1,
+      "max": -1,
+      "slopePerMin": 0
+    }
+  },
+  "derived": {
+    "rssKbPerRowAdded": -24.22,
+    "stateKbPerRowAdded": 15.824,
+    "residentFractionAtEnd": null,
+    "residentPeak": null,
+    "versionsPerKeyAtEnd": 89.3
+  },
+  "tsv": "/Users/yuriyhabarov/work/crates-foundation/tools/soak/results/d3-trails-v100-control-20260813T155251Z.tsv"
+}

@@ -1,6 +1,17 @@
 # 011 — Lineage edges, SQL editor UX, memory stability, sharded tables
 
-**Status: IN PROGRESS.** Baseline `a514190` — Orleans **1508** tests, Dapr **280**, both green.
+**Status: DONE** (A, B, C1, C2, D1, D2, D3, E, F). Baseline `a514190` — Orleans **1508** tests, Dapr
+**280**. Landed at Orleans **1591**, Dapr **308**.
+
+**The one result to carry forward: `ShardBy` is NOT a memory optimisation.** It was built to be one. Wave
+D3 measured a trail-depth sweep at fixed event volume and it never reduced total process RSS beyond the
+±37 MB noise floor at any point, while costing up to +68% below ~100 versions per key. The cost tracks
+shard ACTIVATION RATE ≈ `events-per-sec ÷ versions-per-key`. What it does deliver, and what it should be
+described as, is per-key query locality and swap-out of cold keys: strictly-consistent per-key reads that
+wake one grain, a resident set tracking the active key set (4–15% measured), and full trails kept durably
+per key. The memory work that actually paid was C1 (the flush amplifier, 287 → 109 MB/min) and C2
+(retention, which plateaus a table instead of letting it grow). Full curve and caveats: `orleans/DESIGN.md`,
+"Sharded tables".
 
 ## Context
 
