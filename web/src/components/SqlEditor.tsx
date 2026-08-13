@@ -804,7 +804,12 @@ export function SqlEditor({
       <pre
         ref={preRef}
         aria-hidden
-        className="pointer-events-none absolute inset-0 m-0 overflow-auto whitespace-pre p-3"
+        // overflow-HIDDEN, not auto: this layer is scrolled programmatically from the textarea's
+        // onScroll (handleScroll syncs both axes), never by the user — it is pointer-events-none. With
+        // overflow-auto the browser still paints its own scrollbars for the overflowing content, which
+        // is what put TWO horizontal scrollbars under a long single-line query: this one and the real
+        // textarea's, stacked and moving together.
+        className="pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre p-3"
       >
         {tokens.length === 0 && <span className="text-muted-foreground">{placeholder}</span>}
         {tokens.map((t, i) => {
