@@ -32,9 +32,9 @@ its own note on why `/docs` doesn't serve it automatically).
 
 ```bash
 ~/.dotnet/dotnet build orleans/StreamForge.sln
-~/.dotnet/dotnet test  orleans/StreamForge.sln     # 1542 tests — the whole suite must be green
+~/.dotnet/dotnet test  orleans/StreamForge.sln     # 1569 tests — the whole suite must be green
 ~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln
-~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 304 tests — the whole suite must be green
+~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 308 tests — the whole suite must be green
 cd web && bun run build
 ~/.dotnet/dotnet run --project orleans/src/StreamForge.Host   # :5199 + :5299
 cd dapr && ./tools/run.sh                                      # :5399 (needs `dapr init` done once)
@@ -43,6 +43,12 @@ Orleans stream-transport knobs (post-005 latency work): `--Streams:Transport pus
 pull-based memory streams for the in-process push bus (`Host/Streaming/PushStream*`, p50 1ms vs
 stock 115ms on tableDelta); default `pull` is byte-identical stock Orleans, tunable via
 `--Streams:PullPeriodMs` (default 100). `TABLES__FLUSHMS` tunes the epoch flush (P≥2 tables only).
+Sharded tables (plan 011 D1, `TableDefinition.ShardBy`, empty = off): `--Shards:IdleSeconds` (default
+120) is the shard grain class's activation-collection age — how long an idle key stays resident before
+its state is flushed to disk and the grain collected, which is the whole feature; `--Shards:QuantumSeconds`
+lowers the silo-wide collection scan interval (Orleans requires it to be strictly smaller than any
+collection age, so shortening the idle below ~90s needs it). Orleans-only; Dapr stores `ShardBy` but
+refuses to start such a table.
 
 Local skills (root `.claude/skills/`, `sf-` prefix) wrap the common workflows: `/sf-run` (both
 flavors), `/sf-verify` (both flavors), `/sf-sql`, `/sf-client-gen`, `/sf-config` (catalog

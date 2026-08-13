@@ -65,7 +65,11 @@ public sealed record CreateTableRequest(
     // Plan 011 C2: opt-in row retention. 0/0 (the defaults) = off, i.e. the table holds every row its SQL
     // says it should. Non-zero makes the table a BOUNDED VIEW — see TableDefinition.RetentionMaxRows.
     int RetentionMaxRows = 0,
-    long RetentionTtlMs = 0);
+    long RetentionTtlMs = 0,
+    // Plan 011 D1: opt-in key sharding. Null/empty (the default) = not sharded, i.e. today's behavior
+    // byte for byte. See TableDefinition.ShardBy; RegistryGrain validates the columns against the
+    // compiled output schema and refuses the searchEnabled combination.
+    List<string>? ShardBy = null);
 
 public sealed record TableSearchResponse(IReadOnlyList<TableRowDto> Rows, string Mode, bool Enabled, int Total);
 
@@ -86,7 +90,50 @@ public sealed record ValidateTableResponse(
 /// it — see TableGrain.OnOutputBatchAsync's doc comment for exactly why that's true by construction, not
 /// just by convention. Null for every Parallelism==1 table (classic mode has no partitioned frontier) and
 /// for a Parallelism &gt;= 2 table that hasn't yet completed its first round.</summary>
-public sealed record TableRowsResponse(IReadOnlyList<TableRowDto> Rows, int TotalRows, long Seq, long? FrontierEpoch = null);
+public sealed record TableRowsResponse(IReadOnlyList<TableRowDto> Rows, int TotalRows, long Seq, long? FrontierEpoch = null, TableRowsShardNote? Shards = null);
+
+/// <summary>Plan 011 D1: present (non-null) only on a SHARDED table's <c>/rows</c> response, and there
+/// purely to say honestly where the rows came from.
+///
+/// THE TRAP THIS ANNOTATION EXISTS TO CLOSE. The console's table page polls <c>/rows</c> every two
+/// seconds. If a keyless listing on a sharded table were served by fanning out across the shard
+/// directory, every shard would wake on every poll, nothing would ever be swapped out, and the feature
+/// would be self-defeating while looking like it worked in every functional test. So it is not: a keyless
+/// listing is served from the table's own consolidated snapshot, exactly as it always has been, and
+/// <see cref="ShardsConsulted"/> is <c>false</c> to say so. Not one shard is contacted, so no amount of
+/// polling can wake an idle key.
+///
+/// What that costs in honesty, stated rather than hidden: these rows come from the table's snapshot, so
+/// they are the table's view, not a fresh read of the shard tier. For a key, use
+/// <c>POST /api/tables/{id}/shard/lookup</c> — one grain, strictly consistent. For every shard, use
+/// <c>GET /api/tables/{id}/shards/scan</c>, which is a separate endpoint precisely because it does wake
+/// them.</summary>
+public sealed record TableRowsShardNote(IReadOnlyList<string> ShardBy, bool ShardsConsulted, string Note);
+
+// Plan 011 D1 — sharded tables. POST (not GET) for the same reason /history/lookup is: the lookup key is
+// the row's own content, an arbitrary-shaped object. The client hands back a row (or just an object
+// carrying the shardBy columns) and the server derives the shard key with the identical codec the router
+// uses on live deltas, so the client never needs to know the key encoding.
+public sealed record ShardLookupRequest(Dictionary<string, object?> Row);
+
+/// <summary>Plan 011 D1: <c>GET /api/tables/{id}/shards</c>. Every number here is answered from the
+/// router and the directory — NO shard is activated, which is what makes it safe to poll.</summary>
+public sealed record TableShardsResponse(
+    bool Enabled,
+    IReadOnlyList<string> ShardBy,
+    int ShardCount,
+    int ResidentShardCount,
+    long Activations,
+    long Deactivations,
+    long RouterSeq,
+    long RoutedBatches,
+    long RoutedDeltas,
+    bool RouterActive,
+    IReadOnlyList<string> Keys);
+
+/// <summary>Plan 011 D1: <c>GET /api/tables/{id}/shards/scan</c>. <paramref name="Woke"/> is the number of
+/// shards this call activated — the honest price tag, reported so a caller can see what it just did.</summary>
+public sealed record TableShardScanResponse(IReadOnlyList<TableShardStats> Shards, int Woke, int Offset, int Limit);
 
 // Row history (Feature B). The client hands back the exact row object it already has (from the live grid
 // or a search result) rather than pre-computing/round-tripping an opaque key — the server derives the

@@ -66,6 +66,34 @@ builder.Host.UseOrleans(siloBuilder =>
     }
     siloBuilder.AddMemoryGrainStorage(StreamConstants.PubSubStoreName);
     siloBuilder.AddJsonFileGrainStorage(StreamConstants.StorageName);
+
+    // Plan 011 wave D1 — HOW LONG AN IDLE SHARD STAYS RESIDENT.
+    //
+    // TableShardGrain is the one grain in the table path that does NOT call DelayDeactivation, so it is
+    // the one grain Orleans' activation collector can actually reclaim — and how quickly it does is the
+    // difference between "sharding bounds resident memory" and "sharding is a nice API". Orleans'
+    // default CollectionAge is 15 minutes, which is a reasonable default for grains generally and far
+    // too long for a soak run or a live check to observe anything, so it is configurable here.
+    //
+    // Shards:IdleSeconds sets the shard class's own collection age. Shards:QuantumSeconds sets the
+    // silo-wide scan interval, which Orleans requires to be strictly SMALLER than any collection age;
+    // its default (60s) is left alone unless asked for, since it applies to every grain type. Both are
+    // pass-through knobs with no behavioral default change: at the default 120s a shard becomes eligible
+    // after two minutes idle and is collected on the next 60s scan.
+    var shardIdleSeconds = builder.Configuration.GetValue("Shards:IdleSeconds", 120);
+    var shardQuantumSeconds = builder.Configuration.GetValue("Shards:QuantumSeconds", 0);
+    siloBuilder.Configure<Orleans.Configuration.GrainCollectionOptions>(o =>
+    {
+        if (shardQuantumSeconds > 0)
+        {
+            o.CollectionQuantum = TimeSpan.FromSeconds(shardQuantumSeconds);
+        }
+        if (shardIdleSeconds > 0)
+        {
+            o.ClassSpecificCollectionAge[typeof(StreamForge.Host.Grains.TableShardGrain).FullName!] =
+                TimeSpan.FromSeconds(shardIdleSeconds);
+        }
+    });
 });
 
 builder.Services.AddStreamForgeApi(builder.Configuration);

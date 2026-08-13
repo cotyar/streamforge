@@ -40,6 +40,7 @@ public static class OrleansFacadesExtensions
         services.AddSingleton<IPipelineReadFacade, OrleansPipelineReadFacade>();
         services.AddSingleton<ITableReadFacade, OrleansTableReadFacade>();
         services.AddSingleton<ITableHistoryFacade, OrleansTableHistoryFacade>();
+        services.AddSingleton<ITableShardFacade, OrleansTableShardFacade>();
         services.AddSingleton<IArrangementMetaFacade, OrleansArrangementMetaFacade>();
         services.AddSingleton<IConnectorStatusFacade, OrleansConnectorStatusFacade>();
         // Plan 008 W4: client-push ingress. SourceIngressRegistry is the host-process singleton buffer
@@ -95,6 +96,37 @@ internal sealed class OrleansTableHistoryFacade(IClusterClient client) : ITableH
 
     public Task<TableHistoryStats> GetStatsAsync(string tableName) =>
         client.GetGrain<ITableHistoryGrain>(tableName).GetStatsAsync();
+}
+
+/// <summary>Plan 011 D1: the shard tier's read surface. Three of its four members deliberately never
+/// touch a shard grain — <see cref="GetInfoAsync"/> and <see cref="GetKeysAsync"/> answer from the router
+/// and the directory, so the console can poll them without waking a single idle key. Only
+/// <see cref="GetShardAsync"/> (one named key, the point of the tier) and <see cref="ScanAsync"/> (the
+/// explicit full scan, kept separate precisely so nothing reaches it by accident) activate shards.</summary>
+internal sealed class OrleansTableShardFacade(IClusterClient client) : ITableShardFacade
+{
+    public Task<TableShardView> GetShardAsync(string tableName, string shardKey, int historyLimitPerKey) =>
+        client.GetGrain<ITableShardGrain>(TableShardKeys.GrainKey(tableName, shardKey)).GetViewAsync(historyLimitPerKey);
+
+    public Task<TableShardingInfo> GetInfoAsync(string tableName) =>
+        client.GetGrain<ITableShardRouterGrain>(tableName).GetInfoAsync();
+
+    public Task<List<string>> GetKeysAsync(string tableName, int limit, int offset) =>
+        client.GetGrain<ITableShardDirectoryGrain>(tableName).GetKeysAsync(limit, offset);
+
+    public async Task<List<TableShardStats>> ScanAsync(string tableName, int limit, int offset)
+    {
+        var keys = await client.GetGrain<ITableShardDirectoryGrain>(tableName).GetKeysAsync(limit, offset);
+        var stats = new List<TableShardStats>(keys.Count);
+        // Chunked rather than one WhenAll over the whole page: a scan is the one call that deliberately
+        // activates shards, and activating a few hundred at once is a load spike worth not creating.
+        foreach (var chunk in keys.Chunk(32))
+        {
+            stats.AddRange(await Task.WhenAll(chunk.Select(k =>
+                client.GetGrain<ITableShardGrain>(TableShardKeys.GrainKey(tableName, k)).GetStatsAsync())));
+        }
+        return stats;
+    }
 }
 
 /// <summary>Plan 006, D-C: connector runtime status. Generator-kind sources (Kind unset/"generator"),

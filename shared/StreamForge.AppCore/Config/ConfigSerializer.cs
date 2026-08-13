@@ -104,6 +104,7 @@ public static class ConfigSerializer
         HistoryWindowMs = t.HistoryWindowMs,
         RetentionMaxRows = t.RetentionMaxRows,
         RetentionTtlMs = t.RetentionTtlMs,
+        ShardBy = [.. t.ShardBy],
         Parallelism = t.Parallelism,
         Sinks = includeSecrets ? [.. t.Sinks] : SecretsMasker.MaskSinks(t.Sinks),
     };

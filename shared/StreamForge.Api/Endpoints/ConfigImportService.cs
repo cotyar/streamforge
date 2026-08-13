@@ -436,6 +436,7 @@ public static class ConfigImportService
                     HistoryWindowMs = docTable.HistoryWindowMs,
                     RetentionMaxRows = docTable.RetentionMaxRows,
                     RetentionTtlMs = docTable.RetentionTtlMs,
+                    ShardBy = [.. docTable.ShardBy],
                     Tags = [.. docTable.Tags],
                     Metadata = new Dictionary<string, string>(docTable.Metadata),
                     Parallelism = docTable.Parallelism,
@@ -459,6 +460,7 @@ public static class ConfigImportService
                 existing.HistoryWindowMs = docTable.HistoryWindowMs;
                 existing.RetentionMaxRows = docTable.RetentionMaxRows;
                 existing.RetentionTtlMs = docTable.RetentionTtlMs;
+                existing.ShardBy = [.. docTable.ShardBy];
                 existing.Tags = [.. docTable.Tags];
                 existing.Metadata = new Dictionary<string, string>(docTable.Metadata);
                 existing.Parallelism = docTable.Parallelism;

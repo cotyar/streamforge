@@ -325,7 +325,14 @@ public static class RowKeyCodec
         JsonValueKind.String => je.GetString(),
         JsonValueKind.True => true,
         JsonValueKind.False => false,
-        JsonValueKind.Number => je.TryGetInt64(out var l) ? l : je.GetDouble(),
+        // Plan 011 D1 BUGFIX (found by ShardKeyCodecTests' live-vs-REST agreement test): the cast to
+        // (object) is load-bearing. Without it C#'s conditional-expression typing unifies `long` and
+        // `double` to DOUBLE, so EVERY whole JSON number came back boxed as a double and encoded as
+        // "D:2" while the live delta path — which holds a real long — encoded "L:2". The two keys never
+        // matched, so a POSTed lookup against a table whose identity/shard column is a LONG always
+        // answered keyFound=false. It went unnoticed because the demo tables all key on strings, which
+        // this method has always handled correctly.
+        JsonValueKind.Number => je.TryGetInt64(out var l) ? (object)l : je.GetDouble(),
         JsonValueKind.Object => je.EnumerateObject().ToDictionary(p => p.Name, p => FromJsonElement(p.Value)),
         JsonValueKind.Array => je.EnumerateArray().Select(FromJsonElement).ToList(),
         _ => je.ToString(),

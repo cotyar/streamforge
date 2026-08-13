@@ -24,7 +24,23 @@
 #
 # Usage: tools/soak/run-soak.sh --label before [--minutes 8] [--interval-s 5] [--eps 200]
 #                               [--http-port 7511] [--grpc-port 7512] [--persistence Batched]
-#                               [--retention-max-rows 0]
+#                               [--retention-max-rows 0] [--shard-by orderId] [--shard-idle-s 90]
+#                               [--shard-quantum-s 0]
+#
+# --shard-by (plan 011 wave D1) turns the soak table into a SHARDED table keyed by the named column(s),
+# and adds two sampled series that only mean anything for one: shard_count (distinct keys the directory
+# knows) and resident_shards (shards ACTIVATED right now). The claim under test is not "RSS is flat" —
+# a sharded table's row set still grows, and its shard files still accumulate on disk, which is the
+# design ("keep everything, just not resident"). The claim is that RESIDENT memory tracks the ACTIVE key
+# set rather than the total, and the direct evidence is resident_shards sitting far below shard_count
+# while shard_activations climbs past both. If resident_shards tracks shard_count instead, nothing is
+# being swapped out and the slope is not worth reading.
+#
+# --shard-idle-s (default 90) is passed to the host as --Shards:IdleSeconds. Orleans' stock collection
+# age is 15 MINUTES, so without lowering it a soak of any reasonable length would observe exactly zero
+# deactivations and prove nothing. The silo-wide collection QUANTUM (how often the collector scans, 60s
+# by default) must be strictly smaller than any collection age — hence the 90s floor unless the quantum
+# is lowered too, which --shard-quantum-s does.
 #
 # --retention-max-rows (plan 011 wave C2) sets the soak table's opt-in ROW RETENTION bound. 0 (the default)
 # reproduces the C1 runs exactly — an unbounded table — so the recorded before/after numbers stay
@@ -58,6 +74,9 @@ GRPC_PORT="7512"
 WARMUP_S="20"
 PERSISTENCE="Batched"
 RETENTION_MAX_ROWS="0"
+SHARD_BY=""
+SHARD_IDLE_S="90"
+SHARD_QUANTUM_S="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -70,6 +89,9 @@ while [[ $# -gt 0 ]]; do
     --warmup-s) WARMUP_S="$2"; shift 2 ;;
     --persistence) PERSISTENCE="$2"; shift 2 ;;
     --retention-max-rows) RETENTION_MAX_ROWS="$2"; shift 2 ;;
+    --shard-by) SHARD_BY="$2"; shift 2 ;;
+    --shard-idle-s) SHARD_IDLE_S="$2"; shift 2 ;;
+    --shard-quantum-s) SHARD_QUANTUM_S="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -117,13 +139,20 @@ TSV="$RESULTS_DIR/$LABEL-$TS.tsv"
 JSON="$RESULTS_DIR/$LABEL-$TS.json"
 HOSTLOG="$RESULTS_DIR/$LABEL-$TS.host.log"
 
-log "=== soak '$LABEL': ${MINUTES}m @ ${INTERVAL_S}s samples, ${EPS} eps, $PERSISTENCE, retentionMaxRows=$RETENTION_MAX_ROWS, :$HTTP_PORT/:$GRPC_PORT ==="
+log "=== soak '$LABEL': ${MINUTES}m @ ${INTERVAL_S}s samples, ${EPS} eps, $PERSISTENCE, retentionMaxRows=$RETENTION_MAX_ROWS, shardBy='${SHARD_BY:-none}', :$HTTP_PORT/:$GRPC_PORT ==="
 log "DataDir: $DATADIR"
 log "Host log: $HOSTLOG"
 
+HOST_ARGS=(--Http:Port "$HTTP_PORT" --Grpc:Port "$GRPC_PORT" --DataDir "$DATADIR")
+if [[ -n "$SHARD_BY" ]]; then
+  # Only lowered for a sharded run: the shard grain class's collection age (and, when asked, the
+  # silo-wide scan quantum) is what decides whether an idle shard is ever actually reclaimed.
+  HOST_ARGS+=(--Shards:IdleSeconds "$SHARD_IDLE_S")
+  [[ "$SHARD_QUANTUM_S" != "0" ]] && HOST_ARGS+=(--Shards:QuantumSeconds "$SHARD_QUANTUM_S")
+fi
+
 (
-  cd "$REPO_ROOT" && exec "$DOTNET_BIN" run --project orleans/src/StreamForge.Host -- \
-    --Http:Port "$HTTP_PORT" --Grpc:Port "$GRPC_PORT" --DataDir "$DATADIR"
+  cd "$REPO_ROOT" && exec "$DOTNET_BIN" run --project orleans/src/StreamForge.Host -- "${HOST_ARGS[@]}"
 ) > "$HOSTLOG" 2>&1 &
 RUNNER_PID=$!
 
@@ -163,6 +192,14 @@ AUTH=(-H "Authorization: Bearer $TOKEN")
 # the same effectively-unbounded key space the seeded order_events/order_states pair has) plus one
 # table with the seeded order_states shape (LATEST BY that key, history LastN(8)).
 # ---------------------------------------------------------------------------
+# The table payload's shardBy is a JSON array: [] for an unsharded run (byte-identical to the C1/C2
+# runs, so those recorded numbers stay comparable), ["col", ...] for a sharded one.
+if [[ -n "$SHARD_BY" ]]; then
+  SHARD_BY_JSON="[$(echo "$SHARD_BY" | awk -F, '{for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}}')]"
+else
+  SHARD_BY_JSON="[]"
+fi
+
 log "Creating soak source (eps=$EPS) and table..."
 curl -s -o /dev/null -X POST "$BASE/api/sources" "${AUTH[@]}" -H 'Content-Type: application/json' -d '{
   "name": "soak_orders",
@@ -187,7 +224,8 @@ TABLE_JSON=$(curl -s -X POST "$BASE/api/tables" "${AUTH[@]}" -H 'Content-Type: a
   "historyMode": "LastN",
   "historyLimit": 8,
   "persistence": "'"$PERSISTENCE"'",
-  "retentionMaxRows": '"$RETENTION_MAX_ROWS"'
+  "retentionMaxRows": '"$RETENTION_MAX_ROWS"',
+  "shardBy": '"$SHARD_BY_JSON"'
 }')
 TABLE_ID=$(echo "$TABLE_JSON" | "$BUN_BIN" -e 'const d=await Bun.stdin.text(); try{console.log(JSON.parse(d).id)}catch{console.log("")}')
 if [[ -z "$TABLE_ID" ]]; then
@@ -210,7 +248,7 @@ if [[ -z "$APP_PID" ]]; then
 fi
 log "Sampling PID $APP_PID for ${MINUTES}m..."
 
-printf 'elapsed_s\trss_mb\tstate_kb\tstate_files\trows\tdeltas_in\n' > "$TSV"
+printf 'elapsed_s\trss_mb\tstate_kb\tstate_files\trows\tdeltas_in\tshard_count\tresident_shards\tshard_activations\n' > "$TSV"
 
 START=$(date +%s)
 END=$(( START + MINUTES * 60 ))
@@ -232,7 +270,20 @@ while [[ $(date +%s) -lt $END ]]; do
     try { const m = JSON.parse(d); console.log(`${m.rowCount ?? -1} ${m.deltasIn ?? -1}`); }
     catch { console.log("-1 -1"); }
   ' 2>/dev/null || echo "-1 -1")"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$ELAPSED" "$RSS_MB" "$STATE_KB" "$STATE_FILES" "$ROWS" "$DELTAS" >> "$TSV"
+  # The shard sample uses GET /shards, which is answered by the router and the directory and touches NO
+  # shard — sampling it must not be what keeps shards resident, or the measurement destroys what it
+  # measures. (limit=0 also skips serialising the key list, which is O(keys).)
+  SHARDS_JSON="{}"
+  if [[ -n "$SHARD_BY" ]]; then
+    SHARDS_JSON="$(curl -s --max-time 10 "${AUTH[@]}" "$BASE/api/tables/$TABLE_ID/shards?limit=0" 2>/dev/null || true)"
+  fi
+  [[ -z "$SHARDS_JSON" ]] && SHARDS_JSON="{}"
+  read -r SHARD_COUNT RESIDENT ACTIVATIONS <<<"$(echo "$SHARDS_JSON" | "$BUN_BIN" -e '
+    const d = await Bun.stdin.text();
+    try { const s = JSON.parse(d); console.log(`${s.shardCount ?? -1} ${s.residentShardCount ?? -1} ${s.activations ?? -1}`); }
+    catch { console.log("-1 -1 -1"); }
+  ' 2>/dev/null || echo "-1 -1 -1")"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ELAPSED" "$RSS_MB" "$STATE_KB" "$STATE_FILES" "$ROWS" "$DELTAS" "$SHARD_COUNT" "$RESIDENT" "$ACTIVATIONS" >> "$TSV"
   sleep "$INTERVAL_S"
 done
 
@@ -264,16 +315,22 @@ const stats = (name, i) => {
   };
 };
 const rss = stats('rss_mb', 1), state = stats('state_kb', 2), rowsS = stats('rows', 4), deltas = stats('deltas_in', 5);
+const shardCount = stats('shard_count', 6), resident = stats('resident_shards', 7), activations = stats('shard_activations', 8);
 const rowsGrown = Math.max(1, rowsS.last - rowsS.first);
 const out = {
   label: '$LABEL',
   generatedAtIso: new Date().toISOString(),
   window: { minutes: Number('$MINUTES'), intervalSeconds: Number('$INTERVAL_S'), warmupSeconds: Number('$WARMUP_S'), samples: rows.length },
-  load: { eventsPerSecond: Number('$EPS'), persistence: '$PERSISTENCE', retentionMaxRows: Number('$RETENTION_MAX_ROWS'), table: 'soak_states', shape: 'LATEST BY (orderId), history LastN(8) — the seeded order_states configuration' },
-  series: { rss, state, rows: rowsS, deltas },
+  load: { eventsPerSecond: Number('$EPS'), persistence: '$PERSISTENCE', retentionMaxRows: Number('$RETENTION_MAX_ROWS'), shardBy: '$SHARD_BY', shardIdleSeconds: Number('$SHARD_IDLE_S'), table: 'soak_states', shape: 'LATEST BY (orderId), history LastN(8) — the seeded order_states configuration' },
+  series: { rss, state, rows: rowsS, deltas, shardCount, resident, activations },
   derived: {
     rssKbPerRowAdded: Number(((rss.last - rss.first) * 1024 / rowsGrown).toFixed(2)),
     stateKbPerRowAdded: Number(((state.last - state.first) / rowsGrown).toFixed(3)),
+    // Sharded runs only. residentFractionAtEnd near 1 means NOTHING is being swapped out and the RSS
+    // slope below is not evidence of anything; well under 1, with activations above shardCount (keys
+    // being reloaded), is the shape the wave claims.
+    residentFractionAtEnd: shardCount.last > 0 ? Number((resident.last / shardCount.last).toFixed(4)) : null,
+    residentPeak: resident.max > 0 ? resident.max : null,
   },
   tsv: '$TSV',
 };

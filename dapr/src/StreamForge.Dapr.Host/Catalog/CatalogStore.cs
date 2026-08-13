@@ -493,6 +493,25 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         }
     }
 
+    /// <summary>Plan 011 D1 — WHERE KEY SHARDING IS REFUSED ON THIS FLAVOR, and why it is not here.
+    ///
+    /// <see cref="TableDefinition.ShardBy"/> is Orleans-only for the same reason Parallelism is: the shard
+    /// tier is three Orleans grain kinds whose entire value comes from Orleans' activation collector
+    /// reclaiming an idle shard, and this flavor has no actor equivalent to point at. Parallelism is
+    /// refused in TWO places — here at upsert, and defensively in <c>TableActor.StartAsync</c>. ShardBy is
+    /// refused in the second of those only.
+    ///
+    /// That asymmetry is deliberate and is a real constraint, not a shortcut. This flavor's catalog has a
+    /// standing contract, asserted by CatalogUpdateRoundTripTests, that EVERY client-owned field on
+    /// <see cref="TableDefinition"/> survives an update unchanged — the test sets every writable property
+    /// by reflection precisely so a field added tomorrow is guarded automatically. An upsert-time refusal
+    /// would make ShardBy the one field that cannot round-trip, i.e. it would break the general contract
+    /// to enforce a per-field one. Refusing at START instead keeps both: the field is stored (so a catalog
+    /// exported from Orleans imports here intact and can be promoted back without loss), and a sharded
+    /// table on this flavor can never RUN — <c>TableActor.StartAsync</c> returns a Failure whose message
+    /// says exactly why, which surfaces as Status=Failed + Error on the table, the same visible outcome a
+    /// 409 would have produced. What is explicitly NOT allowed is the silent middle: a table that looks
+    /// sharded and answers every per-key lookup empty.</summary>
     /// <summary>Plan 005 D-F: partitioned execution (Parallelism 2-16) is Orleans-only — the Dapr
     /// registry rejects anything other than 1, not just values outside Orleans' 1..16 range.</summary>
     private static void ValidateParallelism(int parallelism)

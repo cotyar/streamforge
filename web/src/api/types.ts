@@ -442,6 +442,19 @@ export interface TableDefinition {
    * timestamp the table has seen — not wall clock, so replay is deterministic and a stalled input ages
    * nothing out. 0 or absent = unbounded. Composes with retentionMaxRows (age first, then count). */
   retentionTtlMs?: number
+  /** Plan 011 D1: opt-in KEY SHARDING — the output columns this table's rows are sharded by. Absent or
+   * empty (the default) = not sharded, i.e. exactly today's behavior. When set, every delta the table
+   * emits is routed to a per-key shard grain holding just that key's rows and version history, and an
+   * idle key's shard deactivates so its state lives on disk until the next lookup — which is the point.
+   *
+   * NOT the same knob as retentionMaxRows/retentionTtlMs, and worth not confusing: retention DELETES
+   * rows to bound a table; sharding KEEPS everything and bounds what stays RESIDENT. They compose (a
+   * retention eviction reclaims that row's shard history too, since history follows the table).
+   *
+   * Orleans-only. On the Dapr flavor the field is stored but such a table cannot be started (the error
+   * says so). Rejected (409) together with searchEnabled: a table-wide reverse index would keep every
+   * row resident and defeat sharding, so the combination is refused rather than half-served. */
+  shardBy?: string[]
 }
 
 /** Plan 008: how a table's snapshot reaches storage (wire values are PascalCase — confirmed against
@@ -466,6 +479,87 @@ export interface TableRowsResponse {
    * round (see TableMetrics.snapshotFrontierEpoch — same value). When present, `rows` reflects ALL deltas
    * whose epoch is <= frontierEpoch and NONE beyond it. */
   frontierEpoch?: number | null
+  /** Plan 011 D1: present only for a SHARDED table, and only to say where these rows came from. A
+   * keyless listing is served from the table's consolidated snapshot and consults NO shard
+   * (`shardsConsulted: false`) — deliberately, because this endpoint is polled every 2s and a fan-out
+   * across the shard directory would wake every idle key on every poll and undo the whole feature.
+   * For one key use POST /api/tables/{id}/shard/lookup; for all of them, GET .../shards/scan. */
+  shards?: TableRowsShardNote | null
+}
+
+/** Plan 011 D1 — see TableRowsResponse.shards. */
+export interface TableRowsShardNote {
+  shardBy: string[]
+  shardsConsulted: boolean
+  note: string
+}
+
+/** Plan 011 D1: POST /api/tables/{id}/shard/lookup?historyLimit= — "give me everything for this key".
+ * Body is `{ row }` carrying at least the table's shardBy columns (the whole row is fine); the server
+ * derives the shard key with the same codec the router uses on live deltas. One grain, strictly
+ * consistent by construction. Activates that one shard — which is the intended cost of asking. */
+export interface ShardLookupRequest {
+  row: Record<string, unknown>
+}
+
+export interface TableShardHistoryEntry {
+  rowKey: string
+  /** Newest-first, capped by the request's historyLimit (0/absent = all retained). */
+  versions: HistoryVersion[]
+  retractionCount: number
+  /** Retained version count before the limit was applied. */
+  totalVersions: number
+}
+
+export interface TableShardView {
+  /** false = nothing was ever routed to this key (as opposed to a key whose rows were all retracted,
+   * which is found with an empty `rows`). */
+  found: boolean
+  shardKey: string
+  rows: TableRowDto[]
+  history: TableShardHistoryEntry[]
+  /** Highest router sequence this shard has applied; -1 = nothing applied yet. */
+  appliedSeq: number
+  deltasApplied: number
+  historyEnabled: boolean
+}
+
+/** Plan 011 D1: GET /api/tables/{id}/shards?limit=&offset= — metrics + the live key set. Wakes NO
+ * shard, so it is safe to poll. `residentShardCount` far below `shardCount`, with `activations` far
+ * above `residentShardCount`, is the evidence that shards are genuinely being swapped out and
+ * reloaded. Both are per-process (single-silo) figures. */
+export interface TableShardsResponse {
+  enabled: boolean
+  shardBy: string[]
+  /** Distinct live shard keys, from the shard directory — which is itself resident and O(keys). */
+  shardCount: number
+  residentShardCount: number
+  activations: number
+  deactivations: number
+  routerSeq: number
+  routedBatches: number
+  routedDeltas: number
+  routerActive: boolean
+  keys: string[]
+}
+
+export interface TableShardStats {
+  shardKey: string
+  rowCount: number
+  historyKeyCount: number
+  totalVersions: number
+  appliedSeq: number
+}
+
+/** Plan 011 D1: GET /api/tables/{id}/shards/scan?limit=&offset= — the EXPLICIT full scan. This one DOES
+ * activate every shard in its page (`woke` says how many); it is a separate endpoint precisely so that
+ * no routine poll can reach it. Not a consistent cut: shards are read one after another while ingest
+ * continues, and each shard's own appliedSeq says where it was. */
+export interface TableShardScanResponse {
+  shards: TableShardStats[]
+  woke: number
+  offset: number
+  limit: number
 }
 
 // GET /api/tables/{id}/search?q=&limit= — empty q returns rows: []. A 400 means the table's

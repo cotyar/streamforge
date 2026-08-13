@@ -56,6 +56,8 @@ public static class TablesEndpoints
                     JournalMaxEntries = req.JournalMaxEntries,
                     RetentionMaxRows = req.RetentionMaxRows,
                     RetentionTtlMs = req.RetentionTtlMs,
+                    // Plan 011 D1: null = not sharded, the default.
+                    ShardBy = req.ShardBy ?? [],
                     // Plan 009 B2: see the identical note in PipelinesEndpoints' create handler — a
                     // freshly-created table has no stored secrets to merge against.
                     Sinks = req.Sinks ?? [],
@@ -95,6 +97,9 @@ public static class TablesEndpoints
             existing.JournalMaxEntries = req.JournalMaxEntries;
             existing.RetentionMaxRows = req.RetentionMaxRows;
             existing.RetentionTtlMs = req.RetentionTtlMs;
+            // Plan 011 D1: null means "leave as-is" (matching Tags/Metadata/Sinks' convention here), so a
+            // client that predates the field cannot silently un-shard a table by omitting it.
+            existing.ShardBy = req.ShardBy ?? existing.ShardBy;
             // Plan 009 B2: null Sinks = unchanged; a non-null Sinks carrying "***" is restored from the
             // stored value first (SecretsMasker.MergeSinkSecrets — see the identical, more detailed note
             // in PipelinesEndpoints' PUT handler, including the Orleans-flavor RegistryGrain gap that
@@ -196,7 +201,15 @@ public static class TablesEndpoints
             var total = await tables.GetRowCountAsync(def.Name);
             var seq = await tables.GetSeqAsync(def.Name);
             var frontierEpoch = await tables.GetSnapshotFrontierEpochAsync(def.Name);
-            return Results.Ok(new TableRowsResponse(rows, total, seq, frontierEpoch));
+            // Plan 011 D1: on a sharded table, say where these rows came from — and do NOT go and get
+            // them from the shards. See TableRowsShardNote's own doc for the trap this closes; the short
+            // version is that this endpoint is polled every two seconds by the console, and a keyless
+            // listing that fanned out across the directory would wake every shard on every poll.
+            var shardNote = def.ShardBy.Count == 0 ? null : new TableRowsShardNote(
+                def.ShardBy,
+                ShardsConsulted: false,
+                "Served from the table's consolidated snapshot; no shard was activated. Use POST /shard/lookup for one key, or GET /shards/scan for an explicit full scan.");
+            return Results.Ok(new TableRowsResponse(rows, total, seq, frontierEpoch, shardNote));
         }).RequireAuthorization("Viewer");
 
         group.MapGet("/{id}/metrics", async (string id, ICatalogFacade registry, ITableReadFacade tables) =>
@@ -271,6 +284,16 @@ public static class TablesEndpoints
                 return Results.NotFound();
             }
 
+            // Plan 011 D1: on a SHARDED table the per-key shards hold the version trails and the
+            // table-wide history grain is deliberately disabled, so this endpoint would answer 200 with a
+            // convincingly empty result — the worst possible reply, because it looks like "this key has no
+            // history" rather than "you are asking the wrong tier". Point the caller at the right one.
+            if (def.ShardBy.Count > 0)
+            {
+                return Results.BadRequest(new ErrorResponse(
+                    $"This table is sharded by {string.Join(", ", def.ShardBy)}; its row history lives per shard key. Use POST /api/tables/{id}/shard/lookup instead."));
+            }
+
             if (!def.HistoryEnabled)
             {
                 return Results.BadRequest(new ErrorResponse("Row history is not enabled for this table."));
@@ -290,12 +313,112 @@ public static class TablesEndpoints
                 return Results.NotFound();
             }
 
+            // Plan 011 D1: on a SHARDED table the per-key shards hold the version trails and the
+            // table-wide history grain is deliberately disabled, so this endpoint would answer 200 with a
+            // convincingly empty result — the worst possible reply, because it looks like "this key has no
+            // history" rather than "you are asking the wrong tier". Point the caller at the right one.
+            if (def.ShardBy.Count > 0)
+            {
+                return Results.BadRequest(new ErrorResponse(
+                    $"This table is sharded by {string.Join(", ", def.ShardBy)}; its row history lives per shard key. Use POST /api/tables/{id}/shard/lookup instead."));
+            }
+
             if (!def.HistoryEnabled)
             {
                 return Results.BadRequest(new ErrorResponse("Row history is not enabled for this table."));
             }
 
             return Results.Ok(await history.GetStatsAsync(def.Name));
+        }).RequireAuthorization("Viewer");
+
+        // ------------------------------------------------------------------
+        // Plan 011 wave D1 — SHARDED TABLES.
+        //
+        // Three endpoints, and the split between them IS the design. A per-key lookup activates exactly
+        // one shard, which is the point. The listing endpoint activates none, which is what makes it
+        // pollable. A full scan activates every shard in its page, which is why it is a separate URL that
+        // nothing reaches by accident — not a query parameter on one of the other two.
+        // ------------------------------------------------------------------
+
+        // "Give me everything for this key" — the query the whole tier exists for. One grain, one ordered
+        // delta stream, Orleans serializing its turns: strictly consistent by construction, no fence.
+        group.MapPost("/{id}/shard/lookup", async (string id, ShardLookupRequest req, int? historyLimit, ICatalogFacade registry, ITableShardFacade shards) =>
+        {
+            var def = await registry.GetTableAsync(id);
+            if (def is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (def.ShardBy.Count == 0)
+            {
+                return Results.BadRequest(new ErrorResponse("This table is not sharded (shardBy is empty)."));
+            }
+
+            var missing = def.ShardBy.Where(c => !req.Row.ContainsKey(c)).ToList();
+            if (missing.Count > 0)
+            {
+                // Refused rather than defaulted to null: a missing shard column would silently address the
+                // "all nulls" shard, which exists and would answer, so the caller would get a confident
+                // empty result for a typo.
+                return Results.BadRequest(new ErrorResponse(
+                    $"row is missing shardBy column(s): {string.Join(", ", missing)}. This table shards by {string.Join(", ", def.ShardBy)}."));
+            }
+
+            var shardKey = TableShardKeys.EncodeShardKey(req.Row, def.ShardBy);
+            return Results.Ok(await shards.GetShardAsync(def.Name, shardKey, historyLimit ?? 0));
+        }).RequireAuthorization("Viewer");
+
+        // Shard metrics + the live key set. Wakes NOTHING — router and directory only.
+        group.MapGet("/{id}/shards", async (string id, int? limit, int? offset, ICatalogFacade registry, ITableShardFacade shards) =>
+        {
+            var def = await registry.GetTableAsync(id);
+            if (def is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (def.ShardBy.Count == 0)
+            {
+                return Results.Ok(new TableShardsResponse(false, [], 0, 0, 0, 0, -1, 0, 0, false, []));
+            }
+
+            var info = await shards.GetInfoAsync(def.Name);
+            // limit=0 means "metrics only, list no keys" — the shape a 2s console poll should use, since
+            // the key list is O(distinct keys) to serialize and none of the numbers need it. (Note the
+            // directory grain's own GetKeysAsync reads limit<=0 as "all", which is right for the delete
+            // path and wrong here; the endpoint is where the caller-facing meaning is fixed.)
+            var take = Math.Max(0, limit ?? 100);
+            var keys = take == 0 ? [] : await shards.GetKeysAsync(def.Name, take, offset ?? 0);
+            return Results.Ok(new TableShardsResponse(
+                info.Enabled, info.ShardBy, info.ShardCount, info.ResidentShardCount,
+                info.Activations, info.Deactivations, info.RouterSeq, info.RoutedBatches, info.RoutedDeltas,
+                info.RouterActive, keys));
+        }).RequireAuthorization("Viewer");
+
+        // THE EXPLICIT FULL SCAN. This one does activate every shard in its page — that is the whole
+        // reason it is its own endpoint rather than a flag, so that no routine poll can reach it. Note
+        // what it is NOT: a consistent cut. Shards are read one after another while ingest continues, so
+        // this is a set of per-shard observations at different sequence numbers, and each shard's own
+        // AppliedSeq says which. A genuinely fenced whole-table scan is wave D2's job; the router's
+        // sequence stamp is the mechanism it will use.
+        group.MapGet("/{id}/shards/scan", async (string id, int? limit, int? offset, ICatalogFacade registry, ITableShardFacade shards) =>
+        {
+            var def = await registry.GetTableAsync(id);
+            if (def is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (def.ShardBy.Count == 0)
+            {
+                return Results.BadRequest(new ErrorResponse("This table is not sharded (shardBy is empty)."));
+            }
+
+            var take = limit ?? 100;
+            var skip = offset ?? 0;
+            var stats = await shards.ScanAsync(def.Name, take, skip);
+            return Results.Ok(new TableShardScanResponse(stats, stats.Count, skip, take));
         }).RequireAuthorization("Viewer");
     }
 

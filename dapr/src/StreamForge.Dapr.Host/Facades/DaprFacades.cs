@@ -37,6 +37,9 @@ public static class DaprFacadesExtensions
         services.AddSingleton<ITableReadFacade, StubTableReadFacade>();
         services.AddSingleton<ITableHistoryFacade, StubTableHistoryFacade>();
         services.AddSingleton<IArrangementMetaFacade, EmptyArrangementMetaFacade>();
+        // Plan 011 D1: key sharding is Orleans-only and refused at upsert here — see
+        // DisabledTableShardFacade and CatalogStore.ValidateShardBy.
+        services.AddSingleton<ITableShardFacade, DisabledTableShardFacade>();
         return services;
     }
 }

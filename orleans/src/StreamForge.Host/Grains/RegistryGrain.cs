@@ -173,7 +173,7 @@ public sealed class RegistryGrain(
         // Running status (history just won't see new deltas until/unless the table is running). Unlike the
         // table-resume loop above, this uses ResumeAsync (not ResetAsync) so previously accumulated history
         // survives a silo restart.
-        foreach (var table in state.State.Tables.Where(t => t.HistoryEnabled))
+        foreach (var table in state.State.Tables.Where(t => t.HistoryEnabled && t.ShardBy.Count == 0))
         {
             try
             {
@@ -182,6 +182,23 @@ public sealed class RegistryGrain(
             catch
             {
                 // best-effort — a stale/misconfigured history grain shouldn't block boot.
+            }
+        }
+
+        // Plan 011 D1: the same treatment for every SHARDED table's router — ResumeAsync (not ResetAsync)
+        // so the per-key shards persisted on disk survive a silo restart exactly like the history grain's
+        // entries do. Note the loop above now skips sharded tables: on a sharded table the per-key history
+        // REPLACES the table-wide one, and resuming both would hold the same version trails twice, which
+        // is precisely the memory this wave exists to stop holding.
+        foreach (var table in state.State.Tables.Where(t => t.ShardBy.Count > 0))
+        {
+            try
+            {
+                await GrainFactory.GetGrain<ITableShardRouterGrain>(table.Name).ResumeAsync(table);
+            }
+            catch
+            {
+                // best-effort — a stale/misconfigured shard router shouldn't block boot.
             }
         }
     }
@@ -418,6 +435,7 @@ public sealed class RegistryGrain(
         var compileResult = CompileTableSql(def.Sql, excludeTableId: def.Id);
         ValidateHistoryConfig(def, compileResult);
         ValidateRetention(def, compileResult);
+        ValidateShardBy(def, compileResult);
         ApplyCompileResult(def, compileResult);
 
         state.State.Tables.Add(def);
@@ -427,8 +445,26 @@ public sealed class RegistryGrain(
         // Configures (and, if HistoryEnabled, subscribes) the history grain up front — independent of
         // whether the table itself is Running, exactly like SearchEnabled's index is built incrementally
         // once the table starts producing deltas.
-        await GrainFactory.GetGrain<ITableHistoryGrain>(def.Name).ResetAsync(def);
+        await ResetHistoryTiersAsync(def);
         return def;
+    }
+
+    /// <summary>Plan 011 D1: (re)configures BOTH per-row-history tiers from one place, because on any one
+    /// table exactly one of them may run. A sharded table's per-key shards hold the version trails, so the
+    /// table-wide <see cref="ITableHistoryGrain"/> is disabled rather than left subscribed — running both
+    /// over the same delta stream would hold every version twice and hold the sharded copy's worth of it
+    /// resident, which is exactly the memory the shard tier exists to stop holding.</summary>
+    private async Task ResetHistoryTiersAsync(TableDefinition def)
+    {
+        if (def.ShardBy.Count > 0)
+        {
+            await GrainFactory.GetGrain<ITableHistoryGrain>(def.Name).DisableAsync();
+        }
+        else
+        {
+            await GrainFactory.GetGrain<ITableHistoryGrain>(def.Name).ResetAsync(def);
+        }
+        await GrainFactory.GetGrain<ITableShardRouterGrain>(def.Name).ResetAsync(def);
     }
 
     public async Task<TableDefinition?> UpdateTableAsync(TableDefinition def)
@@ -453,6 +489,7 @@ public sealed class RegistryGrain(
         var compileResult = CompileTableSql(def.Sql, excludeTableId: existing.Id);
         ValidateHistoryConfig(def, compileResult);
         ValidateRetention(def, compileResult);
+        ValidateShardBy(def, compileResult);
 
         var sqlChanged = existing.Sql != def.Sql;
         var searchChanged = existing.SearchEnabled != def.SearchEnabled || existing.SearchMode != def.SearchMode;
@@ -475,6 +512,10 @@ public sealed class RegistryGrain(
         // next manual stop/start.
         var retentionChanged = existing.RetentionMaxRows != def.RetentionMaxRows
             || existing.RetentionTtlMs != def.RetentionTtlMs;
+        // Plan 011 D1: a ShardBy change re-keys the entire shard tier (or turns it on/off), so it resets
+        // the tier below. It does NOT restart the table itself — the shard tier is a delta-stream consumer,
+        // not part of execution, so the running table's own grain topology is unaffected by construction.
+        var shardByChanged = !existing.ShardBy.SequenceEqual(def.ShardBy, StringComparer.Ordinal);
         var historyConfigChanged =
             existing.HistoryEnabled != def.HistoryEnabled ||
             existing.HistoryMode != def.HistoryMode ||
@@ -514,9 +555,17 @@ public sealed class RegistryGrain(
         // History config or the SQL it was derived from changed — the row-identity mapping and/or
         // retention policy is now stale, so reset (not resume) the history grain, exactly like a
         // SQL/search-config change restarts the table's own grain above.
-        if (sqlChanged || historyConfigChanged)
+        if (sqlChanged || historyConfigChanged || shardByChanged)
         {
-            await GrainFactory.GetGrain<ITableHistoryGrain>(def.Name).ResetAsync(def);
+            await ResetHistoryTiersAsync(def);
+        }
+        else if (persistenceChanged && def.ShardBy.Count > 0)
+        {
+            // Plan 011 D1: same "re-read the write-behind policy without discarding what was accumulated"
+            // distinction the history grain draws below — ResumeAsync re-derives the TableShardConfig
+            // (which carries Persistence/FlushMs down to every shard on the next routed batch) and leaves
+            // the existing shards on disk untouched.
+            await GrainFactory.GetGrain<ITableShardRouterGrain>(def.Name).ResumeAsync(def);
         }
         else if (persistenceChanged && def.HistoryEnabled)
         {
@@ -558,6 +607,19 @@ public sealed class RegistryGrain(
         try
         {
             await GrainFactory.GetGrain<ITableHistoryGrain>(existing.Name).DisableAsync();
+        }
+        catch
+        {
+            // best-effort
+        }
+
+        // Plan 011 D1: unsubscribe the router AND delete every shard's persisted state. Unlike every other
+        // teardown here this one genuinely activates each shard once — clearing a grain's persisted state
+        // portably means asking the grain to do it — which is the correct trade for an explicit delete and
+        // exactly the wrong one for a read (see TableShardRouterGrain.PurgeShardsAsync).
+        try
+        {
+            await GrainFactory.GetGrain<ITableShardRouterGrain>(existing.Name).DisableAsync();
         }
         catch
         {
@@ -711,6 +773,66 @@ public sealed class RegistryGrain(
         {
             throw new InvalidOperationException(
                 "Row retention is not supported for this table's SQL: joins, set operations, derived sources and GROUP BY/aggregates are excluded, because evicting an output row would leave their per-key state (join indexes, aggregate accumulators) growing — or, for aggregates, would restart the group from zero and emit a wrong value.");
+        }
+    }
+
+    /// <summary>Plan 011 D1: 409-style guard (same shape as <see cref="ValidateParallelism"/>) for opt-in
+    /// KEY SHARDING. Empty <c>ShardBy</c> — the default — returns immediately and nothing below applies, so
+    /// an existing table is untouched by the feature's existence.
+    ///
+    ///  * Blank or duplicate column names are refused: a duplicate would silently widen the key encoding
+    ///    for no effect, and a blank one would encode a column that cannot exist.
+    ///  * <see cref="TableDefinition.SearchEnabled"/> + ShardBy is refused OUTRIGHT rather than
+    ///    half-served. The reverse index is table-wide and row-keyed (see TableSearchIndex — five maps, a
+    ///    4-5x multiplier on whatever the table holds); keeping it alongside a shard tier would keep every
+    ///    row resident and defeat the entire point, while a per-shard index would answer a table-wide
+    ///    query by waking every shard, which is worse. Refusing loudly is the honest option, matching wave
+    ///    C2's refusal of retention on plan shapes it could not honor.
+    ///  * Every ShardBy column must be one of the table's COMPILED output columns. This is the one place
+    ///    the explicit-columns rule is enforced, and it is enforced against the compiler's own output
+    ///    rather than against the SQL text: the shard key decides which grain owns a row, so a column that
+    ///    silently does not exist would put every row under the same "missing value" key. Draft-friendly
+    ///    in exactly the way <see cref="ValidateHistoryConfig"/> and <see cref="ValidateRetention"/> are —
+    ///    SQL that does not compile is saved as a draft with diagnostics, and this check re-runs on the
+    ///    next update that does compile.
+    ///
+    /// NOT restricted by Parallelism, deliberately, unlike retention: the shard tier consumes the table's
+    /// delta stream, and TableOutputGrain republishes onto that same stream for Parallelism &gt;= 2, so a
+    /// shard consumer is identical in both modes.</summary>
+    private static void ValidateShardBy(TableDefinition def, TableCompileResult compileResult)
+    {
+        if (def.ShardBy.Count == 0)
+        {
+            return; // not sharded — the default, and nothing below applies
+        }
+
+        if (def.ShardBy.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new InvalidOperationException("shardBy column names must be non-empty.");
+        }
+
+        var duplicates = def.ShardBy.GroupBy(c => c, StringComparer.Ordinal).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+        if (duplicates.Count > 0)
+        {
+            throw new InvalidOperationException($"shardBy has duplicate column(s): {string.Join(", ", duplicates)}.");
+        }
+
+        if (def.SearchEnabled)
+        {
+            throw new InvalidOperationException(
+                "searchEnabled cannot be combined with shardBy: the reverse index is table-wide and row-keyed, so it would keep every row resident and defeat the point of sharding. Turn search off, or shard off.");
+        }
+
+        if (!compileResult.Ok || compileResult.OutputSchema is null)
+        {
+            return; // draft: no compiled output columns to validate against yet
+        }
+
+        var missing = def.ShardBy.Where(c => !compileResult.OutputSchema.Fields.ContainsKey(c)).ToList();
+        if (missing.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"shardBy column(s) {string.Join(", ", missing)} are not among this table's output fields ({string.Join(", ", compileResult.OutputSchema.Fields.Keys)}).");
         }
     }
 

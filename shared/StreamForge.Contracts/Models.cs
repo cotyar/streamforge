@@ -277,6 +277,34 @@ public sealed class TableDefinition
     /// 0 (default) = unbounded. Composes with <see cref="RetentionMaxRows"/>: age is applied first, then
     /// the row-count bound.</summary>
     [Id(27)] public long RetentionTtlMs { get; set; }
+
+    // ------------------------------------------------------------------
+    // Plan 011 D1: opt-in KEY SHARDING. Empty (the default) = today's behavior, byte for byte — the same
+    // opt-in discipline Parallelism established (DESIGN.md D9). Nothing about how the table is COMPUTED
+    // changes when this is set: the shard tier is a second materialization fed by the table's own delta
+    // stream (DESIGN.md D7, "the delta stream is the event log"), exactly like the row-history tier is.
+    // The SQL path, the planner, the partitioned dataflow and every downstream table-over-table
+    // subscriber are untouched.
+    // ------------------------------------------------------------------
+
+    /// <summary>Plan 011 D1: output column names this table's rows are sharded by. Empty (default) = not
+    /// sharded. When non-empty, every delta the table emits is routed by these columns' values to a
+    /// per-key <c>TableShardGrain</c> holding just that key's rows and just that key's version history —
+    /// and, crucially, that grain does NOT pin itself alive: an idle key deactivates and its state lives
+    /// on disk until the next lookup, which is the whole point (see orleans/DESIGN.md's "Sharded tables").
+    ///
+    /// Columns are EXPLICIT and validated against <see cref="OutputFields"/> at upsert. The textual
+    /// GROUP BY / LATEST BY extraction the row-history tier falls back on
+    /// (<c>TableGroupKeyExtractor.ExtractIdentityColumns</c>) is deliberately NOT used to pick one
+    /// silently: it is best-effort matching, acceptable for "which versions belong together", not
+    /// acceptable for "which grain owns this row".
+    ///
+    /// On a sharded table the per-key history REPLACES the single table-wide history grain (running both
+    /// would double the memory this exists to save), and <see cref="SearchEnabled"/> is rejected outright
+    /// (a table-wide inverted index keeps every row resident and defeats the point). Orleans-only: the
+    /// Dapr flavor rejects a non-empty ShardBy at upsert, exactly as it already rejects
+    /// <see cref="Parallelism"/> &gt; 1.</summary>
+    [Id(28)] public List<string> ShardBy { get; set; } = [];
 }
 
 /// <summary>Plan 008: per-table durability policy. State is the materialized snapshot; the question is only

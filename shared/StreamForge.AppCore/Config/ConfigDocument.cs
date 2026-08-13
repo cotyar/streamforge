@@ -90,4 +90,11 @@ public sealed class ConfigTable
 
     /// <summary>Plan 011 C2: mirrors <see cref="TableDefinition.RetentionTtlMs"/>.</summary>
     public long RetentionTtlMs { get; set; }
+
+    /// <summary>Plan 011 D1: mirrors <see cref="TableDefinition.ShardBy"/>. Carried through export/import
+    /// for the same reason retention is: it is not an operational knob but part of what the table IS —
+    /// where its per-key state and history live, and (via the searchEnabled refusal) what else it can be
+    /// configured with. A round-trip that dropped it would promote a table whose per-key lookups silently
+    /// stopped existing. Empty = not sharded, so an older document imports unchanged.</summary>
+    public List<string> ShardBy { get; set; } = [];
 }

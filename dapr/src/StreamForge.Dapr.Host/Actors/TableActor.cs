@@ -309,6 +309,19 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
                 $"Parallelism must be 1 on the Dapr flavor (got {_def.Parallelism}) — partitioned execution is Orleans-only.");
         }
 
+        // Plan 011 D1: key sharding is Orleans-only (see Catalog.CatalogStore's ValidateParallelism doc
+        // for why this refusal lives here and not at upsert). Unlike the Parallelism check above this one
+        // is NOT merely defensive — it is the only place the flavor says no, so the message has to be the
+        // one a user reads. A sharded table stores fine here and never runs here.
+        if (_def.ShardBy.Count > 0)
+        {
+            _executor = null;
+            _running = false;
+            await SaveControlStateAsync();
+            return ActorResult<TableInputNames>.Failure(
+                $"shardBy must be empty on the Dapr flavor (got {string.Join(", ", _def.ShardBy)}) — key sharding is Orleans-only. The definition is stored as-is so it can be promoted back to an Orleans instance without loss, but it cannot run here.");
+        }
+
         ActivateExecutor();
         if (_executor is null)
         {

@@ -285,3 +285,123 @@ stopped growing (29× less write per minute). Rows/min fell from 5 204 to 3.2.
 
 Operational guidance, unchanged for a table WITHOUT a policy: keep an eye on one whose key space is
 unbounded, and measure with `tools/soak/run-soak.sh`.
+
+### Sharded tables — bounding what is RESIDENT, without deleting anything (plan 011 wave D1)
+
+`TableDefinition.ShardBy`, **empty = off by default**, and off means byte-for-byte today's behavior — the
+same opt-in discipline `Parallelism` established (D9). Orleans-only: the Dapr flavor stores the field but
+refuses to *start* a table carrying it (`TableActor.StartAsync`; see that guard and
+`CatalogStore.ValidateParallelism`'s doc for why the refusal sits at start rather than at upsert on that
+flavor).
+
+**This is not retention, and confusing the two wastes the feature.** Retention DELETES rows to bound a
+table. Sharding KEEPS everything and bounds what is *resident*. The case it was built for is a financial
+instrument modelled as a state machine with legs: the frequent query is "give me everything for this
+key", the full history must be kept, and keeping all of it resident is what costs — one instrument's
+history, even a thousand versions, is small, so a grain per instrument is cheap to save and cheap to load.
+
+**Where it sits.** The shard tier is a *consumer of the table-delta stream*, not a change to execution —
+the same hook `TableHistoryGrain` already uses, which is D7's stated principle ("the delta stream is the
+event log"). The SQL path, the planner, the partitioned dataflow and every downstream table-over-table
+subscriber are untouched, and because `TableOutputGrain` republishes onto that same stream, a shard
+consumer behaves identically at `Parallelism == 1` and `Parallelism >= 2`.
+
+| grain | key | holds | deactivates? |
+|---|---|---|---|
+| `TableShardRouterGrain` | table name | nothing per-key: a config, a sequence counter, two counters | no — `DelayDeactivation`, like every other stream consumer (a local subscription callback does not survive deactivation) |
+| `TableShardDirectoryGrain` | table name | the live shard-key set — **O(distinct keys) of strings, resident** | not pinned, but kept alive by traffic; see the ceiling below |
+| `TableShardGrain` | `{table}\|{token}` | one key's rows + that key's version trails | **YES — and it is the entire point** |
+
+**The one rule.** `TableShardGrain` never calls `DelayDeactivation`. Every other grain in the table path
+does (`TableGrain`, `TableHistoryGrain`, `TableStageGrain`, `ArrangementGrain`, `TableOutputGrain`), which
+is exactly why nothing in it has ever been swapped out — the last row of the ceilings table above. An idle
+shard being collected, with its state on disk until the next lookup, IS the memory win; a shard that
+pinned itself alive would deliver nothing while passing every functional test. How long "idle" is is
+configurable — `Shards:IdleSeconds` (default 120s) sets the grain class's collection age, and
+`Shards:QuantumSeconds` the silo-wide scan interval, which Orleans requires to be strictly smaller.
+
+**Reads, and the trap.** A per-key read (`POST /api/tables/{id}/shard/lookup`) is *strictly consistent by
+construction*: one grain, one ordered delta stream, Orleans serializing its turns — a read sees a whole
+prefix of the stream, never a half-applied batch, with no fence and nothing to configure. A **keyless
+`/rows` listing on a sharded table consults no shard at all**: it is served from the table's own
+consolidated snapshot exactly as before, and the response says so (`shards.shardsConsulted: false`). That
+is not laziness. The console polls `/rows` every two seconds; a listing that fanned out across the
+directory would wake every shard on every poll, nothing would ever be swapped out, and the feature would
+be self-defeating while looking correct. A genuine full scan is a separate endpoint,
+`GET /{id}/shards/scan`, precisely so nothing reaches it by accident — and it is a set of per-shard
+observations at different sequence numbers, not a consistent cut.
+
+**Built now, used later:** the router stamps a monotonically increasing per-table sequence on every
+forwarded batch and each shard records the highest it has applied. Wave D1 only reports it. It exists
+because a *fenced* consistent whole-table scan (wave D2) needs an ordering primitive, retrofitting one
+onto an accumulated tier means reprocessing its history, and the dataflow's own `Epoch` cannot serve:
+`SnapshotFrontierEpoch` is null for every `Parallelism == 1` table, so an epoch-based fence would work for
+half the tables and silently not for the other half.
+
+**Refusals and interactions, all deliberate:**
+
+- **`SearchEnabled` + `ShardBy` is refused** (409, `RegistryGrain.ValidateShardBy`). The reverse index is
+  table-wide and row-keyed — five maps, a 4–5× multiplier on whatever the table holds — so keeping it
+  would keep every row resident and defeat the point, while a per-shard index would answer a table-wide
+  query by waking every shard, which is worse. Refusing loudly beats half-serving, matching C2's refusal
+  of retention on plan shapes it could not honor.
+- **On a sharded table the per-key history replaces the table-wide `TableHistoryGrain`**, which is
+  disabled rather than left subscribed. Running both would hold every version trail twice and hold the
+  second copy resident.
+- **Retention and sharding COMPOSE**, and the rule is the one already written down above: history follows
+  the table. A delta marked `Evicted` makes the shard reclaim that row's version trail, and a shard left
+  with no rows and no history clears its own state and drops out of the directory. The two knobs answer
+  different questions — retention bounds what the table *holds*, sharding bounds what is *resident* — and
+  a user who wants to keep everything simply leaves retention at its default of off.
+- **Shard columns are explicit and validated against the compiled output schema.**
+  `TableGroupKeyExtractor.ExtractIdentityColumns` is best-effort *textual* matching that returns null on
+  any ambiguity: acceptable for "which versions belong together", not acceptable for "which grain owns
+  this row", and never used to pick a key silently.
+
+**What this does NOT bound, stated plainly rather than discovered later:**
+
+- **`TableGrain`'s own consolidated snapshot is untouched.** It still holds one entry per output row, still
+  pinned alive. D1 moves the per-key *history* — the term that grows with versions × keys, and the one
+  that dominates on the shape this was built for — out of resident memory; bounding the snapshot itself is
+  what retention (C2) is for, and shedding it on a sharded table is a later question.
+- **The shard directory is resident and O(distinct keys)**, one string per key. Kilobytes against the
+  shards' megabytes on the shape this targets, but a table with tens of millions of distinct keys would
+  feel it, and the honest answer for that shape is an external index, not a bigger grain.
+- **`Persistence = MemoryOnly` + `ShardBy` throws the win away in the other direction**: a shard that
+  never writes has nothing to reactivate from, so deactivating it *loses* its state rather than swapping
+  it out. Honored literally, since that is already what the mode's contract says; not blocked.
+- **Disk grows, on purpose.** "Keep everything, just not resident" means one state file per shard key,
+  forever. That is the trade, not a leak.
+
+**Measured**, `tools/soak/run-soak.sh`, 6-minute window, 100 ev/s, `Batched`, same machine and the same
+`order_states`-shaped table as the C1/C2 rows above; the sharded arm adds `--shard-by orderId
+--shard-idle-s 30 --shard-quantum-s 10` (results: `tools/soak/results/d1-{unsharded,sharded}-latest.json`).
+
+| run | rows at end | shards known | shards RESIDENT | resident slope | shard-count slope | RSS slope | state dir |
+|---|---|---|---|---|---|---|---|
+| D1 unsharded (control) | 32 141 | — | — | — | — | 123 MB/min | 23 MB |
+| D1 `ShardBy = orderId` | 34 489 | 34 546 | **4 034** (peak 4 234) | **+106 /min** | +5 552 /min | 186 MB/min | 154 MB |
+
+**The claim this proves, and the one it does not.** The shard tier's resident set IS bounded by the ACTIVE
+key set: shards known grew at 5 552/min while shards resident grew at 106/min — a **52× flatter slope**,
+ending at 12% of the key space, with 34 546 activations against 30 512 deactivations. Keys are genuinely
+being swapped out and faithfully reloaded, which is the mechanism the whole wave rests on.
+
+**Total process RSS went UP, not down, on this workload — 186 MB/min against the control's 123.** Said
+plainly rather than buried, because it is the honest shape of D1 and the reason the ceilings above still
+matter:
+
+- The tier is **additive**. `TableGrain`'s consolidated snapshot is untouched and still holds every one of
+  those 34 000 rows, resident and pinned. D1 moves the per-key *history* out of memory; it does not move
+  the table.
+- This soak is the **worst possible shape for sharding**: `LATEST BY` a fresh GUID gives each key exactly
+  one row and one version, so the per-shard overhead (an Orleans activation, a state file, a flush timer)
+  is larger than the per-key content it holds. The shape D1 was built for is the inverse — few keys
+  relative to the data, each with a long version trail — where the resident term the tier removes is
+  `keys × versions` rather than `keys × 1`.
+- Disk grew 6.6×, on purpose: one state file per key, forever, is what "keep everything, just not
+  resident" costs.
+
+Read `derived.residentFractionAtEnd` and `series.activations` first. Resident far below the directory's key
+count, with activations climbing past both, is the feature working. Resident tracking the key count means
+nothing is being reclaimed — and then the RSS slope is not evidence of anything at all.

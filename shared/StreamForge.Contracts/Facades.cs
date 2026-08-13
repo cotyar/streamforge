@@ -148,6 +148,34 @@ public interface IArrangementMetaFacade
     Task<IReadOnlyList<ArrangementMetaInfo>> GetArrangementsAsync();
 }
 
+/// <summary>Plan 011 D1: keyed read surface over one table's SHARD tier — backs
+/// <c>POST /api/tables/{id}/shard/lookup</c>, <c>GET .../shards</c> and <c>GET .../shards/scan</c>. A new
+/// interface rather than more members on <see cref="ITableReadFacade"/> for the same reason
+/// <see cref="IConnectorStatusFacade"/> is one: existing facade members are frozen, and test fakes
+/// implement them.
+///
+/// SHARDING IS ORLEANS-ONLY, exactly as partitioned execution is (decision D-F): the Dapr flavor rejects
+/// a non-empty <see cref="TableDefinition.ShardBy"/> at upsert, so its implementation reports a disabled
+/// tier rather than pretending to serve one.</summary>
+public interface ITableShardFacade
+{
+    /// <summary>Everything for one shard key: that key's rows and that key's version trails. Strictly
+    /// consistent by construction (one grain, one ordered delta stream). ACTIVATES the shard — that is
+    /// the intended cost of asking about a key, and the reason a keyless listing must never do it for
+    /// every key at once.</summary>
+    Task<TableShardView> GetShardAsync(string tableName, string shardKey, int historyLimitPerKey);
+
+    /// <summary>Table-level sharding metrics. Wakes NOTHING — see <see cref="TableShardingInfo"/>.</summary>
+    Task<TableShardingInfo> GetInfoAsync(string tableName);
+
+    /// <summary>The live shard keys, from the directory. Wakes nothing.</summary>
+    Task<List<string>> GetKeysAsync(string tableName, int limit, int offset);
+
+    /// <summary>The EXPLICIT full scan: activates every shard in the returned range. Separate from every
+    /// other read on this facade precisely so that no routine poll can reach it by accident.</summary>
+    Task<List<TableShardStats>> ScanAsync(string tableName, int limit, int offset);
+}
+
 /// <summary>Read facade for connector runtime status (plan 006, D-C). New interface rather than
 /// an ICatalogFacade extension — existing facade members are frozen (test fakes implement them).
 /// Orleans: IConnectorGrain proxy; Dapr: ConnectorActor proxy. Generator-kind sources → null.</summary>
