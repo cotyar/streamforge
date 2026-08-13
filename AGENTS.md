@@ -32,7 +32,7 @@ its own note on why `/docs` doesn't serve it automatically).
 
 ```bash
 ~/.dotnet/dotnet build orleans/StreamForge.sln
-~/.dotnet/dotnet test  orleans/StreamForge.sln     # 1639 tests — the whole suite must be green
+~/.dotnet/dotnet test  orleans/StreamForge.sln     # 1640 tests — the whole suite must be green
 ~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln
 ~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 313 tests — the whole suite must be green
 cd web && bun run build

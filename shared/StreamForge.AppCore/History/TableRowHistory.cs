@@ -150,7 +150,13 @@ public static class TableGroupKeyExtractor
 
     private static (string ExprText, string? Alias) ParseSelectItem(string raw)
     {
-        var asIdx = FindWord(raw, "AS", 0);
+        // TOP-LEVEL "AS" only. A select item's alias marker is the AS at paren depth 0; an AS *inside*
+        // parentheses belongs to the expression (`cast(x AS long)`, and likewise EXTRACT/TRIM-style
+        // constructs). Splitting on the first AS at any depth — which this did until plan 011 — parsed
+        // `cast(bucket AS long) AS b` as expression "cast(bucket" with alias "long) AS b", so the item
+        // never matched its own GROUP BY/LATEST BY key and EVERY cast key silently fell back to whole-row
+        // identity, even when written character-for-character identically in both places.
+        var asIdx = FindWordTopLevel(raw, "AS");
         if (asIdx >= 0)
         {
             var expr = raw[..asIdx].Trim();
@@ -240,6 +246,31 @@ public static class TableGroupKeyExtractor
     }
 
     /// <summary>Finds a whole-word, case-insensitive keyword outside single-quoted literals.</summary>
+    /// <summary>Like <see cref="FindWord"/>, but only matches at parenthesis depth 0 — see
+    /// <see cref="ParseSelectItem"/> for why that distinction is load-bearing. Returns the FIRST such
+    /// match: within one select item, the first depth-0 AS is the alias marker by construction, since
+    /// anything before it is the expression.</summary>
+    private static int FindWordTopLevel(string s, string word)
+    {
+        var inQuote = false;
+        var depth = 0;
+        for (var i = 0; i <= s.Length - word.Length; i++)
+        {
+            var c = s[i];
+            if (c == '\'') { inQuote = !inQuote; continue; }
+            if (inQuote) continue;
+            if (c == '(') { depth++; continue; }
+            if (c == ')') { depth--; continue; }
+            if (depth != 0) continue;
+            if (string.Compare(s, i, word, 0, word.Length, StringComparison.OrdinalIgnoreCase) != 0) continue;
+            var leftOk = i == 0 || !char.IsLetterOrDigit(s[i - 1]);
+            var after = i + word.Length;
+            var rightOk = after >= s.Length || !char.IsLetterOrDigit(s[after]);
+            if (leftOk && rightOk) return i;
+        }
+        return -1;
+    }
+
     private static int FindWord(string s, string word, int from)
     {
         var inQuote = false;

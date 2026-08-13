@@ -156,20 +156,35 @@ public class RowIdentityWarningTests
     }
 
     [Fact]
-    public void Warning_UnmappableGroupBy_ReportsEveryDeclaredKey()
+    public void CastKey_MapsToItsOwnProjection_AndDoesNotWarn()
     {
-        // A CAST key, which looks like it should match its own projection and does not: the select-item
-        // parser splits on the FIRST "AS" it sees, and here that one is inside the cast's parentheses, so
-        // the item's expression text comes out as "cast(bucket" and nothing lines up. Exactly the class of
-        // near-miss a reader cannot be expected to spot by eye — the warning has to name the keys.
+        // REGRESSION GUARD for the parser bug this test used to pin. ParseSelectItem split on the FIRST
+        // "AS" at any depth, and in `cast(bucket AS long) AS b` that one sits inside the cast's own
+        // parentheses — so the item parsed as expression "cast(bucket" with alias "long) AS b", nothing
+        // lined up, and EVERY cast key fell back to whole-row identity even when written character-for-
+        // character identically in both places. The alias marker is the AS at paren depth 0; matching only
+        // that (FindWordTopLevel) is the fix, and this SQL is now correctly mapped rather than warned about.
         const string sql =
             "SELECT cast(bucket AS long) AS b, venue, count(*) AS n FROM trades GROUP BY cast(bucket AS long), venue";
+
+        Assert.Null(TableRowIdentityWarning.For(Table(sql, history: true)));
+        Assert.Equal(["b", "venue"], TableGroupKeyExtractor.ExtractIdentityColumns(sql));
+    }
+
+    [Fact]
+    public void Warning_UnmappableGroupBy_ReportsEveryDeclaredKey()
+    {
+        // A key that genuinely cannot be mapped: nothing in the SELECT list projects it, so there is no
+        // alias to identify rows by. The warning has to NAME the keys — this is exactly the class of
+        // near-miss a reader cannot be expected to spot by eye.
+        const string sql =
+            "SELECT venue, count(*) AS n FROM trades GROUP BY bucket - bucket % 100, venue";
 
         var warning = TableRowIdentityWarning.For(Table(sql, history: true));
 
         Assert.NotNull(warning);
         Assert.Contains("GROUP BY", warning);
-        Assert.Contains("cast(bucket AS long)", warning);
+        Assert.Contains("bucket - bucket % 100", warning);
         Assert.Contains("venue", warning);
     }
 
