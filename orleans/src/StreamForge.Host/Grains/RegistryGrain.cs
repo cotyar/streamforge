@@ -479,6 +479,7 @@ public sealed class RegistryGrain(
         if (!string.Equals(existing.Name, def.Name, StringComparison.Ordinal))
         {
             ValidateUniqueTableName(def.Name, excludeTableId: existing.Id);
+            ValidateShardedTableIsNotRenamed(existing);
         }
         ValidateParallelism(def.Parallelism);
         ValidateFlushMs(def.FlushMs);
@@ -513,8 +514,13 @@ public sealed class RegistryGrain(
         var retentionChanged = existing.RetentionMaxRows != def.RetentionMaxRows
             || existing.RetentionTtlMs != def.RetentionTtlMs;
         // Plan 011 D1: a ShardBy change re-keys the entire shard tier (or turns it on/off), so it resets
-        // the tier below. It does NOT restart the table itself — the shard tier is a delta-stream consumer,
-        // not part of execution, so the running table's own grain topology is unaffected by construction.
+        // the tier below. Plan 011 D2 additionally RESTARTS the table, which D1 explicitly did not: the
+        // tier is still only a delta-stream consumer and the grain topology is still unaffected, but
+        // ShardBy now also decides whether TableGrain keeps a persisted snapshot mirror at all (see its
+        // D2 paragraph), and TableGrain only re-reads its definition on StartAsync. Without the restart,
+        // turning sharding on would leave the duplicate copy in place — the entire memory claim — until
+        // somebody happened to bounce the table. Same reasoning, and the same code path, as the
+        // Persistence/Parallelism changes beside it.
         var shardByChanged = !existing.ShardBy.SequenceEqual(def.ShardBy, StringComparer.Ordinal);
         var historyConfigChanged =
             existing.HistoryEnabled != def.HistoryEnabled ||
@@ -535,7 +541,7 @@ public sealed class RegistryGrain(
         // (re)StartAsync — mirror the SQL-changed restart below for search config, parallelism, and
         // persistence too, so toggling SearchEnabled/SearchMode/Parallelism/Persistence/FlushMs on a
         // Running table takes effect immediately instead of only on the next manual stop/start.
-        if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged || retentionChanged) && wasRunning)
+        if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged || retentionChanged || shardByChanged) && wasRunning)
         {
             var tableGrain = GrainFactory.GetGrain<ITableGrain>(def.Name);
             try
@@ -823,6 +829,21 @@ public sealed class RegistryGrain(
                 "searchEnabled cannot be combined with shardBy: the reverse index is table-wide and row-keyed, so it would keep every row resident and defeat the point of sharding. Turn search off, or shard off.");
         }
 
+        // Plan 011 D2 — MemoryOnly + ShardBy is now REFUSED, where D1 honored it literally and documented
+        // the consequence. The reason it had to change is that D2 is what made it dangerous. A shard's
+        // final write on deactivation is not a durability nicety, it IS the swap-out; a mode that never
+        // writes turns every idle deactivation into silent data loss for that key, and D1 could still say
+        // "the table's own snapshot has the rows" because TableGrain kept a full persisted mirror. D2
+        // deliberately stops keeping it (see TableGrain's sharded-tables paragraph), so on a sharded
+        // MemoryOnly table there would be nothing behind the shards at all. Refusing beats redefining
+        // MemoryOnly's contract underneath the user: the mode promises "a RESTART brings the table back
+        // empty", not "an idle minute loses this key".
+        if (def.Persistence == TablePersistenceMode.MemoryOnly)
+        {
+            throw new InvalidOperationException(
+                "persistence 'MemoryOnly' cannot be combined with shardBy: a shard's write on deactivation IS how its state is swapped out, so a shard that never writes would lose an idle key's rows and history rather than saving them. Pick Batched, FireAndForget or Journaled, or shard off.");
+        }
+
         if (!compileResult.Ok || compileResult.OutputSchema is null)
         {
             return; // draft: no compiled output columns to validate against yet
@@ -834,6 +855,44 @@ public sealed class RegistryGrain(
             throw new InvalidOperationException(
                 $"shardBy column(s) {string.Join(", ", missing)} are not among this table's output fields ({string.Join(", ", compileResult.OutputSchema.Fields.Keys)}).");
         }
+    }
+
+    /// <summary>Plan 011 D2 — REFUSES TO RENAME A SHARDED TABLE, and this deserves the paragraph because
+    /// the alternative fix is better and was not taken.
+    ///
+    /// THE HAZARD. The whole shard tier is keyed by the table's NAME: the router grain, the directory
+    /// grain, and every shard grain (<c>TableShardKeys.GrainKey(tableName, shardKey)</c>). A rename
+    /// therefore does not move anything — it makes the table address a fresh, empty tier while every
+    /// existing shard keeps its rows and its full version trail on disk under a key nothing will ever look
+    /// up again. Nothing throws, nothing logs, and the table simply appears to have lost its per-key
+    /// history. A silent loss is the worst shape this could take, which is why it is refused rather than
+    /// documented.
+    ///
+    /// THE BETTER FIX, and why it is not here. Keying the tier on <see cref="TableDefinition.Id"/> — which
+    /// is immutable — costs nothing while the feature is unreleased and removes the hazard outright rather
+    /// than fencing it off. It was implemented and then backed out for one concrete, non-technical reason:
+    /// wave D1's own cluster tests address the tier by name in a dozen places, and this wave's brief
+    /// forbids modifying a pre-existing test file. The change is mechanical (grain keys + those call
+    /// sites) and is the right thing to do the moment that call is made; until then the rename is refused,
+    /// which closes the hole completely, at the cost of one restriction.
+    ///
+    /// THE WAY AROUND IT for a user who genuinely wants to rename: clear <c>shardBy</c> first, which
+    /// deletes the shards explicitly and visibly, then rename, then shard again. The tier rebuilds from
+    /// live traffic exactly as it does when sharding is first switched on.
+    ///
+    /// NOTE the same exposure exists, pre-existing and unchanged, for <c>TableHistoryGrain</c> and for
+    /// <c>TableGrain</c> itself, both also keyed by name. Neither is in this wave's scope; this guard
+    /// deliberately covers only what this wave is responsible for, rather than quietly widening to a
+    /// restriction nobody asked for.</summary>
+    private static void ValidateShardedTableIsNotRenamed(TableDefinition existing)
+    {
+        if (existing.ShardBy.Count == 0)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"'{existing.Name}' is sharded by {string.Join(", ", existing.ShardBy)} and cannot be renamed: its shard grains are keyed by the table name, so a rename would strand every shard's rows and version trails under a key nothing looks up again. Clear shardBy first (which deletes the shards), rename, then shard again.");
     }
 
     /// <summary>409-style guard: refuses to stop/delete a table that a currently-Running table depends on.</summary>

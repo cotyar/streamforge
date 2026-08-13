@@ -405,3 +405,168 @@ matter:
 Read `derived.residentFractionAtEnd` and `series.activations` first. Resident far below the directory's key
 count, with activations climbing past both, is the feature working. Resident tracking the key count means
 nothing is being reclaimed — and then the RSS slope is not evidence of anything at all.
+
+### Sharded tables, part 2 — shedding the duplicate copy, and the fenced cut (plan 011 wave D2)
+
+D1 built the tier and proved the mechanism: resident ended at 12% of the key space, 52× flatter than the
+key count, and twenty keyless `/rows` polls left resident at zero. It also made total RSS **worse**, because
+the tier was purely *additive* — `TableGrain` still held and still persisted a full consolidated snapshot of
+exactly the rows the shards already held durably. D2 stops keeping it.
+
+#### What is actually redundant, and what is not
+
+There are up to three copies of a table's output rows in one process. **D2 removes exactly one of them**,
+and being precise about which is the difference between a measurement and a slogan.
+
+| copy | where | D2 |
+|---|---|---|
+| the **persisted mirror** — `TableGrainState.Snapshot`, rewritten every `FlushMs`, resident for the life of the activation | `TableGrain` | **REMOVED** on a sharded table |
+| the **executor's own ledger** — `TableExecutorImpl`, and for the motivating shape `TableLatestByOp.Current` | `StreamForge.Engine` | **kept**, and out of reach |
+| the **coordinator ledger** — `_coordinatorLedger`, `Parallelism >= 2` only | `TableGrain` | **kept** |
+
+The executor's ledger is what the SQL is *computed from*; shedding it means sharding **execution**, which
+plan 003 superseded and which `TableGrain`'s own class doc (plan 009 A2) rejected on record. So a sharded
+table's memory is **not** `O(active keys)` — it is `O(keys)` for the executor plus `O(active keys)` for the
+shard tier. The coordinator ledger stays for a different reason: at `Parallelism >= 2` there is no local
+executor and it is the table's only live copy of its own output, so serving `/rows` without it would mean
+fanning out across the shard directory — waking every idle key on every two-second console poll, which is
+the exact trap the tier is designed against.
+
+#### Why the mirror could go at all
+
+Because it was never the source of a restored row. A non-empty persisted snapshot is how
+`StartClassicAsync`/`StartCoordinatorAsync` tell a **resume** from a first-ever start — and the very next
+thing they do is throw those rows away and mark the table `Rebuilding`, because operator state (join
+indexes, `LATEST BY`'s current row) cannot be reconstructed from output rows. The mirror was durably storing
+every row of the table in order to answer one boolean. D2 stores the boolean (`TableGrainState.HadRows`,
+`O(1)`) and lets the shards be the rows.
+
+Reads follow: a sharded table serves `/rows` **live from its executor**, joining `MemoryOnly` and
+`Journaled`, which already did. That is *fresher* than the up-to-one-flush-interval-stale mirror it
+replaces, and still consults no shard. The one honest consequence: a **stopped** sharded table reports zero
+rows where a stopped unsharded one still reports its last snapshot. The rows are not lost — they are in the
+shards, and a per-key lookup returns them.
+
+#### Persistence modes: none redefined
+
+- **Batched / FireAndForget** keep their contracts exactly. What they write is now an `O(1)` marker instead
+  of an `O(rows)` snapshot; neither ever restored rows.
+- **Journaled**'s promise is *Batched's durability at an `O(changed)` write cost*, and sharding meets it
+  **structurally** rather than bypassing it: with no table-level snapshot to rewrite there is nothing to
+  journal, and each shard's own write is already `O(one key)`.
+- **`MemoryOnly` + `ShardBy` is now REFUSED** (409), where D1 honored it and documented the consequence. D2
+  is what made it indefensible: a shard's write on deactivation is not a durability nicety, it *is* the
+  swap-out, so a mode that never writes turns an idle minute into data loss — and with the table's own
+  mirror gone there is nothing behind the shards at all. `MemoryOnly` promises "a **restart** brings the
+  table back empty". Refusing beats redefining that underneath the user.
+
+#### The fenced scan — and why "each shard waits for S" is wrong twice
+
+`GET /{id}/shards/scan?fenced=true`. Opt-in; unfenced stays the default.
+
+The obvious design is that the reader picks a sequence `S` and every shard answers only once its own
+`AppliedSeq` has reached it. That design **deadlocks on the common case**: the sequence is per *table* and
+stamped per forwarded batch, so a shard whose key has seen no traffic since sequence 183 sits there while
+the table runs to 5 217, will never reach it, and would hang the scan for good. Measured on the live check:
+**993 of 994 shards were below the fence** at any instant — the wait-for-`S` fence hangs on essentially
+every shard, essentially always. And its state at 183 *is* its state at 5 217, so there was never anything
+to wait for. It does not even give a cut in the other direction: a shard that raced ahead to `S+5` before
+being read would report deltas from *after* the fence.
+
+What is true is stronger and needs no waiting anywhere. The router forwards **one batch at a time and awaits
+every shard's apply before returning**, and the scan runs as a call **on the router**, which is
+non-reentrant — so no batch can be forwarded while the scan is in flight, on either stream transport (memory
+streams and the push bus both deliver as real Orleans messages, subject to the activation's normal
+concurrency rules). Every shard therefore holds exactly the deltas of batches `<= S` at the moment it is
+read, and nothing beyond. Nothing waits; the idle shard answers immediately with its honest, lagging
+`AppliedSeq`.
+
+**It is checkable, not just claimed.** Every forwarded delta lands in exactly one shard, so across a page
+covering all of them the shards' `deltasApplied` must sum to the router's own `routedDeltasAtFence` — one
+delta from at-or-before the fence missing, or one from after it counted, and the identity breaks. Live, at
+200 ev/s over ~990 shards, three consecutive fenced scans came back exact (`7283/7283`, `8002/8002`,
+`8720/8720`) in 38–41 ms each, with zero shards beyond the fence.
+
+The costs, stated where they are paid: the shard tier's ingest is **paused for the duration of the scan**
+(the table's own snapshot, its delta stream and every other consumer are unaffected — only this router's
+subscription backs up, and it drains afterwards), and the cut is **per request**, so paging a large table
+with several fenced calls gives several cuts rather than one. It retains no per-sequence versions, so it
+costs no memory at all. Per-key reads need none of this and get none of it: one key is one grain, already
+strictly consistent by construction.
+
+#### Renaming a sharded table is refused
+
+The whole tier is keyed by the table's **name** — the router grain, the directory grain, and every shard
+grain (`TableShardKeys.GrainKey`). A rename therefore moves nothing: it points the table at a fresh, empty
+tier while every existing shard keeps its rows and its full version trail on disk under a key nothing will
+ever look up again. Nothing throws and nothing logs, which is the worst shape a data loss can take, so it is
+refused (409) rather than documented.
+
+**The better fix is to key the tier on the immutable `TableDefinition.Id`**, which costs nothing while the
+feature is unreleased. It was implemented and backed out for one concrete, non-technical reason: wave D1's
+own cluster tests address the tier by name in a dozen places, and D2's brief forbids modifying a
+pre-existing test file. The change is mechanical — the grain keys plus those call sites — and should be made
+the moment that call is made; the refusal is what closes the hole until then. The way around it today is to
+clear `shardBy` first (which deletes the shards, explicitly and visibly), rename, then shard again.
+
+The identical exposure exists, pre-existing and unchanged, for `TableHistoryGrain` and for `TableGrain`
+itself, both also keyed by name. Neither is in this wave's scope.
+
+#### Measured — and the answer is still "sharding costs more total RSS"
+
+`tools/soak/run-soak.sh`, same machine, `Batched`, least-squares RSS slope over the sampled window.
+Results in `tools/soak/results/d2-*-latest.json`.
+
+**Shape A — `--shape orders`, 6 min @ 100 ev/s** (`LATEST BY` a fresh GUID: unbounded key space, one row and
+one version per key). This is the *worst* shape for sharding and is kept as the harness default precisely
+because it is unflattering and because every recorded run since C1 used it.
+
+| run | RSS slope | rows at end | shards known | shards resident | state dir |
+|---|---|---|---|---|---|
+| D1 unsharded (control) | 123 MB/min | 32 141 | — | — | 23 MB |
+| D1 `ShardBy = orderId` | 186 MB/min | 34 489 | 34 546 | 4 034 (11.7%) | 154 MB |
+| **D2 unsharded (control)** | **125 MB/min** | 32 559 | — | — | 23 MB |
+| **D2 `ShardBy = orderId`** | **151 MB/min** | 34 042 | 34 042 | 3 909 (11.5%) | 137 MB |
+
+Shedding the mirror took the sharded arm from **186 → 151 MB/min, −19%**, against a control that did not
+move (123 → 125, i.e. the machine and the harness are comparable). **It is still 21% worse than the
+control**, where D1 was 51% worse. The direction is right and the destination is not reached.
+
+**Shape B — `--shape instruments`, 8 min @ 200 ev/s** (bounded ~10k key space, `history All` so trails grow
+without bound: the instrument-with-legs case this feature exists for, ~8.5 versions per key by the end).
+
+| run | RSS slope | rows | deltas | shards known | resident | activations | state dir |
+|---|---|---|---|---|---|---|---|
+| unsharded (control) | **69 MB/min** | 9 996 | 84 674 | — | — | — | 16 MB |
+| `ShardBy`, `--shard-idle-s 15` | 138 MB/min | 9 998 | 88 665 | 9 998 | 2 927 (29%) | 60 783 | 41 MB |
+| `ShardBy`, `--shard-idle-s 60` | 142 MB/min | 9 998 | 85 435 | 9 998 | 7 577 (76%) | 23 225 | 41 MB |
+
+**On the shape it targets, sharding is twice the control's slope.** Reported plainly because the flattering
+alternative would have been to report only shape A's improvement.
+
+The third row is there to kill the obvious excuse. Quadrupling the collection age moves residency from 29%
+to 76% and cuts activations by 62% — the knob works exactly as designed — and **total RSS does not move**
+(138 vs 142 MB/min). So this is not a mistuned idle age. The tier's cost is the tier: at ~8.5 versions per
+key, an Orleans activation plus a JSON state file plus a serializer graph *per key* is about as large as the
+per-key data it holds, and the swap itself (60 783 serialize/deserialize round trips in eight minutes) is
+pure garbage on top. The resident-set claim is true and measurable; it is simply not the dominant term at
+this ratio.
+
+**What would have to change for the total to win**, stated so the next wave does not rediscover it:
+
+- **The remaining copy is the executor's**, `O(keys)` and untouched (see the table above). At 10k keys and
+  10k rows, shedding one of two copies of the rows cannot beat a control that keeps one.
+- **The trail has to be much longer than the row.** The tier's fixed per-key overhead is amortised over
+  `versions × key`, so the crossover is at *hundreds* of versions per key, not eight. The soak cannot reach
+  that ratio and a low residency at the same time: at a fixed event rate, `versions/key ≈ x · T_run/T_idle`
+  where `x = −ln(1 − resident_fraction)` — 20 versions/key at 10% residency needs a run roughly 190× the
+  idle age.
+- **Per-shard persistence is the wrong shape at this granularity.** One rewritten JSON file per key per
+  flush is what puts the state directory at 2.5× the control's and drives the churn cost. A shard tier that
+  paid off would need a storage provider that appends per key rather than rewriting per key.
+
+**What D2 does deliver, unambiguously:** the duplicate copy is gone (measured directly on the live check —
+`TableGrain`'s state file for a sharded table was **39 bytes** against the unsharded control's **308 325**
+for the same 994 rows), the resident set genuinely tracks the active key set, per-key reads are exact and
+cold-load from disk correctly, and the fenced scan is a real cut. What it does not deliver is a smaller
+process.

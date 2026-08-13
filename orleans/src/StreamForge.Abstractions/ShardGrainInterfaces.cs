@@ -14,6 +14,12 @@ namespace StreamForge.Abstractions;
 //   TableShardGrain          key = "{table}|{token}" (TableShardKeys.GrainKey). One key's rows + that
 //                            key's history. THE ONE THAT MUST NOT PIN ITSELF ALIVE.
 //
+// EVERY ONE OF THOSE KEYS IS THE TABLE'S NAME, which is why plan 011 D2 REFUSES to rename a sharded table
+// (RegistryGrain.UpdateTableAsync): a rename would leave every existing shard filed under a key nothing
+// would ever look up again — silently, with nothing failing, which is the worst shape a data loss can
+// take. Keying the tier on the immutable id instead is the better fix and is written up where the refusal
+// is raised.
+//
 // THE INVARIANT THE WHOLE WAVE RESTS ON: TableShardGrain never calls DelayDeactivation. Every other grain
 // in the table path calls DelayDeactivation(TimeSpan.FromDays(365)) — TableGrain, TableHistoryGrain,
 // TableStageGrain, ArrangementGrain, TableOutputGrain — so nothing in it has ever been swapped out. An
@@ -46,6 +52,12 @@ public interface ITableShardRouterGrain : IGrainWithStringKey
 
     /// <summary>Table-level metrics. Wakes no shard — see <see cref="TableShardingInfo"/>.</summary>
     Task<TableShardingInfo> GetInfoAsync();
+
+    /// <summary>Plan 011 D2: a whole-table scan taken as a genuine CONSISTENT CUT at the router's current
+    /// sequence. It lives on the router rather than on the facade precisely because the router is the
+    /// fence — see <see cref="TableShardScanResult"/> and this grain's own class doc. ACTIVATES every
+    /// shard in the page, and PAUSES the shard tier's ingest until it returns.</summary>
+    Task<TableShardScanResult> FencedScanAsync(int limit, int offset);
 }
 
 /// <summary>Plan 011 D1. Key = table name. The live shard-key set.

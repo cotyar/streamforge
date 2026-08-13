@@ -205,10 +205,15 @@ public static class TablesEndpoints
             // them from the shards. See TableRowsShardNote's own doc for the trap this closes; the short
             // version is that this endpoint is polled every two seconds by the console, and a keyless
             // listing that fanned out across the directory would wake every shard on every poll.
+            // Plan 011 D2: the wording changed with the thing it describes. A sharded table no longer KEEPS
+            // a persisted consolidated snapshot (see TableGrain's "sharded tables" paragraph — the shards
+            // are the durable per-key copy, and mirroring them in the table grain was a second copy of the
+            // same rows). These rows are the table's own LIVE executor output, which is if anything fresher
+            // than the up-to-one-flush-interval-stale mirror it replaced. Still no shard is contacted.
             var shardNote = def.ShardBy.Count == 0 ? null : new TableRowsShardNote(
                 def.ShardBy,
                 ShardsConsulted: false,
-                "Served from the table's consolidated snapshot; no shard was activated. Use POST /shard/lookup for one key, or GET /shards/scan for an explicit full scan.");
+                "Served live from the table's own executor; no shard was activated. Use POST /shard/lookup for one key, or GET /shards/scan (optionally ?fenced=true) for an explicit full scan.");
             return Results.Ok(new TableRowsResponse(rows, total, seq, frontierEpoch, shardNote));
         }).RequireAuthorization("Viewer");
 
@@ -397,12 +402,19 @@ public static class TablesEndpoints
         }).RequireAuthorization("Viewer");
 
         // THE EXPLICIT FULL SCAN. This one does activate every shard in its page — that is the whole
-        // reason it is its own endpoint rather than a flag, so that no routine poll can reach it. Note
-        // what it is NOT: a consistent cut. Shards are read one after another while ingest continues, so
-        // this is a set of per-shard observations at different sequence numbers, and each shard's own
-        // AppliedSeq says which. A genuinely fenced whole-table scan is wave D2's job; the router's
-        // sequence stamp is the mechanism it will use.
-        group.MapGet("/{id}/shards/scan", async (string id, int? limit, int? offset, ICatalogFacade registry, ITableShardFacade shards) =>
+        // reason it is its own endpoint rather than a flag, so that no routine poll can reach it.
+        //
+        // ?fenced=true (plan 011 D2) upgrades it from a set of observations to a genuine CONSISTENT CUT:
+        // the router names the sequence it has forwarded up to and reads every shard without letting
+        // another batch through, so no delta from at-or-before the fence is missing and none from after it
+        // is present — checkably, since the shards' own deltasApplied must then sum to
+        // routedDeltasAtFence. Off by default because the fence pauses the shard tier's ingest for the
+        // duration of the scan; that cost is real, is paid only by the caller who asks for it, and buys no
+        // extra memory anywhere (nothing versioned is retained).
+        //
+        // Per-key reads need none of this and get none of it: one key is one grain, already strictly
+        // consistent by construction.
+        group.MapGet("/{id}/shards/scan", async (string id, int? limit, int? offset, bool? fenced, ICatalogFacade registry, ITableShardFacade shards) =>
         {
             var def = await registry.GetTableAsync(id);
             if (def is null)
@@ -417,6 +429,16 @@ public static class TablesEndpoints
 
             var take = limit ?? 100;
             var skip = offset ?? 0;
+
+            if (fenced == true)
+            {
+                var cut = await shards.ScanFencedAsync(def.Name, take, skip);
+                return Results.Ok(new TableShardScanResponse(
+                    cut.Shards, cut.Shards.Count, skip, take,
+                    Fenced: true, FenceSeq: cut.FenceSeq, RoutedDeltasAtFence: cut.RoutedDeltasAtFence,
+                    ShardCount: cut.ShardCount));
+            }
+
             var stats = await shards.ScanAsync(def.Name, take, skip);
             return Results.Ok(new TableShardScanResponse(stats, stats.Count, skip, take));
         }).RequireAuthorization("Viewer");

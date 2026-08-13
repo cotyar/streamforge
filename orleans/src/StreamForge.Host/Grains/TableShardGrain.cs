@@ -305,6 +305,7 @@ public sealed class TableShardGrain(
         HistoryKeyCount = _liveHistory.Count,
         TotalVersions = _liveHistory.Values.Sum(e => (long)e.Versions.Count),
         AppliedSeq = _appliedSeq,
+        DeltasApplied = _deltasApplied,
     });
 
     public async Task PurgeAsync()

@@ -55,6 +55,11 @@ public sealed class DisabledTableShardFacade : ITableShardFacade
 
     public Task<List<TableShardStats>> ScanAsync(string tableName, int limit, int offset) =>
         Task.FromResult(new List<TableShardStats>());
+
+    /// <summary>Plan 011 D2. A fence over nothing is still a well-defined answer: no shards, and a
+    /// FenceSeq of -1 saying nothing has ever been routed — which is exactly true on this flavor.</summary>
+    public Task<TableShardScanResult> ScanFencedAsync(string tableName, int limit, int offset) =>
+        Task.FromResult(new TableShardScanResult());
 }
 
 /// <summary>Partitioned execution (and therefore shared arrangements) is Orleans-only — decision D-F.

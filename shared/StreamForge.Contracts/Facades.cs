@@ -154,9 +154,12 @@ public interface IArrangementMetaFacade
 /// <see cref="IConnectorStatusFacade"/> is one: existing facade members are frozen, and test fakes
 /// implement them.
 ///
-/// SHARDING IS ORLEANS-ONLY, exactly as partitioned execution is (decision D-F): the Dapr flavor rejects
-/// a non-empty <see cref="TableDefinition.ShardBy"/> at upsert, so its implementation reports a disabled
-/// tier rather than pretending to serve one.</summary>
+/// SHARDING IS ORLEANS-ONLY, exactly as partitioned execution is (decision D-F): the Dapr flavor refuses
+/// to START a table with a non-empty <see cref="TableDefinition.ShardBy"/>, so its implementation reports a
+/// disabled tier rather than pretending to serve one.
+///
+/// ADDRESSED BY TABLE NAME, which is what the shard tier's grain keys are derived from — and why plan 011
+/// D2 refuses to rename a sharded table (see RegistryGrain.UpdateTableAsync).</summary>
 public interface ITableShardFacade
 {
     /// <summary>Everything for one shard key: that key's rows and that key's version trails. Strictly
@@ -172,8 +175,15 @@ public interface ITableShardFacade
     Task<List<string>> GetKeysAsync(string tableName, int limit, int offset);
 
     /// <summary>The EXPLICIT full scan: activates every shard in the returned range. Separate from every
-    /// other read on this facade precisely so that no routine poll can reach it by accident.</summary>
+    /// other read on this facade precisely so that no routine poll can reach it by accident. NOT a
+    /// consistent cut — shards are read one after another while ingest continues, and each shard's own
+    /// AppliedSeq says where it was. For a cut, use <see cref="ScanFencedAsync"/>.</summary>
     Task<List<TableShardStats>> ScanAsync(string tableName, int limit, int offset);
+
+    /// <summary>Plan 011 D2: the same scan taken as a GENUINE CONSISTENT CUT at a named router sequence —
+    /// see <see cref="TableShardScanResult"/>. Opt-in, because the fence pauses the shard tier's ingest for
+    /// as long as the scan takes.</summary>
+    Task<TableShardScanResult> ScanFencedAsync(string tableName, int limit, int offset);
 }
 
 /// <summary>Read facade for connector runtime status (plan 006, D-C). New interface rather than

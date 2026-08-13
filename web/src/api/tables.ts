@@ -14,6 +14,9 @@ import type {
   TableRowsResponse,
   TableSearchMode,
   TableSearchResponse,
+  TableShardScanResponse,
+  TableShardsResponse,
+  TableShardView,
   TableValidateResponse,
 } from './types'
 
@@ -49,6 +52,11 @@ export interface CreateTableRequest {
   retentionMaxRows?: number
   /** Plan 011 C2: event-time TTL in ms; 0/absent = unbounded. */
   retentionTtlMs?: number
+  /** Plan 011 D1/D2: opt-in key sharding — the output columns rows are sharded by. Absent on update
+   * means "leave as-is" (so an older client cannot un-shard a table by omitting it); [] clears it, which
+   * DELETES the shards. Rejected (409) together with searchEnabled and with persistence 'MemoryOnly',
+   * and a sharded table cannot be renamed — see TableDefinition.shardBy. */
+  shardBy?: string[]
 }
 
 export type UpdateTableRequest = CreateTableRequest
@@ -77,6 +85,19 @@ export const tablesApi = {
   historyLookup: (id: string, row: ResultRow, limit = 0) =>
     api.post<TableHistoryResponse>(`/api/tables/${encodeURIComponent(id)}/history/lookup?limit=${limit}`, { row }),
   historyStats: (id: string) => api.get<TableHistoryStats>(`/api/tables/${encodeURIComponent(id)}/history/stats`),
+  // Plan 011 D1/D2 — sharded tables. The split between these three IS the design, so read it before
+  // adding a fourth: `shards` wakes NOTHING (router + directory only) and is the one safe to poll;
+  // `shardLookup` wakes exactly one shard, which is the point of the tier; `shardsScan` wakes every
+  // shard in its page, which is why it is a separate call nothing reaches by accident.
+  shards: (id: string, limit = 0, offset = 0) =>
+    api.get<TableShardsResponse>(`/api/tables/${encodeURIComponent(id)}/shards?limit=${limit}&offset=${offset}`),
+  shardLookup: (id: string, row: ResultRow, historyLimit = 0) =>
+    api.post<TableShardView>(`/api/tables/${encodeURIComponent(id)}/shard/lookup?historyLimit=${historyLimit}`, { row }),
+  /** fenced=true costs latency (the shard tier's ingest pauses for the scan) and buys a real cut. */
+  shardsScan: (id: string, limit = 100, offset = 0, fenced = false) =>
+    api.get<TableShardScanResponse>(
+      `/api/tables/${encodeURIComponent(id)}/shards/scan?limit=${limit}&offset=${offset}&fenced=${fenced}`,
+    ),
   // Plan 008 W5: lineage + execution-plan view (see ExecutionPlanResponse's doc comment in ./types).
   plan: (id: string) => api.get<ExecutionPlanResponse>(`/api/tables/${encodeURIComponent(id)}/plan`),
 }

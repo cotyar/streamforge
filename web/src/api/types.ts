@@ -549,6 +549,10 @@ export interface TableShardStats {
   historyKeyCount: number
   totalVersions: number
   appliedSeq: number
+  /** Plan 011 D2: deltas this shard has ever applied, persisted across deactivation. Summed over every
+   * shard of a table it must equal a fenced scan's `routedDeltasAtFence` — which is what makes the cut
+   * checkable rather than merely claimed. */
+  deltasApplied: number
 }
 
 /** Plan 011 D1: GET /api/tables/{id}/shards/scan?limit=&offset= — the EXPLICIT full scan. This one DOES
@@ -560,6 +564,18 @@ export interface TableShardScanResponse {
   woke: number
   offset: number
   limit: number
+  /** Plan 011 D2 — `?fenced=true`. false (the default) is a set of per-shard observations taken at
+   * DIFFERENT sequence numbers while ingest continued; true is a genuine consistent cut at `fenceSeq`,
+   * bought by pausing the shard tier's ingest for the duration of the scan. Per-key reads need no fence
+   * and get none: one key is one grain and is already strictly consistent. */
+  fenced?: boolean
+  /** The router sequence the cut was taken at; -1 = nothing has ever been routed. */
+  fenceSeq?: number
+  /** Deltas the router had forwarded at the fence. When the page covers every shard (`shards.length ===
+   * shardCount`), the shards' `deltasApplied` must sum to exactly this. */
+  routedDeltasAtFence?: number
+  /** Live shard keys at the fence, so a caller can tell "this page is all of them" from "this is a page". */
+  shardCount?: number
 }
 
 // GET /api/tables/{id}/search?q=&limit= — empty q returns rows: []. A 400 means the table's

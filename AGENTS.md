@@ -32,7 +32,7 @@ its own note on why `/docs` doesn't serve it automatically).
 
 ```bash
 ~/.dotnet/dotnet build orleans/StreamForge.sln
-~/.dotnet/dotnet test  orleans/StreamForge.sln     # 1569 tests — the whole suite must be green
+~/.dotnet/dotnet test  orleans/StreamForge.sln     # 1579 tests — the whole suite must be green
 ~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln
 ~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 308 tests — the whole suite must be green
 cd web && bun run build
@@ -48,7 +48,10 @@ Sharded tables (plan 011 D1, `TableDefinition.ShardBy`, empty = off): `--Shards:
 its state is flushed to disk and the grain collected, which is the whole feature; `--Shards:QuantumSeconds`
 lowers the silo-wide collection scan interval (Orleans requires it to be strictly smaller than any
 collection age, so shortening the idle below ~90s needs it). Orleans-only; Dapr stores `ShardBy` but
-refuses to start such a table.
+refuses to start such a table. Plan 011 D2: a sharded table keeps NO persisted snapshot mirror (the shards
+are the durable per-key copy), refuses `MemoryOnly` and refuses being RENAMED (the tier is keyed by name);
+`GET /{id}/shards/scan?fenced=true` is an opt-in consistent cut that pauses the tier's ingest for the scan.
+Soak shapes: `tools/soak/run-soak.sh --shape orders|instruments`.
 
 Local skills (root `.claude/skills/`, `sf-` prefix) wrap the common workflows: `/sf-run` (both
 flavors), `/sf-verify` (both flavors), `/sf-sql`, `/sf-client-gen`, `/sf-config` (catalog

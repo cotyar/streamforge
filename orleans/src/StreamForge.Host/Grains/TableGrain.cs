@@ -15,9 +15,27 @@ namespace StreamForge.Host.Grains;
 public sealed class TableGrainState
 {
     /// <summary>Consolidated output snapshot: canonical rowKey -> (row, weight). Write-behind persisted
-    /// (dirty flag + periodic flush) — see TableGrain's class comment for the restart-resume tradeoff.</summary>
+    /// (dirty flag + periodic flush) — see TableGrain's class comment for the restart-resume tradeoff.
+    ///
+    /// Plan 011 D2: left permanently EMPTY for a SHARDED table (non-empty <c>TableDefinition.ShardBy</c>),
+    /// where the shard grains are the durable per-key copy and this would be a second copy of the same
+    /// rows — see TableGrain's "sharded tables" paragraph. <see cref="HadRows"/> carries the one thing
+    /// this mirror was actually load-bearing for.</summary>
     public Dictionary<string, TableRowDto> Snapshot { get; set; } = [];
     public long Seq { get; set; }
+
+    /// <summary>Plan 011 D2 — RESUME DETECTION WITHOUT THE MIRROR, and the reason shedding it is even
+    /// possible. A non-empty <see cref="Snapshot"/> is how StartClassicAsync/StartCoordinatorAsync tell a
+    /// resume from a first-ever start, and that is the ONLY thing they use it for: the resumed rows are
+    /// then thrown away and the table rebuilds from live traffic (the restart-resume limitation in
+    /// TableGrain's class doc). So the mirror was durably storing every row of the table in order to
+    /// answer one boolean. On a sharded table the boolean is stored directly instead — O(1) where the
+    /// mirror was O(distinct keys) — and behavior is unchanged.
+    ///
+    /// Maintained ONLY for sharded tables; an unsharded table never writes it and its resume detection is
+    /// byte-identical to before. Absent in an existing data dir, which reads as false, which is right for
+    /// any table that has never been sharded.</summary>
+    public bool HadRows { get; set; }
 }
 
 /// <summary>Plan 009 A2: one journaled change since the last compaction — the second, SMALL persisted state
@@ -223,6 +241,45 @@ public sealed class TableJournalState
 /// Bounding the key space itself needs a retention policy (plan 011 wave C2) or per-key sharding (wave D).
 /// Every unbounded structure in the table path is now enumerated in orleans/DESIGN.md's "Known ceilings".
 ///
+/// PLAN 011 WAVE D2 — A SHARDED TABLE STOPS KEEPING THE DUPLICATE COPY. When
+/// <see cref="TableDefinition.ShardBy"/> is non-empty, this grain no longer maintains or persists
+/// <c>state.State.Snapshot</c> at all (<see cref="_shardMirrorSuppressed"/>): the capture writes only the
+/// O(1) <see cref="TableGrainState.HadRows"/> marker, the journal is not written, and
+/// <see cref="_touchedRowKeys"/> is not accumulated.
+///
+/// WHY THAT IS SOUND, not just smaller. On a sharded table the shard grains ARE the durable per-key copy
+/// of the same rows — same content, arrived by the same delta stream — so the mirror was a second full
+/// copy, rewritten every FlushMs and pinned in memory forever. It was never the source of a restored row:
+/// the resume path reads it, notes "this is a resume", and then RESETS it to empty (see the RESTART-RESUME
+/// LIMITATION above). That one boolean is what HadRows now carries. And it was not the read path either
+/// for two of the four persistence modes already — MemoryOnly and Journaled read live from the executor
+/// (see ClassicModeRows), so a sharded table simply joins them, which makes its <c>/rows</c> FRESHER than
+/// the up-to-one-flush-interval-stale mirror it replaced, not staler.
+///
+/// WHAT IS DELIBERATELY *NOT* SHED, because being precise here is the difference between a measurement and
+/// a slogan. Three copies of a table's rows can exist; D2 removes exactly ONE of them.
+///   1. <b>The persisted mirror</b> (<c>state.State.Snapshot</c>) — REMOVED on a sharded table. This is
+///      the whole of D2's memory claim.
+///   2. <b>The Engine executor's own ledger</b> (<c>TableExecutorImpl</c>, and for the motivating shape
+///      <c>TableLatestByOp.Current</c>) — KEPT, and unreachable from here. It is O(distinct keys) and it
+///      is what the table's SQL is computed from; shedding it would mean sharding EXECUTION, which plan
+///      003 superseded and plan 009 A2 rejected on record. A sharded table's memory is therefore NOT
+///      O(active keys); it is O(keys) for the executor plus O(active keys) for the shard tier.
+///   3. <b>The coordinator ledger</b> (<see cref="_coordinatorLedger"/>, Parallelism &gt;= 2 only) — KEPT,
+///      because at Parallelism &gt;= 2 there is no local executor and this IS the table's only live copy
+///      of its own output. Serving <c>/rows</c> from the shards instead would fan out across the directory
+///      and wake every idle key on every poll, which is precisely the trap the whole tier is designed
+///      against.
+///
+/// PERSISTENCE MODES, none redefined. Batched/FireAndForget keep their contracts exactly: what they write
+/// is now an O(1) marker instead of an O(rows) snapshot, and neither ever restored rows in the first place.
+/// Journaled's promise — Batched's durability with an O(changed) write — is STRUCTURALLY met rather than
+/// bypassed: with no table-level snapshot to rewrite there is nothing to journal, and each shard's own
+/// write is already O(one key). MemoryOnly + ShardBy is REFUSED at upsert (RegistryGrain.ValidateShardBy)
+/// rather than reinterpreted: a shard's write on deactivation IS its swap-out, so a mode that never writes
+/// would turn an idle minute into data loss — which is not what "a restart brings the table back empty"
+/// promises.
+///
 /// [MayInterleave] ON OnOutputBatchAsync (plan 003 M4, mirrors RegistryGrain's identical fix for an
 /// identical shape of problem — see that class's doc comment): TableOutputGrain.PublishAsync calls back
 /// into THIS grain (the same one orchestrating TableOutputGrain/TableStageGrain's own start/stop) — without
@@ -301,6 +358,13 @@ public sealed class TableGrain(
     /// start/stop cycle; cleared by the capture itself.</summary>
     private bool _fullCaptureNeeded = true;
 
+    /// <summary>Plan 011 D2 — true when this table has a non-empty <see cref="TableDefinition.ShardBy"/>,
+    /// i.e. when the shard tier holds the durable per-key copy and <c>state.State.Snapshot</c> would be a
+    /// second one. See the class doc's D2 paragraph for what this suppresses and, more importantly, for
+    /// the two copies it does NOT. Re-read from the definition on every StartAsync, like every other
+    /// per-def field here.</summary>
+    private bool _shardMirrorSuppressed;
+
     // Plan 003 M2 — Parallelism >= 2 coordinator-mode state (see class doc). Unused, always default, on
     // the Parallelism==1 path.
     private bool _coordinatorMode;
@@ -344,6 +408,7 @@ public sealed class TableGrain(
         await StopAsync();
 
         _def = def;
+        _shardMirrorSuppressed = def.ShardBy.Count > 0;
         _persistenceMode = def.Persistence;
         _flushInterval = TimeSpan.FromMilliseconds(def.FlushMs > 0 ? def.FlushMs : 2000);
 
@@ -387,12 +452,14 @@ public sealed class TableGrain(
 
         // See class-level comment: a non-empty persisted snapshot means this is a resume (not a first
         // start) — operator internal state can't be rebuilt from it, so mark rebuilding and reset to empty.
-        if (state.State.Snapshot.Count > 0)
+        //
+        // Plan 011 D2: HadRows is the same signal for a SHARDED table, which keeps no mirror to inspect —
+        // see TableGrainState.HadRows. Both are checked on both kinds of table, deliberately: a table that
+        // was sharded and has just been un-sharded (or the reverse) must resume correctly across the
+        // transition, and whichever of the two marks its previous life is the one that fires.
+        if (ClearResumeMarkersAndDetect())
         {
             _rebuilding = true;
-            state.State.Snapshot = [];
-            state.State.Seq = 0;
-            _dirty = true;
         }
 
         await ClearStaleJournalAsync();
@@ -458,12 +525,9 @@ public sealed class TableGrain(
 
         ResumeJournaledState();
 
-        if (state.State.Snapshot.Count > 0)
+        if (ClearResumeMarkersAndDetect())
         {
             _rebuilding = true;
-            state.State.Snapshot = [];
-            state.State.Seq = 0;
-            _dirty = true;
         }
 
         await ClearStaleJournalAsync();
@@ -702,14 +766,22 @@ public sealed class TableGrain(
     /// flush) — only which copy classic-mode READS are served from, mirroring the split MemoryOnly already
     /// established.</summary>
     private IEnumerable<TableRowDto> ClassicModeRows() =>
-        _persistenceMode is TablePersistenceMode.MemoryOnly or TablePersistenceMode.Journaled && _executor is not null
-            ? _executor.Snapshot().Values.Select(v => new TableRowDto { Row = new Dictionary<string, object?>(v.Row), Weight = v.Weight })
+        ReadsLive
+            ? _executor!.Snapshot().Values.Select(v => new TableRowDto { Row = new Dictionary<string, object?>(v.Row), Weight = v.Weight })
             : state.State.Snapshot.Values;
 
     private int ClassicModeRowCount() =>
-        _persistenceMode is TablePersistenceMode.MemoryOnly or TablePersistenceMode.Journaled && _executor is not null
-            ? _executor.Snapshot().Count
-            : state.State.Snapshot.Count;
+        ReadsLive ? _executor!.Snapshot().Count : state.State.Snapshot.Count;
+
+    /// <summary>Plan 011 D2 — SHARDED tables join MemoryOnly and Journaled in reading rows live from the
+    /// executor, for the strongest of the three reasons: they do not merely lag the mirror, they have no
+    /// mirror at all (see the class doc's D2 paragraph — it would be a second copy of what the shards
+    /// durably hold). The result is FRESHER than the up-to-one-flush-interval-stale copy it replaces, and
+    /// still consults no shard, so a two-second <c>/rows</c> poll still wakes nothing.</summary>
+    private bool ReadsLive =>
+        _executor is not null
+        && (_shardMirrorSuppressed
+            || _persistenceMode is TablePersistenceMode.MemoryOnly or TablePersistenceMode.Journaled);
 
     /// <summary>Plan 003 M2: in coordinator mode (Parallelism &gt;= 2), additively fans out to every
     /// deployed TableStageGrain for per-partition detail (TableMetrics.Partitions) — null/absent on the
@@ -869,10 +941,13 @@ public sealed class TableGrain(
 
             // Plan 011 wave C: one key-derivation pass per batch feeds all three consumers (was up to two
             // separate passes) — see TouchedKeys' own doc comment.
-            var touched = TouchedKeys(allDeltas);
+            // Plan 011 D2: on a sharded table nothing downstream of this pass exists — no mirror to keep
+            // incrementally, no journal to write, and no search index (the combination is refused) — so the
+            // per-delta canonical-key derivation itself is skipped rather than computed and discarded.
+            var touched = NeedsTouchedKeys ? TouchedKeys(allDeltas) : [];
             RecordTouchedRowKeys(touched);
 
-            if (_persistenceMode == TablePersistenceMode.Journaled)
+            if (_persistenceMode == TablePersistenceMode.Journaled && !_shardMirrorSuppressed)
             {
                 RecordJournalEntries(touched);
             }
@@ -940,7 +1015,7 @@ public sealed class TableGrain(
 
         // Plan 011 wave C: one key-derivation pass per batch, shared by the search index, the journal and
         // the incremental snapshot capture — see TouchedKeys' own doc comment.
-        var touched = TouchedKeys(deltas);
+        var touched = NeedsTouchedKeys ? TouchedKeys(deltas) : [];
         RecordTouchedRowKeys(touched);
 
         if (_searchIndex is not null)
@@ -948,7 +1023,7 @@ public sealed class TableGrain(
             ReflectDeltasInSearchIndex(touched);
         }
 
-        if (_persistenceMode == TablePersistenceMode.Journaled)
+        if (_persistenceMode == TablePersistenceMode.Journaled && !_shardMirrorSuppressed)
         {
             RecordJournalEntries(touched);
         }
@@ -986,9 +1061,15 @@ public sealed class TableGrain(
     /// comment for why accumulating there would be a leak rather than an optimization.</summary>
     private void RecordTouchedRowKeys(List<string> touched)
     {
-        if (_persistenceMode == TablePersistenceMode.MemoryOnly) return;
+        if (_persistenceMode == TablePersistenceMode.MemoryOnly || _shardMirrorSuppressed) return;
         foreach (var key in touched) _touchedRowKeys.Add(key);
     }
+
+    /// <summary>Plan 011 D2 — is there any consumer left for the per-batch canonical-key pass? On a sharded
+    /// table there is not: the mirror is gone, the journal with it, and searchEnabled + shardBy is refused
+    /// at upsert. The <c>_searchIndex is not null</c> half is defensive rather than reachable, and costs
+    /// one null check.</summary>
+    private bool NeedsTouchedKeys => !_shardMirrorSuppressed || _searchIndex is not null;
 
     /// <summary>Keeps the search index in sync with the consolidated Z-set as deltas land: for each row
     /// touched by this batch, look its canonical key up in the (already-updated, O(1) live) consolidated
@@ -1075,6 +1156,25 @@ public sealed class TableGrain(
     /// STALE (a different/former mode) — see class doc's Plan 009 A2 "RESUME" paragraph for why leaving it
     /// behind would let a later switch back to Journaled replay pre-restart data onto an already-rebuilt
     /// table.</summary>
+    /// <summary>Plan 011 D2 — the shared half of both start paths' resume detection, factored out because
+    /// there are now TWO markers to check and clearing one but not the other would leave a table that
+    /// changed its ShardBy permanently claiming to be resuming.
+    ///
+    /// Returns true when this activation is a RESUME (something was here before) rather than a first-ever
+    /// start, and unconditionally clears both markers so the table rebuilds from live traffic — the
+    /// RESTART-RESUME LIMITATION in the class doc, unchanged by D2.</summary>
+    private bool ClearResumeMarkersAndDetect()
+    {
+        var resuming = state.State.Snapshot.Count > 0 || state.State.HadRows;
+        if (!resuming) return false;
+
+        state.State.Snapshot = [];
+        state.State.HadRows = false;
+        state.State.Seq = 0;
+        _dirty = true;
+        return true;
+    }
+
     private async Task ClearStaleJournalAsync()
     {
         if (journalState.State.Entries.Count == 0) return;
@@ -1134,7 +1234,14 @@ public sealed class TableGrain(
     /// <summary>Plan 009 A2 — dispatches an awaited flush to the mode-appropriate write: Journaled goes
     /// through <see cref="JournalFlushAsync"/> (O(changed)), everything else — Batched, and every FINAL flush
     /// (StopAsync/OnDeactivateAsync, all modes) — through the existing <see cref="FlushAsync"/> (O(|table|)).</summary>
-    private Task FlushDirtyAsync() => _persistenceMode == TablePersistenceMode.Journaled ? JournalFlushAsync() : FlushAsync();
+    /// <summary>Plan 011 D2: a sharded table always takes the plain path, whatever its mode says. There is
+    /// no snapshot to journal — see the class doc's D2 paragraph on why that MEETS Journaled's contract
+    /// (Batched durability at O(changed) write cost) rather than quietly redefining it: each shard's own
+    /// write is already O(one key), and this grain's write is now O(1).</summary>
+    private Task FlushDirtyAsync() =>
+        _persistenceMode == TablePersistenceMode.Journaled && !_shardMirrorSuppressed
+            ? JournalFlushAsync()
+            : FlushAsync();
 
     /// <summary>Captures the live consolidated Z-set into <c>state.State</c> — MUST stay synchronous, on the
     /// grain turn: <see cref="_executor"/>/<see cref="_coordinatorLedger"/> are not thread-safe and this is
@@ -1174,6 +1281,21 @@ public sealed class TableGrain(
         }
 
         var snapshot = _coordinatorMode ? _coordinatorLedger.Visible : _executor.Snapshot();
+
+        // Plan 011 D2 — THE SHED. A sharded table captures a boolean instead of its rows: the shards are
+        // the durable per-key copy (see the class doc's D2 paragraph), and the only thing the mirror was
+        // ever load-bearing for is the resume/first-start distinction that TableGrainState.HadRows now
+        // carries. state.State.Snapshot is left empty and stays empty, so the write below is O(1) rather
+        // than O(|table|) and nothing here holds a second copy of any row.
+        if (_shardMirrorSuppressed)
+        {
+            state.State.HadRows = snapshot.Count > 0;
+            state.State.Seq++;
+            _dirty = false;
+            _fullCaptureNeeded = false;
+            return true;
+        }
+
         if (_fullCaptureNeeded)
         {
             state.State.Snapshot = snapshot.ToDictionary(

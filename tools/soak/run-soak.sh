@@ -25,7 +25,22 @@
 # Usage: tools/soak/run-soak.sh --label before [--minutes 8] [--interval-s 5] [--eps 200]
 #                               [--http-port 7511] [--grpc-port 7512] [--persistence Batched]
 #                               [--retention-max-rows 0] [--shard-by orderId] [--shard-idle-s 90]
-#                               [--shard-quantum-s 0]
+#                               [--shard-quantum-s 0] [--shape orders|instruments]
+#
+# --shape (plan 011 wave D2) picks WHICH TABLE is under load, because the two shapes answer different
+# questions and reporting only one of them would flatter the feature:
+#
+#   orders (default, and what every recorded run before D2 used) — `LATEST BY (<fresh GUID>)`, history
+#     LastN(8), i.e. an UNBOUNDED key space where each key gets exactly one row and one version. This is
+#     the WORST case for sharding: per-shard overhead (a grain, a state file, an activation) is paid per
+#     key and there is almost no per-key content to amortise it against. It is kept as the default
+#     precisely because it is the unflattering one and because the C1/C2/D1 numbers are comparable to it.
+#
+#   instruments — a BOUNDED key space (~10k) with LONG version trails (history All, unbounded), which is
+#     the shape the feature was actually built for: a financial instrument as a state machine, where the
+#     query is "everything for this key" and the memory that hurts is versions x keys. Here the resident
+#     set is bounded by the ACTIVE key set while the unsharded control holds every version of every key
+#     resident forever.
 #
 # --shard-by (plan 011 wave D1) turns the soak table into a SHARDED table keyed by the named column(s),
 # and adds two sampled series that only mean anything for one: shard_count (distinct keys the directory
@@ -77,6 +92,7 @@ RETENTION_MAX_ROWS="0"
 SHARD_BY=""
 SHARD_IDLE_S="90"
 SHARD_QUANTUM_S="0"
+SHAPE="orders"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -92,6 +108,7 @@ while [[ $# -gt 0 ]]; do
     --shard-by) SHARD_BY="$2"; shift 2 ;;
     --shard-idle-s) SHARD_IDLE_S="$2"; shift 2 ;;
     --shard-quantum-s) SHARD_QUANTUM_S="$2"; shift 2 ;;
+    --shape) SHAPE="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -139,7 +156,7 @@ TSV="$RESULTS_DIR/$LABEL-$TS.tsv"
 JSON="$RESULTS_DIR/$LABEL-$TS.json"
 HOSTLOG="$RESULTS_DIR/$LABEL-$TS.host.log"
 
-log "=== soak '$LABEL': ${MINUTES}m @ ${INTERVAL_S}s samples, ${EPS} eps, $PERSISTENCE, retentionMaxRows=$RETENTION_MAX_ROWS, shardBy='${SHARD_BY:-none}', :$HTTP_PORT/:$GRPC_PORT ==="
+log "=== soak '$LABEL': shape=$SHAPE, ${MINUTES}m @ ${INTERVAL_S}s samples, ${EPS} eps, $PERSISTENCE, retentionMaxRows=$RETENTION_MAX_ROWS, shardBy='${SHARD_BY:-none}', :$HTTP_PORT/:$GRPC_PORT ==="
 log "DataDir: $DATADIR"
 log "Host log: $HOSTLOG"
 
@@ -200,7 +217,33 @@ else
   SHARD_BY_JSON="[]"
 fi
 
-log "Creating soak source (eps=$EPS) and table..."
+log "Creating soak source (shape=$SHAPE, eps=$EPS) and table..."
+if [[ "$SHAPE" == "instruments" ]]; then
+  # The generic generator branch synthesises a Long field as Random(0, 10_000) — a BOUNDED key space,
+  # which is the whole point of this shape. Each key is therefore revisited many times over the run and
+  # accumulates a long version trail (history All, unbounded), while at any moment only the keys touched
+  # inside the collection age are active.
+  curl -s -o /dev/null -X POST "$BASE/api/sources" "${AUTH[@]}" -H 'Content-Type: application/json' -d '{
+    "name": "soak_instr",
+    "description": "Plan 011 wave D2 soak driver: bounded key space, long version trails.",
+    "eventsPerSecond": '"$EPS"',
+    "fields": [
+      {"name":"instrument","type":"Long"},
+      {"name":"stage","type":"String"},
+      {"name":"notional","type":"Double"}
+    ]
+  }'
+  TABLE_JSON=$(curl -s -X POST "$BASE/api/tables" "${AUTH[@]}" -H 'Content-Type: application/json' -d '{
+    "name": "soak_states",
+    "description": "Plan 011 wave D2 soak driver: instrument-with-legs shape.",
+    "sql": "SELECT instrument, stage, notional FROM soak_instr LATEST BY (instrument)",
+    "historyEnabled": true,
+    "historyMode": "All",
+    "persistence": "'"$PERSISTENCE"'",
+    "retentionMaxRows": '"$RETENTION_MAX_ROWS"',
+    "shardBy": '"$SHARD_BY_JSON"'
+  }')
+else
 curl -s -o /dev/null -X POST "$BASE/api/sources" "${AUTH[@]}" -H 'Content-Type: application/json' -d '{
   "name": "soak_orders",
   "description": "Plan 011 wave C soak driver: order_states-shaped load at a configurable rate.",
@@ -227,6 +270,7 @@ TABLE_JSON=$(curl -s -X POST "$BASE/api/tables" "${AUTH[@]}" -H 'Content-Type: a
   "retentionMaxRows": '"$RETENTION_MAX_ROWS"',
   "shardBy": '"$SHARD_BY_JSON"'
 }')
+fi
 TABLE_ID=$(echo "$TABLE_JSON" | "$BUN_BIN" -e 'const d=await Bun.stdin.text(); try{console.log(JSON.parse(d).id)}catch{console.log("")}')
 if [[ -z "$TABLE_ID" ]]; then
   log "FATAL: could not create soak table: $TABLE_JSON"
@@ -321,7 +365,7 @@ const out = {
   label: '$LABEL',
   generatedAtIso: new Date().toISOString(),
   window: { minutes: Number('$MINUTES'), intervalSeconds: Number('$INTERVAL_S'), warmupSeconds: Number('$WARMUP_S'), samples: rows.length },
-  load: { eventsPerSecond: Number('$EPS'), persistence: '$PERSISTENCE', retentionMaxRows: Number('$RETENTION_MAX_ROWS'), shardBy: '$SHARD_BY', shardIdleSeconds: Number('$SHARD_IDLE_S'), table: 'soak_states', shape: 'LATEST BY (orderId), history LastN(8) — the seeded order_states configuration' },
+  load: { eventsPerSecond: Number('$EPS'), persistence: '$PERSISTENCE', retentionMaxRows: Number('$RETENTION_MAX_ROWS'), shardBy: '$SHARD_BY', shardIdleSeconds: Number('$SHARD_IDLE_S'), shardQuantumSeconds: Number('$SHARD_QUANTUM_S'), table: 'soak_states', shape: '$SHAPE', shapeNote: '$SHAPE' === 'instruments' ? 'LATEST BY (instrument) over a ~10k bounded key space, history All (unbounded trails) — the instrument-with-legs shape the shard tier targets' : 'LATEST BY (orderId), history LastN(8) — the seeded order_states configuration, an unbounded key space with one row and one version per key' },
   series: { rss, state, rows: rowsS, deltas, shardCount, resident, activations },
   derived: {
     rssKbPerRowAdded: Number(((rss.last - rss.first) * 1024 / rowsGrown).toFixed(2)),

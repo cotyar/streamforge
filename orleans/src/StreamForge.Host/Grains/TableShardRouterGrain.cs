@@ -56,6 +56,16 @@ public sealed class TableShardRouterGrainState
 /// DIFFERENT shards run concurrently, which is safe precisely because no ordering exists between distinct
 /// keys in a Z-set stream.
 ///
+/// THE FENCED SCAN (plan 011 D2) LIVES HERE, and that is the whole trick. Because this grain forwards one
+/// batch at a time and AWAITS every shard's apply before returning, and because it is NON-REENTRANT, a
+/// scan taken as a call on this grain cannot overlap a forward: no batch is in flight while it runs, and
+/// none can start. Every shard therefore holds exactly the deltas of batches &lt;= the last forwarded
+/// sequence, and nothing beyond — a genuine consistent cut, with no shard-side waiting, no retained
+/// per-sequence versions, and nothing for an idle shard to hang on. See
+/// <see cref="TableShardScanResult"/>'s doc for why the obvious alternative ("each shard waits until its
+/// AppliedSeq reaches S") is wrong in both directions. The cost is real and is stated where users see it:
+/// the shard tier's ingest is paused for as long as the scan takes, which is why it is opt-in.
+///
 /// REENTRANCY. The call graph is strictly one-way: RegistryGrain → router → shard/directory. Nothing
 /// calls back into RegistryGrain, so no cycle is introduced and no <c>[MayInterleave]</c> allowlist entry
 /// is needed. That is also why <see cref="TableShardConfig"/> is carried on every batch rather than
@@ -166,6 +176,53 @@ public sealed class TableShardRouterGrain(
             RoutedDeltas = _routedDeltas,
             RouterActive = _sub is not null,
         };
+    }
+
+    /// <summary>Plan 011 D2 — THE FENCED SCAN. See <see cref="TableShardScanResult"/> for the argument;
+    /// the mechanism is that this method BEING a call on this non-reentrant grain is itself the fence. No
+    /// batch can be forwarded while it runs (Orleans queues the stream delivery behind it, on both stream
+    /// transports — memory streams and the push bus both deliver as real Orleans messages), and the last
+    /// one that was forwarded completed before returning, because OnDeltaBatchAsync awaits every shard.
+    /// So every shard read below holds exactly batches &lt;= <c>_seq</c> and nothing after.
+    ///
+    /// NOTHING WAITS, and that is the point about idle shards. A shard whose key has seen no traffic since
+    /// sequence 12 answers immediately, reporting AppliedSeq 12 against a fence of 9000 — correct, because
+    /// its state at 12 IS its state at 9000, and a design that made it wait for 9000 would hang forever on
+    /// the most ordinary configuration there is.
+    ///
+    /// The honest cost, stated where it is paid: the shard tier's ingest stalls for the duration. Shards
+    /// are read in chunks and a cold one is a disk read, so a fenced scan over a large page is not cheap.
+    /// The table's OWN snapshot, its delta stream and every other consumer of it are unaffected — only
+    /// this router's subscription backs up, and it drains afterwards.</summary>
+    public async Task<TableShardScanResult> FencedScanAsync(int limit, int offset)
+    {
+        var table = this.GetPrimaryKeyString();
+        var result = new TableShardScanResult
+        {
+            // -1 until something has actually been routed, for the same reason GetInfoAsync reports it
+            // that way: the HiLo reservation moves _seq forward at activation, and reporting it raw would
+            // name a fence no shard has ever seen.
+            FenceSeq = _routedBatches == 0 ? -1 : _seq,
+            RoutedDeltasAtFence = _routedDeltas,
+        };
+
+        if (!state.State.Enabled)
+        {
+            return result;
+        }
+
+        var directory = GrainFactory.GetGrain<ITableShardDirectoryGrain>(table);
+        result.ShardCount = await directory.GetCountAsync();
+        var keys = await directory.GetKeysAsync(limit, offset);
+
+        foreach (var chunk in keys.Chunk(32))
+        {
+            var stats = await Task.WhenAll(chunk.Select(k =>
+                GrainFactory.GetGrain<ITableShardGrain>(TableShardKeys.GrainKey(table, k)).GetStatsAsync()));
+            result.Shards.AddRange(stats);
+        }
+
+        return result;
     }
 
     private static TableShardConfig BuildConfig(TableDefinition def) => new()

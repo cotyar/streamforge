@@ -1,0 +1,79 @@
+{
+  "label": "d2-instr-sharded-idle60",
+  "generatedAtIso": "2026-08-13T15:12:50.920Z",
+  "window": {
+    "minutes": 8,
+    "intervalSeconds": 5,
+    "warmupSeconds": 20,
+    "samples": 94
+  },
+  "load": {
+    "eventsPerSecond": 200,
+    "persistence": "Batched",
+    "retentionMaxRows": 0,
+    "shardBy": "instrument",
+    "shardIdleSeconds": 60,
+    "shardQuantumSeconds": 20,
+    "table": "soak_states",
+    "shape": "instruments",
+    "shapeNote": "LATEST BY (instrument) over a ~10k bounded key space, history All (unbounded trails) — the instrument-with-legs shape the shard tier targets"
+  },
+  "series": {
+    "rss": {
+      "name": "rss_mb",
+      "first": 418,
+      "last": 1993,
+      "max": 1993,
+      "slopePerMin": 141.774
+    },
+    "state": {
+      "name": "state_kb",
+      "first": 11116,
+      "last": 41264,
+      "max": 41264,
+      "slopePerMin": 2194.295
+    },
+    "rows": {
+      "name": "rows",
+      "first": 2986,
+      "last": 9998,
+      "max": 9998,
+      "slopePerMin": 497.793
+    },
+    "deltas": {
+      "name": "deltas_in",
+      "first": 3542,
+      "last": 85435,
+      "max": 85435,
+      "slopePerMin": 10230.528
+    },
+    "shardCount": {
+      "name": "shard_count",
+      "first": 2986,
+      "last": 9998,
+      "max": 9998,
+      "slopePerMin": 497.948
+    },
+    "resident": {
+      "name": "resident_shards",
+      "first": 2986,
+      "last": 7577,
+      "max": 8244,
+      "slopePerMin": 244.22
+    },
+    "activations": {
+      "name": "shard_activations",
+      "first": 2986,
+      "last": 23225,
+      "max": 23225,
+      "slopePerMin": 2324.762
+    }
+  },
+  "derived": {
+    "rssKbPerRowAdded": 230.01,
+    "stateKbPerRowAdded": 4.299,
+    "residentFractionAtEnd": 0.7579,
+    "residentPeak": 8244
+  },
+  "tsv": "/Users/yuriyhabarov/work/crates-foundation/tools/soak/results/d2-instr-sharded-idle60-20260813T150423Z.tsv"
+}

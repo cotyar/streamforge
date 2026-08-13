@@ -1,0 +1,79 @@
+{
+  "label": "d2-sharded",
+  "generatedAtIso": "2026-08-13T14:46:27.896Z",
+  "window": {
+    "minutes": 6,
+    "intervalSeconds": 5,
+    "warmupSeconds": 20,
+    "samples": 70
+  },
+  "load": {
+    "eventsPerSecond": 100,
+    "persistence": "Batched",
+    "retentionMaxRows": 0,
+    "shardBy": "orderId",
+    "shardIdleSeconds": 30,
+    "shardQuantumSeconds": 10,
+    "table": "soak_states",
+    "shape": "orders",
+    "shapeNote": "LATEST BY (orderId), history LastN(8) — the seeded order_states configuration, an unbounded key space with one row and one version per key"
+  },
+  "series": {
+    "rss": {
+      "name": "rss_mb",
+      "first": 327,
+      "last": 1369,
+      "max": 1549,
+      "slopePerMin": 151.02
+    },
+    "state": {
+      "name": "state_kb",
+      "first": 6460,
+      "last": 137080,
+      "max": 137080,
+      "slopePerMin": 21996.286
+    },
+    "rows": {
+      "name": "rows",
+      "first": 1757,
+      "last": 34042,
+      "max": 34042,
+      "slopePerMin": 5437.697
+    },
+    "deltas": {
+      "name": "deltas_in",
+      "first": 1757,
+      "last": 34042,
+      "max": 34042,
+      "slopePerMin": 5437.697
+    },
+    "shardCount": {
+      "name": "shard_count",
+      "first": 1757,
+      "last": 34042,
+      "max": 34042,
+      "slopePerMin": 5437.841
+    },
+    "resident": {
+      "name": "resident_shards",
+      "first": 1757,
+      "last": 3909,
+      "max": 3922,
+      "slopePerMin": 72.714
+    },
+    "activations": {
+      "name": "shard_activations",
+      "first": 1757,
+      "last": 34042,
+      "max": 34042,
+      "slopePerMin": 5437.841
+    }
+  },
+  "derived": {
+    "rssKbPerRowAdded": 33.05,
+    "stateKbPerRowAdded": 4.046,
+    "residentFractionAtEnd": 0.1148,
+    "residentPeak": 3922
+  },
+  "tsv": "/Users/yuriyhabarov/work/crates-foundation/tools/soak/results/d2-sharded-20260813T144001Z.tsv"
+}

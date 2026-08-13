@@ -127,6 +127,13 @@ internal sealed class OrleansTableShardFacade(IClusterClient client) : ITableSha
         }
         return stats;
     }
+
+    /// <summary>Plan 011 D2. One grain call, deliberately: the ROUTER performs the whole scan, because the
+    /// router being busy IS the fence (see TableShardRouterGrain.FencedScanAsync). Doing the fan-out here,
+    /// from outside the cluster, would read shards while the router kept forwarding — which is exactly the
+    /// unfenced scan above.</summary>
+    public Task<TableShardScanResult> ScanFencedAsync(string tableName, int limit, int offset) =>
+        client.GetGrain<ITableShardRouterGrain>(tableName).FencedScanAsync(limit, offset);
 }
 
 /// <summary>Plan 006, D-C: connector runtime status. Generator-kind sources (Kind unset/"generator"),

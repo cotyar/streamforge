@@ -99,12 +99,18 @@ public sealed record TableRowsResponse(IReadOnlyList<TableRowDto> Rows, int Tota
 /// seconds. If a keyless listing on a sharded table were served by fanning out across the shard
 /// directory, every shard would wake on every poll, nothing would ever be swapped out, and the feature
 /// would be self-defeating while looking like it worked in every functional test. So it is not: a keyless
-/// listing is served from the table's own consolidated snapshot, exactly as it always has been, and
-/// <see cref="ShardsConsulted"/> is <c>false</c> to say so. Not one shard is contacted, so no amount of
-/// polling can wake an idle key.
+/// listing is served from the table itself, and <see cref="ShardsConsulted"/> is <c>false</c> to say so.
+/// Not one shard is contacted, so no amount of polling can wake an idle key.
 ///
-/// What that costs in honesty, stated rather than hidden: these rows come from the table's snapshot, so
-/// they are the table's view, not a fresh read of the shard tier. For a key, use
+/// Plan 011 D2: "from the table itself" now means LIVE, from its executor, because a sharded table no
+/// longer keeps a persisted consolidated mirror at all — the shards are the durable per-key copy, and the
+/// mirror was a second copy of the same rows (see TableGrain's own D2 paragraph). The rows served here are
+/// therefore FRESHER than the up-to-one-flush-interval-stale copy they replace, not staler.
+///
+/// What that costs in honesty, stated rather than hidden: these rows are the table's view, not a fresh
+/// read of the shard tier — and a STOPPED sharded table, having no executor to serve them from, reports
+/// zero rows where a stopped unsharded one still reports its last snapshot (the rows are not lost, they
+/// are in the shards, and a per-key lookup returns them). For a key, use
 /// <c>POST /api/tables/{id}/shard/lookup</c> — one grain, strictly consistent. For every shard, use
 /// <c>GET /api/tables/{id}/shards/scan</c>, which is a separate endpoint precisely because it does wake
 /// them.</summary>
@@ -132,8 +138,29 @@ public sealed record TableShardsResponse(
     IReadOnlyList<string> Keys);
 
 /// <summary>Plan 011 D1: <c>GET /api/tables/{id}/shards/scan</c>. <paramref name="Woke"/> is the number of
-/// shards this call activated — the honest price tag, reported so a caller can see what it just did.</summary>
-public sealed record TableShardScanResponse(IReadOnlyList<TableShardStats> Shards, int Woke, int Offset, int Limit);
+/// shards this call activated — the honest price tag, reported so a caller can see what it just did.
+///
+/// Plan 011 D2 adds <c>?fenced=true</c>, and the three fields below are what it answers with.
+/// <paramref name="Fenced"/> false is D1's behavior unchanged and remains the default: a set of per-shard
+/// observations taken at DIFFERENT sequence numbers while ingest continued, not a cut.
+/// <paramref name="Fenced"/> true is a genuine consistent cut at <paramref name="FenceSeq"/> — see
+/// <c>TableShardScanResult</c> for how, and for why "each shard waits until it has applied the fence
+/// sequence" is the wrong shape (it deadlocks on any idle shard and still admits post-fence deltas).
+///
+/// <paramref name="RoutedDeltasAtFence"/> is what makes the cut CHECKABLE instead of merely claimed: when
+/// the page covers every shard (<paramref name="ShardCount"/> shards returned), the sum of the shards'
+/// own <c>deltasApplied</c> must equal it exactly — nothing forwarded at or before the fence missing, and
+/// nothing from after it counted. Both are 0/-1 on an unfenced scan, where no such statement can be
+/// made.</summary>
+public sealed record TableShardScanResponse(
+    IReadOnlyList<TableShardStats> Shards,
+    int Woke,
+    int Offset,
+    int Limit,
+    bool Fenced = false,
+    long FenceSeq = -1,
+    long RoutedDeltasAtFence = 0,
+    int ShardCount = 0);
 
 // Row history (Feature B). The client hands back the exact row object it already has (from the live grid
 // or a search result) rather than pre-computing/round-tripping an opaque key — the server derives the

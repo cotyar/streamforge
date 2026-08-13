@@ -32,6 +32,11 @@ namespace StreamForge.Abstractions;
 [GenerateSerializer]
 public sealed class TableShardConfig
 {
+    /// <summary>The owning table's name — which is also what the whole shard tier is KEYED by (router,
+    /// directory and every shard grain; see TableShardKeys.GrainKey). Plan 011 D2 therefore refuses to
+    /// RENAME a sharded table: a rename would leave every existing shard filed under a key nothing would
+    /// ever look up again, silently, with nothing failing. See RegistryGrain.UpdateTableAsync's own note
+    /// for why the alternative (re-keying the tier on the immutable id) was not taken here.</summary>
     [Id(0)] public string TableName { get; set; } = "";
 
     /// <summary>The output columns whose values form the shard key — <see cref="TableDefinition.ShardBy"/>.</summary>
@@ -109,6 +114,53 @@ public sealed class TableShardStats
     [Id(2)] public int HistoryKeyCount { get; set; }
     [Id(3)] public long TotalVersions { get; set; }
     [Id(4)] public long AppliedSeq { get; set; } = -1;
+
+    /// <summary>Plan 011 D2: total deltas this shard has ever applied, persisted across deactivation. It
+    /// is what makes a FENCED scan CHECKABLE rather than merely asserted: summed over every shard of a
+    /// table it must equal the router's own <see cref="TableShardScanResult.RoutedDeltasAtFence"/> — no
+    /// delta forwarded at or before the fence missing, none from after it counted.</summary>
+    [Id(5)] public long DeltasApplied { get; set; }
+}
+
+/// <summary>Plan 011 D2 — THE FENCED SCAN's result: a genuine consistent cut across every shard of one
+/// table, at a named router sequence.
+///
+/// HOW THE CUT IS TAKEN, and why it is not "each shard waits until AppliedSeq &gt;= S". That obvious
+/// design is wrong twice over. It DEADLOCKS on the common case: the sequence is per TABLE and stamped per
+/// forwarded batch, so a shard whose key has seen no traffic since sequence 12 sits at AppliedSeq 12 while
+/// the table is at 9000, will never reach 9000, and would hang the scan forever — and its state at 12 IS
+/// its state at 9000, so there was never anything to wait for. And it does not even give a cut in the
+/// other direction: a shard that raced ahead to S+5 before being read would report deltas from AFTER the
+/// fence.
+///
+/// What is actually true is stronger and needs no waiting anywhere. The router forwards one batch at a
+/// time and AWAITS every shard's apply before returning (see TableShardRouterGrain.OnDeltaBatchAsync), and
+/// the scan runs as a call ON THE ROUTER, which is non-reentrant — so no batch can be forwarded while the
+/// scan is in flight, on either stream transport (memory streams and the push bus both deliver as real
+/// Orleans messages, subject to the activation's normal concurrency rules). Every shard therefore holds
+/// exactly the deltas of batches &lt;= S at the moment it is read, and nothing beyond. The cost is
+/// latency: the shard tier's ingest is paused for the duration of the scan, which is why this is opt-in
+/// and why the unfenced scan remains the default. No per-sequence versions are retained, so it costs no
+/// memory at all.
+///
+/// SCOPE: the cut is per REQUEST. Paging through a large table with several fenced calls gives several
+/// cuts, each honest about its own <see cref="FenceSeq"/> — it does not give one cut across the pages.</summary>
+[GenerateSerializer]
+public sealed class TableShardScanResult
+{
+    [Id(0)] public List<TableShardStats> Shards { get; set; } = [];
+
+    /// <summary>The router sequence this scan is a cut AT: the highest batch the router had fully
+    /// forwarded when the scan began. -1 = nothing has been routed yet.</summary>
+    [Id(1)] public long FenceSeq { get; set; } = -1;
+
+    /// <summary>Deltas the router had forwarded up to and including <see cref="FenceSeq"/>. The
+    /// verifiable half of the fence — see <see cref="TableShardStats.DeltasApplied"/>.</summary>
+    [Id(2)] public long RoutedDeltasAtFence { get; set; }
+
+    /// <summary>Live shard keys at the fence, from the directory — so a caller can tell "this page is all
+    /// of them" (and the DeltasApplied sum is therefore comparable) from "this page is a page".</summary>
+    [Id(3)] public int ShardCount { get; set; }
 }
 
 /// <summary>Plan 011 D1: table-level sharding metrics, answerable WITHOUT touching a single shard — which

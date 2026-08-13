@@ -34,6 +34,7 @@ import { MetadataEditor } from '../components/MetadataEditor'
 import { RowHistorySheet } from '../components/RowHistorySheet'
 import { DataflowPanel } from '../components/DataflowPanel'
 import { SinksEditor } from '../components/SinksEditor'
+import { ShardingPanel, shardByErrorToast } from '../components/ShardingPanel'
 import { cn } from '@/lib/utils'
 import { formatEpochMs, isEpochMsColumn } from '@/lib/format'
 import { Card, CardContent } from '@/components/ui/card'
@@ -428,7 +429,23 @@ function SearchAndView({
       sinks: table.sinks ?? [],
       retentionMaxRows: table.retentionMaxRows ?? 0,
       retentionTtlMs: table.retentionTtlMs ?? 0,
+      // Plan 011 D1/D2: carried like every other field here. Omitting it would be read by the server as
+      // "leave as-is", which is survivable — but sending the table's real value keeps this helper's own
+      // contract ("resend the ENTIRE current config") true, and it is what makes the sharding card's
+      // toggle able to send a CLEARED list at all.
+      shardBy: table.shardBy ?? [],
       ...overrides,
+    }
+  }
+
+  /** Plan 011 D — see ShardingPanel. One PUT, and the server's own refusal (bad column, searchEnabled,
+   * MemoryOnly, a rename that would strand the shards) is surfaced verbatim rather than paraphrased:
+   * the reason a combination is refused is exactly what the reader needs. */
+  async function applyShardBy(next: string[]) {
+    try {
+      onTableChange(await tablesApi.update(table.id, fullUpdateBody({ shardBy: next })))
+    } catch (err) {
+      shardByErrorToast(err)
     }
   }
 
@@ -1022,6 +1039,11 @@ function SearchAndView({
         </CardContent>
       </Card>
 
+      {/* Plan 011 wave D — key sharding, plus the per-key lookup it exists for. Its own component
+          because it is two related surfaces (a config control and a live read) rather than one card,
+          and because the metrics it polls have a rule attached: they must never wake a shard. */}
+      <ShardingPanel table={table} canEdit={canEdit} onApplyShardBy={applyShardBy} />
+
       <Card>
         <CardContent className="flex flex-col gap-3">
           <div className="flex items-center justify-between">
@@ -1280,6 +1302,7 @@ export function TableDetailPage() {
         journalMaxEntries: table?.journalMaxEntries ?? 0,
         retentionMaxRows: table?.retentionMaxRows ?? 0,
         retentionTtlMs: table?.retentionTtlMs ?? 0,
+        shardBy: table?.shardBy ?? [],
         sinks: table?.sinks ?? [],
       }
       let saved: TableDefinition
