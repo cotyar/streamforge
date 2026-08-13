@@ -162,6 +162,29 @@ public static class StreamForgeApiExtensions
             o.Theme = ScalarTheme.Kepler;
         });
 
+        // Per-entity interactive references: /scalar/tables/{id}, /scalar/pipelines/{id},
+        // /scalar/sources/{name}. Same Scalar UI as /scalar above, pointed at that entity's own document
+        // (EntityOpenApiEndpoints) instead of the whole application's — the REST twin of the per-entity
+        // .proto downloads, and what the console's API Explorer links to per entity.
+        //
+        // The mechanism is Scalar's (options, HttpContext) overload: the endpoint prefix carries a normal
+        // route parameter, and OpenApiRoutePattern is chosen per request from its value. No CDN is
+        // involved — Scalar.AspNetCore serves its own bundle from embedded resources under each prefix,
+        // and each MapScalarApiReference call maps that static-asset route under its own prefix, so the
+        // four pages coexist. Scalar's page fetches its document without an Authorization header, which
+        // is why the document routes are anonymous; see EntityOpenApiEndpoints' reachability note.
+        foreach (var (segment, parameter) in
+                 new[] { ("tables", "id"), ("pipelines", "id"), ("sources", "name") })
+        {
+            app.MapScalarApiReference($"/scalar/{segment}/{{{parameter}}}", (o, httpContext) =>
+            {
+                var key = httpContext.Request.RouteValues[parameter] as string ?? "";
+                o.Title = $"StreamForge — {segment}/{key}";
+                o.Theme = ScalarTheme.Kepler;
+                o.OpenApiRoutePattern = $"/api/{segment}/{Uri.EscapeDataString(key)}/{EntityOpenApiEndpoints.RouteSuffix}";
+            });
+        }
+
         // Anonymous liveness/readiness probe (plan 007 W0): used by the admin app, docker compose
         // healthchecks, and Cloud Run startup probes. Deliberately unauthenticated and cheap.
         // /api/healthz alias: Google Frontend intercepts external /healthz requests on run.app URLs
@@ -185,6 +208,7 @@ public static class StreamForgeApiExtensions
         app.MapChatEndpoints();
         app.MapMetaEndpoints(options);
         app.MapTransportsEndpoints();
+        app.MapEntityOpenApiEndpoints();
         app.MapHub<StreamHub>("/hubs/stream");
 
         // Interactive user documentation (docs/index.html), served at /docs. Per decision D-F, /docs

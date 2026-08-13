@@ -159,16 +159,17 @@ public static class PipelinesEndpoints
             return Results.Ok(PlanEndpointsLogic.BuildPipelinePlan(def, schemas));
         }).RequireAuthorization("Viewer");
 
+        // .Produces<>() for the same reason as TablesEndpoints' /rows — see the note there.
         group.MapGet("/{id}/results", async (string id, int? limit, IPipelineReadFacade pipelines) =>
             Results.Ok(await pipelines.GetRecentResultsAsync(id, limit ?? 100))
-        ).RequireAuthorization("Viewer");
+        ).Produces<List<ResultEnvelope>>().RequireAuthorization("Viewer");
 
         group.MapGet("/{id}/metrics", async (string id, IPipelineReadFacade pipelines) =>
             Results.Ok(await pipelines.GetMetricsAsync(id))
         ).RequireAuthorization("Viewer");
     }
 
-    private static async Task<Dictionary<string, SourceSchema>> BuildSchemasAsync(ICatalogFacade registry)
+    internal static async Task<Dictionary<string, SourceSchema>> BuildSchemasAsync(ICatalogFacade registry)
     {
         var sources = await registry.GetSourcesAsync();
         var schemas = new Dictionary<string, SourceSchema>();

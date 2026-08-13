@@ -244,6 +244,14 @@ function RestCard({ entity }: { entity: DynamicEntityMetaDto }) {
   const auth = 'Authorization: Bearer $TOKEN'
   const loginCmd = `curl -s -X POST ${origin}/api/auth/login -H 'content-type: application/json' -d '{"username":"admin","password":"admin123!"}'`
 
+  // Route segment + id-or-name key this entity is addressed by (sources go by name, tables/pipelines
+  // by id — same split the proto-download routes use). Drives the per-entity OpenAPI document and the
+  // Scalar page that renders it.
+  const segment = entity.kind === 'source' ? 'sources' : entity.kind === 'pipeline' ? 'pipelines' : 'tables'
+  const key = entity.kind === 'source' ? entity.name : entity.id
+  const specPath = `/api/${segment}/${encodeURIComponent(key)}/openapi.json`
+  const scalarPath = `/scalar/${segment}/${encodeURIComponent(key)}`
+
   let routes: { label: string; text: string }[]
   let note: string | null = null
 
@@ -288,6 +296,10 @@ function RestCard({ entity }: { entity: DynamicEntityMetaDto }) {
     ]
   }
 
+  // Same idea as the .proto download one row up, in REST's own currency: this entity's endpoints as a
+  // standalone OpenAPI document. Anonymous (a Scalar page fetches it without headers), so no -H here.
+  routes.push({ label: 'Get OpenAPI document', text: `curl -s ${origin}${specPath}` })
+
   return (
     <Card>
       <CardHeader>
@@ -306,9 +318,22 @@ function RestCard({ entity }: { entity: DynamicEntityMetaDto }) {
         ))}
         {note && <p className="text-[11px] text-muted-foreground">{note}</p>}
         <div>
-          <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Interactive reference</p>
+          <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            Interactive reference — this {entity.kind}
+          </p>
+          <SnippetRow text={`${origin}${scalarPath}`} />
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Scalar rendering only this {entity.kind}'s document ({specPath}): every path already carries{' '}
+            <code className="font-mono">{key}</code>, and the row payloads use its real output schema. Paste the token
+            from the login call into Scalar's auth box to send requests.
+          </p>
+        </div>
+        <div>
+          <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            Interactive reference — whole API
+          </p>
           <SnippetRow text={`${origin}/scalar`} />
-          <p className="mt-1 text-[11px] text-muted-foreground">Same Bearer token as above.</p>
+          <p className="mt-1 text-[11px] text-muted-foreground">Every endpoint of the application. Same Bearer token as above.</p>
         </div>
       </CardContent>
     </Card>

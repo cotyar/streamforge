@@ -189,6 +189,11 @@ public static class TablesEndpoints
             return Results.Ok(PlanEndpointsLogic.BuildTablePlan(def, streamSchemas, tableSchemas, options.Flavor));
         }).RequireAuthorization("Viewer");
 
+        // The .Produces<>() below is what puts this response's shape into the generated OpenAPI document —
+        // an IResult-returning handler describes nothing on its own. That in turn is what lets the
+        // per-entity document (EntityOpenApiEndpoints) replace the free-form TableRowDto.row with this
+        // table's real output schema, which is most of the point of a per-entity spec. Same for /search
+        // and for PipelinesEndpoints' /results.
         group.MapGet("/{id}/rows", async (string id, int? limit, int? offset, ICatalogFacade registry, ITableReadFacade tables) =>
         {
             var def = await registry.GetTableAsync(id);
@@ -215,7 +220,7 @@ public static class TablesEndpoints
                 ShardsConsulted: false,
                 "Served live from the table's own executor; no shard was activated. Use POST /shard/lookup for one key, or GET /shards/scan (optionally ?fenced=true) for an explicit full scan.");
             return Results.Ok(new TableRowsResponse(rows, total, seq, frontierEpoch, shardNote));
-        }).RequireAuthorization("Viewer");
+        }).Produces<TableRowsResponse>().RequireAuthorization("Viewer");
 
         group.MapGet("/{id}/metrics", async (string id, ICatalogFacade registry, ITableReadFacade tables) =>
         {
@@ -273,7 +278,7 @@ public static class TablesEndpoints
                 ? []
                 : await tables.SearchAsync(def.Name, query, limit ?? 100);
             return Results.Ok(new TableSearchResponse(rows, def.SearchMode.ToString(), def.SearchEnabled, rows.Count));
-        }).RequireAuthorization("Viewer");
+        }).Produces<TableSearchResponse>().RequireAuthorization("Viewer");
 
         // Row history (Feature B). POST (not GET) because the lookup key is the row's own content — an
         // arbitrary-shaped object, awkward to round-trip through a query string — not a resource
