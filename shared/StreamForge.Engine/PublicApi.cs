@@ -98,7 +98,47 @@ public sealed class TableCompileResult
 
 /// <summary>One Z-set delta: a row entering (+1) or leaving (-1) a table's output. Weights other than
 /// ±1 arise from join fan-out (weight multiplication) or upstream retraction cascades.</summary>
-public sealed record TableDelta(EventRecord Row, long Weight);
+/// <param name="Row">The output row.</param>
+/// <param name="Weight">Signed Z-set weight.</param>
+public sealed record TableDelta(EventRecord Row, long Weight)
+{
+    /// <summary>Plan 011 C2 — ADDITIVE (default false, so every existing producer and consumer is
+    /// unchanged): true only for a retraction emitted because the table's ROW RETENTION policy evicted
+    /// this row, as opposed to one emitted because an upstream input retracted it. The distinction is not
+    /// cosmetic: an ordinary retraction means "this row is no longer true", and per-row-identity history
+    /// records it as one more retraction against a key that may well come back; an eviction means "this
+    /// table is a bounded view and has stopped carrying this row", and the honest thing for history to do
+    /// is drop the key's version list with it (otherwise retention bounds the table while history keeps
+    /// every key it ever saw — see StreamForge.Host.Grains.TableHistoryGrain). Consumers that do not care
+    /// simply ignore it and treat the delta as the plain retraction it also is.</summary>
+    public bool Retention { get; init; }
+}
+
+/// <summary>
+/// Plan 011 C2 — an opt-in, per-table ROW RETENTION policy. DEFAULT OFF (<see cref="None"/>), and that
+/// default is load-bearing: a table with retention is NOT the full relation its SQL describes, it is a
+/// BOUNDED VIEW of that relation. Turning it on changes the table's results — rows that the SQL says
+/// belong in the table are deliberately dropped, with a real retraction, once the bound is exceeded.
+/// Enable it when an unbounded key space (a per-request GUID, an order id, a session id) would otherwise
+/// grow the table forever; do not enable it on a table whose consumers assume completeness.
+///
+/// The two bounds compose (both are applied, TTL first): <paramref name="MaxRows"/> caps how many rows
+/// the table retains at once; <paramref name="TtlMs"/> caps how far back in EVENT TIME a retained row may
+/// be. Both are evaluated against the row's event timestamp, never the wall clock — see IRetentionScope's
+/// doc comment for the determinism and the "if the input stops, event time stops" consequence.
+/// </summary>
+/// <param name="MaxRows">Maximum retained rows; 0 = unbounded (no row-count bound).</param>
+/// <param name="TtlMs">Maximum age in event-time milliseconds, measured back from the highest event
+/// timestamp the table has admitted; 0 = unbounded (no age bound).</param>
+public sealed record TableRetentionPolicy(int MaxRows, long TtlMs)
+{
+    /// <summary>Retention off — the default for every table, and byte-for-byte the pre-011 behavior.</summary>
+    public static readonly TableRetentionPolicy None = new(0, 0);
+
+    /// <summary>True when at least one bound is set. A policy that is not enabled costs the executor
+    /// nothing: no ordering index is built and the hot path keeps its original shape.</summary>
+    public bool IsEnabled => MaxRows > 0 || TtlMs > 0;
+}
 
 public static class SqlCompiler
 {
@@ -120,6 +160,23 @@ public static class SqlCompiler
 public sealed partial class TablePlan
 {
     public TableExecutor CreateExecutor() => new(this);
+
+    /// <summary>Plan 011 C2 — whether a <see cref="TableRetentionPolicy"/> can be honestly applied to a
+    /// table with THIS plan shape. True for a plan that reads one leaf source with no joins, no set
+    /// operation, no derived/CTE source and no GROUP BY/aggregate, i.e. exactly the shapes whose entire
+    /// per-row state is reachable from the terminal stage (LATEST BY's per-key map, or the consolidated
+    /// ledger for a plain projection).
+    ///
+    /// WHY THE OTHERS ARE EXCLUDED RATHER THAN "SUPPORTED, PARTIALLY". A join's ZSet indexes hold the
+    /// INPUT rows of both sides; evicting an output row leaves both indexes untouched and growing, so a
+    /// policy there would bound the number the console shows while bounding nothing that occupies memory
+    /// — the exact theatre this feature exists to avoid. A GROUP BY is excluded for a different and
+    /// stronger reason: evicting a group would drop its running aggregate state, so the next contributing
+    /// delta would restart that group's SUM/COUNT from zero and silently emit a WRONG value — a bounded
+    /// view is a defensible thing to offer, a wrong aggregate is not. Callers (RegistryGrain /
+    /// CatalogStore) reject the combination up front with that message rather than accepting it and
+    /// under-delivering.</summary>
+    public bool SupportsRetention => Runtime.TableRetentionSupport.IsSupported(Compiled);
 }
 
 /// <summary>
@@ -146,4 +203,26 @@ public sealed partial class TableExecutor
     /// reverse search index kept incrementally in sync) can look a delta's row up in Snapshot() without
     /// re-deriving the same key by hand.</summary>
     public string CanonicalRowKey(EventRecord row) => Runtime.JsonText.SerializeCanonicalRow(row);
+
+    /// <summary>
+    /// Plan 011 C2 — the eviction seam. ADDITIVE: not calling it (or passing
+    /// <see cref="TableRetentionPolicy.None"/>) leaves this executor byte-for-byte the pre-011 one.
+    ///
+    /// WHY CONFIGURATION AND NOT AN "EvictNow()" CALL, which is the shape a host would find easier to
+    /// schedule: eviction must be indistinguishable from an ordinary retraction to every consumer —
+    /// downstream tables, the delta stream, SignalR, sinks, the search index, the history grain — and the
+    /// only way to guarantee that for ALL of them at once is to emit the eviction retractions through the
+    /// exact same return value ordinary deltas already travel through. So the policy is installed once and
+    /// the evictions are appended to whatever <see cref="OnStreamEvent"/>/<see cref="OnTableDelta"/>
+    /// return, after that call's own deltas. A host that already publishes what those methods return
+    /// therefore stays consistent with no new plumbing, and no consumer can be forgotten by omission. It
+    /// also keeps the Engine free of any clock or scheduler — the exact thing a periodic EvictNow() would
+    /// have needed a host type for.
+    ///
+    /// Idempotent and re-callable (a table restart re-applies its definition's current policy). Throws
+    /// <see cref="InvalidOperationException"/> for an ENABLED policy on a plan shape where retention
+    /// cannot reclaim the real state — see <see cref="TablePlan.SupportsRetention"/> for which shapes and
+    /// why refusing beats silently trimming the copy.
+    /// </summary>
+    public void ConfigureRetention(TableRetentionPolicy policy) => ConfigureRetentionCore(policy);
 }

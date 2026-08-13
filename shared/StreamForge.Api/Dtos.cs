@@ -61,7 +61,11 @@ public sealed record CreateTableRequest(
     int JournalMaxEntries = 0,
     // Plan 009 B2: where this table's deltas are republished. Same null-means-unchanged convention as
     // CreatePipelineRequest.Sinks above.
-    List<SinkSpec>? Sinks = null);
+    List<SinkSpec>? Sinks = null,
+    // Plan 011 C2: opt-in row retention. 0/0 (the defaults) = off, i.e. the table holds every row its SQL
+    // says it should. Non-zero makes the table a BOUNDED VIEW — see TableDefinition.RetentionMaxRows.
+    int RetentionMaxRows = 0,
+    long RetentionTtlMs = 0);
 
 public sealed record TableSearchResponse(IReadOnlyList<TableRowDto> Rows, string Mode, bool Enabled, int Total);
 

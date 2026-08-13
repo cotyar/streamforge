@@ -54,6 +54,8 @@ public static class TablesEndpoints
                     Persistence = req.Persistence,
                     FlushMs = req.FlushMs,
                     JournalMaxEntries = req.JournalMaxEntries,
+                    RetentionMaxRows = req.RetentionMaxRows,
+                    RetentionTtlMs = req.RetentionTtlMs,
                     // Plan 009 B2: see the identical note in PipelinesEndpoints' create handler — a
                     // freshly-created table has no stored secrets to merge against.
                     Sinks = req.Sinks ?? [],
@@ -91,6 +93,8 @@ public static class TablesEndpoints
             existing.Persistence = req.Persistence;
             existing.FlushMs = req.FlushMs;
             existing.JournalMaxEntries = req.JournalMaxEntries;
+            existing.RetentionMaxRows = req.RetentionMaxRows;
+            existing.RetentionTtlMs = req.RetentionTtlMs;
             // Plan 009 B2: null Sinks = unchanged; a non-null Sinks carrying "***" is restored from the
             // stored value first (SecretsMasker.MergeSinkSecrets — see the identical, more detailed note
             // in PipelinesEndpoints' PUT handler, including the Orleans-flavor RegistryGrain gap that

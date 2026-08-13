@@ -24,6 +24,13 @@
 #
 # Usage: tools/soak/run-soak.sh --label before [--minutes 8] [--interval-s 5] [--eps 200]
 #                               [--http-port 7511] [--grpc-port 7512] [--persistence Batched]
+#                               [--retention-max-rows 0]
+#
+# --retention-max-rows (plan 011 wave C2) sets the soak table's opt-in ROW RETENTION bound. 0 (the default)
+# reproduces the C1 runs exactly — an unbounded table — so the recorded before/after numbers stay
+# comparable; a positive value makes the soak table a BOUNDED VIEW (oldest rows evicted by event timestamp,
+# with real retractions), which is the configuration whose slope answers "does the bound actually bound
+# memory, or only the row count the console shows?".
 #
 # --persistence selects the soak table's TablePersistenceMode. It matters: Batched (the default, and the
 # seeded default) rewrites the WHOLE state file every FlushMs by contract, so its residual cost stays
@@ -50,6 +57,7 @@ HTTP_PORT="7511"
 GRPC_PORT="7512"
 WARMUP_S="20"
 PERSISTENCE="Batched"
+RETENTION_MAX_ROWS="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -61,6 +69,7 @@ while [[ $# -gt 0 ]]; do
     --grpc-port) GRPC_PORT="$2"; shift 2 ;;
     --warmup-s) WARMUP_S="$2"; shift 2 ;;
     --persistence) PERSISTENCE="$2"; shift 2 ;;
+    --retention-max-rows) RETENTION_MAX_ROWS="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -108,7 +117,7 @@ TSV="$RESULTS_DIR/$LABEL-$TS.tsv"
 JSON="$RESULTS_DIR/$LABEL-$TS.json"
 HOSTLOG="$RESULTS_DIR/$LABEL-$TS.host.log"
 
-log "=== soak '$LABEL': ${MINUTES}m @ ${INTERVAL_S}s samples, ${EPS} eps, $PERSISTENCE, :$HTTP_PORT/:$GRPC_PORT ==="
+log "=== soak '$LABEL': ${MINUTES}m @ ${INTERVAL_S}s samples, ${EPS} eps, $PERSISTENCE, retentionMaxRows=$RETENTION_MAX_ROWS, :$HTTP_PORT/:$GRPC_PORT ==="
 log "DataDir: $DATADIR"
 log "Host log: $HOSTLOG"
 
@@ -177,7 +186,8 @@ TABLE_JSON=$(curl -s -X POST "$BASE/api/tables" "${AUTH[@]}" -H 'Content-Type: a
   "historyEnabled": true,
   "historyMode": "LastN",
   "historyLimit": 8,
-  "persistence": "'"$PERSISTENCE"'"
+  "persistence": "'"$PERSISTENCE"'",
+  "retentionMaxRows": '"$RETENTION_MAX_ROWS"'
 }')
 TABLE_ID=$(echo "$TABLE_JSON" | "$BUN_BIN" -e 'const d=await Bun.stdin.text(); try{console.log(JSON.parse(d).id)}catch{console.log("")}')
 if [[ -z "$TABLE_ID" ]]; then
@@ -259,7 +269,7 @@ const out = {
   label: '$LABEL',
   generatedAtIso: new Date().toISOString(),
   window: { minutes: Number('$MINUTES'), intervalSeconds: Number('$INTERVAL_S'), warmupSeconds: Number('$WARMUP_S'), samples: rows.length },
-  load: { eventsPerSecond: Number('$EPS'), persistence: '$PERSISTENCE', table: 'soak_states', shape: 'LATEST BY (orderId), history LastN(8) — the seeded order_states configuration' },
+  load: { eventsPerSecond: Number('$EPS'), persistence: '$PERSISTENCE', retentionMaxRows: Number('$RETENTION_MAX_ROWS'), table: 'soak_states', shape: 'LATEST BY (orderId), history LastN(8) — the seeded order_states configuration' },
   series: { rss, state, rows: rowsS, deltas },
   derived: {
     rssKbPerRowAdded: Number(((rss.last - rss.first) * 1024 / rowsGrown).toFixed(2)),

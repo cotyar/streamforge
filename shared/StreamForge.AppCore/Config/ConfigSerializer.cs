@@ -102,6 +102,8 @@ public static class ConfigSerializer
         HistoryLimit = t.HistoryLimit,
         HistoryByField = t.HistoryByField,
         HistoryWindowMs = t.HistoryWindowMs,
+        RetentionMaxRows = t.RetentionMaxRows,
+        RetentionTtlMs = t.RetentionTtlMs,
         Parallelism = t.Parallelism,
         Sinks = includeSecrets ? [.. t.Sinks] : SecretsMasker.MaskSinks(t.Sinks),
     };

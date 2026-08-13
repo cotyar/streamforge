@@ -81,4 +81,13 @@ public sealed class ConfigTable
     /// <summary>Plan 009 B2: mirrors <see cref="TableDefinition.Sinks"/> — see the identical note on
     /// <see cref="ConfigPipeline.Sinks"/>.</summary>
     public List<SinkSpec> Sinks { get; set; } = [];
+
+    /// <summary>Plan 011 C2: mirrors <see cref="TableDefinition.RetentionMaxRows"/>. Carried through
+    /// export/import — unlike the purely operational Persistence/FlushMs knobs, which this document
+    /// deliberately does not carry, retention changes what ROWS the table holds, so a config round-trip
+    /// that dropped it would promote a differently-behaving table.</summary>
+    public int RetentionMaxRows { get; set; }
+
+    /// <summary>Plan 011 C2: mirrors <see cref="TableDefinition.RetentionTtlMs"/>.</summary>
+    public long RetentionTtlMs { get; set; }
 }

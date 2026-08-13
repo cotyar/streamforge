@@ -68,6 +68,16 @@ public sealed partial class TableExecutor
 
     private long _epochCounter;
 
+    // Plan 011 C2 — row retention. All three are inert until ConfigureRetention installs an ENABLED policy,
+    // so a table without one keeps the pre-011 hot path exactly (no ordering index, no per-batch check
+    // beyond a single `IsEnabled` bool test). _retentionScope is whichever structure actually owns this
+    // plan's rows — the LATEST BY op's per-key map, or _ledger for a plain projection; _ledgerScope is the
+    // same object as _retentionScope in the latter case, held separately only because ApplyConsolidation
+    // has to keep its ordering index in step with the ledger.
+    private TableRetentionPolicy _retention = TableRetentionPolicy.None;
+    private IRetentionScope? _retentionScope;
+    private LedgerRetentionScope? _ledgerScope;
+
     // Plan 008 W3: set (non-null) only when this plan's CompiledTablePlan.UnionBranches is non-null — a
     // set-operation root. Every OTHER field above (`_joins`, `_filterProject`, `_reduce`, `_latestBy`,
     // `_ingestOps`, `_roles`) stays completely unused for such a plan — EnsureInit/HandleIncoming both
@@ -256,6 +266,69 @@ public sealed partial class TableExecutor
         return _ledger.Visible;
     }
 
+    /// <summary>Plan 011 C2 — see <see cref="TableExecutor.ConfigureRetention"/> for the contract and for
+    /// why the policy is installed rather than driven. Picks the scope from the plan's shape: LATEST BY
+    /// owns its rows in <see cref="TableLatestByOp.Current"/>, everything else supported owns them in
+    /// <see cref="_ledger"/>. An unsupported shape throws instead of quietly installing a policy that
+    /// could only trim the derived copies (see <see cref="TablePlan.SupportsRetention"/>).</summary>
+    private void ConfigureRetentionCore(TableRetentionPolicy policy)
+    {
+        EnsureInit();
+
+        if (!policy.IsEnabled)
+        {
+            _retention = TableRetentionPolicy.None;
+            return;
+        }
+
+        if (!TableRetentionSupport.IsSupported(_plan.Compiled))
+        {
+            throw new InvalidOperationException(
+                "Row retention is not supported for this table's plan shape (joins, set operations, derived sources and GROUP BY/aggregates are excluded) — see TablePlan.SupportsRetention.");
+        }
+
+        _retention = policy;
+
+        if (_latestBy is not null)
+        {
+            _latestBy.EnableRetention();
+            _retentionScope = _latestBy;
+        }
+        else
+        {
+            _ledgerScope ??= new LedgerRetentionScope(_ledger);
+            // Seed the ordering index from whatever is already consolidated. Empty in practice (a table
+            // configures retention on start, against a brand-new executor), but seeding keeps the index
+            // and the ledger consistent by construction rather than by call-order luck.
+            foreach (var key in _ledger.Visible.Keys.ToList()) _ledgerScope.Observe(key);
+            _retentionScope = _ledgerScope;
+        }
+    }
+
+    /// <summary>Plan 011 C2 — applies the configured bounds after a batch has been consolidated, returning
+    /// the eviction retractions to append to that batch's own output. TTL runs before MaxRows so an
+    /// already-expired row is never counted against the row budget. Each eviction is folded into the
+    /// ledger through the ordinary <see cref="ApplyConsolidation"/> path — a retraction is a retraction,
+    /// whoever emitted it.</summary>
+    private List<TableDelta> RunRetention()
+    {
+        var evicted = new List<TableDelta>();
+        var scope = _retentionScope!;
+
+        if (_retention.TtlMs > 0)
+        {
+            evicted.AddRange(scope.EvictOlderThan(scope.MaxObservedTs - _retention.TtlMs));
+        }
+
+        if (_retention.MaxRows > 0 && scope.RetainedCount > _retention.MaxRows)
+        {
+            evicted.AddRange(scope.EvictOldest(scope.RetainedCount - _retention.MaxRows));
+        }
+
+        foreach (var delta in evicted) ApplyConsolidation(delta);
+        return evicted;
+    }
+
     /// <summary>Test-only introspection hook (see TableConsolidationLedgerTests) for the debt side-table's
     /// size: the number of canonical row keys currently holding outstanding negative running weight, not yet
     /// netted against a later positive delta. Zero whenever every key's history so far is either untouched
@@ -263,6 +336,15 @@ public sealed partial class TableExecutor
     /// contract (PublicApi.cs); `internal` + this assembly's InternalsVisibleTo to StreamForge.Engine.Tests
     /// is enough for the ledger itself to be provable, without adding surface area hosts could depend on.</summary>
     internal int DebtCount => _ledger.DebtCount;
+
+    /// <summary>Plan 011 C2 test-only introspection hook, in the same spirit (and with the same
+    /// `internal` + InternalsVisibleTo justification) as <see cref="DebtCount"/> above: how many entries
+    /// the RETENTION SCOPE currently holds — i.e. the size of the structure that actually owns this
+    /// table's rows (TableLatestByOp.Current, or the ledger), not of the consolidated output copy. It
+    /// exists because the one thing a retention test MUST prove is exactly the thing Snapshot() cannot
+    /// show: that eviction reclaimed the operator's own per-key state and not merely the mirror. -1 when
+    /// no policy is configured.</summary>
+    internal int RetainedStateCount => _retentionScope?.RetainedCount ?? -1;
 
     private List<TableDelta> HandleIncoming(string name, EventRecord evt, long weight)
     {
@@ -314,6 +396,11 @@ public sealed partial class TableExecutor
             ApplyConsolidation(delta);
         }
 
+        // Plan 011 C2: eviction retractions ride out on this call's own return value, AFTER its real
+        // deltas — see TableExecutor.ConfigureRetention's doc for why that (and not a separate method) is
+        // what keeps every downstream consumer consistent.
+        if (_retention.IsEnabled) output.AddRange(RunRetention());
+
         return output;
     }
 
@@ -331,5 +418,8 @@ public sealed partial class TableExecutor
     {
         var key = JsonText.SerializeCanonicalRow(delta.Row);
         _ledger.Apply(key, delta.Row, delta.Weight);
+        // Plan 011 C2: null unless this plan's retention scope IS the ledger, in which case its ordering
+        // index has to observe every visibility change the ledger just made.
+        _ledgerScope?.Observe(key);
     }
 }

@@ -298,6 +298,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
         var compileResult = CompileTableSql(def.Sql, excludeTableId: def.Id);
         ValidateHistoryConfig(def, compileResult);
+        ValidateRetention(def, compileResult);
         ApplyCompileResult(def, compileResult);
 
         state.Tables.Add(def);
@@ -324,6 +325,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
         var compileResult = CompileTableSql(def.Sql, excludeTableId: existing.Id);
         ValidateHistoryConfig(def, compileResult);
+        ValidateRetention(def, compileResult);
 
         var sqlChanged = existing.Sql != def.Sql;
         var searchChanged = existing.SearchEnabled != def.SearchEnabled || existing.SearchMode != def.SearchMode;
@@ -336,6 +338,11 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         // ITableHistoryActor.EnsureConfiguredAsync (see that method's plan-008 addendum).
         var persistenceChanged = existing.Persistence != def.Persistence || existing.FlushMs != def.FlushMs
             || existing.JournalMaxEntries != def.JournalMaxEntries; // plan 009 A2 — this flavor was missing it entirely
+        // Plan 011 C2: mirrors RegistryGrain — the retention policy is installed on the executor at
+        // (re)start only (see TableActor.ApplyRetentionPolicy), so changing it restarts a Running table
+        // for exactly the reason a Persistence/SQL/search change does.
+        var retentionChanged = existing.RetentionMaxRows != def.RetentionMaxRows
+            || existing.RetentionTtlMs != def.RetentionTtlMs;
         var historyConfigChanged =
             existing.HistoryEnabled != def.HistoryEnabled ||
             existing.HistoryMode != def.HistoryMode ||
@@ -350,7 +357,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
         ApplyCompileResult(def, compileResult);
 
-        if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged) && wasRunning)
+        if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged || retentionChanged) && wasRunning)
         {
             await orchestrator.StopTableAsync(def.Name);
             var outcome = await orchestrator.StartTableAsync(def, state.Sources, state.Tables);
@@ -505,6 +512,36 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         if (flushMs < 0)
         {
             throw new InvalidOperationException($"FlushMs must be >= 0 (got {flushMs}).");
+        }
+    }
+
+    /// <summary>Plan 011 C2: 409-style guard for the opt-in row retention policy — the Dapr mirror of
+    /// <c>RegistryGrain.ValidateRetention</c>, same rules and same reasoning (see that method's doc
+    /// comment): non-negative bounds, Parallelism == 1 (already forced on this flavor), and a plan shape
+    /// whose per-row state the Engine can actually reclaim. Refusing beats accepting a policy that would
+    /// bound only what the console shows. Draft-friendly: SQL that does not compile is not rejected here.</summary>
+    private static void ValidateRetention(TableDefinition def, TableCompileResult compileResult)
+    {
+        if (def.RetentionMaxRows < 0 || def.RetentionTtlMs < 0)
+        {
+            throw new InvalidOperationException(
+                $"Retention bounds must be >= 0 (got maxRows={def.RetentionMaxRows}, ttlMs={def.RetentionTtlMs}); 0 means unbounded.");
+        }
+
+        if (def.RetentionMaxRows == 0 && def.RetentionTtlMs == 0)
+        {
+            return;
+        }
+
+        if (!compileResult.Ok || compileResult.Plan is null)
+        {
+            return;
+        }
+
+        if (!compileResult.Plan.SupportsRetention)
+        {
+            throw new InvalidOperationException(
+                "Row retention is not supported for this table's SQL: joins, set operations, derived sources and GROUP BY/aggregates are excluded, because evicting an output row would leave their per-key state (join indexes, aggregate accumulators) growing — or, for aggregates, would restart the group from zero and emit a wrong value.");
         }
     }
 

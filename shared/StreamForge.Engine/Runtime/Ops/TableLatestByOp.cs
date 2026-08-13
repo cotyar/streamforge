@@ -38,8 +38,19 @@ namespace StreamForge.Engine.Runtime.Ops;
 ///
 /// STATE: <see cref="Current"/> — encoded-key string -> the single retained (WorkingRow, Ts) pair. No
 /// per-key history beyond that one row (see the retraction-ceiling note above).
+///
+/// PLAN 011 C2 — RETENTION. <see cref="Current"/> is THE structure that makes a `LATEST BY (&lt;unbounded
+/// key&gt;)` table grow forever: one permanent entry per key ever seen, and nothing ever removed it. It is
+/// therefore also the structure a retention policy has to evict FROM — evicting the consolidated output
+/// row (let alone the persisted snapshot) would leave this map holding the WorkingRow and its whole field
+/// dictionary, so the table would look bounded and remain unbounded. This op implements
+/// <see cref="IRetentionScope"/> directly for that reason: eviction removes the key from
+/// <see cref="Current"/> AND emits the same retract(projected row, -1) an upstream retraction of that row
+/// would have emitted, so the ledger, the search index, downstream tables and history all follow along
+/// through the ordinary delta path. The ordering index (<see cref="_order"/>) is built only when
+/// <see cref="EnableRetention"/> has been called, so a table without a policy pays nothing.
 /// </summary>
-internal sealed class TableLatestByOp : ITableOp
+internal sealed class TableLatestByOp : ITableOp, IRetentionScope
 {
     internal sealed class KeyState
     {
@@ -52,6 +63,13 @@ internal sealed class TableLatestByOp : ITableOp
 
     /// <summary>This op's state: encoded LATEST BY key -> the single row currently retained for it.</summary>
     public Dictionary<string, KeyState> Current { get; } = [];
+
+    // Plan 011 C2 — retention (all three fields inert until EnableRetention is called; see class doc).
+    // _order mirrors Current as (retained row's event Ts, encoded key), giving eviction a deterministic
+    // oldest-first total order in O(log n) instead of a hash-order scan.
+    private bool _retentionEnabled;
+    private SortedSet<(long Ts, string Key)>? _order;
+    private long _maxObservedTs;
 
     public TableLatestByOp(CompiledTablePlan plan, List<Expr> keys)
     {
@@ -71,6 +89,11 @@ internal sealed class TableLatestByOp : ITableOp
         var results = new List<TableDelta>();
         var key = EncodeKey(row);
 
+        // Plan 011 C2: the event-time high-water mark a TTL cutoff is measured back from. Taken over every
+        // ADMITTED assertion, including one this op is about to ignore as a late arrival — a max is
+        // order-independent either way, so this stays replay-deterministic (see IRetentionScope's doc).
+        if (weight > 0 && row.Ts > _maxObservedTs) _maxObservedTs = row.Ts;
+
         if (weight > 0)
         {
             // Assertion (weight >1 is deliberately NOT tracked as a multiplicity — see class doc's
@@ -79,8 +102,10 @@ internal sealed class TableLatestByOp : ITableOp
             {
                 if (row.Ts < existing.Ts) return results; // strictly older late arrival: ignored, counted nowhere
                 results.Add(new TableDelta(ProjectRow(existing.Row), -1));
+                _order?.Remove((existing.Ts, key));
             }
             Current[key] = new KeyState { Row = row, Ts = row.Ts };
+            _order?.Add((row.Ts, key));
             results.Add(new TableDelta(ProjectRow(row), 1));
             return results;
         }
@@ -90,9 +115,61 @@ internal sealed class TableLatestByOp : ITableOp
         if (Current.TryGetValue(key, out var current) && SameRow(current.Row, row))
         {
             Current.Remove(key);
+            _order?.Remove((current.Ts, key));
             results.Add(new TableDelta(ProjectRow(current.Row), -1));
         }
         return results;
+    }
+
+    // ------------------------------------------------------------------
+    // Plan 011 C2 — IRetentionScope. See the class doc for why this op, and not the consolidated ledger,
+    // is the scope for a LATEST BY plan.
+    // ------------------------------------------------------------------
+
+    /// <summary>Starts maintaining the ordering index, seeding it from whatever is already retained (in
+    /// practice nothing: a table configures retention on start, with a freshly built executor). Idempotent
+    /// so a restart that re-applies the same definition is free.</summary>
+    public void EnableRetention()
+    {
+        if (_retentionEnabled) return;
+        _retentionEnabled = true;
+        _order = new SortedSet<(long Ts, string Key)>(RetentionOrder.Comparer);
+        foreach (var kv in Current) _order.Add((kv.Value.Ts, kv.Key));
+    }
+
+    public int RetainedCount => Current.Count;
+
+    public long MaxObservedTs => _maxObservedTs;
+
+    public IReadOnlyList<TableDelta> EvictOldest(int count)
+    {
+        var results = new List<TableDelta>();
+        for (int i = 0; i < count && _order is { Count: > 0 }; i++)
+        {
+            EvictOne(_order.Min, results);
+        }
+        return results;
+    }
+
+    public IReadOnlyList<TableDelta> EvictOlderThan(long cutoffTs)
+    {
+        var results = new List<TableDelta>();
+        while (_order is { Count: > 0 } && _order.Min.Ts < cutoffTs)
+        {
+            EvictOne(_order.Min, results);
+        }
+        return results;
+    }
+
+    /// <summary>Drops one key's retained row entirely — the map entry, the ordering entry, and (via the
+    /// returned delta) the row's presence everywhere downstream. The emitted retraction is byte-identical
+    /// to the one an upstream retraction of the same row produces, apart from carrying
+    /// <see cref="TableDelta.Retention"/> so history can tell the two apart.</summary>
+    private void EvictOne((long Ts, string Key) entry, List<TableDelta> results)
+    {
+        _order!.Remove(entry);
+        if (!Current.Remove(entry.Key, out var state)) return;
+        results.Add(new TableDelta(ProjectRow(state.Row), -1) { Retention = true });
     }
 
     private static bool SameRow(WorkingRow a, WorkingRow b) =>

@@ -201,7 +201,7 @@ public sealed class TableHistoryActor(ActorHost host, ILogger<TableHistoryActor>
             return;
         }
 
-        switch (TablePersistencePolicy.DecideFlushAction(_state.Persistence, dirty: true, writeInProgress: _persistInProgress))
+        switch (TableHistoryApplication.DecideHistoryFlushAction(_state.Persistence, dirty: true, writeInProgress: _persistInProgress))
         {
             case TablePersistAction.AwaitedWrite:
                 _dirty = false;
@@ -217,19 +217,8 @@ public sealed class TableHistoryActor(ActorHost host, ILogger<TableHistoryActor>
             default:
                 // MemoryOnly (the timer is never armed for it in practice — see ArmFlushTimerAsync's
                 // guard — this branch exists for defensiveness only), or a FireAndForget write already in
-                // flight: leave _dirty set so the next tick retries once that write completes.
-                //
-                // PLAN 011 WAVE C — FOUND, NOT FIXED, WRITTEN DOWN: TablePersistAction.JournalWrite also
-                // lands here, because this actor has no journal. The consequence is real: a table
-                // configured Persistence = Journaled never persists its HISTORY at all on this flavor — the
-                // tick leaves _dirty set and retries forever, so the entries live only in this activation
-                // and are gone after a deactivation. (Orleans' TableHistoryGrain differs: its flush
-                // dispatch has no journal branch either, but its `else` falls through to a full awaited
-                // write, so Journaled behaves as Batched there — durable, just not O(changed).) Fixing this
-                // is out of wave C's scope because it is a CHOICE, not a bug fix: either give history its
-                // own journal state, or make Journaled fall back to a full write here the way Orleans
-                // does. Either way it is a durability-contract decision, and this wave changed no
-                // contracts.
+                // flight: leave _dirty set so the next tick retries once that write completes. Journaled
+                // no longer lands here — see DecideHistoryFlushAction.
                 break;
         }
     }
@@ -450,6 +439,34 @@ public static class TableHistoryApplication
         return a.SequenceEqual(b, StringComparer.Ordinal);
     }
 
+    /// <summary>
+    /// Plan 011 wave C2 — history's own flush-action decision, and THE FIX for the defect wave C found,
+    /// documented and left in place here.
+    ///
+    /// THE DEFECT: this actor has no journal of its own, so <see cref="TablePersistencePolicy.
+    /// DecideFlushAction"/>'s <see cref="TablePersistAction.JournalWrite"/> fell through the caller's
+    /// switch to the Skip branch. The consequence was not a missed optimization: a table configured
+    /// <see cref="TablePersistenceMode.Journaled"/> never persisted its HISTORY AT ALL on this flavor — the
+    /// tick left the dirty flag set and retried forever, so every entry lived only in that activation and
+    /// vanished on deactivation.
+    ///
+    /// THE FIX, and why this one of the two available: Orleans' TableHistoryGrain has no journal branch
+    /// either, but its flush dispatch falls through to a full AWAITED write, so Journaled behaves exactly
+    /// as Batched there — durable, just not O(changed). Mapping JournalWrite to AwaitedWrite here makes the
+    /// two flavors agree on that same behavior, and changes no contract: FlushMs, durability and the
+    /// grain-turn stall are all identical to Batched's, which is what a Journaled table's HISTORY already
+    /// got on the other flavor. Giving history its own journal (so it would be O(changed) too) remains a
+    /// genuine open design choice; losing the data was never a choice.
+    ///
+    /// Pure and public for the same reason the rest of this class is: it is testable without any actor,
+    /// timer or sidecar machinery — see dapr/tests/StreamForge.Dapr.Tests/TableHistoryRetentionTests.cs.
+    /// </summary>
+    public static TablePersistAction DecideHistoryFlushAction(TablePersistenceMode mode, bool dirty, bool writeInProgress)
+    {
+        var action = TablePersistencePolicy.DecideFlushAction(mode, dirty, writeInProgress);
+        return action == TablePersistAction.JournalWrite ? TablePersistAction.AwaitedWrite : action;
+    }
+
     /// <summary>Plan 008: true when <paramref name="state"/>'s currently-recorded persistence mode/cadence
     /// already matches <paramref name="def"/>'s current settings — the persistence-only counterpart of
     /// <see cref="ConfigMatches"/>, deliberately SEPARATE from it (see <see cref="TableHistoryActorState.
@@ -510,6 +527,18 @@ public static class TableHistoryApplication
             state.Seq++;
 
             var key = RowKeyCodec.EncodeIdentity(delta.Row, state.IdentityColumns);
+
+            // Plan 011 C2 — verbatim mirror of TableHistoryGrain.OnDeltaBatchAsync's eviction branch (see
+            // its comment for the full reasoning): a delta the owning table's RETENTION policy produced
+            // reclaims the key's whole version trail instead of bumping its retraction counter. History is
+            // derived from the table; a row that leaves a bounded table takes its history with it,
+            // otherwise the bound would bound the visible row count and none of the memory.
+            if (delta.Evicted)
+            {
+                state.Entries.Remove(key);
+                continue;
+            }
+
             if (!state.Entries.TryGetValue(key, out var entry))
             {
                 entry = new RowHistoryEntry();

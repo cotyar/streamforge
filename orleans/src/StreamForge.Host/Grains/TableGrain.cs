@@ -380,6 +380,7 @@ public sealed class TableGrain(
         }
 
         _executor = compileResult.Plan.CreateExecutor();
+        ApplyRetentionPolicy(compileResult.Plan, def);
         _status = PipelineStatus.Running;
 
         ResumeJournaledState();
@@ -904,6 +905,34 @@ public sealed class TableGrain(
         _coordinatorLedger.Apply(key, delta.Row, delta.Weight);
     }
 
+    /// <summary>Plan 011 C2 — installs this table's row retention policy on the freshly built executor.
+    /// The eviction retractions it produces come back through <see cref="TableExecutor.OnStreamEvent"/>/
+    /// <see cref="TableExecutor.OnTableDelta"/>'s own return values, so <see cref="ApplyAndPublishAsync"/>
+    /// already publishes them, indexes them and journals them with no retention-specific branch anywhere on
+    /// the hot path — see TableExecutor.ConfigureRetention's doc comment for why that shape was chosen.
+    ///
+    /// A policy this plan shape cannot honor is REFUSED by the Engine, and refused loudly here rather than
+    /// swallowed: RegistryGrain.ValidateRetention already rejects the combination at create/update, so
+    /// reaching this branch means a definition arrived some other way (a hand-edited catalog file, an
+    /// import from an older build). The table still starts — a startup failure would be a worse outcome
+    /// than an unbounded table — but the log line says exactly which table is running without the bound it
+    /// asks for.</summary>
+    private void ApplyRetentionPolicy(TablePlan plan, TableDefinition def)
+    {
+        var policy = new TableRetentionPolicy(def.RetentionMaxRows, def.RetentionTtlMs);
+        if (!policy.IsEnabled) return;
+
+        if (!plan.SupportsRetention)
+        {
+            logger.LogWarning(
+                "Table '{Table}' requests row retention (maxRows={MaxRows}, ttlMs={TtlMs}) but its plan shape does not support it — starting WITHOUT the bound.",
+                def.Name, def.RetentionMaxRows, def.RetentionTtlMs);
+            return;
+        }
+
+        _executor!.ConfigureRetention(policy);
+    }
+
     private async Task ApplyAndPublishAsync(IReadOnlyList<TableDelta> deltas)
     {
         _dirty = true;
@@ -924,7 +953,9 @@ public sealed class TableGrain(
             RecordJournalEntries(touched);
         }
 
-        var dtos = deltas.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight }).ToList();
+        // Plan 011 C2: Evicted rides along so the row-history grain can tell a retention eviction apart
+        // from an ordinary upstream retraction — see TableDeltaDto.Evicted. Every other consumer ignores it.
+        var dtos = deltas.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight, Evicted = d.Retention }).ToList();
         var stream = this.GetStreamProvider(StreamConstants.ProviderName)
             .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, _def!.Name));
         await stream.OnNextAsync(dtos);

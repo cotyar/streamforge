@@ -492,6 +492,8 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         _tableInputs = tableInputs;
         _lastCompileError = null;
 
+        ApplyRetentionPolicy();
+
         // Plan 009 A2: fold whatever the persisted journal holds onto _flushed BEFORE the resume-detection
         // check below — UNCONDITIONALLY, not gated on _def.Persistence == Journaled. See class doc's
         // "Resume" paragraph: a non-empty journal can only exist here because a PRIOR activation ran
@@ -535,6 +537,35 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         _searchIndex = _def!.SearchEnabled ? BuildSearchIndex(_def.SearchMode) : null;
     }
 
+    /// <summary>Plan 011 C2 — installs this table's row retention policy on the freshly compiled executor,
+    /// the Dapr mirror of <c>TableGrain.ApplyRetentionPolicy</c>. The eviction retractions it produces come
+    /// back through the executor's own OnStreamEvent/OnTableDelta return values, so
+    /// <see cref="ApplyAndPublishAsync"/> publishes, indexes and journals them with no retention-specific
+    /// branch on the hot path.
+    ///
+    /// ONE DELIBERATE DIFFERENCE FROM ORLEANS, stated rather than hidden: TableGrain checks
+    /// <c>TablePlan.SupportsRetention</c> before configuring, because it has the compiled plan in hand.
+    /// Here the plan is not available — <see cref="TableCompilation.TryCompile"/> returns the executor and
+    /// nothing else, and widening that tuple would mean editing a pre-existing test file. So this relies on
+    /// <c>TableExecutor.ConfigureRetention</c>'s own refusal instead, which enforces exactly the same rule
+    /// (and is a no-op, never a throw, for the default off policy). Same outcome, same log line;
+    /// Catalog.CatalogStore.ValidateRetention rejects the combination at create/update either way, so this
+    /// branch only fires for a definition that arrived some other way.</summary>
+    private void ApplyRetentionPolicy()
+    {
+        var policy = new TableRetentionPolicy(_def!.RetentionMaxRows, _def.RetentionTtlMs);
+        try
+        {
+            _executor!.ConfigureRetention(policy);
+        }
+        catch (InvalidOperationException ex)
+        {
+            logger.LogWarning(ex,
+                "TableActor[{Name}]: row retention (maxRows={MaxRows}, ttlMs={TtlMs}) is not supported for this table's plan shape — starting WITHOUT the bound.",
+                _def.Name, _def.RetentionMaxRows, _def.RetentionTtlMs);
+        }
+    }
+
     private TableSearchIndex BuildSearchIndex(TableSearchMode mode)
     {
         var index = new TableSearchIndex(mode);
@@ -565,7 +596,9 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         }
 
         _deltaSeq++;
-        var dtos = deltas.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight }).ToList();
+        // Plan 011 C2: Evicted rides along so TableHistoryActor can tell a retention eviction apart from an
+        // ordinary upstream retraction — see TableDeltaDto.Evicted. Every other subscriber ignores it.
+        var dtos = deltas.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight, Evicted = d.Retention }).ToList();
 
         try
         {

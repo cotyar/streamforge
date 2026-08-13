@@ -417,6 +417,7 @@ public sealed class RegistryGrain(
 
         var compileResult = CompileTableSql(def.Sql, excludeTableId: def.Id);
         ValidateHistoryConfig(def, compileResult);
+        ValidateRetention(def, compileResult);
         ApplyCompileResult(def, compileResult);
 
         state.State.Tables.Add(def);
@@ -451,6 +452,7 @@ public sealed class RegistryGrain(
         // behind in the in-memory list entry.
         var compileResult = CompileTableSql(def.Sql, excludeTableId: existing.Id);
         ValidateHistoryConfig(def, compileResult);
+        ValidateRetention(def, compileResult);
 
         var sqlChanged = existing.Sql != def.Sql;
         var searchChanged = existing.SearchEnabled != def.SearchEnabled || existing.SearchMode != def.SearchMode;
@@ -466,6 +468,13 @@ public sealed class RegistryGrain(
         // TableDefinition it's (re)started with — see its own class doc's persistence-mode paragraph).
         var persistenceChanged = existing.Persistence != def.Persistence || existing.FlushMs != def.FlushMs
             || existing.JournalMaxEntries != def.JournalMaxEntries;
+        // Plan 011 C2: the retention policy is installed on the executor at StartAsync and nowhere else
+        // (see TableGrain.ApplyRetentionPolicy), so a change to it has the same "only picked up on
+        // (re)start" property SQL/search/parallelism/persistence changes have — restart for the same
+        // reason, so tightening or lifting a bound on a Running table takes effect now rather than at the
+        // next manual stop/start.
+        var retentionChanged = existing.RetentionMaxRows != def.RetentionMaxRows
+            || existing.RetentionTtlMs != def.RetentionTtlMs;
         var historyConfigChanged =
             existing.HistoryEnabled != def.HistoryEnabled ||
             existing.HistoryMode != def.HistoryMode ||
@@ -485,7 +494,7 @@ public sealed class RegistryGrain(
         // (re)StartAsync — mirror the SQL-changed restart below for search config, parallelism, and
         // persistence too, so toggling SearchEnabled/SearchMode/Parallelism/Persistence/FlushMs on a
         // Running table takes effect immediately instead of only on the next manual stop/start.
-        if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged) && wasRunning)
+        if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged || retentionChanged) && wasRunning)
         {
             var tableGrain = GrainFactory.GetGrain<ITableGrain>(def.Name);
             try
@@ -656,6 +665,52 @@ public sealed class RegistryGrain(
         if (flushMs < 0)
         {
             throw new InvalidOperationException($"FlushMs must be >= 0 (got {flushMs}).");
+        }
+    }
+
+    /// <summary>Plan 011 C2: 409-style guard (same pattern as <see cref="ValidateParallelism"/>) for the
+    /// opt-in row retention policy. Everything here is a refusal to accept a policy the runtime could not
+    /// actually honor, because the failure mode of accepting one is the worst kind: metrics and the console
+    /// would report a bounded table while the structures that hold the memory kept growing.
+    ///
+    ///  * Negative bounds have no meaning (0 is already "off").
+    ///  * Parallelism &gt;= 2 runs the partitioned dataflow, where the rows live in the stage grains rather
+    ///    than in this table's own executor — a policy installed on the coordinator's scratch executor would
+    ///    evict nothing at all. Retention is Parallelism == 1 only, and says so.
+    ///  * A plan shape the Engine cannot reclaim state for (joins, set operations, derived sources, GROUP
+    ///    BY/aggregates) is refused with the Engine's own reasoning — see TablePlan.SupportsRetention.
+    ///
+    /// Draft-friendly in exactly the way <see cref="ValidateHistoryConfig"/> is: SQL that does not compile
+    /// is not rejected here (the table is saved as a draft with diagnostics, as always) — the shape check
+    /// simply has nothing to check yet and re-runs on the next update that does compile.</summary>
+    private static void ValidateRetention(TableDefinition def, TableCompileResult compileResult)
+    {
+        if (def.RetentionMaxRows < 0 || def.RetentionTtlMs < 0)
+        {
+            throw new InvalidOperationException(
+                $"Retention bounds must be >= 0 (got maxRows={def.RetentionMaxRows}, ttlMs={def.RetentionTtlMs}); 0 means unbounded.");
+        }
+
+        if (def.RetentionMaxRows == 0 && def.RetentionTtlMs == 0)
+        {
+            return; // retention off — the default, and nothing further to check
+        }
+
+        if (def.Parallelism > 1)
+        {
+            throw new InvalidOperationException(
+                $"Row retention requires Parallelism = 1 (got {def.Parallelism}) — a partitioned table's rows live in its stage grains, so the policy could not reclaim them.");
+        }
+
+        if (!compileResult.Ok || compileResult.Plan is null)
+        {
+            return; // draft: nothing to validate the shape against yet
+        }
+
+        if (!compileResult.Plan.SupportsRetention)
+        {
+            throw new InvalidOperationException(
+                "Row retention is not supported for this table's SQL: joins, set operations, derived sources and GROUP BY/aggregates are excluded, because evicting an output row would leave their per-key state (join indexes, aggregate accumulators) growing — or, for aggregates, would restart the group from zero and emit a wrong value.");
         }
     }
 

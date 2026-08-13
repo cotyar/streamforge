@@ -179,9 +179,9 @@ pipeline names not enforced unique (name-resolution falls back only on unambiguo
 ## Memory ceilings — what grows without bound, and with what (plan 011 wave C)
 
 Written down because none of it was, and because a long run on the *stock seed* exhausts memory: the
-seeded `order_states` table is `LATEST BY (order_id)` over a fresh-GUID key, seeded Running, so it gains
-roughly one permanent row per second forever (see `SeedCatalog.Tables()`' own comment for why the fix is
-wave C2's, not this wave's). Everything below is **by design** — table mode is a materialized view, and a
+seeded `order_states` table is `LATEST BY (order_id)` over a fresh-GUID key, seeded Running, so it gained
+roughly one permanent row per second forever — until wave C2 gave it a retention bound (see the
+"Row retention" section below and `SeedCatalog.Tables()`' own comment). Everything below is **by design** — table mode is a materialized view, and a
 materialized view over an unbounded key space is unbounded. The defect was never that these grow; it was
 that nobody could find out that they do.
 
@@ -206,22 +206,23 @@ Flatter, not flat — and the difference matters. What remains is (a) the row se
 ~5 000 rows/min in this load and is the ceiling, not the amplifier; and (b) the **whole-state JSON
 serialization** every `FlushMs`, which is `Batched`'s contract, not a defect: `JsonFileGrainStorage`
 rewrites a whole state object per write. `Journaled` removes that for the table's own snapshot but not for
-its history — `TableHistoryGrain`'s flush has no journal branch and falls through to a full awaited write
-(and on the Dapr flavor the same gap is worse: `TableHistoryActor` has no `JournalWrite` case at all, so a
-Journaled table's history is never persisted there — see that switch's own comment). Wave C did not change
-either, because giving history a journal is a durability-contract decision, not a memory fix.
+its history — `TableHistoryGrain`'s flush has no journal branch and falls through to a full awaited write,
+and wave C2 made the Dapr flavor match (it previously had no `JournalWrite` case at all, so a Journaled
+table's history was **never persisted there**; `TableHistoryApplication.DecideHistoryFlushAction` now maps
+it to the same full awaited write Orleans does). Giving history its own journal, so it would be
+O(changed) too, is still open — it is a durability-contract decision, not a memory fix.
 
 What none of it does is bound anything below.
 
 | Structure | Grows with | Evicts? |
 |---|---|---|
-| `TableExecutorImpl._ledger` (`Runtime/TableExecutorImpl.cs`) | distinct output rows | never |
-| `TableLatestByOp.Current` | distinct `LATEST BY` keys | never |
+| `TableExecutorImpl._ledger` (`Runtime/TableExecutorImpl.cs`) | distinct output rows | only under an opt-in row retention policy (wave C2) |
+| `TableLatestByOp.Current` | distinct `LATEST BY` keys | only under an opt-in row retention policy (wave C2) |
 | `TableReduceOp.Groups` | distinct GROUP BY keys ("groups live forever" — its own doc) | never |
 | `TableJoinOp` / `TableOuterJoinOp` / `TableSemiAntiOp` ZSet indexes | distinct join keys on both sides | never — no `WITHIN` eviction in table mode; `OnFrontier` is a documented no-op |
 | `TableDistinctOp._weights` | distinct rows | never |
 | `TableGrainState.Snapshot` (the persisted mirror) | distinct output rows — a **second** full copy alongside the ledger for `Batched`/`FireAndForget` (`MemoryOnly`/`Journaled` read live and hold one) | with its ledger |
-| `TableHistoryGrain._liveEntries` | distinct row identities. Per-key *version* counts ARE capped (`HistoryLimit`, `AllModeCap = 1000`); the **key count is not** | never |
+| `TableHistoryGrain._liveEntries` | distinct row identities. Per-key *version* counts ARE capped (`HistoryLimit`, `AllModeCap = 1000`); the **key count is not** | only when the owning table has a retention policy — an evicted row's whole version trail is reclaimed with it (wave C2) |
 | `TableSearchIndex`'s five row-keyed maps (`AppCore/Search/TableSearchIndex.cs`) | distinct rows, ~4–5× multiplier on whatever the table holds | with the table's rows |
 | `ArrangementGrain._index` | distinct arranged keys | never |
 | `EpochBuffer._pending` + `TableStageGrain._originByBatch` | (stall duration × ingest rate) while any one upstream partition holds the frontier back | on frontier advance only — no cap, no backpressure, no status; see EpochBuffer's class doc |
@@ -230,7 +231,57 @@ What none of it does is bound anything below.
 Rules of thumb that follow: a table's resident cost is roughly *(distinct output rows) × (2 copies for the
 default persistence mode + 4–5× again if `SearchEnabled` + up to `HistoryLimit` versions if
 `HistoryEnabled`)*; `Persistence = MemoryOnly` or `Journaled` removes one of those copies; `SearchEnabled`
-is the single most expensive flag on a wide table. The two mechanisms that will actually bound the row set
-rather than shrink its constant factor are a per-table **row retention policy** (wave C2) and **per-key
-sharding with deactivatable shards** (wave D). Until then, the honest operational guidance is: keep an eye
-on a table whose key space is unbounded, and measure with `tools/soak/run-soak.sh`.
+is the single most expensive flag on a wide table. Two mechanisms bound the row set itself rather than
+shrink its constant factor: the per-table **row retention policy** below (wave C2), and **per-key sharding
+with deactivatable shards** (wave D, still open).
+
+### Row retention — the bound, and what it costs (plan 011 wave C2)
+
+`TableDefinition.RetentionMaxRows` / `RetentionTtlMs`, **both 0 = off by default**. Off is not a
+formality: a table with retention is **not the relation its SQL describes**, it is a *bounded view* of it.
+Rows that belong in the table by the SQL's own semantics are dropped once a bound is exceeded. Enable it
+where an unbounded key space (an order id, a session id, a request id) would otherwise grow the table
+forever; do not enable it where a consumer assumes completeness.
+
+What makes it a fix rather than a metric:
+
+- **Eviction reclaims the operator's own per-key state**, not the persisted mirror. For a `LATEST BY` plan
+  that means `TableLatestByOp.Current` — the map that actually holds the row and its field dictionary; for
+  a plain projection it means the consolidation ledger. Trimming `TableGrainState.Snapshot` alone would
+  have left every structure in the table above growing while the row count "plateaued".
+- **Eviction emits a real retraction** (negative weight) through the same `OnStreamEvent`/`OnTableDelta`
+  return value an ordinary delta travels through — so downstream tables, the delta stream, SignalR, sinks,
+  the search index and the row history all follow along with no retention-specific code on any of those
+  paths. A row that vanished without a retraction would corrupt every consumer downstream of it, which is
+  strictly worse than the leak.
+- **History follows the table**: a delta marked `TableDeltaDto.Evicted` makes the history grain/actor drop
+  the key's whole version trail rather than bump its retraction counter. Otherwise the bound would bound
+  the visible row count and none of the memory.
+- **Order is deterministic**: oldest-first by the row's **event timestamp** (`_ts`), tie-broken by the
+  entry's identity string — never wall clock, never hash order, so replaying the same input produces the
+  same bounded table. The TTL cutoff is likewise event-time (`max admitted _ts − TtlMs`), with the honest
+  consequence that a stalled input ages nothing out: a TTL keeps the last N ms *of data*, not of clock.
+- **Refused where it could not be honest**: joins, set operations, derived sources, GROUP BY/aggregates and
+  `Parallelism ≥ 2` are rejected at create/update (409). A join's ZSet indexes hold the *input* rows, so
+  evicting an output row would bound nothing; an evicted aggregate group would restart its SUM/COUNT from
+  zero and emit a *wrong* value. Both flavors enforce the same rule
+  (`RegistryGrain.ValidateRetention` / `CatalogStore.ValidateRetention`).
+
+The seeded `order_states` is its first customer, at `RetentionMaxRows = 2000` (~the last half hour of
+orders at the seeded rate). Measured with the same harness and the same load as the table above
+(`tools/soak/run-soak.sh --retention-max-rows 2000`, 5 min, 100 ev/s, `Batched`):
+
+| run | RSS slope (whole window) | RSS slope (last third) | RSS at end | rows at end | state dir |
+|---|---|---|---|---|---|
+| C1 (`Batched`, unbounded) | 109 MB/min | **+162 MB/min** | 1009 MB | 27 616, still climbing | 3587 KB/min |
+| C2 (`Batched`, `RetentionMaxRows = 2000`) | 44 MB/min | **−12 MB/min** | 507 MB | 2 000, flat | 122 KB/min |
+
+Read the last-third column, not the first: both runs ingest the identical 5 200 deltas/min, and the
+whole-window slope of the C2 run is dominated by the startup ramp (JIT, the seeded catalog spinning up, the
+GC growing to its steady-state heap). What the two columns say together is the whole point — the unbounded
+run was still *accelerating* at the end of its window and the bounded one had **plateaued**: RSS
+oscillating in a 485–552 MB band with no trend, a row count pinned at the bound, and a state directory that
+stopped growing (29× less write per minute). Rows/min fell from 5 204 to 3.2.
+
+Operational guidance, unchanged for a table WITHOUT a policy: keep an eye on one whose key space is
+unbounded, and measure with `tools/soak/run-soak.sh`.

@@ -325,6 +325,18 @@ function SearchAndView({
     setJournalMaxEntriesDraft(table.journalMaxEntries ?? 0)
   }, [table.persistence, table.flushMs, table.journalMaxEntries])
 
+  // Plan 011 C2: row-retention draft — same resync-on-fresh-definition pattern as the drafts above.
+  // Both bounds default to 0 = off, which is also what an older backend's absent field means.
+  const [retentionMaxRowsDraft, setRetentionMaxRowsDraft] = useState(table.retentionMaxRows ?? 0)
+  const [retentionTtlMsDraft, setRetentionTtlMsDraft] = useState(table.retentionTtlMs ?? 0)
+  const [retentionApplying, setRetentionApplying] = useState(false)
+  const retentionEnabled = retentionMaxRowsDraft > 0 || retentionTtlMsDraft > 0
+
+  useEffect(() => {
+    setRetentionMaxRowsDraft(table.retentionMaxRows ?? 0)
+    setRetentionTtlMsDraft(table.retentionTtlMs ?? 0)
+  }, [table.retentionMaxRows, table.retentionTtlMs])
+
   // Plan 009 B2: outbound sinks draft — same resync-on-fresh-definition pattern as the other
   // quick-toggle drafts above.
   const [sinksDraft, setSinksDraft] = useState<SinkSpec[]>(table.sinks ?? [])
@@ -414,6 +426,8 @@ function SearchAndView({
       flushMs: table.flushMs ?? 0,
       journalMaxEntries: table.journalMaxEntries ?? 0,
       sinks: table.sinks ?? [],
+      retentionMaxRows: table.retentionMaxRows ?? 0,
+      retentionTtlMs: table.retentionTtlMs ?? 0,
       ...overrides,
     }
   }
@@ -452,6 +466,31 @@ function SearchAndView({
       setJournalMaxEntriesDraft(table.journalMaxEntries ?? 0)
     } finally {
       setPersistenceApplying(false)
+    }
+  }
+
+  /** Plan 011 C2. Both bounds go up together (one PUT, one restart) so a user setting a max-rows AND
+   * a TTL does not restart the table twice — and so an invalid combination comes back as ONE 409 with
+   * the server's own explanation (unsupported SQL shape, parallelism > 1), which is surfaced verbatim
+   * rather than paraphrased: the reason retention is refused is exactly what the user needs to read. */
+  async function applyRetention(nextMaxRows: number, nextTtlMs: number) {
+    const clampedMaxRows = Math.max(0, nextMaxRows)
+    const clampedTtlMs = Math.max(0, nextTtlMs)
+    setRetentionMaxRowsDraft(clampedMaxRows)
+    setRetentionTtlMsDraft(clampedTtlMs)
+    setRetentionApplying(true)
+    try {
+      const saved = await tablesApi.update(
+        table.id,
+        fullUpdateBody({ retentionMaxRows: clampedMaxRows, retentionTtlMs: clampedTtlMs }),
+      )
+      onTableChange(saved)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update retention settings.')
+      setRetentionMaxRowsDraft(table.retentionMaxRows ?? 0)
+      setRetentionTtlMsDraft(table.retentionTtlMs ?? 0)
+    } finally {
+      setRetentionApplying(false)
     }
   }
 
@@ -896,6 +935,93 @@ function SearchAndView({
         </CardContent>
       </Card>
 
+      {/* Plan 011 C2 — row retention. Deliberately its own card, next to Persistence rather than inside
+          it: persistence decides how the rows REACH storage, retention decides which rows EXIST at all.
+          The alert is not decoration — a table with a bound is a bounded view of its SQL's relation, and
+          that is a change in results the person turning it on has to see. */}
+      <Card>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row retention</h3>
+            <Badge variant={retentionEnabled ? 'destructive' : 'outline'}>
+              {retentionEnabled ? 'Bounded view' : 'Unbounded'}
+            </Badge>
+          </div>
+
+          {!canEdit && (
+            <span className="text-xs text-muted-foreground">
+              {retentionEnabled
+                ? `Keeps ${retentionMaxRowsDraft > 0 ? `${retentionMaxRowsDraft} rows` : 'every row'}${
+                    retentionTtlMsDraft > 0 ? ` newer than ${retentionTtlMsDraft} ms of event time` : ''
+                  }; older rows are retracted.`
+                : 'This table holds every row its SQL produces — no bound.'}
+            </span>
+          )}
+
+          <RoleGate min="Editor">
+            <div className="flex flex-wrap items-center gap-3 border-t border-border pt-3">
+              <Field orientation="horizontal" className="items-center gap-1.5">
+                <FieldLabel htmlFor="tbl-retention-max-rows" className="text-xs font-normal text-muted-foreground">
+                  Max rows
+                </FieldLabel>
+                <Input
+                  id="tbl-retention-max-rows"
+                  type="number"
+                  min={0}
+                  step={100}
+                  className="w-28"
+                  value={retentionMaxRowsDraft}
+                  disabled={retentionApplying}
+                  onChange={(e) => setRetentionMaxRowsDraft(Math.max(0, Number(e.target.value) || 0))}
+                  onBlur={() => void applyRetention(retentionMaxRowsDraft, retentionTtlMsDraft)}
+                />
+              </Field>
+
+              <Field orientation="horizontal" className="items-center gap-1.5">
+                <FieldLabel htmlFor="tbl-retention-ttl-ms" className="text-xs font-normal text-muted-foreground">
+                  Max age (ms, event time)
+                </FieldLabel>
+                <Input
+                  id="tbl-retention-ttl-ms"
+                  type="number"
+                  min={0}
+                  step={1000}
+                  className="w-32"
+                  value={retentionTtlMsDraft}
+                  disabled={retentionApplying}
+                  onChange={(e) => setRetentionTtlMsDraft(Math.max(0, Number(e.target.value) || 0))}
+                  onBlur={() => void applyRetention(retentionMaxRowsDraft, retentionTtlMsDraft)}
+                />
+              </Field>
+
+              {retentionApplying && (
+                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Spinner className="size-3.5" /> Restarting…
+                </span>
+              )}
+            </div>
+
+            <p className="text-[11px] text-muted-foreground">
+              0 = unbounded (the default). Eviction is oldest-first by the row&apos;s event timestamp, and age is
+              measured against the newest event this table has seen — not the wall clock, so a stalled input ages
+              nothing out. Unavailable for SQL with joins, set operations, derived sources or GROUP BY/aggregates,
+              and for parallelism &gt; 1. Changing this restarts the table.
+            </p>
+
+            {retentionEnabled && (
+              <Alert variant="destructive">
+                <TriangleAlert />
+                <AlertDescription>
+                  This table is a bounded view, not the full relation its SQL describes: rows past the bound are
+                  evicted with real retractions, so downstream tables, sinks, search and row history stay
+                  consistent — but the evicted rows, and their history, are gone.
+                </AlertDescription>
+              </Alert>
+            )}
+          </RoleGate>
+        </CardContent>
+      </Card>
+
       <Card>
         <CardContent className="flex flex-col gap-3">
           <div className="flex items-center justify-between">
@@ -1133,8 +1259,8 @@ export function TableDetailPage() {
       // History config isn't editable from this form (see the right-panel "Row history" card, which
       // applies its own changes immediately) — carry the currently-persisted values through so a
       // plain Save never resets them back to the request DTO's defaults (history-off). Same for
-      // parallelism, persistence/flushMs/journalMaxEntries, and sinks — editable only via the
-      // right-panel "Execution", "Persistence" and "Sinks" cards.
+      // parallelism, persistence/flushMs/journalMaxEntries, sinks and retention — editable only via
+      // the right-panel "Execution", "Persistence", "Sinks" and "Row retention" cards.
       const body = {
         name: name.trim(),
         description,
@@ -1152,6 +1278,8 @@ export function TableDetailPage() {
         persistence: table?.persistence ?? ('Batched' as TablePersistenceMode),
         flushMs: table?.flushMs ?? 0,
         journalMaxEntries: table?.journalMaxEntries ?? 0,
+        retentionMaxRows: table?.retentionMaxRows ?? 0,
+        retentionTtlMs: table?.retentionTtlMs ?? 0,
         sinks: table?.sinks ?? [],
       }
       let saved: TableDefinition

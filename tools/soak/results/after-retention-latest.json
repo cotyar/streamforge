@@ -1,0 +1,52 @@
+{
+  "label": "after-retention",
+  "generatedAtIso": "2026-08-13T12:27:04.986Z",
+  "window": {
+    "minutes": 5,
+    "intervalSeconds": 5,
+    "warmupSeconds": 20,
+    "samples": 60
+  },
+  "load": {
+    "eventsPerSecond": 100,
+    "persistence": "Batched",
+    "retentionMaxRows": 2000,
+    "table": "soak_states",
+    "shape": "LATEST BY (orderId), history LastN(8) — the seeded order_states configuration"
+  },
+  "series": {
+    "rss": {
+      "name": "rss_mb",
+      "first": 277,
+      "last": 507,
+      "max": 552,
+      "slopePerMin": 43.566
+    },
+    "state": {
+      "name": "state_kb",
+      "first": 1384,
+      "last": 2128,
+      "max": 2128,
+      "slopePerMin": 122.104
+    },
+    "rows": {
+      "name": "rows",
+      "first": 1835,
+      "last": 2000,
+      "max": 2000,
+      "slopePerMin": 3.197
+    },
+    "deltas": {
+      "name": "deltas_in",
+      "first": 1845,
+      "last": 27942,
+      "max": 27942,
+      "slopePerMin": 5208.584
+    }
+  },
+  "derived": {
+    "rssKbPerRowAdded": 1427.39,
+    "stateKbPerRowAdded": 4.509
+  },
+  "tsv": "/Users/yuriyhabarov/work/crates-foundation/tools/soak/results/after-retention-20260813T122135Z.tsv"
+}

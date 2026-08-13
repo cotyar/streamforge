@@ -43,6 +43,12 @@ export interface CreateTableRequest {
   /** Plan 009 B2: where this table's deltas are republished. Absent on create = none; absent on
    * update = leave unchanged, same convention as CreatePipelineRequest.sinks. */
   sinks?: SinkSpec[]
+  /** Plan 011 C2: opt-in row retention. 0/absent = unbounded (default). See TableDefinition's own
+   * doc comment — a non-zero bound makes the table a bounded view, and the server rejects it (409)
+   * for SQL shapes whose per-row state it could not reclaim. */
+  retentionMaxRows?: number
+  /** Plan 011 C2: event-time TTL in ms; 0/absent = unbounded. */
+  retentionTtlMs?: number
 }
 
 export type UpdateTableRequest = CreateTableRequest

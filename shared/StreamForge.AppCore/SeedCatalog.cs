@@ -129,27 +129,36 @@ public static class SeedCatalog
         // not a peak+latest pair. MaxBy(stage_rank) would only ever retain 2 entries (the FILLED/CANCELED
         // extreme + itself as latest) and lose the PART_FILL steps in between — LastN(8) keeps the walk.
         //
-        // PLAN 011 WAVE C — KNOWN, UNFIXED, AND DELIBERATELY WRITTEN DOWN HERE: this is the one seeded
-        // entry whose STOCK configuration grows without bound. `order_id` is a fresh GUID-derived string
-        // per order (MarketDataProfiles.SpawnOrder), an order goes terminal and is never re-emitted
-        // (LifecycleGeneratorTests asserts exactly that finality), and `LATEST BY (order_id)` has no
-        // eviction — so a table seeded RUNNING gains roughly one PERMANENT row per second, forever, with up
-        // to 8 retained history versions behind each. A host left running overnight on the stock seed will
-        // eventually exhaust memory; that is not a hypothetical, it is the reproduction of the reported
-        // failure. Wave C removed the AMPLIFIER (the whole-table snapshot rebuild every FlushMs — see
-        // TableGrain.CaptureSnapshotIntoState), so the growth is now proportional to the row set instead of
-        // to the row set times the clock, but the row set itself is still unbounded.
+        // PLAN 011 WAVE C2 — THIS TABLE IS BOUNDED, AND HERE IS EXACTLY WHAT THAT MEANS. It is the one
+        // seeded entry whose key space is unbounded: `order_id` is a fresh GUID-derived string per order
+        // (MarketDataProfiles.SpawnOrder), an order goes terminal and is never re-emitted
+        // (LifecycleGeneratorTests asserts exactly that finality), and `LATEST BY (order_id)` retains one
+        // row per key forever. Seeded RUNNING at 5 order_events/s (~1 new order/s), it used to gain roughly
+        // one PERMANENT row per second for as long as the host lived, with up to 8 history versions behind
+        // each — a host left running overnight on the stock seed would eventually exhaust memory. That was
+        // not a hypothetical: it is the reproduction of the reported failure. Wave C removed the AMPLIFIER
+        // (the whole-table snapshot rebuild every FlushMs); wave C2's per-table ROW RETENTION policy is
+        // what bounds the row set itself, and this table is its first customer.
         //
-        // WHY IT IS NOT FIXED HERE, rather than left silently broken: both honest fixes are blocked by
-        // pre-existing tests that this wave may not modify. Seeding it Stopped contradicts
-        // LifecycleSeedClusterTests / StreamBridgeServiceStartupRaceTests, which assert it seeds Running;
-        // bounding the key space by recycling order ids contradicts LifecycleGeneratorTests' terminal-
-        // finality invariant. The mechanism that fixes it without touching either — a per-table row
-        // retention policy (max rows and/or TTL, default off) applied where consolidation already runs — is
-        // plan 011 wave C2. When it lands, this table is its first customer.
+        // RetentionMaxRows = 2000 is roughly the last half hour of orders at the seeded rate. Past that,
+        // the oldest rows (by EVENT timestamp — see TableDefinition.RetentionMaxRows) are evicted with real
+        // retractions, so the delta stream, any downstream table, the search index and this table's own row
+        // history all follow along; the evicted key's history is reclaimed with it. The honest consequence,
+        // which is the point of the policy being opt-in everywhere else: `order_states` is now a BOUNDED
+        // VIEW of "current state per order", not the full one. An order that went terminal ~2000 orders ago
+        // is no longer listed. For the demo that is the intended reading anyway — the table's own
+        // description says "per LIVE order" — and it is strictly better than the alternative, which was a
+        // demo that eats the machine.
+        //
+        // WHY THIS AND NOT THE TWO OBVIOUS ALTERNATIVES, both of which remain blocked: seeding it Stopped
+        // contradicts LifecycleSeedClusterTests / StreamBridgeServiceStartupRaceTests, which assert it
+        // seeds Running; recycling order ids to bound the key space contradicts LifecycleGeneratorTests'
+        // terminal-finality invariant. Retention touches neither assertion — all three still pass
+        // unmodified, which is exactly why the policy was built rather than the seed rewritten.
         orderStates.HistoryEnabled = true;
         orderStates.HistoryMode = TableHistoryMode.LastN;
         orderStates.HistoryLimit = 8;
+        orderStates.RetentionMaxRows = 2000;
 
         return
         [

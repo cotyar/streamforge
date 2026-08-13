@@ -431,6 +431,17 @@ export interface TableDefinition {
   journalMaxEntries?: number
   /** Plan 009 B2: where this table's deltas are republished. Absent/empty = nowhere. */
   sinks?: SinkSpec[]
+  /** Plan 011 C2: opt-in row retention — maximum rows the table retains, oldest-first by EVENT
+   * timestamp. 0 or absent = unbounded (the default, and the pre-011 behavior). Non-zero makes the
+   * table a BOUNDED VIEW of its SQL's relation: rows past the bound are evicted with real retractions,
+   * so downstream tables, the live grid, sinks, search and row history all follow along — but the
+   * table no longer holds everything its SQL says it should. Rejected (409) for SQL with joins, set
+   * operations, derived sources or GROUP BY/aggregates, and for parallelism > 1. */
+  retentionMaxRows?: number
+  /** Plan 011 C2: maximum age of a retained row, in EVENT-time ms measured back from the highest event
+   * timestamp the table has seen — not wall clock, so replay is deterministic and a stalled input ages
+   * nothing out. 0 or absent = unbounded. Composes with retentionMaxRows (age first, then count). */
+  retentionTtlMs?: number
 }
 
 /** Plan 008: how a table's snapshot reaches storage (wire values are PascalCase — confirmed against

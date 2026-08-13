@@ -101,6 +101,12 @@ public sealed class TableHistoryGrainState
 /// per-key VERSION counts are capped (TableRowHistoryRetention, AllModeCap/HistoryLimit) but nothing ever
 /// removes a key, so a table over an unbounded key space still accumulates one entry per key it has ever
 /// seen, here and in TableGrain alike. See orleans/DESIGN.md's "Known ceilings".
+///
+/// PLAN 011 WAVE C2 gives that key count its bound, but only for a table that OPTS IN: a row evicted by
+/// the owning table's retention policy arrives here as a delta with <c>Evicted</c> set, and this grain
+/// then REMOVES the key's entry outright rather than bumping its retraction counter — see
+/// OnDeltaBatchAsync's own comment for why "history follows the table" is the right reading of an
+/// eviction. Without a retention policy nothing changed: the key count is still unbounded.
 /// </summary>
 public sealed class TableHistoryGrain(
     [PersistentState("tableHistory", StreamConstants.StorageName)] IPersistentState<TableHistoryGrainState> state,
@@ -321,6 +327,28 @@ public sealed class TableHistoryGrain(
             _liveSeq++;
 
             var key = RowKeyCodec.EncodeIdentity(delta.Row, state.State.IdentityColumns);
+
+            // Plan 011 wave C2 — A RETENTION EVICTION RECLAIMS THE KEY'S HISTORY, it does not record one
+            // more retraction against it. Rationale, stated once here because it is a real semantic
+            // decision and not an optimization: an ordinary retraction means "this row is not true right
+            // now", and the key may well assert again, so keeping its version trail is exactly right. An
+            // eviction means the table has stopped carrying the key at all because the table is a BOUNDED
+            // view (see TableDefinition.RetentionMaxRows) — and if history kept the trail anyway, the row
+            // count would plateau while _liveEntries kept one entry per key ever seen, i.e. the bound
+            // would bound the visible table and none of the memory. History is derived from the table: a
+            // row that leaves the table takes its history with it. A later re-assertion of the same key
+            // simply starts a fresh trail, which is the honest representation of what the table knows.
+            if (delta.Evicted)
+            {
+                if (_liveEntries.Remove(key) && _persistenceMode != TablePersistenceMode.MemoryOnly)
+                {
+                    // The capture's removal branch (see CaptureSnapshotIntoState) drops the mirrored entry.
+                    _touchedKeys.Add(key);
+                    _dirty = true;
+                }
+                continue;
+            }
+
             if (!_liveEntries.TryGetValue(key, out var entry))
             {
                 entry = new RowHistoryEntry();
@@ -366,7 +394,8 @@ public sealed class TableHistoryGrain(
     /// and a key present in _touchedKeys but absent from _liveEntries cannot happen, because nothing ever
     /// REMOVES a live entry (which is precisely why the key count is unbounded — see orleans/DESIGN.md's
     /// "Known ceilings"). The removal branch below is kept anyway so the invariant survives any future
-    /// eviction (wave C2's retention) without silently leaving a resurrected entry in the mirror.
+    /// eviction (wave C2's retention) without silently leaving a resurrected entry in the mirror — which is
+/// exactly what OnDeltaBatchAsync's <c>delta.Evicted</c> branch now does.
     ///
     /// The capture stays fully synchronous on the grain turn, exactly as before — the whole point is that
     /// nothing else may touch these two graphs mid-clone.</summary>

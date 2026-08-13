@@ -244,6 +244,39 @@ public sealed class TableDefinition
     /// <summary>Plan 009 B2: where this table's deltas are republished. Empty = nowhere, the pre-009
     /// behavior. Delivery is fire-and-forget — see <see cref="SinkSpec"/>.</summary>
     [Id(25)] public List<SinkSpec> Sinks { get; set; } = [];
+
+    // ------------------------------------------------------------------
+    // Plan 011 C2: opt-in ROW RETENTION. Both default to 0 = OFF, and that default is the whole reason
+    // this is safe to add to a frozen contract: an existing table keeps holding every row its SQL says it
+    // should, exactly as before.
+    //
+    // READ THIS BEFORE TURNING EITHER ON. A table with retention is NOT the relation its SQL describes —
+    // it is a BOUNDED VIEW of that relation. Rows that belong in the table by the SQL's own semantics are
+    // deliberately dropped once a bound is exceeded, with a real retraction (so downstream tables, the
+    // delta stream, SignalR, sinks, the search index and the row history all follow along and stay
+    // consistent — the row genuinely LEAVES, it does not silently disappear). That is a change in results,
+    // not just in memory use, and it is the price of bounding a table whose key space is unbounded
+    // (a per-order GUID, a session id, a request id).
+    //
+    // Eviction is oldest-first by the row's EVENT timestamp (`_ts`), tie-broken deterministically, so
+    // replaying the same input produces the same table — never wall-clock, never hash order. Supported
+    // only on plan shapes whose whole per-row state is reclaimable (no joins, no set operations, no
+    // derived sources, no GROUP BY/aggregates) and only on Parallelism == 1; RegistryGrain/CatalogStore
+    // reject anything else up front rather than accepting a policy they could not honor. See
+    // StreamForge.Engine's TableRetentionPolicy / TablePlan.SupportsRetention for the full rationale.
+    // ------------------------------------------------------------------
+
+    /// <summary>Plan 011 C2: maximum rows this table retains; the oldest (by event timestamp) are evicted
+    /// once the count exceeds it. 0 (default) = unbounded, i.e. the pre-011 behavior. See the block comment
+    /// above — enabling this changes the table's results, on purpose.</summary>
+    [Id(26)] public int RetentionMaxRows { get; set; }
+
+    /// <summary>Plan 011 C2: maximum age of a retained row, in EVENT-time milliseconds measured back from
+    /// the highest event timestamp this table has admitted (not from the wall clock — replay must be
+    /// deterministic, and the honest consequence is that when the input stops, nothing further ages out).
+    /// 0 (default) = unbounded. Composes with <see cref="RetentionMaxRows"/>: age is applied first, then
+    /// the row-count bound.</summary>
+    [Id(27)] public long RetentionTtlMs { get; set; }
 }
 
 /// <summary>Plan 008: per-table durability policy. State is the materialized snapshot; the question is only
@@ -310,6 +343,14 @@ public sealed class TableDeltaDto
 {
     [Id(0)] public Dictionary<string, object?> Row { get; set; } = [];
     [Id(1)] public long Weight { get; set; }
+
+    /// <summary>Plan 011 C2 — additive mirror of <c>StreamForge.Engine.TableDelta.Retention</c> (default
+    /// false, so every pre-011 producer and consumer is unchanged): true only for a retraction the table's
+    /// ROW RETENTION policy caused, as opposed to one an upstream input caused. Consumers that do not care
+    /// treat it as the ordinary retraction it also is; the one that does is the row-history grain/actor,
+    /// which reclaims the evicted key's version list instead of counting one more retraction against a key
+    /// that is never coming back (see TableDefinition.RetentionMaxRows' block comment).</summary>
+    [Id(2)] public bool Evicted { get; set; }
 }
 
 /// <summary>One row of a table's current consolidated Z-set snapshot (weight is always &gt; 0 in a
