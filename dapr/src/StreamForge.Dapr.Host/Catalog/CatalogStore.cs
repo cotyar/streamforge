@@ -91,6 +91,25 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             dirty = true;
         }
 
+        // Plan 011 Wave A backfill: pipelines are seeded RAW (unlike tables, above) and Create/Update are
+        // the only other writers of SourceNames (ApplyPipelineCompileResult), so any pipeline that has
+        // never been through either — freshly seeded above, or durably persisted from before this backfill
+        // existed — still carries an empty SourceNames and draws no lineage edge. Runs for BOTH cases
+        // (seed and restore) since it's driven off the data (SourceNames.Count == 0), not off whether
+        // seeding just happened. Must run after Sources are loaded (above, unconditionally) so
+        // BuildStreamSchemas() has something to compile against. Draft-friendly like the create/update
+        // paths: a pipeline whose SQL doesn't currently compile is left with an empty SourceNames rather
+        // than throwing or blocking initialization.
+        foreach (var pipeline in state.Pipelines.Where(p => p.SourceNames.Count == 0))
+        {
+            var compileResult = SqlCompiler.Compile(pipeline.Sql, BuildStreamSchemas());
+            if (compileResult.Ok && compileResult.SourceNames.Count > 0)
+            {
+                ApplyPipelineCompileResult(pipeline, compileResult);
+                dirty = true;
+            }
+        }
+
         return dirty;
     }
 
