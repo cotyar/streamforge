@@ -2,6 +2,7 @@ using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Config;
 using StreamForge.Engine;
@@ -26,7 +27,7 @@ public static class TablesEndpoints
             return t is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskTable(t));
         }).RequireAuthorization("Viewer");
 
-        group.MapPost("/", async (CreateTableRequest req, ClaimsPrincipal principal, ICatalogFacade registry) =>
+        group.MapPost("/", async (CreateTableRequest req, ClaimsPrincipal principal, ICatalogFacade registry, ILoggerFactory loggers) =>
         {
             if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Sql))
             {
@@ -63,6 +64,7 @@ public static class TablesEndpoints
                     Sinks = req.Sinks ?? [],
                 };
                 var created = await registry.CreateTableAsync(def);
+                WarnOnDegradedRowIdentity(loggers, created);
                 return Results.Created($"/api/tables/{created.Id}", SecretsMasker.MaskTable(created));
             }
             catch (InvalidOperationException ex)
@@ -71,7 +73,7 @@ public static class TablesEndpoints
             }
         }).RequireAuthorization("Editor");
 
-        group.MapPut("/{id}", async (string id, CreateTableRequest req, ICatalogFacade registry) =>
+        group.MapPut("/{id}", async (string id, CreateTableRequest req, ICatalogFacade registry, ILoggerFactory loggers) =>
         {
             var existing = await registry.GetTableAsync(id);
             if (existing is null)
@@ -109,6 +111,10 @@ public static class TablesEndpoints
             try
             {
                 var updated = await registry.UpdateTableAsync(existing);
+                if (updated is not null)
+                {
+                    WarnOnDegradedRowIdentity(loggers, updated);
+                }
                 return updated is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskTable(updated));
             }
             catch (InvalidOperationException ex)
@@ -230,7 +236,16 @@ public static class TablesEndpoints
                 return Results.NotFound();
             }
 
-            return Results.Ok(await tables.GetMetricsAsync(def.Name));
+            var metrics = await tables.GetMetricsAsync(def.Name);
+            // The row-identity warning (see TableRowIdentityWarning). DERIVED from the definition, not
+            // measured by the grain/actor, and stamped here for two reasons: it belongs on the object the
+            // console already polls for "this table is not in the state you think it is" conditions
+            // (TableMetrics.Rebuilding is the precedent), and doing it in the shared endpoint means BOTH
+            // flavors report it from one implementation instead of two that can drift. Pure and cheap — a
+            // textual pass over this table's own SQL — and it can never go stale relative to that SQL,
+            // which a value persisted at upsert could.
+            metrics.RowIdentityWarning = TableRowIdentityWarning.For(def);
+            return Results.Ok(metrics);
         }).RequireAuthorization("Viewer");
 
         // Downloadable, self-contained .proto for this table: DescriptorFactory's schema (built from
@@ -475,6 +490,24 @@ public static class TablesEndpoints
             schemas[t.Name] = new SourceSchema(t.Name, fields);
         }
         return schemas;
+    }
+
+    /// <summary>The upsert half of the row-identity report (the other half is GET /{id}/metrics, which
+    /// serves the same sentence to the console). A create/update that leaves a table with a degraded
+    /// version trail is ACCEPTED — the whole-row fallback is pre-existing behavior and real catalogs rely
+    /// on it, so rejecting would break working installs — but it no longer passes in silence: the server
+    /// log names the table and says what happened, at the moment the definition that caused it was
+    /// written. Draft-friendly in exactly the sense ApplyCompileResult is: it reports, it never blocks.</summary>
+    private static void WarnOnDegradedRowIdentity(ILoggerFactory loggers, TableDefinition def)
+    {
+        var warning = TableRowIdentityWarning.For(def);
+        if (warning is null)
+        {
+            return;
+        }
+
+        loggers.CreateLogger("StreamForge.Api.Tables")
+            .LogWarning("Table '{Table}': {Warning}", def.Name, warning);
     }
 
     private static FieldKind MapFieldKind(FieldType type) => type switch

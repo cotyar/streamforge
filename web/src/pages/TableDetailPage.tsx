@@ -17,6 +17,7 @@ import type {
   Tags,
   TableDefinition,
   TableHistoryMode,
+  TableMetrics,
   TableOutputField,
   TablePersistenceMode,
   TableSearchMode,
@@ -171,9 +172,20 @@ function RowsTable({
 }
 
 /** Live materialized-view grid: sorted by the first output column, plus the live/metrics header. */
-function MaterializedView({ table, onRowClick }: { table: TableDefinition; onRowClick?: (row: ResultRow) => void }) {
+function MaterializedView({
+  table,
+  metrics,
+  deltasInPerSec,
+  onRowClick,
+}: {
+  table: TableDefinition
+  /** Polled by SearchAndView, not here: the same numbers now also drive the config cards' warnings, and
+   * this grid unmounts while a search is running — one poll shared beats two that come and go. */
+  metrics: TableMetrics | null
+  deltasInPerSec: number
+  onRowClick?: (row: ResultRow) => void
+}) {
   const { rows, live, flashKeys } = useTableRows(table.id, table.name)
-  const { metrics, deltasInPerSec } = useTableMetrics(table.id)
 
   const sortedRows = useMemo(() => {
     const firstField = table.outputFields[0]
@@ -278,6 +290,13 @@ function SearchAndView({
   const [query, setQuery] = useState('')
   const debouncedQuery = useDebounced(query.trim(), 250)
   const isSearching = query.trim().length > 0
+
+  // One metrics poll for this whole panel: the grid's counters AND the row-identity warning the history
+  // / sharding cards render come from the same 2 s read (see TableMetrics.rowIdentityWarning — it is
+  // derived from the definition server-side, and it rides the metrics object because that is where this
+  // page already looks for "this table is not in the state you think it is", e.g. rebuilding).
+  const { metrics, deltasInPerSec } = useTableMetrics(table.id)
+  const rowIdentityWarning = metrics?.rowIdentityWarning ?? null
 
   const [searchResult, setSearchResult] = useState<TableSearchResponse | null>(null)
   const [searching, setSearching] = useState(false)
@@ -677,11 +696,26 @@ function SearchAndView({
         <CardContent className="flex flex-col gap-3">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row history</h3>
-            {table.historyEnabled && <Badge variant="outline">{table.historyMode}</Badge>}
+            <div className="flex items-center gap-1.5">
+              {table.historyEnabled && rowIdentityWarning && <Badge variant="destructive">Degraded</Badge>}
+              {table.historyEnabled && <Badge variant="outline">{table.historyMode}</Badge>}
+            </div>
           </div>
 
           {!canEdit && !table.historyEnabled && (
             <span className="text-xs text-muted-foreground">Row history is not enabled for this table.</span>
+          )}
+
+          {/* The row-identity warning. History is on, the server accepted it, everything LOOKS fine — and
+              the trail silently never forms because the GROUP BY / LATEST BY key could not be matched to
+              an output column, so each version is keyed by the whole row and sits alone. That is the one
+              failure this card cannot let a reader discover by themselves, so the server's own sentence
+              (which names the keys and the fix) is shown verbatim rather than paraphrased. */}
+          {table.historyEnabled && rowIdentityWarning && (
+            <Alert variant="destructive">
+              <TriangleAlert />
+              <AlertDescription>{rowIdentityWarning}</AlertDescription>
+            </Alert>
           )}
 
           <RoleGate min="Editor">
@@ -1042,7 +1076,12 @@ function SearchAndView({
       {/* Plan 011 wave D — key sharding, plus the per-key lookup it exists for. Its own component
           because it is two related surfaces (a config control and a live read) rather than one card,
           and because the metrics it polls have a rule attached: they must never wake a shard. */}
-      <ShardingPanel table={table} canEdit={canEdit} onApplyShardBy={applyShardBy} />
+      <ShardingPanel
+        table={table}
+        canEdit={canEdit}
+        rowIdentityWarning={rowIdentityWarning}
+        onApplyShardBy={applyShardBy}
+      />
 
       <Card>
         <CardContent className="flex flex-col gap-3">
@@ -1095,7 +1134,12 @@ function SearchAndView({
           />
         )
       ) : (
-        <MaterializedView table={table} onRowClick={table.historyEnabled ? setHistoryRow : undefined} />
+        <MaterializedView
+          table={table}
+          metrics={metrics}
+          deltasInPerSec={deltasInPerSec}
+          onRowClick={table.historyEnabled ? setHistoryRow : undefined}
+        />
       )}
 
       <RowHistorySheet

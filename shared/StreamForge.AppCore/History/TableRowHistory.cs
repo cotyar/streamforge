@@ -33,22 +33,48 @@ namespace StreamForge.Host.Grains;
 /// doesn't textually match any SELECT item) it returns null, and callers fall back to whole-row identity
 /// (see RowKeyCodec.EncodeIdentity) — a safe degradation the task spec itself calls out as acceptable for
 /// tables with "no group-by identity".
+///
+/// THE FALLBACK IS NO LONGER SILENT (post-011 D). The degradation above is safe but it is NOT free, and
+/// the two cases that reach it are not the same thing:
+///   * a table with NO GROUP BY / LATEST BY at all has always been keyed by the whole row, that IS its
+///     identity, and nothing is wrong — this is the case the fallback was designed for;
+///   * a table that DOES declare a key the mapping could not resolve (an expression key like
+///     <c>ts_ms - ts_ms % 43000</c>, a CAST, a JSON path that doesn't match its own projection
+///     character-for-character) silently loses the very thing history was enabled for: each row version
+///     lands under its own whole-row key, so the version trail never forms.
+/// <see cref="Describe"/> tells the two apart — it reports the clause and the raw declared keys alongside
+/// the mapped columns — and <see cref="TableRowIdentityWarning.For(TableDefinition)"/> turns the second
+/// case into a human-readable warning. That warning is reported in two places, both in the SHARED API
+/// layer so the two runtime flavors cannot drift: the server log at table create/update
+/// (TablesEndpoints.WarnOnDegradedRowIdentity — it warns, it never rejects), and
+/// <see cref="TableMetrics.RowIdentityWarning"/> on <c>GET /api/tables/{id}/metrics</c>, which the
+/// console polls and renders verbatim on the Row history card and the Sharding panel — the same object
+/// and the same idiom <c>TableMetrics.Rebuilding</c> already uses. Derived on every read rather than
+/// persisted, so it can never disagree with the SQL it describes.
 /// </summary>
 public static class TableGroupKeyExtractor
 {
     /// <summary>Returns the output column names (aliases) that make up this table's GROUP BY identity, in
     /// GROUP BY clause order — or null if there's no GROUP BY, or the SQL couldn't be confidently parsed
-    /// well enough to map every GROUP BY expression to a SELECT output column.</summary>
-    public static List<string>? ExtractIdentityColumns(string? sql)
+    /// well enough to map every GROUP BY expression to a SELECT output column. Unchanged in behavior: it
+    /// is now the <see cref="TableRowIdentity.Columns"/> half of <see cref="Describe"/>.</summary>
+    public static List<string>? ExtractIdentityColumns(string? sql) => Describe(sql).Columns;
+
+    /// <summary>The same derivation <see cref="ExtractIdentityColumns"/> performs, reporting WHAT IT SAW as
+    /// well as what it resolved: which clause (if any) declared a row identity, the raw declared key
+    /// expressions, and the mapped output columns (null on the whole-row fallback). Callers that only want
+    /// the key use ExtractIdentityColumns; callers that want to tell "no declared identity" (fine) from
+    /// "declared an identity we could not map" (degraded) use this — see the class doc.</summary>
+    public static TableRowIdentity Describe(string? sql)
     {
-        if (string.IsNullOrWhiteSpace(sql)) return null;
+        if (string.IsNullOrWhiteSpace(sql)) return TableRowIdentity.None;
 
         var selectIdx = FindWord(sql, "SELECT", 0);
-        if (selectIdx < 0) return null;
+        if (selectIdx < 0) return TableRowIdentity.None;
         var afterSelect = selectIdx + "SELECT".Length;
 
         var fromIdx = FindWord(sql, "FROM", afterSelect);
-        if (fromIdx < 0) return null;
+        if (fromIdx < 0) return TableRowIdentity.None;
 
         var groupByIdx = FindGroupBy(sql);
         if (groupByIdx < 0)
@@ -56,57 +82,52 @@ public static class TableGroupKeyExtractor
             // No GROUP BY — a LATEST BY (col, ...) clause (plan 002) also defines a row identity: its key
             // columns, which the engine requires to be plainly projected. Same best-effort contract: map
             // each key to a SELECT output column, whole-row fallback on any ambiguity.
-            return ExtractLatestByIdentity(sql, afterSelect, fromIdx);
+            return DescribeLatestBy(sql, afterSelect, fromIdx);
         }
 
-        var selectListText = sql.Substring(afterSelect, fromIdx - afterSelect);
         var groupByStart = groupByIdx + GroupByKeywordLength(sql, groupByIdx);
-        var groupByListText = sql[groupByStart..];
-
-        var selectItems = SplitTopLevel(selectListText, ',')
-            .Select(s => s.Trim())
-            .Where(s => s.Length > 0)
-            .Select(ParseSelectItem)
-            .ToList();
-
-        var groupExprs = SplitTopLevel(groupByListText, ',')
-            .Select(s => Normalize(s))
+        var groupExprs = SplitTopLevel(sql[groupByStart..], ',')
+            .Select(Normalize)
             .Where(s => s.Length > 0)
             .ToList();
 
-        if (groupExprs.Count == 0) return null;
+        if (groupExprs.Count == 0) return TableRowIdentity.None;
 
-        var identity = new List<string>();
-        foreach (var g in groupExprs)
-        {
-            var match = selectItems.FirstOrDefault(it => it.Alias is not null && Normalize(it.ExprText) == g);
-            if (match.Alias is null)
-            {
-                return null; // couldn't confidently map this GROUP BY expression -> fall back to whole-row
-            }
-            identity.Add(match.Alias);
-        }
-        return identity;
+        return new TableRowIdentity(
+            TableRowIdentity.GroupByClause,
+            groupExprs,
+            MapKeysToColumns(sql, afterSelect, fromIdx, groupExprs));
     }
 
-    private static List<string>? ExtractLatestByIdentity(string sql, int afterSelect, int fromIdx)
+    private static TableRowIdentity DescribeLatestBy(string sql, int afterSelect, int fromIdx)
     {
         var latestIdx = FindWord(sql, "LATEST", fromIdx);
-        if (latestIdx < 0) return null;
+        if (latestIdx < 0) return TableRowIdentity.None;
         var byIdx = FindWord(sql, "BY", latestIdx + "LATEST".Length);
-        if (byIdx < 0) return null;
+        if (byIdx < 0) return TableRowIdentity.None;
 
         var open = sql.IndexOf('(', byIdx);
-        if (open < 0) return null;
+        if (open < 0) return TableRowIdentity.None;
         var close = sql.IndexOf(')', open);
-        if (close < 0) return null;
+        if (close < 0) return TableRowIdentity.None;
 
         var keys = SplitTopLevel(sql[(open + 1)..close], ',')
             .Select(Normalize)
             .Where(s => s.Length > 0)
             .ToList();
-        if (keys.Count == 0) return null;
+        if (keys.Count == 0) return TableRowIdentity.None;
 
+        return new TableRowIdentity(
+            TableRowIdentity.LatestByClause,
+            keys,
+            MapKeysToColumns(sql, afterSelect, fromIdx, keys));
+    }
+
+    /// <summary>Maps every declared key expression to the SELECT item projecting it, by normalized
+    /// expression text — all-or-nothing, exactly as before: one unmappable key means whole-row identity for
+    /// the table, not a partial key.</summary>
+    private static List<string>? MapKeysToColumns(string sql, int afterSelect, int fromIdx, List<string> keys)
+    {
         var selectListText = sql.Substring(afterSelect, fromIdx - afterSelect);
         var selectItems = SplitTopLevel(selectListText, ',')
             .Select(s => s.Trim())
@@ -118,10 +139,12 @@ public static class TableGroupKeyExtractor
         foreach (var k in keys)
         {
             var match = selectItems.FirstOrDefault(it => it.Alias is not null && Normalize(it.ExprText) == k);
-            if (match.Alias is null) return null;
+            if (match.Alias is null)
+            {
+                return null; // couldn't confidently map this key -> fall back to whole-row
+            }
             identity.Add(match.Alias);
         }
-
         return identity;
     }
 
@@ -263,6 +286,81 @@ public static class TableGroupKeyExtractor
         var j = groupByIdx + 5;
         while (j < s.Length && char.IsWhiteSpace(s[j])) j++;
         return j + 2 - groupByIdx;
+    }
+}
+
+/// <summary>What <see cref="TableGroupKeyExtractor.Describe"/> saw in a table's SQL.
+/// <see cref="Clause"/> is "GROUP BY"/"LATEST BY" when the SQL declares a row identity at all and null
+/// when it doesn't; <see cref="DeclaredKeys"/> are that clause's key expressions verbatim (normalized
+/// whitespace only); <see cref="Columns"/> are the output columns they mapped to, or null for the
+/// whole-row fallback. The pair is what separates "no identity declared, whole row IS the identity"
+/// (fine — <see cref="None"/>) from "identity declared but unmappable" (degraded —
+/// <see cref="FellBackToWholeRow"/>).</summary>
+public sealed record TableRowIdentity(string? Clause, IReadOnlyList<string> DeclaredKeys, List<string>? Columns)
+{
+    public const string GroupByClause = "GROUP BY";
+    public const string LatestByClause = "LATEST BY";
+
+    /// <summary>The SQL declares no row identity this extractor can see — the pre-existing, perfectly
+    /// healthy whole-row-identity case.</summary>
+    public static readonly TableRowIdentity None = new(null, [], null);
+
+    /// <summary>The SQL declares a GROUP BY / LATEST BY row identity.</summary>
+    public bool IsDeclared => Clause is not null;
+
+    /// <summary>A row identity WAS declared but could not be mapped to output columns, so
+    /// <see cref="RowKeyCodec.EncodeIdentity"/> will key rows by their whole content. This is the
+    /// materially degraded state — see TableGroupKeyExtractor's class doc.</summary>
+    public bool FellBackToWholeRow => IsDeclared && Columns is null;
+}
+
+/// <summary>Turns <see cref="TableRowIdentity.FellBackToWholeRow"/> into the sentence a user reads.
+///
+/// Called from the shared API layer only — at table create/update (logged) and on the table's metrics
+/// (rendered by the console) — so both runtime flavors report identically, from one implementation, for
+/// every table including ones seeded or persisted long before this existed. It never persists a computed
+/// verdict anywhere: recomputing from the definition is cheap and cannot go stale, and TableDefinition is
+/// a client-owned record whose every writable field must round-trip an update untouched (asserted by the
+/// Dapr flavor's CatalogUpdateRoundTripTests), which a server-computed field would break.
+/// It WARNS, it never rejects: the whole-row fallback is pre-existing behavior, catalogs
+/// legitimately depend on it, and refusing it would break working installs (which is also why a table
+/// with no GROUP BY / LATEST BY at all is never flagged — that table's identity IS its whole row and
+/// always was).
+///
+/// The trigger is narrow on purpose: the fallback only COSTS anything where something actually consumes
+/// the row identity, i.e. when row history is enabled (the table-wide TableHistoryGrain/TableHistoryActor
+/// trail) or the table is sharded (each TableShardGrain groups versions of one logical row by the same
+/// identity — see TableShardRouterGrain.BuildConfig). A table with neither stores no version trail for
+/// the degradation to ruin, so it says nothing.</summary>
+public static class TableRowIdentityWarning
+{
+    /// <summary>The warning for <paramref name="def"/>, or null when there is nothing to report.</summary>
+    public static string? For(TableDefinition def) =>
+        For(def.Sql, def.HistoryEnabled, def.ShardBy.Count > 0);
+
+    /// <summary>Definition-free overload (same rule), for callers holding the three inputs directly.</summary>
+    public static string? For(string? sql, bool historyEnabled, bool sharded)
+    {
+        if (!historyEnabled && !sharded) return null;
+
+        var identity = TableGroupKeyExtractor.Describe(sql);
+        if (!identity.FellBackToWholeRow) return null;
+
+        var keys = string.Join(", ", identity.DeclaredKeys);
+        var plural = identity.DeclaredKeys.Count == 1 ? "" : "s";
+        var affected = historyEnabled && sharded
+            ? "Row history and each shard's version trail are"
+            : historyEnabled
+                ? "Row history is"
+                : "Each shard's version trail is";
+
+        return $"{affected} degraded: this table's {identity.Clause} key{plural} ({keys}) could not be " +
+               $"matched to an output column, so rows are identified by their WHOLE content instead. " +
+               $"Successive versions of the same row therefore never group together — every version sits " +
+               $"alone under its own key, and no version trail forms. Fix: key on a plainly projected " +
+               $"column — compute the expression upstream (a CTE or a derived query) and SELECT it as-is — " +
+               $"or write the {identity.Clause} expression character-for-character identically to the " +
+               $"SELECT item that projects it.";
     }
 }
 

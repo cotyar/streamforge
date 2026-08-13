@@ -427,6 +427,26 @@ public sealed class TableMetrics
     /// callers (REST /rows, StreamForge.Host.Api.TableRowsResponse.FrontierEpoch) shouldn't have to pay
     /// for a full GetMetricsAsync fan-out just to read it.</summary>
     [Id(9)] public long? SnapshotFrontierEpoch { get; set; }
+
+    /// <summary>A plain-language warning that this table's per-row VERSION TRAIL is degraded, or null (the
+    /// overwhelmingly common case) when it is not — the same kind of "this table is not in the state you
+    /// think it is" condition <see cref="Rebuilding"/> reports, on the same object, for the same reason:
+    /// the console is already looking here.
+    ///
+    /// It reports exactly one condition (composed by <c>TableRowIdentityWarning</c>, from the table's own
+    /// definition): the SQL declares a GROUP BY / LATEST BY row identity whose keys the textual extractor
+    /// could not map to output columns, so <c>RowKeyCodec.EncodeIdentity</c> keys rows by their WHOLE
+    /// content and successive versions of one row never group into a trail — which is precisely what row
+    /// history (and a shard's per-key trail) exists to accumulate. Reported only where it costs something,
+    /// i.e. when HistoryEnabled or ShardBy is set; a table with no declared identity at all is never
+    /// flagged, because the whole row genuinely IS its identity there and always was.
+    ///
+    /// DERIVED, NOT MEASURED — unlike every other field here. It is a pure function of the table's
+    /// definition (Sql + HistoryEnabled + ShardBy), stamped onto the metrics by the shared
+    /// <c>GET /api/tables/{id}/metrics</c> endpoint rather than counted by a grain/actor, so both runtime
+    /// flavors report it from the identical code and it can never go stale relative to the SQL it
+    /// describes. Additive and informational: nothing branches on it.</summary>
+    [Id(10)] public string? RowIdentityWarning { get; set; }
 }
 
 /// <summary>

@@ -620,6 +620,21 @@ export interface TableMetrics {
    * value as TableRowsResponse.frontierEpoch. Non-null only for a parallelism >= 2 table once its
    * coordinator has completed a full round. */
   snapshotFrontierEpoch?: number | null
+  /** Server-derived (from the table's definition, not measured): a plain-language warning that this
+   * table's per-row VERSION TRAIL is degraded, absent/null when it is not — which is the normal case.
+   * It rides the metrics object for the same reason `rebuilding` does: this is where the console looks
+   * for "this table is not in the state you think it is".
+   *
+   * Exactly one condition is reported: the SQL declares a GROUP BY / LATEST BY row identity whose keys
+   * the server could not match to output columns (an expression key, a CAST, a JSON path that doesn't
+   * match the projection character-for-character), so rows fall back to being keyed by their WHOLE
+   * content and successive versions of one row never group into a trail. Reported only where it costs
+   * something — history enabled, or a sharded table. A table with no GROUP BY / LATEST BY at all is NOT
+   * flagged: the whole row genuinely is its identity there, and always was.
+   *
+   * A warning, not a rejection — the table was accepted and runs. Render it verbatim (it names the keys
+   * and the fix); see TableDetailPage's Row history card and ShardingPanel. */
+  rowIdentityWarning?: string | null
 }
 
 export interface TableOutputField {

@@ -39,10 +39,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 export function ShardingPanel({
   table,
   canEdit,
+  rowIdentityWarning,
   onApplyShardBy,
 }: {
   table: TableDefinition
   canEdit: boolean
+  /** TableMetrics.rowIdentityWarning, polled by the parent (null = nothing to report). See the alert
+   * below for why a sharded table cares about it. */
+  rowIdentityWarning?: string | null
   /** Sends a full table update with the new shardBy (the PUT replaces the whole definition). */
   onApplyShardBy: (next: string[]) => Promise<void>
 }) {
@@ -163,6 +167,19 @@ export function ShardingPanel({
               <ShardStat label="Routed deltas" value={info.routedDeltas.toLocaleString()} />
               <ShardStat label="Router sequence" value={info.routerSeq < 0 ? '—' : info.routerSeq.toLocaleString()} />
             </div>
+          )}
+
+          {/* Same warning the Row history card shows, for the same reason and from the same server field:
+              a shard groups VERSIONS of one logical row by the row identity derived from the SQL, so an
+              unmappable GROUP BY / LATEST BY key degrades every shard's trail exactly as it degrades the
+              table-wide one. The shard tier itself is unaffected — which key owns a row is decided by the
+              explicit shardBy columns, never by this extraction — so this is about the trail inside a
+              shard, and it is shown verbatim. */}
+          {sharded && rowIdentityWarning && (
+            <Alert variant="destructive">
+              <TriangleAlert />
+              <AlertDescription>{rowIdentityWarning}</AlertDescription>
+            </Alert>
           )}
 
           {sharded && info && !info.routerActive && (
