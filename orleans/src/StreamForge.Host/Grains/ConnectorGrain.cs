@@ -33,6 +33,8 @@ public sealed class ConnectorGrainState
     public long EventsEmittedTotal { get; set; }
     /// <summary>Plan 009 C2: cumulative field coercion failures — see ConnectorRuntimeStatus's own doc.</summary>
     public long CoercionFailuresTotal { get; set; }
+    /// <summary>Plan 014: cumulative envelope-unwrap skips — see ConnectorRuntimeStatus's own doc.</summary>
+    public long EnvelopeSkippedTotal { get; set; }
     public int LastBatchCount { get; set; }
 }
 
@@ -159,6 +161,7 @@ public sealed class ConnectorGrain(
         ConsecutiveFailures = state.State.ConsecutiveFailures,
         EventsEmittedTotal = state.State.EventsEmittedTotal,
         CoercionFailuresTotal = state.State.CoercionFailuresTotal,
+        EnvelopeSkippedTotal = state.State.EnvelopeSkippedTotal,
         LastBatchCount = state.State.LastBatchCount,
         Cursor = state.State.Cursor,
     });
@@ -247,6 +250,25 @@ public sealed class ConnectorGrain(
     /// coercion failures would exist as a LastError string and nowhere countable, while the polled kinds
     /// — which report through EmitRowsAsync's cycle handler — had a real counter. A counter that is
     /// accurate for some source kinds and silently zero for others is worse than no counter.</summary>
+    /// <summary>Plan 009 C2 + plan 014: the "clean cycle, but not silent" note. Both coercion failures
+    /// (under Null/DropRow) and envelope skips leave <see cref="PollCycleResult.Error"/> null on purpose —
+    /// an error drops the whole batch — so LastError is the only line an operator reading the status sees
+    /// them on. Composed rather than either-or, because a CDC source can hit both in one cycle and the
+    /// second one silently winning would be exactly the kind of quiet this note exists to prevent.</summary>
+    private static string? CycleNote(PollCycleResult result, CoercionFailurePolicy policy)
+    {
+        List<string> notes = [];
+        if (result.CoercionFailures > 0)
+        {
+            notes.Add($"{result.CoercionFailures} field coercion failure(s) this cycle; policy={policy}");
+        }
+        if (result.EnvelopeSkipped > 0)
+        {
+            notes.Add($"{result.EnvelopeSkipped} message(s) skipped: the envelope carried no representable row");
+        }
+        return notes.Count == 0 ? null : string.Join("; ", notes);
+    }
+
     public async Task ReportCoercionFailuresAsync(int count)
     {
         if (count <= 0 || state.State.Def is null)
@@ -570,9 +592,11 @@ public sealed class ConnectorGrain(
             // CoercionFailuresTotal — the queryable channel — and ALSO restated in LastError so an
             // operator reading the status line sees it without knowing to look at a counter.
             state.State.CoercionFailuresTotal += result.CoercionFailures;
-            state.State.LastError = result.CoercionFailures > 0
-                ? $"{result.CoercionFailures} field coercion failure(s) this cycle; policy={def.OnCoercionFailure}"
-                : null;
+            // Plan 014: an envelope skip reaches an operator the same way and for the same reason — it is
+            // never an Error (that would drop the good rows beside it), so without this line a CDC source
+            // quietly discarding every delete looks identical to one with no deletes.
+            state.State.EnvelopeSkippedTotal += result.EnvelopeSkipped;
+            state.State.LastError = CycleNote(result, def.OnCoercionFailure);
         }
         else
         {

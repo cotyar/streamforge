@@ -462,6 +462,15 @@ public sealed class ConnectorRuntimeStatus
     /// operator who cannot see the cursor cannot tell a stuck source from an idle one. Null for every
     /// kind that has no cursor.</summary>
     [Id(9)] public string? Cursor { get; set; }
+
+    /// <summary>Plan 014: cumulative messages a <see cref="MappingSpec.Envelope"/> unwrapper could not turn
+    /// into a row — a Debezium delete whose <c>before</c> is absent because the table has no
+    /// REPLICA IDENTITY FULL, or a tombstone. Counted rather than folded into <see cref="LastError"/>,
+    /// because a non-null error drops every row the cycle produced and one unrepresentable change event
+    /// must not discard the good rows sitting beside it in the same batch. Same reasoning, and the same
+    /// shape, as <see cref="CoercionFailuresTotal"/>: silence would be indistinguishable from a source
+    /// that simply has no deletes.</summary>
+    [Id(10)] public long EnvelopeSkippedTotal { get; set; }
 }
 
 // ---- REST helper DTOs (cross HTTP only, but follow house serialization style anyway) ----

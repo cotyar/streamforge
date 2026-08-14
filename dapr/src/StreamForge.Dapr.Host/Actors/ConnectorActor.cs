@@ -567,6 +567,8 @@ public sealed class ConnectorActorState
     public long EventsEmittedTotal { get; set; }
     /// <summary>Plan 009 C2: cumulative field coercion failures — see ConnectorRuntimeStatus's own doc.</summary>
     public long CoercionFailuresTotal { get; set; }
+    /// <summary>Plan 014: cumulative envelope-unwrap skips — see ConnectorRuntimeStatus's own doc.</summary>
+    public long EnvelopeSkippedTotal { get; set; }
 
     public int LastBatchCount { get; set; }
 
@@ -642,6 +644,7 @@ public static class ConnectorBookkeeping
         ConsecutiveFailures = state.ConsecutiveFailures,
         EventsEmittedTotal = state.EventsEmittedTotal,
         CoercionFailuresTotal = state.CoercionFailuresTotal,
+        EnvelopeSkippedTotal = state.EnvelopeSkippedTotal,
         LastBatchCount = state.LastBatchCount,
         Cursor = state.Cursor,
     };
@@ -652,6 +655,25 @@ public static class ConnectorBookkeeping
     /// ConsecutiveFailures, sets LastStatus "error"/LastError, and reports a zero batch (no emission on
     /// failure). LastRunMs and NextRunMs are ALWAYS recomputed regardless of success/failure — a failing
     /// connector must still get a (backed-off) next run, never freeze forever.</summary>
+    /// <summary>Plan 009 C2 + plan 014: the "clean cycle, but not silent" note. Both coercion failures
+    /// (under Null/DropRow) and envelope skips leave <see cref="PollCycleResult.Error"/> null on purpose —
+    /// an error drops the whole batch — so LastError is the only line an operator reading the status sees
+    /// them on. Composed rather than either-or, because a CDC source can hit both in one cycle and the
+    /// second one silently winning would be exactly the kind of quiet this note exists to prevent.</summary>
+    private static string? CycleNote(PollCycleResult result, CoercionFailurePolicy? policy)
+    {
+        List<string> notes = [];
+        if (result.CoercionFailures > 0)
+        {
+            notes.Add($"{result.CoercionFailures} field coercion failure(s) this cycle; policy={policy}");
+        }
+        if (result.EnvelopeSkipped > 0)
+        {
+            notes.Add($"{result.EnvelopeSkipped} message(s) skipped: the envelope carried no representable row");
+        }
+        return notes.Count == 0 ? null : string.Join("; ", notes);
+    }
+
     public static void ApplyPollResult(ConnectorActorState state, PollCycleResult result, DateTimeOffset nowUtc)
     {
         state.LastRunMs = nowUtc.ToUnixTimeMilliseconds();
@@ -665,9 +687,11 @@ public static class ConnectorBookkeeping
             // ConnectorRuntimeStatus.LastError (no dedicated counter field exists on that frozen
             // contract), so a clean cycle still surfaces a non-zero count instead of going quiet.
             state.CoercionFailuresTotal += result.CoercionFailures;
-            state.LastError = result.CoercionFailures > 0
-                ? $"{result.CoercionFailures} field coercion failure(s) this cycle; policy={state.Def?.OnCoercionFailure}"
-                : null;
+            // Plan 014: an envelope skip reaches an operator the same way and for the same reason — it is
+            // never an Error (that would drop the good rows beside it), so without this line a CDC source
+            // quietly discarding every delete looks identical to one with no deletes.
+            state.EnvelopeSkippedTotal += result.EnvelopeSkipped;
+            state.LastError = CycleNote(result, state.Def?.OnCoercionFailure);
             state.LastBatchCount = result.Rows.Count;
             state.EventsEmittedTotal += result.Rows.Count;
         }
