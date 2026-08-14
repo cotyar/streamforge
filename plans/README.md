@@ -21,5 +21,6 @@ Written against commit `49d6979` by the improve skill (focused `plan` invocation
 | 014 | [Pluggable connectors + database ingress/egress](014-pluggable-connectors-databases.md) | IN PROGRESS | 013 |
 | 015 | [RBAC → entitlements, groups, approvals, escalation, audit](015-rbac-entitlements-approvals.md) | PLANNED | independent of 014 |
 | 016 | [Name resolution, versioning & dependencies, service discovery](016-identity-versioning-discovery.md) | PLANNED | 014 (plugin versions only) |
+| 017 | [Native .NET CDC](017-native-cdc.md) | IN PROGRESS (postgres-cdc + mssql-cdc registered and documented; live DB integration running concurrently) | 014 (reuses `IPolledTransport`, `DbSourceConfig`, `CdcEnvelope`'s vocabulary) |
 
 Design tokens source of truth: `orleans/design-system/streamforge/MASTER.md`.

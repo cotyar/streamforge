@@ -17,6 +17,13 @@ appends CSV or NDJSON to a path on the host (append-only, header fixed for the l
 `GET /api/tables/{id}/rows.csv` + `GET /api/pipelines/{id}/results.csv` (plus a **CSV** button on both
 detail pages) download the same rows. One writer, `CsvFormatter`, behind all of it.
 
+**Native CDC** (plan 017): `postgres-cdc` and `mssql-cdc` are two more `IPolledTransport` source kinds,
+living in `shared/StreamForge.Connectors.Database` alongside the plain `postgres`/`mssql` kinds — a
+source reads the database's own change log (Postgres logical replication, SQL Server capture tables)
+instead of polling a cursor column. Their operational hazards (an undrained Postgres slot pinning WAL,
+SQL Server's 3-day CDC retention default, `REPLICA IDENTITY FULL`) are written down in
+[`TRANSPORTS.md`](TRANSPORTS.md)'s "Change data capture" section — read it before enabling either kind.
+
 ## Environment — non-negotiables
 
 - **dotnet**: `~/.dotnet/dotnet` (SDK 10.0.3xx). It is **NOT on PATH** — always use the full path.

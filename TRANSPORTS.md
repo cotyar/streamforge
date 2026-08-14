@@ -172,6 +172,134 @@ Register in `SinkTransports.Registered`, same as above.
 
 ---
 
+## Polled sources (a database, or anything else pull-shaped)
+
+Everything above is **push**-shaped: something else decides when a message exists, and `SubscribeAsync`
+yields until it throws. A database table is the opposite — nothing arrives until you ask — and plan 014
+added a second seam for exactly that: [`IPolledTransport`](shared/StreamForge.AppCore/Transports/IPolledTransport.cs),
+implemented today by `StreamForge.Connectors.Database` (postgres, mssql, postgres-cdc, mssql-cdc).
+
+**It is a *sibling* of `IInboundTransport`, not a generalization of it — on purpose.** `IInboundTransport.Open`
+hands back an async enumerable, which means the polling loop (and its cursor — the one piece of state that
+must survive anything) would have to live *inside the subscription instance*. That is in memory, and it is
+lost on every silo recycle, actor deactivation and rebalance — precisely the thing that must not happen to a
+cursor. `PollAsync(def, cursor, ct) -> PolledBatch` puts the loop in the *driver* instead, which already
+persists its state once per cycle, so the cursor rides along for free instead of needing a subscription
+object with its own lifecycle.
+
+```csharp
+public interface IPolledTransport
+{
+    string Kind { get; }
+    void Validate(SourceDefinition def, List<string> errors);
+    Task<PolledBatch> PollAsync(SourceDefinition def, string? cursor, CancellationToken ct);
+    TransportDescriptor Describe();
+}
+
+public sealed record PolledBatch(IReadOnlyList<Dictionary<string, object?>> Rows, string? Cursor, bool HasMore);
+```
+
+- **`Cursor` is opaque.** The transport mints it, the driver persists it, nothing in between parses it — an
+  LSN, a composite `(ts,id)` string and a plain bigint all fit without the platform ever learning what any
+  of them mean. `null` means "leave the persisted cursor exactly as it was" (what an empty poll returns);
+  it is **never** "reset to the beginning" — a transport that wants to restart a source has to say so with
+  an actual value, not by returning null and hoping.
+- **`HasMore` means "re-arm right now"** instead of waiting for the schedule. That single bit is what makes
+  a paged backfill resumable: a large initial read pages across successive *driver* cycles, each persisting
+  its own cursor, so a restart mid-backfill resumes where it stopped rather than starting over. Paging
+  inside one `PollAsync` call would put those intermediate cursors back in memory, which is the exact
+  failure this whole seam exists to avoid.
+- **The load-bearing rule: a failed cycle keeps the OLD cursor** — enforced once, in
+  [`PolledSourceCore`](shared/StreamForge.AppCore/Transports/PolledSourceCore.cs), not by each transport,
+  because a transport bug is exactly the case the rule has to protect against, and a rule enforced by the
+  code that might be buggy protects nothing. **Throwing from `PollAsync` is therefore a normal, expected
+  outcome** — a database is down far more often than a config is wrong — not something your transport needs
+  to catch and convert into an empty batch. `PolledSourceCore` turns the exception into a reported error
+  with the incoming cursor handed back unchanged, so the same rows are re-read next cycle rather than
+  skipped.
+- **No `FormatOf`, no ledger, no mapping** — three deliberate divergences from `IInboundTransport`. A result
+  set is already structured, so there is nothing to parse. There is no file whose mtime answers "did this
+  change" — the cursor replaces that question outright. And for a row source the SELECT list (or the
+  publication, for CDC) **is** the mapping; a JSONPath layer on top would be a second way to say the same
+  thing, free to disagree with the first the moment a column is renamed in one and not the other. That is
+  what `TransportDescriptor.Mapping = false` tells the console: stop offering a mapping editor for this kind.
+- **`ISchemaProbe` is an optional capability**, not a second interface every polled transport must implement.
+  `POST /api/transports/{kind}/probe` looks for it on the registered transport and 400s when it is absent —
+  which is how schema discovery reaches the console without `StreamForge.Api` learning what a database (or
+  anything else pull-shaped) actually is; it knows a probe returns fields and diagnostic notes, and nothing
+  further. `TransportDescriptor.CanProbe` is what lets the console render the "Discover" button honestly
+  instead of hopefully.
+
+**The four kinds that exist today, and the one-line difference between the two pairs:** `postgres` and
+`mssql` poll a table or your own query on a durable, monotonic cursor **column** — cheap, and it never sees
+a transaction that commits after a later-timestamped one already moved the watermark past it (the honest
+argument for the next pair). `postgres-cdc` and `mssql-cdc` read the source database's own change log
+instead of polling anything — see below.
+
+### Change data capture
+
+The native CDC pair is `postgres-cdc` ([`PgCdcSource`](shared/StreamForge.Connectors.Database/PgCdcSource.cs))
+and `mssql-cdc` ([`MsSqlCdcSource`](shared/StreamForge.Connectors.Database/MsSqlCdcSource.cs)), both
+`IPolledTransport` like their cursor-polled siblings — CDC is still pull-shaped from this platform's point
+of view, one cycle at a time, even though the *source* database is doing the pushing internally.
+
+- **Postgres**: logical replication over a **slot + publication**, read via `Npgsql.Replication`'s pgoutput
+  decoder. **SQL Server**: the built-in capture tables, read via `cdc.fn_cdc_get_all_changes_*` on a
+  `binary(10)` LSN.
+
+**The operational hazards, stated where an operator will actually read them (the descriptor `Help` text, not
+just here):**
+
+- An **undrained Postgres slot pins WAL until the *source* database's disk fills** — not StreamForge's disk,
+  the database being read from. `max_slot_wal_keep_size` is the server-side safety valve; it is not a
+  substitute for keeping the source running.
+- **SQL Server CDC retention defaults to 3 days.** A source left stopped longer than that has permanently
+  lost whatever retention already discarded — the next cycle fails loudly (a retention-breach check, not a
+  silent skip) rather than quietly resuming from wherever it can.
+- **`REPLICA IDENTITY FULL`** is what makes a Postgres `DELETE` carry more than its key columns. Without it,
+  a delete event is genuinely partial (key columns only) — not fabricated, not dropped, just partial, and
+  both the native reader and the Debezium envelope path (below) treat it identically.
+- An **unchanged TOASTed column arrives as the sentinel `__debezium_unavailable_value`**, not its real
+  content — Postgres never wrote the value into this change record in the first place, so there is nothing
+  to decode; a consumer that treats the sentinel as real data corrupts silently.
+
+**Delivery is at-least-once**, same ceiling as the cursor-polled kinds, and **a batch always ends on a
+transaction boundary** in both dialects — rows from a transaction whose COMMIT (Postgres) or whose read
+this cycle could not prove complete (SQL Server's `TOP`-capped read, re-read bounded to its own
+`__$start_lsn` with no `TOP` when needed) are held back rather than emitted split or over-eagerly confirmed.
+`BatchSize` is therefore a **target** for a cycle's read, never a hard ceiling on what one batch can emit —
+a transaction larger than `BatchSize` is delivered whole, over budget, once the bounded re-read resolves it.
+Emitting a truncated group and advancing the cursor past it would be silent, permanent data loss, which is
+the failure this rule exists to make impossible.
+
+**Backfill is asymmetric between the two dialects, and each says so in its own `Help` text:**
+
+- `postgres-cdc` **refuses `Snapshot` outright** — a replication slot carries no history from before its own
+  creation, so there is nothing to snapshot. Backfill with the polled `postgres` kind first, then switch the
+  source to `postgres-cdc` to tail changes from where the backfill left off.
+- `mssql-cdc`'s `Snapshot` means **"replay whatever the capture table still retains"**, not a full-table
+  snapshot — CDC retention is finite (see the 3-day default above), so `Snapshot` here can only ever replay
+  what has not aged out yet. For a true backfill, run the polled `mssql` kind first.
+
+**`MappingSpec.Envelope = "debezium"` still exists**, and is still the right route for a database this
+connector does not speak natively — MySQL, Oracle, MongoDB via Debezium Server emitting into a NATS source.
+The native kinds are an *addition* to that path, not a replacement for it: they exist because this connector
+already speaks Postgres and SQL Server natively, so a slot/capture-table reader was cheap; nothing about it
+extends to a database this project has no client for.
+
+**The honest limit, restated so it does not get lost between the two paths:** a StreamForge source is an
+append-only `EventRecord` stream — `_weight` on an *inbound* row is just a column, a value like any other,
+whichever path stamped it. The Engine's Z-set weights that make a table a genuine multiset are computed
+*from* table SQL, not carried in from ingress. So neither `postgres-cdc`/`mssql-cdc` nor the Debezium
+envelope path retracts the row a delete removed; it arrives as one more event (`_op = "d"`, `_weight = -1`
+on the Debezium path) sitting in the stream next to every insert and update that came before it. The working
+pattern is `LATEST BY <key>` + `WHERE _op <> 'd'` on the downstream table — which **hides** a deleted key
+from query results but does **not free it**: the tombstone event, and everything before it, is still sitting
+in the source's history. See [`CdcEnvelope`](shared/StreamForge.AppCore/Connectors/Mapping/CdcEnvelope.cs)'s
+class doc for the canonical wording — this section restates it rather than diverging from it.
+
+---
+
 ## The console form
 
 `Describe()` returns a [`TransportDescriptor`](shared/StreamForge.AppCore/Transports/TransportDescriptor.cs),
@@ -246,8 +374,10 @@ a built-in.
 **The `grpc` source kind stays its own branch** in both drivers. It subscribes to a remote StreamForge and
 decodes typed protobuf frames against a schema fetched by reflection — it never asks "what format is this
 payload", which is the question this seam is built around. Bending it into `IInboundTransport` would mean
-widening the interface for exactly one implementation. The transports that fit here are the
-subject/topic + opaque-payload family: NATS today; RV, MQTT, AMQP, Kafka next.
+widening the interface for exactly one implementation. `IInboundTransport` is the subject/topic +
+opaque-payload family (NATS today; RV, MQTT, AMQP, Kafka next); `IPolledTransport` is the separate,
+pull-shaped family covered above (postgres/mssql/postgres-cdc/mssql-cdc today) — between the two, most
+future ingress kinds fit one or the other.
 
 **The registries are static lists, not DI discovery.** Assembly scanning would buy nothing — transports are
 compile-time known — and both connector drivers are constructed by runtime machinery (an Orleans grain, a
@@ -259,8 +389,10 @@ repo's test cluster once. `Register()` covers the out-of-tree case above.
 ## Checklist
 
 - [ ] Config class with the next free `[Id(n)]`, `[Secret]` on every credential, nothing else marked
-- [ ] `IInboundTransport` / `ISinkTransport` implemented, including `Describe()`
-- [ ] Registered in `InboundTransports` / `SinkTransports` (or from host startup, if out-of-tree)
+- [ ] `IInboundTransport` / `ISinkTransport` implemented, including `Describe()` — **or**, for a pull-shaped
+      kind, `IPolledTransport` (plus `ISchemaProbe` if it can discover its own schema)
+- [ ] Registered in `InboundTransports` / `SinkTransports` / `PolledTransports` (or from host startup, if
+      out-of-tree)
 - [ ] `~/.dotnet/dotnet test orleans/StreamForge.sln` and `dapr/StreamForge.Dapr.sln` — both suites green,
       **no existing test file modified**
 - [ ] `cd web && bun run build` — should need no source change; it is a check that nothing regressed
@@ -268,3 +400,7 @@ repo's test cluster once. `Register()` covers the out-of-tree case above.
       afterwards): the kind appears in `GET /api/transports`, an invalid config is rejected with your
       messages, credentials read back as `***`, a masked PUT round-trip preserves them, and the source arms
       and degrades rather than crashing against an unreachable broker
+- [ ] For a polled kind specifically: a cycle that fails (kill the source mid-poll, or point it at an
+      unreachable endpoint) leaves the persisted cursor untouched rather than advancing or nulling it — the
+      one property `PolledSourceCore` exists to guarantee, and the one worth checking live rather than
+      trusting the unit tests alone
