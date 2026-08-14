@@ -29,6 +29,15 @@ public static class SourceKinds
     /// transport, a different dialect.</summary>
     public const string MsSql = "mssql";
 
+    /// <summary>Plan 017: Postgres logical replication (pgoutput) read via <c>Npgsql.Replication</c> off a
+    /// replication slot + publication, instead of polling a cursor column. Reuses <see cref="DbSourceConfig"/>
+    /// — see <see cref="DbSourceConfig.SlotName"/> / <see cref="DbSourceConfig.PublicationName"/>.</summary>
+    public const string PostgresCdc = "postgres-cdc";
+    /// <summary>Plan 017: SQL Server's built-in CDC capture tables
+    /// (<c>cdc.fn_cdc_get_all_changes_*</c>), cursor is the <c>binary(10)</c> LSN. See
+    /// <see cref="DbSourceConfig.CaptureInstance"/>.</summary>
+    public const string MsSqlCdc = "mssql-cdc";
+
     /// <summary>The masked placeholder for secrets-lite values (D-H).</summary>
     public const string SecretMask = "***";
 }
@@ -223,7 +232,17 @@ public sealed class OpenApiRef
 /// <summary>Plan 014: a database source, Postgres or MS SQL. Structured rather than a single connection
 /// string BECAUSE a raw string with an embedded password masks to "***" wholesale, and the operator can
 /// then no longer see which host it points at — the escape hatch below exists for the cases the structured
-/// fields cannot express, and it pays that price knowingly.</summary>
+/// fields cannot express, and it pays that price knowingly.
+///
+/// <para>Plan 017: this one config class now serves FOUR kinds — <see cref="SourceKinds.Postgres"/>,
+/// <see cref="SourceKinds.MsSql"/>, <see cref="SourceKinds.PostgresCdc"/> and
+/// <see cref="SourceKinds.MsSqlCdc"/> — rather than growing a sibling CDC config, so the connection fields
+/// above are shared verbatim and only the CDC-specific fields below are added. Some fields are therefore
+/// inert for a given kind (e.g. <see cref="CursorColumn"/> is meaningless for either CDC kind, and
+/// <see cref="SlotName"/> is meaningless outside <see cref="SourceKinds.PostgresCdc"/>); the per-kind
+/// <c>TransportDescriptor</c> is what hides the irrelevant fields from the console. The cost, paid
+/// knowingly: a reader of this raw class cannot tell which fields apply to which kind without also
+/// consulting that descriptor.</para></summary>
 [GenerateSerializer]
 public sealed class DbSourceConfig
 {
@@ -276,6 +295,30 @@ public sealed class DbSourceConfig
     /// <summary>Full connection string. When set it WINS over every structured field above — for the
     /// options this shape does not model. Masked wholesale, with the visibility cost named at the top.</summary>
     [Id(17)] [Secret] public string? ConnectionString { get; set; }
+
+    // ---- Plan 017: CDC-only fields. Inert for the polled postgres/mssql kinds. ----
+
+    /// <summary>Postgres logical replication slot name. Required for <see cref="SourceKinds.PostgresCdc"/>;
+    /// unused elsewhere.</summary>
+    [Id(18)] public string SlotName { get; set; } = "";
+    /// <summary>The Postgres publication the slot streams from. Required for
+    /// <see cref="SourceKinds.PostgresCdc"/>; unused elsewhere.</summary>
+    [Id(19)] public string PublicationName { get; set; } = "";
+    /// <summary>SQL Server CDC capture instance (conventionally <c>&lt;schema&gt;_&lt;table&gt;</c>).
+    /// Required for <see cref="SourceKinds.MsSqlCdc"/>; unused elsewhere.</summary>
+    [Id(20)] public string CaptureInstance { get; set; } = "";
+    /// <summary>Optional CSV of <c>schema.table</c> to keep; empty = everything the publication/capture
+    /// instance carries. An informational filter only — on Postgres the publication is the real filter, this
+    /// just narrows what the driver surfaces from it. CDC kinds only; unused elsewhere.</summary>
+    [Id(21)] public string Tables { get; set; } = "";
+    /// <summary>Upper bound, in milliseconds, on how long a single poll cycle drains the replication stream
+    /// before returning whatever it has collected so far. CDC kinds only; unused elsewhere.</summary>
+    [Id(22)] public int MaxPollMs { get; set; } = 1000;
+    /// <summary>Opt-in: create the Postgres replication slot on the first cycle if it does not already
+    /// exist. Off by default ON PURPOSE — creating a slot starts pinning WAL on the source database, a
+    /// privileged and consequential act on a system this connector does not own, not a convenience to
+    /// default to. <see cref="SourceKinds.PostgresCdc"/> only; unused elsewhere.</summary>
+    [Id(23)] public bool CreateSlotIfMissing { get; set; }
 }
 
 /// <summary>Plan 014: a database sink. Connection fields mirror <see cref="DbSourceConfig"/> deliberately,
