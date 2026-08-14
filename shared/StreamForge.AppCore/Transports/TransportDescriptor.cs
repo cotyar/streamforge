@@ -132,6 +132,11 @@ public static class TransportFieldTypes
 }
 
 /// <summary><c>GET /api/transports</c> response.</summary>
+/// <para>Plan 014: <see cref="Inbound"/> carries BOTH registries — message transports
+/// (<c>IInboundTransport</c>) and polled ones (<c>IPolledTransport</c>). They are separate registries for a
+/// driver-side reason — one arms a subscriber, the other arms a timer — that a form has no business knowing.
+/// What the form needs is <see cref="TransportDescriptor.Polled"/> on the entry it is drawing, which is why
+/// that flag exists.</para>
 public sealed record TransportCatalog(
     IReadOnlyList<TransportDescriptor> Inbound,
     IReadOnlyList<TransportDescriptor> Outbound);

@@ -31,8 +31,19 @@ public static class TransportsEndpoints
 
     public static void MapTransportsEndpoints(this WebApplication app)
     {
+        // Plan 014: Inbound is BOTH registries. A polled kind and a message kind are both "a source the
+        // console has to draw a form for", and the two are separate registries for a driver-side reason
+        // (one arms a subscriber, the other arms a timer) that the console has no business knowing about.
+        // Merging them here is what makes the descriptor's own Polled flag useful — it exists precisely so
+        // one list can carry both and the form decides per entry whether to render a schedule editor.
+        // Without this the database kinds would validate, start and run while being invisible to the only
+        // UI that can configure them.
         app.MapGet("/api/transports", () => Results.Ok(new TransportCatalog(
-                Inbound: [.. InboundTransports.Kinds.Select(k => InboundTransports.Find(k)!.Describe())],
+                Inbound:
+                [
+                    .. InboundTransports.Kinds.Select(k => InboundTransports.Find(k)!.Describe()),
+                    .. PolledTransports.Kinds.Select(k => PolledTransports.Find(k)!.Describe()),
+                ],
                 Outbound: [.. SinkTransports.Kinds.Select(k => SinkTransports.Find(k)!.Describe())])))
             .RequireAuthorization("Viewer");
 
