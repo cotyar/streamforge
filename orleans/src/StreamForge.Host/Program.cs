@@ -3,6 +3,7 @@ using Orleans;
 using Orleans.Hosting;
 using StreamForge.Abstractions;
 using StreamForge.Api;
+using StreamForge.Connectors.Database;
 using StreamForge.Host.Facades;
 using StreamForge.Host.Grpc;
 using StreamForge.Host.Grpc.Dynamic;
@@ -109,6 +110,13 @@ builder.Services.AddHostedService<StreamBridgeService>();
 builder.Services.AddHostedService<NatsPublisherService>();
 
 builder.Services.AddGrpc();
+
+// Plan 014-I: the out-of-core database connectors' only call site. InboundTransports/PolledTransports
+// both document "before any source starts" as the registration deadline; nothing in this process can
+// start a source before builder.Build() returns and the hosted services below get to Run(), so anywhere
+// before this line satisfies it — here, immediately before Build(), keeps it visibly paired with the
+// rest of the transport wiring above rather than buried at the top of the file.
+DatabaseConnectors.RegisterAll();
 
 var app = builder.Build();
 

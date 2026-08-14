@@ -23,6 +23,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamForge.AppCore", "..\s
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamForge.Api", "..\shared\StreamForge.Api\StreamForge.Api.csproj", "{4E06A4DE-9450-469E-AA7B-722086D5596A}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamForge.Connectors.Database", "..\shared\StreamForge.Connectors.Database\StreamForge.Connectors.Database.csproj", "{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamForge.Connectors.Database.Tests", "..\shared\StreamForge.Connectors.Database.Tests\StreamForge.Connectors.Database.Tests.csproj", "{0CDEE25C-65DE-4ECF-9F71-1719034CD789}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -129,6 +133,30 @@ Global
 		{4E06A4DE-9450-469E-AA7B-722086D5596A}.Release|x64.Build.0 = Release|Any CPU
 		{4E06A4DE-9450-469E-AA7B-722086D5596A}.Release|x86.ActiveCfg = Release|Any CPU
 		{4E06A4DE-9450-469E-AA7B-722086D5596A}.Release|x86.Build.0 = Release|Any CPU
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}.Debug|x64.Build.0 = Debug|Any CPU
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}.Debug|x86.Build.0 = Debug|Any CPU
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}.Release|x64.ActiveCfg = Release|Any CPU
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}.Release|x64.Build.0 = Release|Any CPU
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}.Release|x86.ActiveCfg = Release|Any CPU
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9}.Release|x86.Build.0 = Release|Any CPU
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789}.Debug|x64.Build.0 = Debug|Any CPU
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789}.Debug|x86.Build.0 = Debug|Any CPU
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789}.Release|x64.ActiveCfg = Release|Any CPU
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789}.Release|x64.Build.0 = Release|Any CPU
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789}.Release|x86.ActiveCfg = Release|Any CPU
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -139,5 +167,7 @@ Global
 		{2F2487A8-98B5-4970-B6F4-D56CCAAECF87} = {4F52FD11-658E-A102-6CD3-7D7C16FFA15B}
 		{FD3F7837-8891-4646-8E9B-3FCD2D91EEAC} = {4F52FD11-658E-A102-6CD3-7D7C16FFA15B}
 		{4E06A4DE-9450-469E-AA7B-722086D5596A} = {4F52FD11-658E-A102-6CD3-7D7C16FFA15B}
+		{EC0B498A-291D-4340-ABC0-3BC4AAB121D9} = {4F52FD11-658E-A102-6CD3-7D7C16FFA15B}
+		{0CDEE25C-65DE-4ECF-9F71-1719034CD789} = {4F52FD11-658E-A102-6CD3-7D7C16FFA15B}
 	EndGlobalSection
 EndGlobal
