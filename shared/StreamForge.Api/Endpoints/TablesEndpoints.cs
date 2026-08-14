@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Config;
+using StreamForge.AppCore.Sql;
 using StreamForge.Engine;
 using StreamForge.Host.Grains;
 using StreamForge.Host.Grpc.Dynamic;
@@ -34,13 +35,23 @@ public static class TablesEndpoints
                 return Results.BadRequest(new ErrorResponse("name and sql are required"));
             }
 
+            // Plan 014 K: 'INSERT INTO <sink> SELECT …' is stripped before the definition is built — the
+            // stored text is the naked query and the named sink is switched on. See the identical note in
+            // PipelinesEndpoints' create handler; an unknown target is a 400, never a silent no-op.
+            var sinks = req.Sinks ?? [];
+            var sugar = SinkSugar.ApplyTo(req.Sql, sinks, "table");
+            if (sugar.Diagnostics.Count > 0)
+            {
+                return Results.BadRequest(new ErrorResponse(string.Join("; ", sugar.Diagnostics)));
+            }
+
             try
             {
                 var def = new TableDefinition
                 {
                     Name = req.Name,
                     Description = req.Description,
-                    Sql = req.Sql,
+                    Sql = sugar.Sql,
                     CreatedBy = principal.Identity?.Name ?? "",
                     SearchEnabled = req.SearchEnabled,
                     SearchMode = req.SearchMode,
@@ -61,7 +72,8 @@ public static class TablesEndpoints
                     ShardBy = req.ShardBy ?? [],
                     // Plan 009 B2: see the identical note in PipelinesEndpoints' create handler — a
                     // freshly-created table has no stored secrets to merge against.
-                    Sinks = req.Sinks ?? [],
+                    // Plan 014 K: 'sinks' is that same list, after the sugar enabled a member of it.
+                    Sinks = sinks,
                 };
                 var created = await registry.CreateTableAsync(def);
                 WarnOnDegradedRowIdentity(loggers, created);
@@ -81,9 +93,23 @@ public static class TablesEndpoints
                 return Results.NotFound();
             }
 
+            // Plan 009 B2: null Sinks = unchanged; a non-null Sinks carrying "***" is restored from the
+            // stored value first (SecretsMasker.MergeSinkSecrets — see the identical, more detailed note
+            // in PipelinesEndpoints' PUT handler, including the Orleans-flavor RegistryGrain gap that
+            // applies here too, in TablesEndpoints' case via RegistryGrain.UpdateTableAsync).
+            var sinks = req.Sinks is null ? existing.Sinks : SecretsMasker.MergeSinkSecrets(req.Sinks, existing.Sinks);
+
+            // Plan 014 K: after the merge and before the field copies — same ordering, and the same reason
+            // for it, as PipelinesEndpoints' PUT handler.
+            var sugar = SinkSugar.ApplyTo(req.Sql, sinks, "table");
+            if (sugar.Diagnostics.Count > 0)
+            {
+                return Results.BadRequest(new ErrorResponse(string.Join("; ", sugar.Diagnostics)));
+            }
+
             existing.Name = req.Name;
             existing.Description = req.Description;
-            existing.Sql = req.Sql;
+            existing.Sql = sugar.Sql;
             existing.SearchEnabled = req.SearchEnabled;
             existing.SearchMode = req.SearchMode;
             existing.HistoryEnabled = req.HistoryEnabled;
@@ -102,11 +128,7 @@ public static class TablesEndpoints
             // Plan 011 D1: null means "leave as-is" (matching Tags/Metadata/Sinks' convention here), so a
             // client that predates the field cannot silently un-shard a table by omitting it.
             existing.ShardBy = req.ShardBy ?? existing.ShardBy;
-            // Plan 009 B2: null Sinks = unchanged; a non-null Sinks carrying "***" is restored from the
-            // stored value first (SecretsMasker.MergeSinkSecrets — see the identical, more detailed note
-            // in PipelinesEndpoints' PUT handler, including the Orleans-flavor RegistryGrain gap that
-            // applies here too, in TablesEndpoints' case via RegistryGrain.UpdateTableAsync).
-            existing.Sinks = req.Sinks is null ? existing.Sinks : SecretsMasker.MergeSinkSecrets(req.Sinks, existing.Sinks);
+            existing.Sinks = sinks;
 
             try
             {
@@ -165,9 +187,24 @@ public static class TablesEndpoints
 
         group.MapPost("/validate", async (ValidateRequest req, ICatalogFacade registry) =>
         {
+            // Plan 014 K: the sugar is stripped before compiling, and the named sink's existence is NOT
+            // checked here — see the fuller note on PipelinesEndpoints' /validate for why a ValidateRequest
+            // deliberately stays "SQL and nothing else".
+            var sugar = SinkSugar.Desugar(req.Sql);
+            if (sugar.Diagnostics.Count > 0)
+            {
+                return Results.Ok(new ValidateTableResponse(
+                    false,
+                    [.. sugar.Diagnostics.Select(d => new SqlDiagnosticDto(d, 1, 1, nameof(DiagnosticSeverity.Error)))],
+                    null,
+                    [],
+                    [],
+                    []));
+            }
+
             var streamSchemas = await BuildStreamSchemasAsync(registry);
             var tableSchemas = await BuildTableSchemasAsync(registry);
-            var result = SqlCompiler.CompileTable(req.Sql, streamSchemas, tableSchemas);
+            var result = SqlCompiler.CompileTable(sugar.Sql, streamSchemas, tableSchemas);
             return Results.Ok(new ValidateTableResponse(
                 result.Ok,
                 result.Diagnostics.Select(d => new SqlDiagnosticDto(d.Message, d.Line, d.Column, d.Severity.ToString())).ToList(),

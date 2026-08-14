@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Config;
+using StreamForge.AppCore.Sql;
 using StreamForge.Engine;
 
 namespace StreamForge.Api;
@@ -387,6 +388,18 @@ public static class ConfigImportService
 
         var docTable = docByName[action.Name];
 
+        // Plan 014 K: an imported document may carry 'INSERT INTO <sink> SELECT …' exactly as the console
+        // editor would have saved it, so the strip happens here too — before the compile, since the naked
+        // query is what has to compile, and before the apply/validate fork, so "validate" reports an
+        // unknown sink target the same way an apply would rather than discovering it at write time. The
+        // enable flip lands on the DOCUMENT's sink list, which is what both branches below go on to store
+        // (created: copied wholesale; updated: MergeSinkSecrets clones it).
+        var sugar = SinkSugar.ApplyTo(docTable.Sql, docTable.Sinks, "table");
+        if (sugar.Diagnostics.Count > 0)
+        {
+            return ErrorEntry("table", action.Name, sugar.Diagnostics);
+        }
+
         if (!Enum.TryParse<TableSearchMode>(docTable.SearchMode, ignoreCase: true, out var searchMode))
         {
             return ErrorEntry("table", action.Name, [$"invalid searchMode: '{docTable.SearchMode}'"]);
@@ -399,7 +412,7 @@ public static class ConfigImportService
 
         // D-J: every imported SQL compiles through the real Engine compiler against the composed
         // (post-import-world) catalog; failure -> "error", entity skipped, keep going.
-        var compile = SqlCompiler.CompileTable(docTable.Sql, worldSourceSchemas, worldTableSchemas);
+        var compile = SqlCompiler.CompileTable(sugar.Sql, worldSourceSchemas, worldTableSchemas);
         if (!compile.Ok)
         {
             return ErrorEntry("table", action.Name, FormatDiagnostics(compile.Diagnostics));
@@ -425,7 +438,7 @@ public static class ConfigImportService
                 {
                     Name = docTable.Name,
                     Description = docTable.Description,
-                    Sql = docTable.Sql,
+                    Sql = sugar.Sql,
                     CreatedBy = createdBy,
                     SearchEnabled = docTable.SearchEnabled,
                     SearchMode = searchMode,
@@ -450,7 +463,7 @@ public static class ConfigImportService
             {
                 var existing = storedByName[action.Name];
                 existing.Description = docTable.Description;
-                existing.Sql = docTable.Sql;
+                existing.Sql = sugar.Sql;
                 existing.SearchEnabled = docTable.SearchEnabled;
                 existing.SearchMode = searchMode;
                 existing.HistoryEnabled = docTable.HistoryEnabled;
@@ -534,9 +547,17 @@ public static class ConfigImportService
 
         var docPipeline = docByName[action.Name];
 
+        // Plan 014 K: see the identical note in ProcessTableAsync — strip the sugar before the compile and
+        // before the apply/validate fork.
+        var sugar = SinkSugar.ApplyTo(docPipeline.Sql, docPipeline.Sinks, "pipeline");
+        if (sugar.Diagnostics.Count > 0)
+        {
+            return ErrorEntry("pipeline", action.Name, sugar.Diagnostics);
+        }
+
         // Pipelines only ever read from STREAM sources (SqlCompiler.Compile takes source schemas only —
         // see PipelinesEndpoints.BuildSchemasAsync, mirrored by worldSourceSchemas above).
-        var compile = SqlCompiler.Compile(docPipeline.Sql, worldSourceSchemas);
+        var compile = SqlCompiler.Compile(sugar.Sql, worldSourceSchemas);
         if (!compile.Ok)
         {
             return ErrorEntry("pipeline", action.Name, FormatDiagnostics(compile.Diagnostics));
@@ -556,7 +577,7 @@ public static class ConfigImportService
                 {
                     Name = docPipeline.Name,
                     Description = docPipeline.Description,
-                    Sql = docPipeline.Sql,
+                    Sql = sugar.Sql,
                     CreatedBy = createdBy,
                     Tags = [.. docPipeline.Tags],
                     Metadata = new Dictionary<string, string>(docPipeline.Metadata),
@@ -569,7 +590,7 @@ public static class ConfigImportService
             {
                 var existing = storedByName[action.Name];
                 existing.Description = docPipeline.Description;
-                existing.Sql = docPipeline.Sql;
+                existing.Sql = sugar.Sql;
                 existing.Tags = [.. docPipeline.Tags];
                 existing.Metadata = new Dictionary<string, string>(docPipeline.Metadata);
                 // Plan 009 B2: see the identical note (including the Orleans RegistryGrain gap) in
