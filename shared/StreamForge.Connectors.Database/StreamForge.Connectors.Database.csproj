@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The two drivers, and NOTHING else. See DatabaseConnectors' class doc for why ONE project
+         serves both dialects, and what that costs a Postgres-only deployment. -->
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Runtime-agnostic by construction: Contracts + AppCore only, exactly what StreamForge.AppCore
+         itself depends on. No Orleans, no Dapr, no ASP.NET — both hosts reference this one project. -->
+    <ProjectReference Include="..\StreamForge.AppCore\StreamForge.AppCore.csproj" />
+    <ProjectReference Include="..\StreamForge.Contracts\StreamForge.Contracts.csproj" />
+  </ItemGroup>
+</Project>
