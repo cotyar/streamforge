@@ -65,6 +65,12 @@ pin useful — an `eventsPerSecond` edit must not invalidate a downstream pin. "
 predicate that already exists: `ConfigJsonMapper.ToCanonicalJsonText(...)` inequality, the exact test
 `ImportPlanner` uses for "skipped" vs "updated", so a round-trip that reports "skipped" provably does not bump.
 
+**Known interaction with 014-K:** a config document written as `INSERT INTO <sink> SELECT …` stores the
+stripped `SELECT`, so its document text and its stored text legitimately differ and it plans as `updated` on
+every import — which under this predicate bumps its `Revision` every time. Either desugar inside
+`ImportPlanner` before comparing, or exclude sugared documents from the bump. Decide it in wave 2 rather than
+discovering it as revision churn.
+
 **Pinning lives in config documents only. Not in SQL.** `FROM trades@3` would touch tokenizer, parser, AST,
 validator, planner, editor autocomplete, formatter and highlighter — the most expensive change in scope, in
 the one project work serializes on — and it has no coherent runtime meaning, because the engine executes

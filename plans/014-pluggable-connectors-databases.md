@@ -84,6 +84,11 @@ stores the untouched `SELECT`, and enables the named sink. It is lossy on round-
 `SELECT` plus a sink row); the console says so after save. Not chosen: `INSERT INTO postgres.public.trades`,
 which implies a catalog-level named-connection entity — a much bigger plan.
 
+**Second face of that lossiness, found during implementation:** a sugared config document now always plans as
+`updated`, never `skipped`, because `ImportPlanner` compares document text against stored text and those
+legitimately differ. Harmless here, but plan 016 bumps entity revisions off the same canonical-text
+predicate — see 016's note, or it becomes revision churn on every import.
+
 ## Waves
 
 Every wave gates on both solutions building and testing green (Orleans ≥1676, Dapr ≥313), `cd web && bun run
