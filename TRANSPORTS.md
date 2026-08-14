@@ -238,6 +238,11 @@ instead of polling anything — see below.
 
 ### Change data capture
 
+**Using either kind — standalone with no StreamForge server, or as a source inside StreamForge, with the
+worked examples and every operational hazard below spelled out in full — is [`docs/cdc.md`](docs/cdc.md).**
+This section stays the *recipe* (what you'd change to add a third native CDC dialect); that document is the
+*user guide* for the two that already exist.
+
 The native CDC pair is `postgres-cdc` ([`PgCdcSource`](shared/StreamForge.Connectors.Database/PgCdcSource.cs))
 and `mssql-cdc` ([`MsSqlCdcSource`](shared/StreamForge.Connectors.Database/MsSqlCdcSource.cs)), both
 `IPolledTransport` like their cursor-polled siblings — CDC is still pull-shaped from this platform's point

@@ -2,7 +2,7 @@ namespace StreamForge.Connectors.Database;
 
 /// <summary>
 /// The ONE place a native CDC reader writes change-event metadata onto a row dictionary. The
-/// Postgres reader (logical replication) and the SQL Server reader (Change Tracking / CDC tables)
+/// Postgres reader (logical replication) and the SQL Server reader (CDC capture tables)
 /// both call this instead of setting <c>_op</c>/<c>_weight</c>/<c>_ts</c> by hand, so the two
 /// dialects cannot drift apart from each other — and, just as important, cannot drift from
 /// <see cref="StreamForge.AppCore.Connectors.Mapping.CdcEnvelope"/>, the existing Debezium-envelope

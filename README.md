@@ -96,6 +96,7 @@ registered by both hosts with a single `AddStreamForgeApi()`.
 
 Deeper: [architecture](orleans/ARCHITECTURE.md) · [design rationale](orleans/DESIGN.md) ·
 [Dapr flavor](dapr/ARCHITECTURE.md) · [adding a transport](TRANSPORTS.md) ·
+[using the native CDC readers, standalone or inside StreamForge](docs/cdc.md) ·
 [execution plans the system was built from](plans/README.md).
 
 ## What this is not
