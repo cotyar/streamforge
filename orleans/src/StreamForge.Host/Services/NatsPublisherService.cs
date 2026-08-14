@@ -142,21 +142,20 @@ public sealed class NatsPublisherService(
 
         var handle = await stream.SubscribeAsync(async (rows, _) =>
         {
-            foreach (var row in rows)
+            // Plan 014: the delivered batch survives as far as the sink client, instead of being torn back
+            // into one publish per row here. Materialized once — SinkFanout walks the list once per client.
+            // For NATS and file clients this is the same set of PublishAsync calls in a different nesting
+            // order, which is unobservable for them (see SinkFanout's own doc, which argues that at length
+            // rather than asserting it); a sink whose delivery unit is a transaction sees one batch.
+            var messages = rows.Select(row => new NatsPipelineRowMessage
             {
-                var message = new NatsPipelineRowMessage
-                {
-                    PipelineId = row.PipelineId,
-                    Seq = row.Seq,
-                    TimestampMs = row.TimestampMs,
-                    Row = row.Row,
-                };
+                PipelineId = row.PipelineId,
+                Seq = row.Seq,
+                TimestampMs = row.TimestampMs,
+                Row = row.Row,
+            }).ToList();
 
-                foreach (var sinkClient in clients)
-                {
-                    await sinkClient.PublishAsync(message, CancellationToken.None).ConfigureAwait(false);
-                }
-            }
+            await SinkFanout.PublishAllAsync(clients, messages, CancellationToken.None).ConfigureAwait(false);
         });
 
         return new PipelineSinkState(signature, clients, handle);
@@ -236,21 +235,18 @@ public sealed class NatsPublisherService(
         var handle = await stream.SubscribeAsync(async (deltas, _) =>
         {
             var seq = ++seqBox[0];
-            foreach (var delta in deltas)
-            {
-                var message = new NatsTableDeltaMessage
-                {
-                    Table = tableName,
-                    Seq = seq,
-                    Row = delta.Row,
-                    Weight = delta.Weight,
-                };
 
-                foreach (var sinkClient in clients)
-                {
-                    await sinkClient.PublishAsync(message, CancellationToken.None).ConfigureAwait(false);
-                }
-            }
+            // Plan 014, as in SubscribePipelineAsync above: one stream item is one batch all the way to the
+            // sink client. Every delta in it shares the one invented seq, exactly as before.
+            var messages = deltas.Select(delta => new NatsTableDeltaMessage
+            {
+                Table = tableName,
+                Seq = seq,
+                Row = delta.Row,
+                Weight = delta.Weight,
+            }).ToList();
+
+            await SinkFanout.PublishAllAsync(clients, messages, CancellationToken.None).ConfigureAwait(false);
         });
 
         return new TableSinkState(signature, clients, handle);

@@ -24,6 +24,12 @@ public sealed class ConnectorGrainState
     /// GrpcSubscriberCore/NatsSubscriberCore's onStatus contract).</summary>
     public string LastStatus { get; set; } = "never";
     public string? LastError { get; set; }
+    /// <summary>Plan 014: the polled transport's high-water mark, opaque to everything here. Persisted on
+    /// the cycle's own WriteStateAsync (there is no second persistence path) and — the load-bearing part —
+    /// written back UNCHANGED after a failed cycle, because PolledSourceCore hands back the cursor it was
+    /// given rather than a partially-advanced one. This state class is a plain POCO, not a
+    /// [GenerateSerializer] contract, so the field costs no [Id(n)] and breaks no contract test.</summary>
+    public string? Cursor { get; set; }
     public long EventsEmittedTotal { get; set; }
     /// <summary>Plan 009 C2: cumulative field coercion failures — see ConnectorRuntimeStatus's own doc.</summary>
     public long CoercionFailuresTotal { get; set; }
@@ -59,7 +65,11 @@ public interface IConnectorStatusSink : IGrainWithStringKey
 /// url/file/folder: a ONE-SHOT grain timer (dueTime = next-run delay, period = Infinite; each fire runs
 /// one cycle then re-arms) — cron correctness requires recomputing the next occurrence after every fire
 /// rather than a fixed period. grpc: a persistent background subscription (GrpcSubscriberCore.RunAsync)
-/// started on StartAsync and cancelled on StopAsync; its Schedule is ignored (D-B).
+/// started on StartAsync and cancelled on StopAsync; its Schedule is ignored (D-B). Plan 014 adds a THIRD
+/// arm to the first of those: a kind registered in PolledTransports rides the IDENTICAL one-shot timer,
+/// driven through PolledSourceCore, and additionally persists an opaque cursor on the state write the
+/// cycle already performs — so a silo recycle resumes such a source exactly where it stopped, including
+/// mid-snapshot. Nothing here knows what any of those kinds are.
 ///
 /// Emission goes through the same door GeneratorGrain uses: one EventRecord per row onto
 /// (StreamConstants.SourcesNamespace, sourceName) — pipelines/tables/SignalR/SPA all work unchanged
@@ -121,7 +131,7 @@ public sealed class ConnectorGrain(
         ArmForKind(def, persistNextRun: true);
         await state.WriteStateAsync();
 
-        if (def.Kind is SourceKinds.Url or SourceKinds.File or SourceKinds.Folder)
+        if (IsScheduled(def.Kind))
         {
             ArmTimer(NextRunDelay(def));
         }
@@ -150,6 +160,7 @@ public sealed class ConnectorGrain(
         EventsEmittedTotal = state.State.EventsEmittedTotal,
         CoercionFailuresTotal = state.State.CoercionFailuresTotal,
         LastBatchCount = state.State.LastBatchCount,
+        Cursor = state.State.Cursor,
     });
 
     /// <summary>gRPC onRows callback entry (reached via a captured self-reference — see
@@ -272,7 +283,13 @@ public sealed class ConnectorGrain(
             return;
         }
 
-        if (def.Kind is SourceKinds.Url or SourceKinds.File or SourceKinds.Folder)
+        // Plan 014: any registered POLLED transport. Deliberately the SAME arm as url/file/folder rather
+        // than one of its own — a polled kind is a scheduled cycle, so it wants exactly the timer,
+        // NextRunMs and backoff that already exist here. The only thing the new seam adds is a cursor,
+        // and a cursor rides on the state write the cycle already performs. The two registries are
+        // disjoint by construction (PolledTransportRegistryTests pins it), so this lookup cannot steal a
+        // kind from the branch above or from the built-ins below.
+        if (IsScheduled(def.Kind))
         {
             if (persistNextRun)
             {
@@ -291,6 +308,13 @@ public sealed class ConnectorGrain(
         // Kind == "generator" (or an unrecognized value) never reaches ConnectorGrain in normal
         // operation — RegistryGrain dispatches those to IGeneratorGrain instead. Defensive no-op.
     }
+
+    /// <summary>Kinds this grain drives off the one-shot timer: the three built-in poll kinds, plus
+    /// whatever <see cref="PolledTransports"/> has been told about. A registry lookup rather than a
+    /// hardcoded array is the whole point of the seam — a kind this assembly has never heard of gets a
+    /// schedule because it registered, not because someone remembered to extend a list.</summary>
+    private static bool IsScheduled(string? kind) =>
+        kind is SourceKinds.Url or SourceKinds.File or SourceKinds.Folder || PolledTransports.Find(kind) is not null;
 
     /// <summary>Delay until the persisted NextRunMs (falling back to a 30 s retry if unset/invalid —
     /// e.g. a schedule that failed ScheduleCalc.Validate at some point).</summary>
@@ -466,7 +490,8 @@ public sealed class ConnectorGrain(
     }
 
     // ------------------------------------------------------------------
-    // Poll cycle (url/file/folder only — grpc is a persistent subscription, not a poll)
+    // Poll cycle (url/file/folder and any registered IPolledTransport — grpc and the message transports
+    // are persistent subscriptions, not polls)
     // ------------------------------------------------------------------
 
     private async Task RunCycleAsync()
@@ -480,16 +505,41 @@ public sealed class ConnectorGrain(
         EnsureTrackers();
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
+        // Plan 014: set by a polled cycle that says there is more waiting RIGHT NOW — see the re-arm at
+        // the bottom of this method. Always false for url/file/folder, which have no notion of a page.
+        var hasMore = false;
+
         PollCycleResult result;
         try
         {
-            result = def.Kind switch
+            if (PolledTransports.Find(def.Kind) is { } polled)
             {
-                SourceKinds.Url => await ExecuteUrlCycleAsync(def, nowMs),
-                SourceKinds.File => ConnectorPollCycle.ExecuteFile(def, _ledger!, _dedup!, nowMs),
-                SourceKinds.Folder => ConnectorPollCycle.ExecuteFolder(def, _ledger!, _dedup!, nowMs),
-                _ => new PollCycleResult([], null),
-            };
+                // The cursor rules — never advance past a cycle that emitted nothing, null means
+                // "unchanged" rather than "start over" — live in PolledSourceCore, not here. A
+                // driver-local copy of them is exactly the copy that drifts from the other flavour's.
+                // The dedup column comes from the kind's own config because a polled row source has no
+                // mapping document to read a DedupKeyField out of.
+                var outcome = await PolledSourceCore.RunCycleAsync(
+                    polled, def, state.State.Cursor, _dedup!, nowMs, CancellationToken.None,
+                    dedupKeyField: def.Connector?.Db?.DedupKeyColumn is { Length: > 0 } key ? key : null);
+
+                result = outcome.Result;
+                // Assigned unconditionally and persisted by the WriteStateAsync this cycle already does.
+                // Safe precisely because a failed outcome carries the cursor that went IN — so "persist
+                // whatever I was handed" and "never skip data on failure" are the same statement.
+                state.State.Cursor = outcome.Cursor;
+                hasMore = outcome.HasMore;
+            }
+            else
+            {
+                result = def.Kind switch
+                {
+                    SourceKinds.Url => await ExecuteUrlCycleAsync(def, nowMs),
+                    SourceKinds.File => ConnectorPollCycle.ExecuteFile(def, _ledger!, _dedup!, nowMs),
+                    SourceKinds.Folder => ConnectorPollCycle.ExecuteFolder(def, _ledger!, _dedup!, nowMs),
+                    _ => new PollCycleResult([], null),
+                };
+            }
         }
         catch (Exception ex)
         {
@@ -540,6 +590,19 @@ public sealed class ConnectorGrain(
         var schedule = def.Connector?.Schedule ?? DefaultSchedule;
         var nowUtc = DateTimeOffset.UtcNow;
         var nextRun = BackoffPolicy.NextRun(schedule, nowUtc, state.State.ConsecutiveFailures);
+
+        // Plan 014: HasMore means "there is more waiting right now", and the whole reason a snapshot pages
+        // across DRIVER cycles instead of inside one PollAsync is that every page's cursor gets persisted
+        // before the next page is read — so a restart resumes mid-snapshot. Waiting out the schedule
+        // between pages would make a million-row snapshot take (pages x interval) to land for no benefit,
+        // so the next run is now. Same one-shot timer, just due immediately; PolledSourceCore never
+        // returns HasMore on a failed cycle, so this cannot spin against a failure. Overwriting NextRunMs
+        // (rather than arming behind its back) keeps the status honest about when the next cycle runs.
+        if (hasMore)
+        {
+            nextRun = nowUtc;
+        }
+
         state.State.NextRunMs = nextRun?.ToUnixTimeMilliseconds();
 
         await state.WriteStateAsync();
