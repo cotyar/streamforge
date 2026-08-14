@@ -30,7 +30,7 @@ public static class SourceValidation
     };
 
     private static bool IsKnownKind(string kind) =>
-        BuiltInKinds.Contains(kind) || InboundTransports.Find(kind) is not null;
+        BuiltInKinds.Contains(kind) || InboundTransports.Find(kind) is not null || PolledTransports.Find(kind) is not null;
 
     private static readonly HashSet<string> KnownFileFormats = new(StringComparer.Ordinal)
     {
@@ -63,7 +63,10 @@ public static class SourceValidation
 
         if (!IsKnownKind(def.Kind))
         {
-            var known = string.Join(", ", BuiltInKinds.Concat(InboundTransports.Kinds));
+            // Plan 014: list the polled kinds alongside the built-ins and the message transports, so an
+            // operator who typed e.g. 'postgres' on a build without the connector registered is told what
+            // IS available rather than just "unknown".
+            var known = string.Join(", ", BuiltInKinds.Concat(InboundTransports.Kinds).Concat(PolledTransports.Kinds));
             errors.Add($"kind '{def.Kind}' is not recognized (expected one of: {known})");
             return errors;
         }
@@ -127,12 +130,20 @@ public static class SourceValidation
                 // Plan 010: every message-transport kind validates itself — the rules for "is this nats
                 // config usable" live next to the code that uses it, not in a switch arm here.
                 InboundTransports.Find(def.Kind)?.Validate(def, errors);
+                // Plan 014: same idea, second registry — a pull-shaped (polled) kind validates itself too.
+                // The two registries are disjoint by construction (PolledTransports' own doc comment), so
+                // at most one of these two calls does anything for a given def.Kind.
+                PolledTransports.Find(def.Kind)?.Validate(def, errors);
                 break;
         }
 
         // Schedule applies to poll-driven kinds only — grpc and the message transports are persistent
         // subscriptions; their Schedule (if any) is ignored by the driver (ConnectorConfig doc comment).
-        if (def.Kind is SourceKinds.Url or SourceKinds.File or SourceKinds.Folder)
+        // Plan 014: "does this kind take a schedule" is a registry lookup rather than a hardcoded kind
+        // list for the very reason PolledTransports exists as a second registry instead of an IsPolled
+        // flag on the first (see that class's doc) — a kind this assembly has never heard of gets a
+        // schedule because it is registered, not because someone remembered to add it to this list.
+        if (def.Kind is SourceKinds.Url or SourceKinds.File or SourceKinds.Folder || PolledTransports.Find(def.Kind) is not null)
         {
             // An absent Schedule is valid — the driver applies a documented 30 s default; only
             // validate one the caller actually supplied.
@@ -503,4 +514,79 @@ public static class SourceSchemaService
             Diagnostics = [.. diagnostics],
         };
     }
+
+    // ------------------------------------------------------------------
+    // POST /api/transports/{kind}/probe (plan 014 — Editor only; dials whatever host the request body
+    // names, same trust the url/file/folder source kinds already extend to an Editor).
+    // ------------------------------------------------------------------
+
+    /// <summary>Kind-aware, unbounded-timeout-free schema discovery for any registered POLLED transport
+    /// that also implements <see cref="ISchemaProbe"/> — the logic half of the probe endpoint, split out
+    /// exactly the way <see cref="FromRemoteAsync"/> is, so the unknown-kind / cannot-probe / success /
+    /// throws-mid-probe branching is unit-testable without an HTTP-level harness. <paramref name="timeout"/>
+    /// is the caller's job to pick (the endpoint reads it from config); this method just enforces it.</summary>
+    public static async Task<ProbeOutcome> ProbeAsync(string kind, SourceDefinition def, TimeSpan timeout, CancellationToken ct)
+    {
+        var transport = PolledTransports.Find(kind);
+        if (transport is null)
+        {
+            // Distinct from "cannot probe" below: nobody registered this kind at all — on the default
+            // build (PolledTransports.Kinds empty) EVERY kind lands here, and the message says so.
+            return new ProbeOutcome(ProbeOutcomeKind.UnknownKind, null,
+                $"kind '{kind}' is not a registered polled transport (known: {string.Join(", ", PolledTransports.Kinds)})");
+        }
+
+        if (transport is not ISchemaProbe probe)
+        {
+            // The kind exists and runs sources today — it has simply never implemented schema discovery.
+            return new ProbeOutcome(ProbeOutcomeKind.CannotProbe, null, $"kind '{kind}' does not support schema discovery");
+        }
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(timeout);
+        try
+        {
+            var result = await probe.ProbeAsync(def, cts.Token).ConfigureAwait(false);
+            return new ProbeOutcome(ProbeOutcomeKind.Ok, result, null);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The CALLER went away (request aborted), not a probe failure to report — the same "caller is
+            // shutting down" carve-out FileSinkClient.PublishAsync/NatsSinkClient.PublishAsync both take.
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            // Our own CancelAfter bound tripped, not the caller's token — a clean diagnostic, not a 500/504.
+            // This is the actual timeout enforcement: ISchemaProbe.ProbeAsync dials a caller-supplied host
+            // and has no bound of its own, so a stalled/black-holed connector would otherwise park this
+            // request thread indefinitely.
+            return new ProbeOutcome(ProbeOutcomeKind.Ok,
+                new SchemaProbeResult([], [$"probe of kind '{kind}' timed out after {timeout.TotalSeconds:0}s"]), null);
+        }
+        catch (Exception ex)
+        {
+            // ISchemaProbe's own contract: throwing means "could not look" and is surfaced verbatim rather
+            // than becoming an unhandled-exception 500 an Editor can't act on.
+            return new ProbeOutcome(ProbeOutcomeKind.Ok,
+                new SchemaProbeResult([], [$"probe of kind '{kind}' failed: {ex.Message}"]), null);
+        }
+    }
 }
+
+/// <summary>Which of three answers <see cref="SourceSchemaService.ProbeAsync"/> gave, so the endpoint maps
+/// it to an HTTP status without re-deciding anything: <see cref="UnknownKind"/> (404 — nobody registered
+/// this kind) and <see cref="CannotProbe"/> (400 — the kind exists but never implemented
+/// <see cref="ISchemaProbe"/>) are deliberately different answers, per plan 014's own instruction that a
+/// kind nobody registered and a kind that cannot probe must not collapse into one "no" a caller can't act
+/// on. <see cref="Ok"/> covers both a genuinely successful probe AND a probe that threw or timed out — those
+/// two land as <see cref="SchemaProbeResult.Diagnostics"/> on a 200, mirroring how every other schema-helper
+/// endpoint in this file (<see cref="SourceSchemaService.FromRemoteAsync"/>,
+/// <see cref="SourceSchemaService.DeriveOpenApiAsync"/>) already reports "could not look" as a diagnostic
+/// rather than a 5xx.</summary>
+public enum ProbeOutcomeKind { UnknownKind, CannotProbe, Ok }
+
+/// <summary><see cref="SourceSchemaService.ProbeAsync"/>'s result: <see cref="Message"/> is set for
+/// <see cref="ProbeOutcomeKind.UnknownKind"/> and <see cref="ProbeOutcomeKind.CannotProbe"/> (the endpoint's
+/// error body); <see cref="Result"/> is set for <see cref="ProbeOutcomeKind.Ok"/> (the endpoint's 200 body).</summary>
+public sealed record ProbeOutcome(ProbeOutcomeKind Kind, SchemaProbeResult? Result, string? Message);
