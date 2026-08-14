@@ -18,5 +18,8 @@ Written against commit `49d6979` by the improve skill (focused `plan` invocation
 | 011 | [Lineage edges, SQL editor UX, memory stability, sharded tables](011-lineage-sql-memory-sharding.md) | DONE (lineage edges restored; SQL revert/format; the flush amplifier fixed 287→109 MB/min and row retention plateaus a table; per-key shards shipped but **measured NOT to be a memory optimisation** — query locality and swap-out only; per-entity Scalar docs) | 010 |
 | 012 | [CSV in, CSV out](012-csv-io.md) | DONE (url sources read CSV/NDJSON; TSV/semicolon/pipe detected; a `file` sink kind writes CSV or NDJSON; CSV download for table rows and pipeline results) | 010 |
 | 013 | [`sf` admin CLI + MCP server](013-admin-cli-mcp.md) | DONE (`bun admin/sf.ts` for a terminal, `bun admin/mcp.ts` for an agent — one shared REST client, zero npm deps, MCP stdio hand-written to the spec and pinned by subprocess conformance tests) | 012 |
+| 014 | [Pluggable connectors + database ingress/egress](014-pluggable-connectors-databases.md) | IN PROGRESS | 013 |
+| 015 | [RBAC → entitlements, groups, approvals, escalation, audit](015-rbac-entitlements-approvals.md) | PLANNED | independent of 014 |
+| 016 | [Name resolution, versioning & dependencies, service discovery](016-identity-versioning-discovery.md) | PLANNED | 014 (plugin versions only) |
 
 Design tokens source of truth: `orleans/design-system/streamforge/MASTER.md`.
