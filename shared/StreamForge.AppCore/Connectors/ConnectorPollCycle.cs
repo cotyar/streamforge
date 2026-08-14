@@ -14,8 +14,12 @@ namespace StreamForge.AppCore.Connectors;
 /// <see cref="ConnectorRowCoercion"/> for what happens to a failing field/row per
 /// <see cref="SourceDefinition.OnCoercionFailure"/>; a <see cref="CoercionFailurePolicy.RejectBatch"/>
 /// rejection surfaces as a non-null <see cref="Error"/> instead (same "coerce before admission, nothing
-/// left behind" shape as every other Error case here).</summary>
-public sealed record PollCycleResult(List<Dictionary<string, object?>> Rows, string? Error, int CoercionFailures = 0);
+/// left behind" shape as every other Error case here). <see cref="EnvelopeSkipped"/> (plan 014, 0 for
+/// every pre-014 caller/record — additive, default parameter) counts messages
+/// <see cref="Mapping.CdcEnvelope"/> could not turn into a row (a delete with no `before`, a tombstone) —
+/// same shape as <see cref="CoercionFailures"/>: counted and visible, NOT folded into <see cref="Error"/>,
+/// because one unrepresentable CDC event must not drop every other row this cycle DID produce.</summary>
+public sealed record PollCycleResult(List<Dictionary<string, object?>> Rows, string? Error, int CoercionFailures = 0, int EnvelopeSkipped = 0);
 
 /// <summary>One poll execution for url/file/folder connector kinds, composing the W2 cores
 /// (FormatParsers → RecordExtractor → DedupTracker/FileLedger) identically on both runtimes, plus
@@ -26,7 +30,14 @@ public sealed record PollCycleResult(List<Dictionary<string, object?>> Rows, str
 /// <see cref="ExecuteNatsMessage"/> — because it shares the exact same format/mapping path a polled
 /// body uses; only its transport (a persistent subscription) is different. Plan 014 adds
 /// <see cref="ExecuteRows"/> for sources whose rows arrive already structured (a database result set):
-/// same coercion, dedup and stamping, minus the parse step there is nothing to apply.</summary>
+/// same coercion, dedup and stamping, minus the parse step there is nothing to apply.
+///
+/// <para>Plan 014 also wires <see cref="Mapping.CdcEnvelope"/> into <see cref="ParseAndExtract"/> — the
+/// one place every format/message-based kind funnels through (url-with-a-declared-format, file, folder,
+/// NATS, and any future message transport) — so a Debezium envelope unwraps identically no matter which
+/// transport carried it in. It runs on each parsed item BEFORE <see cref="RecordExtractor.Extract"/>
+/// applies <see cref="MappingSpec.ItemsPath"/>/Fields, per that field's own doc comment. It does NOT run
+/// in <see cref="ExecuteRows"/> — a database result row is not wrapped in anything to unwrap.</para></summary>
 public static class ConnectorPollCycle
 {
     /// <summary>Effective mapping: the configured one, else a pass-through built from the source's
@@ -157,8 +168,34 @@ public static class ConnectorPollCycle
         }
         var mapping = EffectiveMapping(def);
         var rows = new List<Dictionary<string, object?>>();
-        foreach (var item in items) rows.AddRange(RecordExtractor.Extract(item, mapping, nowMs));
-        return Emit(def, rows, dedup, nowMs);
+        var envelopeSkipped = 0;
+        foreach (var item in items)
+        {
+            // Plan 014: unwrap BEFORE ItemsPath/Fields apply — see the class doc and
+            // Mapping.CdcEnvelope's own doc for why. `mapping.Envelope` defaults to
+            // CdcEnvelopes.None, for which Unwrap() hands `item` straight back with nothing stamped,
+            // which is what keeps every pre-014 mapping byte-identical.
+            var unwrapped = CdcEnvelope.Unwrap(item, mapping.Envelope);
+            if (unwrapped.Skip)
+            {
+                envelopeSkipped++;
+                continue;
+            }
+
+            foreach (var row in RecordExtractor.Extract(unwrapped.Row, mapping, nowMs))
+            {
+                // These three land directly on the row, bypassing Fields, the same way "_source" and
+                // "_ts" already do in EmitCore/ResolveTimestamp below — a CDC stamp is metadata about
+                // the event, not a column the operator's mapping document would ever declare.
+                if (unwrapped.Op is not null) row["_op"] = unwrapped.Op;
+                if (unwrapped.Weight is not null) row["_weight"] = unwrapped.Weight.Value;
+                if (unwrapped.TsMs is not null) row["_ts"] = unwrapped.TsMs.Value;
+                rows.Add(row);
+            }
+        }
+
+        var result = Emit(def, rows, dedup, nowMs);
+        return envelopeSkipped == 0 ? result : result with { EnvelopeSkipped = envelopeSkipped };
     }
 
     private static List<Dictionary<string, object?>> ExtractRows(SourceDefinition def, JsonElement root, long nowMs)
