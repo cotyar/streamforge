@@ -25,6 +25,24 @@ namespace StreamForge.Connectors.Database;
 /// scalar LSN functions plus a table-valued read — so there is no subscription to keep alive between
 /// cycles, no relation cache, no tuple decoder: everything Postgres logical replication needs and this
 /// does not. The entire connector is four small round trips per cycle plus the planner's pure logic.</para>
+///
+/// <para><b>Why <see cref="PolledBatch.EnvelopeSkipped"/> is always 0 here, deliberately, not by
+/// omission.</b> <see cref="PgCdcSource"/> counts a genuinely unrepresentable event
+/// (<c>TruncateMessage</c> and its siblings) because pgoutput can hand it one; this reader's read uses the
+/// <c>'all'</c> CDC row filter (see <see cref="MsSqlCdcPlanner.PlanRead"/>), under which
+/// <c>__$operation</c> is documented by SQL Server to be only 1 (delete), 2 (insert) or 4 (update) — there
+/// is no fourth message shape this reader is ever handed to be unrepresentable. The one way that contract
+/// could break — SQL Server returning an <c>__$operation</c> outside 1/2/4 — is not silently absorbed
+/// either: <see cref="MsSqlCdcPlanner.Complete"/> throws for it (see its private <c>OpLetter</c>), which
+/// <see cref="PolledSourceCore.RunCycleAsync"/> turns into a reported cycle <c>Error</c> with the cursor
+/// held — a LOUD failure, not a silent skip, which is the opposite of what <see cref="PolledBatch.EnvelopeSkipped"/>
+/// exists to report. <see cref="MsSqlCdcPlanner.Complete"/>'s own <see cref="DbSourceConfig.Tables"/>
+/// filtering is config excluding a row, not a skip, exactly as <see cref="PgCdcSource"/>'s equivalent
+/// filter is — see that method's doc on why <c>Tables</c> runs per row without touching the cursor. So
+/// there is genuinely nothing this class can count today: the one hazard this counter exists for already
+/// has its own, stricter channel (a failed cycle) on this dialect. Manufacturing a counted case here so the
+/// two dialects looked symmetric would misrepresent a difference in the underlying substrate as a gap in
+/// this reader.</para>
 /// </summary>
 public sealed class MsSqlCdcSource(ISqlDialect dialect) : IPolledTransport, ISchemaProbe
 {

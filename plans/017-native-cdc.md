@@ -91,17 +91,23 @@ what one batch can emit** — a transaction bigger than the target is always del
 once resolved. The cost: one extra round trip on SQL Server the cycle a transaction happens to straddle the
 cap, and up to one transaction's worth of overshoot on Postgres.
 
-**Known gap, named not hidden: `ConnectorRuntimeStatus.EnvelopeSkippedTotal` has no wire from a polled
-transport.** `PolledBatch` carries only `Rows`, `Cursor` and `HasMore` — a frozen shape, unchanged since 014
-— so there is no channel for a native CDC reader to report "I saw something I chose not to emit." Both
-readers hit this in practice: a Postgres `TRUNCATE`/`TYPE`/`ORIGIN`/logical-decoding message, or any future
-pgoutput message type this reader does not recognize, never fails the cycle (the same discipline
-`ConnectorPollCycle` already applies to an unrepresentable Debezium event) but also never increments the
-counter a Debezium-envelope skip would. These events are skipped *safely* — one bad message does not discard
-every good row sitting beside it — but the skip itself is invisible to an operator watching the source's
-status today. Widening `PolledBatch` (or adding a sibling out-parameter) to carry a skip count is the named
-follow-up; it was not done here because it is an additive-but-frozen-contract change plan 017's file
-ownership did not license touching casually mid-plan.
+**Closed in follow-up: `ConnectorRuntimeStatus.EnvelopeSkippedTotal` now has a wire from a polled
+transport.** `PolledBatch` grew a fourth, defaulted field, `EnvelopeSkipped` (0 for every pre-existing
+construction, including every non-CDC `IPolledTransport`, which keeps `DbSource` and every polled test
+compiling untouched) — the same trailing-defaulted-parameter shape `PollCycleResult` already used to solve
+this exact "count something without touching a frozen contract" problem for the Debezium-envelope path.
+`PolledSourceCore.RunCycleAsync` folds it into the `PollCycleResult` it returns in one expression, and
+`ConnectorGrain`/`ConnectorActor` needed zero changes — they already read `PollCycleResult.EnvelopeSkipped`
+and had since the field existed. `PgCdcSource` now increments a per-cycle counter in `DrainAsync`'s
+`default` switch arm — the same branch that was already catching `TRUNCATE`/`TYPE`/`ORIGIN`/logical-decoding
+messages and letting the cycle continue, just not counting them — and returns it on the batch.
+`MsSqlCdcSource` stays at 0 deliberately, not by omission: its read uses the CDC `'all'` row filter, under
+which `__$operation` is documented to be only 1/2/4, so there is no unrepresentable-message case reachable
+the way pgoutput's is; the one way that contract could break (`__$operation` outside 1/2/4) already fails
+the cycle loudly through `MsSqlCdcPlanner.Complete`'s own throw rather than skipping silently, which is a
+stricter guarantee than a counter would add. Neither reader counts a row its own `Tables` filter excluded —
+that is the operator's configuration doing what they asked, not an unrepresentable event, and counting it
+would turn a working filter into permanent alarming noise.
 
 ## Waves
 
@@ -148,8 +154,9 @@ comes back whole. Deliberately over budget: **`BatchSize` is a target, not a cei
 
 ## Design detail pinned across agents
 
-- `PolledBatch(Rows, Cursor, HasMore)` is unchanged from plan 014 — CDC does not get its own richer return
-  shape. See "Known gap" above for the cost of that choice.
+- `PolledBatch(Rows, Cursor, HasMore)` was unchanged from plan 014 through the end of this plan's own waves
+  — CDC did not get its own richer return shape at the time. A follow-up widened it additively with
+  `EnvelopeSkipped` (default 0); see "Closed in follow-up" above.
 - `DbSourceConfig`'s CDC-only fields are additive, next free `[Id(n)]` (`SlotName` = 18 through
   `CreateSlotIfMissing` = 23) — see "Decisions" above for why this class rather than a new one.
 - `Kind` is fixed per class, never derived from `ISqlDialect.Kind` the way `DbSource.Kind` is:

@@ -37,7 +37,13 @@ public static class PolledSourceCore
 {
     /// <summary>Runs one cycle. Never throws — a transport failure comes back as
     /// <see cref="PollCycleResult.Error"/> with the incoming <paramref name="cursor"/> intact, because the
-    /// caller's next act is to persist whatever it is handed.</summary>
+    /// caller's next act is to persist whatever it is handed. <see cref="PolledBatch.EnvelopeSkipped"/>
+    /// rides along into the returned <see cref="PolledCycleOutcome.Result"/>'s
+    /// <see cref="PollCycleResult.EnvelopeSkipped"/> on a successful read of <paramref name="transport"/>;
+    /// on ANY failure — <see cref="IPolledTransport.PollAsync"/> throwing, a null batch, or
+    /// <see cref="ConnectorPollCycle.ExecuteRows"/> throwing — the count is 0, never a stale value from a
+    /// batch this method never finished processing, following the same "a failed cycle reports nothing"
+    /// discipline as the cursor itself.</summary>
     /// <param name="cursor">The persisted cursor, or null on this source's first ever cycle.</param>
     /// <param name="dedup">The driver's persisted tracker; mutated in place on a successful cycle exactly
     /// as every other <c>ConnectorPollCycle</c> entry point mutates it.</param>
@@ -86,7 +92,12 @@ public static class PolledSourceCore
         PollCycleResult result;
         try
         {
-            result = ConnectorPollCycle.ExecuteRows(def, batch.Rows, dedupKeyField, dedup, nowMs);
+            // batch.EnvelopeSkipped rides along here rather than through ExecuteRows' own parameters:
+            // ExecuteRows never produces a non-zero EnvelopeSkipped itself (a row source has no envelope to
+            // unwrap — see ConnectorPollCycle's class doc), so folding the transport's own count in with a
+            // `with` expression is the whole of "wiring PolledBatch into PollCycleResult", not a rule
+            // ExecuteRows needs to know about.
+            result = ConnectorPollCycle.ExecuteRows(def, batch.Rows, dedupKeyField, dedup, nowMs) with { EnvelopeSkipped = batch.EnvelopeSkipped };
         }
         catch (Exception ex)
         {
@@ -104,6 +115,12 @@ public static class PolledSourceCore
         return new PolledCycleOutcome(result, batch.Cursor ?? cursor, batch.HasMore);
     }
 
+    /// <summary>The shared shape for every failure branch above. <see cref="PollCycleResult.EnvelopeSkipped"/>
+    /// is left at its default (0) here on purpose — whatever the transport's batch may have carried is
+    /// unreachable from this method (a thrown <see cref="IPolledTransport.PollAsync"/> never returns one; a
+    /// null batch has none; a thrown <see cref="ConnectorPollCycle.ExecuteRows"/> means the batch it was
+    /// given is already behind it) — so 0 is not a guess, it is the only value this branch could ever
+    /// honestly report.</summary>
     private static PolledCycleOutcome Failed(string? cursor, string error)
         => new(new PollCycleResult([], error), cursor, HasMore: false);
 }

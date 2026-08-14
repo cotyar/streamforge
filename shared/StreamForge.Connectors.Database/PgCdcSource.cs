@@ -85,18 +85,18 @@ namespace StreamForge.Connectors.Database;
 /// <see cref="StreamForge.AppCore.Connectors.Mapping.CdcEnvelope"/>'s documented behavior for the same
 /// situation on the Debezium path.</para>
 ///
-/// <para><b>What is counted rather than fatal, and the honest gap in that today:</b> a
-/// <c>TruncateMessage</c>/<c>TypeMessage</c>/<c>OriginMessage</c>/<c>LogicalDecodingMessage</c>, or any
-/// future pgoutput message this reader does not recognize, never fails the cycle — one unrepresentable
-/// message must not discard every good row sitting beside it, the same discipline
-/// <c>ConnectorPollCycle</c> already applies to unrepresentable Debezium events via
-/// <see cref="ConnectorRuntimeStatus.EnvelopeSkippedTotal"/>. <b>That counter has no live wire to this
-/// class today</b>: <see cref="IPolledTransport.PollAsync"/> returns only <see cref="PolledBatch"/>
-/// (rows/cursor/hasMore — a frozen contract), and <c>ConnectorPollCycle.ExecuteRows</c> — the entry point a
-/// row source's rows go through — never produces a non-zero <c>EnvelopeSkipped</c>, unlike the
-/// Debezium-envelope path that has its own counting built in. So these events ARE skipped safely, but the
-/// count itself is not currently surfaced anywhere an operator can see it; wiring that through is future
-/// work, not silently dropped correctness.</para>
+/// <para><b>What is counted rather than fatal.</b> A <c>TruncateMessage</c>/<c>TypeMessage</c>/
+/// <c>OriginMessage</c>/<c>LogicalDecodingMessage</c>, or any future pgoutput message this reader does not
+/// recognize, never fails the cycle — one unrepresentable message must not discard every good row sitting
+/// beside it, the same discipline <c>ConnectorPollCycle</c> already applies to unrepresentable Debezium
+/// events. It is also no longer merely safe-but-silent: the <c>default</c> arm of <c>DrainAsync</c>'s
+/// message switch increments a per-cycle counter that rides home on <see cref="PolledBatch.EnvelopeSkipped"/>,
+/// which <see cref="PolledSourceCore.RunCycleAsync"/> folds into <c>PollCycleResult.EnvelopeSkipped</c> —
+/// the same channel the Debezium-envelope path already reported through — so it reaches
+/// <see cref="ConnectorRuntimeStatus.EnvelopeSkippedTotal"/> exactly like a skipped Debezium event does.
+/// Deliberately NOT incremented for a row <c>AppendAsync</c> drops via <see cref="DbSourceConfig.Tables"/> —
+/// that is the operator's own configuration doing what they asked, not an unrepresentable event, and
+/// counting it would turn a working filter into permanent alarming noise.</para>
 ///
 /// <para><b>Delivery is at-least-once</b>, same ceiling as the polled kinds: a cycle can never confirm a
 /// position ahead of what is durably persisted, because the ONLY value ever confirmed is <c>startLsn</c> —
@@ -379,6 +379,7 @@ public sealed class PgCdcSource(ISqlDialect dialect) : IPolledTransport, ISchema
         string? cursor = null;
         var hasMore = false;
         var confirmed = false;
+        var envelopeSkipped = 0;
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(1, config.MaxPollMs)));
@@ -477,9 +478,13 @@ public sealed class PgCdcSource(ISqlDialect dialect) : IPolledTransport, ISchema
 
                     default:
                         // TruncateMessage, TypeMessage, OriginMessage, LogicalDecodingMessage, and any future
-                        // pgoutput message this reader does not recognize: counted-in-spirit, never fatal —
-                        // one unrepresentable message must not discard every good row beside it. See the
-                        // class doc's paragraph on where that count currently has no channel to travel through.
+                        // pgoutput message this reader does not recognize: never fatal — one unrepresentable
+                        // message must not discard every good row beside it — but now COUNTED, not merely
+                        // safe: PolledBatch.EnvelopeSkipped is the channel that reaches
+                        // ConnectorRuntimeStatus.EnvelopeSkippedTotal via PolledSourceCore. Deliberately NOT
+                        // incremented for a row AppendAsync drops because of the Tables filter — that is the
+                        // operator's own configuration doing what they asked, not something unrepresentable.
+                        envelopeSkipped++;
                         break;
                 }
 
@@ -496,7 +501,7 @@ public sealed class PgCdcSource(ISqlDialect dialect) : IPolledTransport, ISchema
             // IPolledTransport.PollAsync's contract with PolledSourceCore.
         }
 
-        return new PolledBatch(batch, cursor, hasMore);
+        return new PolledBatch(batch, cursor, hasMore, envelopeSkipped);
     }
 
     /// <summary>Enumerates <paramref name="tuple"/> FULLY and IN ORDER — the discipline that loses data if

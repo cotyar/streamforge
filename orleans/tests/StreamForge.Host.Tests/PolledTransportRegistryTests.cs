@@ -235,6 +235,63 @@ public class PolledTransportRegistryTests
     }
 
     // ------------------------------------------------------------------
+    // 2b — PolledBatch.EnvelopeSkipped rides into PollCycleResult (a follow-up to plan 017's named gap:
+    // a native CDC reader now has a channel to report an unrepresentable message, not just PgCdcSource
+    // itself — this is the transport-neutral half of that wiring, proven with the same fake FizzDb this
+    // whole file already uses for every other IPolledTransport claim).
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public async Task ANonZeroEnvelopeSkippedOnTheBatchSurfacesOnThePollCycleResult()
+    {
+        var transport = new FizzDb();
+        transport.Pages.Enqueue(new PolledBatch([Row("a", 1L)], "c1", HasMore: false, EnvelopeSkipped: 3));
+
+        var outcome = await RunCycleAsync(transport, FizzDbSource(), null, new DedupTracker([]));
+
+        Assert.Null(outcome.Result.Error);
+        Assert.Single(outcome.Result.Rows);
+        Assert.Equal(3, outcome.Result.EnvelopeSkipped);
+    }
+
+    [Fact]
+    public async Task AZeroEnvelopeSkippedLeavesEveryExistingPolledSourceByteIdentical()
+    {
+        // The regression guard that matters: every non-CDC polled source (and every pre-existing PolledBatch
+        // constructor call, which never named this parameter) gets the implicit default, 0 — this test
+        // pins that "nothing changed" is still true for the ordinary, non-CDC path.
+        var transport = new FizzDb();
+        transport.Pages.Enqueue(new PolledBatch([Row("a", 1L), Row("b", 2L)], "c1", false));   // no 4th arg
+
+        var outcome = await RunCycleAsync(transport, FizzDbSource(), null, new DedupTracker([]));
+
+        Assert.Null(outcome.Result.Error);
+        Assert.Equal(2, outcome.Result.Rows.Count);
+        Assert.Equal(0, outcome.Result.EnvelopeSkipped);
+    }
+
+    [Fact]
+    public async Task AThrownCycleReportsNoEnvelopeSkippedCountRatherThanAStaleOne()
+    {
+        // Mirrors AThrowingTransportNeverAdvancesTheCursor's cursor assertion, for the new field: a cycle
+        // that never got as far as reading a batch (or that ExecuteRows itself blew up on) has nothing
+        // honest to report except 0 — never a value carried over from an earlier, unrelated cycle.
+        var transport = new FizzDb();
+        var def = FizzDbSource();
+        var dedup = new DedupTracker([]);
+
+        transport.Pages.Enqueue(new PolledBatch([Row("a", 1L)], "c1", false, EnvelopeSkipped: 5));
+        var ok = await RunCycleAsync(transport, def, null, dedup);
+        Assert.Equal(5, ok.Result.EnvelopeSkipped);
+
+        transport.Fail = new InvalidOperationException("connection reset by peer");
+        var failed = await RunCycleAsync(transport, def, ok.Cursor, dedup);
+
+        Assert.Equal(0, failed.Result.EnvelopeSkipped);   // not 5 — that batch never happened this cycle
+        Assert.NotNull(failed.Result.Error);
+    }
+
+    // ------------------------------------------------------------------
     // 3 — The cursor advances across cycles
     // ------------------------------------------------------------------
 

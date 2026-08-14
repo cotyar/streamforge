@@ -15,11 +15,25 @@ namespace StreamForge.AppCore.Transports;
 /// cycles, each one persisting its own cursor, so a restart halfway through resumes where it stopped
 /// instead of starting the snapshot over. Paging inside one <see cref="IPolledTransport.PollAsync"/> call
 /// would put those intermediate cursors back in memory, which is the failure this whole seam exists to
-/// avoid.</para></summary>
+/// avoid.</para>
+///
+/// <para><see cref="EnvelopeSkipped"/> (plan 017 follow-up, default 0 — additive, the same trailing-
+/// defaulted-parameter shape <see cref="StreamForge.AppCore.Connectors.PollCycleResult"/> used to solve
+/// this exact problem for the Debezium-envelope path) counts messages the transport read but could not
+/// turn into a row — a Postgres <c>TruncateMessage</c>/<c>TypeMessage</c>/<c>OriginMessage</c>/
+/// <c>LogicalDecodingMessage</c>, or any future pgoutput message a reader does not recognize. It is a bare
+/// count, not a count-plus-reason: <c>ConnectorGrain</c>/<c>ConnectorActor</c> render it through one fixed
+/// sentence (see their <c>CycleNote</c>), and <see cref="StreamForge.AppCore.Connectors.PollCycleResult.EnvelopeSkipped"/>
+/// — the channel this value flows into via <see cref="PolledSourceCore.RunCycleAsync"/> — carries only a
+/// count for the same reason, so a reason field here would have nowhere to be displayed. It must NOT
+/// include rows a source's own <c>Tables</c> filter excluded — that is the operator's configuration doing
+/// what they asked, not something unrepresentable, and counting it would turn a working filter into
+/// permanent alarming noise.</para></summary>
 public sealed record PolledBatch(
     IReadOnlyList<Dictionary<string, object?>> Rows,
     string? Cursor,
-    bool HasMore);
+    bool HasMore,
+    int EnvelopeSkipped = 0);
 
 /// <summary>
 /// Plan 014: everything the platform needs to know about a <b>pull</b>-shaped source kind — the sibling of
