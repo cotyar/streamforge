@@ -21,6 +21,14 @@ public static class SourceKinds
     /// <see cref="Grpc"/>, not a polled kind — its Schedule is ignored. See <see cref="NatsSubConfig"/>.</summary>
     public const string Nats = "nats";
 
+    /// <summary>Plan 014: a PostgreSQL table or query, polled with a durable cursor. Unlike every kind
+    /// above it is driven by <c>IPolledTransport</c> — the pull-shaped seam — and is implemented in
+    /// <c>StreamForge.Connectors.Database</c>, out of the core. See <see cref="DbSourceConfig"/>.</summary>
+    public const string Postgres = "postgres";
+    /// <summary>Plan 014: the Microsoft SQL Server twin of <see cref="Postgres"/>. Same config, same
+    /// transport, a different dialect.</summary>
+    public const string MsSql = "mssql";
+
     /// <summary>The masked placeholder for secrets-lite values (D-H).</summary>
     public const string SecretMask = "***";
 }
@@ -44,6 +52,13 @@ public sealed class ConnectorConfig
     [Id(5)] public MappingSpec? Mapping { get; set; }
     /// <summary>Plan 009 B1; set only for <see cref="SourceKinds.Nats"/>.</summary>
     [Id(6)] public NatsSubConfig? Nats { get; set; }
+
+    /// <summary>Plan 014; set for <see cref="SourceKinds.Postgres"/> and <see cref="SourceKinds.MsSql"/>.
+    /// One container for both, because the two differ only in dialect — the config surface is identical.
+    /// It lives HERE rather than in the connector project because <c>SecretWalk</c> only recurses into
+    /// types declared in this assembly, so a config class outside it would export its password in
+    /// plaintext, silently — the exact failure <c>[Secret]</c> was introduced to eliminate.</summary>
+    [Id(7)] public DbSourceConfig? Db { get; set; }
 }
 
 /// <summary>Plan 009 B1: NATS subject subscription. Credentials follow the secrets-lite convention
@@ -99,6 +114,14 @@ public sealed class SinkSpec
     [Id(2)] public NatsPubConfig? Nats { get; set; }
     /// <summary>Plan 012; set only for <see cref="SinkKinds.File"/>.</summary>
     [Id(3)] public FileSinkConfig? File { get; set; }
+
+    /// <summary>Plan 014; set for <see cref="SinkKinds.Postgres"/> and <see cref="SinkKinds.MsSql"/>.</summary>
+    [Id(4)] public DbSinkConfig? Db { get; set; }
+
+    /// <summary>Plan 014: an optional name, so <c>INSERT INTO &lt;name&gt; SELECT …</c> has something to
+    /// address. Empty for every sink authored before that syntax existed, which is why the sugar reports
+    /// an unknown target rather than guessing at a positional one.</summary>
+    [Id(5)] public string Name { get; set; } = "";
 }
 
 public static class SinkKinds
@@ -108,6 +131,13 @@ public static class SinkKinds
     /// <summary>Plan 012: append rows to a local file as CSV or NDJSON — the egress twin of the
     /// <see cref="SourceKinds.File"/> source kind. See <see cref="FileSinkConfig"/>.</summary>
     public const string File = "file";
+
+    /// <summary>Plan 014: write rows into a PostgreSQL table, appending or mirroring. The first sink whose
+    /// natural unit is a TRANSACTION rather than a message, which is why <c>IBatchSinkClient</c> exists.
+    /// See <see cref="DbSinkConfig"/>.</summary>
+    public const string Postgres = "postgres";
+    /// <summary>Plan 014: the Microsoft SQL Server twin of <see cref="Postgres"/>.</summary>
+    public const string MsSql = "mssql";
 }
 
 /// <summary>Plan 009 B2. DELIVERY IS FIRE-AND-FORGET and there is no backpressure from the sink into
@@ -188,6 +218,120 @@ public sealed class OpenApiRef
     [Id(3)] public string? SchemaPointer { get; set; }
 }
 
+// ---- Plan 014: database ingress / egress ----
+
+/// <summary>Plan 014: a database source, Postgres or MS SQL. Structured rather than a single connection
+/// string BECAUSE a raw string with an embedded password masks to "***" wholesale, and the operator can
+/// then no longer see which host it points at — the escape hatch below exists for the cases the structured
+/// fields cannot express, and it pays that price knowingly.</summary>
+[GenerateSerializer]
+public sealed class DbSourceConfig
+{
+    [Id(0)] public string Host { get; set; } = "";
+    /// <summary>0 = the dialect default (5432 / 1433).</summary>
+    [Id(1)] public int Port { get; set; }
+    [Id(2)] public string Database { get; set; } = "";
+    [Id(3)] public string Username { get; set; } = "";
+    [Id(4)] [Secret] public string? Password { get; set; }
+
+    /// <summary>Schema holding <see cref="Table"/>. Empty = the dialect default (public / dbo).</summary>
+    [Id(5)] public string Schema { get; set; } = "";
+    /// <summary>Table to poll. Ignored when <see cref="Query"/> is set.</summary>
+    [Id(6)] public string Table { get; set; } = "";
+    /// <summary>Extra predicate ANDed onto the generated WHERE. Table mode only.</summary>
+    [Id(7)] public string Where { get; set; } = "";
+    /// <summary>Escape hatch: your own SQL, which MUST contain the <c>@cursor</c> placeholder. Bound as a
+    /// PARAMETER, never interpolated — injection, and just as importantly type fidelity, since a
+    /// timestamptz spliced in as text compares wrong across a DST boundary.</summary>
+    [Id(8)] public string Query { get; set; } = "";
+
+    /// <summary>The monotonic column the high-water mark is taken from.
+    ///
+    /// <para><b>Read this before choosing a timestamp.</b> A surrogate key compared with <c>&gt;</c> is
+    /// safe. An <c>updated_at</c> compared with <c>&gt;</c> LOSES every row written in the same millisecond
+    /// as the watermark; compared with <c>&gt;=</c> it re-reads them, which is why the recommended shape is
+    /// <c>&gt;=</c> plus a <see cref="DedupKeyColumn"/>. Neither variant ever sees a row whose transaction
+    /// commits after a later-timestamped one — a polled source is eventually-consistent-with-holes on a
+    /// timestamp column, and that is the honest argument for CDC when it matters.</para></summary>
+    [Id(9)] public string CursorColumn { get; set; } = "";
+    /// <summary>"long" | "timestamp" | "string" (<see cref="CursorKinds"/>) — how the persisted opaque
+    /// cursor string is parsed back into a bound parameter.</summary>
+    [Id(10)] public string CursorKind { get; set; } = CursorKinds.Long;
+    /// <summary>Where to start when no cursor is persisted yet. Empty + <see cref="Snapshot"/> = from the
+    /// beginning; empty without it = from MAX(cursorColumn), i.e. new rows only.</summary>
+    [Id(11)] public string InitialCursor { get; set; } = "";
+    /// <summary>Column whose value dedups re-read rows. The companion to a <c>&gt;=</c> cursor.</summary>
+    [Id(12)] public string DedupKeyColumn { get; set; } = "";
+
+    /// <summary>Rows per poll. Also the page size for the initial snapshot, which pages across successive
+    /// driver cycles — each persisting its cursor — so a restart mid-snapshot resumes instead of starting
+    /// over.</summary>
+    [Id(13)] public int BatchSize { get; set; } = 1000;
+    /// <summary>Read the whole table first, then tail. See <see cref="InitialCursor"/>.</summary>
+    [Id(14)] public bool Snapshot { get; set; }
+    [Id(15)] public int CommandTimeoutSeconds { get; set; } = 30;
+    /// <summary>Require TLS on the connection.</summary>
+    [Id(16)] public bool Tls { get; set; }
+
+    /// <summary>Full connection string. When set it WINS over every structured field above — for the
+    /// options this shape does not model. Masked wholesale, with the visibility cost named at the top.</summary>
+    [Id(17)] [Secret] public string? ConnectionString { get; set; }
+}
+
+/// <summary>Plan 014: a database sink. Connection fields mirror <see cref="DbSourceConfig"/> deliberately,
+/// so an operator configuring both directions types the same form twice rather than two different ones.</summary>
+[GenerateSerializer]
+public sealed class DbSinkConfig
+{
+    [Id(0)] public string Host { get; set; } = "";
+    [Id(1)] public int Port { get; set; }
+    [Id(2)] public string Database { get; set; } = "";
+    [Id(3)] public string Username { get; set; } = "";
+    [Id(4)] [Secret] public string? Password { get; set; }
+    [Id(5)] public string Schema { get; set; } = "";
+    /// <summary>Destination table. May contain <c>{name}</c>, replaced with the pipeline id / table name,
+    /// the same substitution the NATS and file sinks use. It must ALREADY EXIST — this sink issues no DDL,
+    /// because a streaming sink that can CREATE is a trust escalation over one that can only INSERT.</summary>
+    [Id(6)] public string Table { get; set; } = "";
+
+    /// <summary>"append" | "upsert" (<see cref="DbSinkModes"/>).</summary>
+    [Id(7)] public string Mode { get; set; } = DbSinkModes.Append;
+    /// <summary>Comma-separated key columns. REQUIRED for <see cref="DbSinkModes.Upsert"/> and unused by
+    /// append. Explicit rather than derived, because a sink client only ever sees the entity NAME — reaching
+    /// back for its SQL to guess the identity would couple egress to the catalog. The console prefills it
+    /// from the table's declared keys, which is a visible suggestion rather than a silent derivation.</summary>
+    [Id(8)] public string KeyColumns { get; set; } = "";
+    /// <summary>Write the Z-set weight as a <c>_weight</c> column. Append mode only — in upsert mode the
+    /// weight IS the operation (negative = DELETE), so persisting it would store a number already spent.</summary>
+    [Id(9)] public bool IncludeWeight { get; set; }
+
+    /// <summary>Explicit column order, comma-separated. Empty = the union of the batch's keys.</summary>
+    [Id(10)] public string Columns { get; set; } = "";
+    [Id(11)] public int CommandTimeoutSeconds { get; set; } = 30;
+    [Id(12)] public bool Tls { get; set; }
+    [Id(13)] [Secret] public string? ConnectionString { get; set; }
+}
+
+/// <summary>How <see cref="DbSourceConfig.CursorKind"/> parses the persisted opaque cursor.</summary>
+public static class CursorKinds
+{
+    public const string Long = "long";
+    public const string Timestamp = "timestamp";
+    public const string String = "string";
+}
+
+/// <summary>How a database sink applies a batch.</summary>
+public static class DbSinkModes
+{
+    /// <summary>Every delivered row becomes an INSERT. Never deletes; the destination is a log.</summary>
+    public const string Append = "append";
+    /// <summary>Positive weights UPSERT on <see cref="DbSinkConfig.KeyColumns"/>, negative weights DELETE,
+    /// deletes applied last within the one transaction so a delete-then-reinsert of the same key inside a
+    /// batch lands the way the caller meant it. Rejected on a PIPELINE sink: a pipeline emits results, not
+    /// deltas, so there is no identity and no weight and "mirror current state" means nothing there.</summary>
+    public const string Upsert = "upsert";
+}
+
 /// <summary>Formats for file/folder sources.</summary>
 public static class FileFormats
 {
@@ -254,6 +398,30 @@ public sealed class MappingSpec
     /// Null = arrival time.</summary>
     [Id(2)] public string? TimestampField { get; set; }
     [Id(3)] public List<FieldMapEntry> Fields { get; set; } = [];
+
+    /// <summary>Plan 014: an envelope the payload is wrapped in and should be unwrapped from BEFORE
+    /// <see cref="ItemsPath"/> applies. <see cref="CdcEnvelopes.None"/> (the default) is byte-identical
+    /// to every mapping authored before this existed. It lives on the MAPPING rather than on a transport
+    /// so that one unwrapper serves every transport at once — NATS today, a queue tomorrow, and a
+    /// file of captured envelopes in a test.</summary>
+    [Id(4)] public string Envelope { get; set; } = CdcEnvelopes.None;
+}
+
+/// <summary>Plan 014: recognized payload envelopes for <see cref="MappingSpec.Envelope"/>.</summary>
+public static class CdcEnvelopes
+{
+    public const string None = "none";
+
+    /// <summary>Debezium's change envelope: <c>op</c> c/u/r take the row from <c>after</c>, <c>d</c> takes
+    /// it from <c>before</c> and stamps <c>_weight = -1</c>; <c>ts_ms</c> becomes <c>_ts</c>. Accepts both
+    /// the raw <c>{schema,payload}</c> form and the already-unwrapped form the <c>ExtractNewRecordState</c>
+    /// SMT emits, and passes a message with no <c>op</c> through untouched.
+    ///
+    /// <para><b>The honest limit:</b> a source is an append-only event stream, so <c>_weight</c> on an
+    /// INBOUND row is just a column — the Engine's Z-set weights are computed by table SQL, not carried in
+    /// from ingress. A delete therefore arrives as a tombstone row; the working pattern is
+    /// <c>LATEST BY key</c> + <c>WHERE _op &lt;&gt; 'd'</c>, which hides the key but does not free it.</para></summary>
+    public const string Debezium = "debezium";
 }
 
 /// <summary>One output field: where it comes from (path relative to the item) and its FieldDef
@@ -288,6 +456,12 @@ public sealed class ConnectorRuntimeStatus
     /// policy discard anything. Cumulative since activation, like
     /// <see cref="EventsEmittedTotal"/>.</summary>
     [Id(8)] public long CoercionFailuresTotal { get; set; }
+
+    /// <summary>Plan 014: the polled transport's persisted high-water mark, verbatim and opaque — an
+    /// LSN, a composite "(ts,id)", or a plain bigint, whatever the transport minted. Surfaced because an
+    /// operator who cannot see the cursor cannot tell a stuck source from an idle one. Null for every
+    /// kind that has no cursor.</summary>
+    [Id(9)] public string? Cursor { get; set; }
 }
 
 // ---- REST helper DTOs (cross HTTP only, but follow house serialization style anyway) ----

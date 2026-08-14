@@ -43,6 +43,7 @@ public class SecretWalkTests
         Folder = new FolderPollConfig { Path = "/tmp" },
         Grpc = new GrpcSubConfig { Address = "http://localhost:5299", EntityKey = "source:s" },
         Nats = new NatsSubConfig { Url = "nats://localhost:4222", Subject = "t.>" },
+        Db = new DbSourceConfig { Host = "localhost", Database = "d", Table = "t" },
         Mapping = new MappingSpec(),
         Schedule = new ScheduleSpec { IntervalMs = 30_000 },
     };
