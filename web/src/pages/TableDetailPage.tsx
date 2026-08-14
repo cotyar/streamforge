@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Check, CircleAlert, Play, Search, Trash2, TriangleAlert, Undo2, X } from 'lucide-react'
+import { Check, CircleAlert, Download, Play, Search, Trash2, TriangleAlert, Undo2, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { tablesApi } from '../api/tables'
+import { downloadCsv } from '../api/csv'
 import type { UpdateTableRequest } from '../api/tables'
 import { sourcesApi } from '../api/sources'
 import { ApiError } from '../api/client'
@@ -213,11 +214,27 @@ function MaterializedView({
             {sortedRows.length.toLocaleString()} row{sortedRows.length === 1 ? '' : 's'}
           </span>
         </div>
-        {metrics?.rebuilding && (
-          <Badge variant="outline" className="border-warning/40 text-warning">
-            Rebuilding
-          </Badge>
-        )}
+        <div className="flex items-center gap-2">
+          {metrics?.rebuilding && (
+            <Badge variant="outline" className="border-warning/40 text-warning">
+              Rebuilding
+            </Badge>
+          )}
+          {/* Plan 012: the server renders the CSV (GET /rows.csv) rather than this grid exporting what it
+              happens to hold — the grid is a capped live view, the download is the table. */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              void downloadCsv(`/api/tables/${table.id}/rows.csv`, `${table.name}.csv`).catch((err: unknown) =>
+                toast.error(err instanceof Error ? err.message : 'Download failed.'),
+              )
+            }}
+          >
+            <Download data-icon="inline-start" /> CSV
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">

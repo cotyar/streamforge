@@ -4,11 +4,18 @@ Streaming-SQL platform ("StreamForge") in two runtime flavors: `orleans/` (compl
 Orleans 10) and `dapr/` (complete — Dapr, for polyglot processing and runtime comparison). Both
 flavors share one runtime-agnostic core (`shared/`): Engine, Contracts, AppCore, Api, and the `web/`
 SPA. Execution plans with acceptance criteria: [`plans/`](plans/README.md). Adding an ingress/egress transport
-(NATS today; the recipe is one class + one registry line): [`TRANSPORTS.md`](TRANSPORTS.md). Architecture:
+(NATS + a `file` sink today; the recipe is one class + one registry line): [`TRANSPORTS.md`](TRANSPORTS.md). Architecture:
 [`orleans/ARCHITECTURE.md`](orleans/ARCHITECTURE.md) · [`dapr/ARCHITECTURE.md`](dapr/ARCHITECTURE.md)
 · rationale: [`orleans/DESIGN.md`](orleans/DESIGN.md) · runtime comparison + measured latency:
 [`orleans/docs/comparison.html`](orleans/docs/comparison.html) (opened directly from the repo — see
 its own note on why `/docs` doesn't serve it automatically).
+
+
+**CSV I/O** (plan 012): `format: "csv"` on a url/file/folder/nats source sniffs its delimiter from the
+header line, so TSV / semicolon / pipe exports read through the same format; the `file` sink kind
+appends CSV or NDJSON to a path on the host (append-only, header fixed for the life of the file); and
+`GET /api/tables/{id}/rows.csv` + `GET /api/pipelines/{id}/results.csv` (plus a **CSV** button on both
+detail pages) download the same rows. One writer, `CsvFormatter`, behind all of it.
 
 ## Environment — non-negotiables
 
@@ -32,7 +39,7 @@ its own note on why `/docs` doesn't serve it automatically).
 
 ```bash
 ~/.dotnet/dotnet build orleans/StreamForge.sln
-~/.dotnet/dotnet test  orleans/StreamForge.sln     # 1640 tests — the whole suite must be green
+~/.dotnet/dotnet test  orleans/StreamForge.sln     # 1676 tests — the whole suite must be green
 ~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln
 ~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 313 tests — the whole suite must be green
 cd web && bun run build

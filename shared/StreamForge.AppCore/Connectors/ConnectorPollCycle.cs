@@ -37,9 +37,24 @@ public static class ConnectorPollCycle
             Fields = def.Fields.Select(f => new FieldMapEntry { Field = f }).ToList(),
         };
 
-    /// <summary>URL kind: body → JSON → extract → dedup → stamp.</summary>
+    /// <summary>URL kind: body → JSON → extract → dedup → stamp.
+    ///
+    /// <para>Plan 012: a url source may declare a <see cref="UrlPollConfig.Format"/> other than JSON, in
+    /// which case the body goes through the SAME <see cref="ParseAndExtract"/> path a file/folder/message
+    /// payload uses — an endpoint that serves text/csv no longer needs a file in between. The JSON branch
+    /// below is left exactly as it was rather than folded into that path: it hands the parsed ROOT to the
+    /// extractor, so an ItemsPath rooted at a top-level array (<c>$.data[*]</c> against an array body)
+    /// resolves against the whole document, where ParseAndExtract would have already split it into items
+    /// and re-rooted each one. Identical for every mapping that works today, different for some that
+    /// don't — not a distinction worth risking on a default-valued field.</para></summary>
     public static PollCycleResult ExecuteUrl(SourceDefinition def, string responseBody, DedupTracker dedup, long nowMs)
     {
+        var format = def.Connector?.Url?.Format;
+        if (!string.IsNullOrEmpty(format) && format != FileFormats.JsonArray)
+        {
+            return ParseAndExtract(def, format, responseBody, dedup, nowMs);
+        }
+
         try
         {
             using var doc = JsonDocument.Parse(responseBody);

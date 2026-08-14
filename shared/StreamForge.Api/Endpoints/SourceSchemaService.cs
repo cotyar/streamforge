@@ -176,6 +176,14 @@ public static class SourceValidation
         {
             errors.Add("connector.url.url must be an absolute http(s) URL");
         }
+
+        // Plan 012: same vocabulary the file/folder kinds validate against. Empty is accepted as "json"
+        // — a definition stored before the field existed deserializes with it unset, and rejecting those
+        // on the next PUT would make an additive field a breaking one.
+        if (!string.IsNullOrEmpty(url.Format) && !KnownFileFormats.Contains(url.Format))
+        {
+            errors.Add($"connector.url.format '{url.Format}' is not recognized (expected one of: ndjson, json, csv)");
+        }
     }
 
     private static void ValidateFile(ConnectorConfig connector, List<string> errors)

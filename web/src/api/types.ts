@@ -74,6 +74,9 @@ export interface UrlPollConfig {
   url: string
   headers: Record<string, string>
   openApi?: OpenApiRef | null
+  /** Plan 012: response body format. Absent = 'json', which is what this kind did before the field
+   *  existed — an endpoint serving text/csv or NDJSON needs no file in between. */
+  format?: FileFormat
 }
 
 export interface FilePollConfig {
@@ -156,6 +159,17 @@ export interface SinkSpec {
   kind: string
   enabled: boolean
   nats?: NatsPubConfig | null
+  file?: FileSinkConfig | null
+}
+
+/** Plan 012: the file egress sink — appends to a file on the HOST's filesystem, never truncates. */
+export interface FileSinkConfig {
+  /** May contain {name}, replaced with the pipeline id / table name. */
+  path: string
+  /** 'csv' | 'ndjson' — 'json' is absent on purpose (an append-only writer can't close the array). */
+  format: FileFormat
+  /** CSV only: explicit column order, comma-separated. Empty = the first written row's order. */
+  columns: string
 }
 
 export interface NatsPubConfig {

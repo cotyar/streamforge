@@ -1,15 +1,17 @@
 import { useState } from 'react'
-import type { FieldDef, UrlPollConfig } from '@/api/types'
+import type { FieldDef, FileFormat, UrlPollConfig } from '@/api/types'
 import { sourcesApi } from '@/api/sources'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Plus, Trash2 } from 'lucide-react'
 
 export interface UrlFormState {
   url: string
+  format: FileFormat
   headers: { key: string; value: string }[]
   openApiDocUrl: string
   openApiDocInline: string
@@ -20,6 +22,7 @@ export interface UrlFormState {
 export function toUrlFormState(cfg?: UrlPollConfig | null): UrlFormState {
   return {
     url: cfg?.url ?? '',
+    format: cfg?.format ?? 'json',
     headers: Object.entries(cfg?.headers ?? {}).map(([key, value]) => ({ key, value })),
     openApiDocUrl: cfg?.openApi?.docUrl ?? '',
     openApiDocInline: cfg?.openApi?.docInline ?? '',
@@ -37,6 +40,7 @@ export function buildUrlConfig(state: UrlFormState): UrlPollConfig {
   const hasOpenApi = !!state.openApiDocUrl.trim() || !!state.openApiDocInline.trim()
   return {
     url: state.url.trim(),
+    format: state.format,
     headers,
     openApi: hasOpenApi
       ? {
@@ -115,6 +119,20 @@ export function UrlConfigEditor({
           disabled={disabled}
           className="font-mono"
         />
+      </Field>
+
+      <Field>
+        <FieldLabel htmlFor="url-cfg-format">Response format</FieldLabel>
+        <Select value={value.format} onValueChange={(v) => onChange({ format: v as FileFormat })} disabled={disabled}>
+          <SelectTrigger id="url-cfg-format" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="json">json — a JSON document (array or object)</SelectItem>
+            <SelectItem value="ndjson">ndjson — one JSON value per line</SelectItem>
+            <SelectItem value="csv">csv — header row; TSV / semicolon / pipe are detected too</SelectItem>
+          </SelectContent>
+        </Select>
       </Field>
 
       <Field>

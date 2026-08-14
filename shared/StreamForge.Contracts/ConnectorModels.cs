@@ -97,11 +97,17 @@ public sealed class SinkSpec
     [Id(0)] public string Kind { get; set; } = SinkKinds.Nats;
     [Id(1)] public bool Enabled { get; set; } = true;
     [Id(2)] public NatsPubConfig? Nats { get; set; }
+    /// <summary>Plan 012; set only for <see cref="SinkKinds.File"/>.</summary>
+    [Id(3)] public FileSinkConfig? File { get; set; }
 }
 
 public static class SinkKinds
 {
     public const string Nats = "nats";
+
+    /// <summary>Plan 012: append rows to a local file as CSV or NDJSON — the egress twin of the
+    /// <see cref="SourceKinds.File"/> source kind. See <see cref="FileSinkConfig"/>.</summary>
+    public const string File = "file";
 }
 
 /// <summary>Plan 009 B2. DELIVERY IS FIRE-AND-FORGET and there is no backpressure from the sink into
@@ -120,6 +126,32 @@ public sealed class NatsPubConfig
     [Id(5)] [Secret] public string? Credentials { get; set; }
 }
 
+/// <summary>Plan 012: the file egress sink. Rows are APPENDED, never truncated — the file is a log,
+/// and a sink that could truncate would silently discard whatever an operator pointed it at by mistake.
+/// The writing process is the StreamForge host, so the path is resolved on the HOST's filesystem with
+/// the host process's permissions: this is exactly the same trust the <see cref="SourceKinds.File"/> /
+/// <see cref="SourceKinds.Folder"/> source kinds already place in an Editor, in the write direction.
+/// In a container or on Cloud Run the target must be a mounted volume, or the output dies with the
+/// instance.</summary>
+[GenerateSerializer]
+public sealed class FileSinkConfig
+{
+    /// <summary>Destination path. May contain <c>{name}</c>, replaced with the pipeline id / table name,
+    /// so one spec can serve a whole catalog (same substitution <see cref="NatsPubConfig.Subject"/> uses).
+    /// Missing parent directories are created.</summary>
+    [Id(0)] public string Path { get; set; } = "";
+    /// <summary><see cref="FileFormats.Csv"/> (default) or <see cref="FileFormats.Ndjson"/>. NOT
+    /// <see cref="FileFormats.JsonArray"/>: a JSON array has a closing bracket, and an append-only writer
+    /// with no idea when the stream ends can never write one — a half-written array file that no parser
+    /// accepts would be worse than refusing the format.</summary>
+    [Id(1)] public string Format { get; set; } = FileFormats.Csv;
+    /// <summary>CSV only: explicit column order, comma-separated (e.g. "symbol,qty,_weight"). Empty =
+    /// the first written row's key order. Either way the header is fixed for the life of the file, so a
+    /// column that only appears in a later row is dropped rather than silently shifting every subsequent
+    /// row one cell to the left — set this when the rows are not uniform.</summary>
+    [Id(2)] public string Columns { get; set; } = "";
+}
+
 /// <summary>Cron (5/6-field, UTC, Cronos) XOR fixed interval; IntervalMs floor is 1000 (D-E).</summary>
 [GenerateSerializer]
 public sealed class ScheduleSpec
@@ -136,6 +168,10 @@ public sealed class UrlPollConfig
     [Id(1)] public Dictionary<string, string> Headers { get; set; } = [];
     /// <summary>Optional OpenAPI derivation reference (schema was derived from it; kept for re-derive).</summary>
     [Id(2)] public OpenApiRef? OpenApi { get; set; }
+    /// <summary>Plan 012: response body format, same vocabulary as the file/folder connectors
+    /// ("ndjson" | "json" | "csv"). Defaults to "json", which is what this kind did before the field
+    /// existed — an endpoint serving text/csv or NDJSON no longer needs a file in between.</summary>
+    [Id(3)] public string Format { get; set; } = FileFormats.JsonArray;
 }
 
 /// <summary>Where an OpenAPI-derived schema came from (D-F).</summary>

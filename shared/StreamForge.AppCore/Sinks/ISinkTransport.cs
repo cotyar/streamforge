@@ -59,7 +59,7 @@ public static class SinkTransports
     private static readonly Lock Gate = new();
 
     // ponytail: a plain list, not a plugin host. Add built-in sink transports here.
-    private static readonly List<ISinkTransport> Registered = [new NatsSinkTransport()];
+    private static readonly List<ISinkTransport> Registered = [new NatsSinkTransport(), new FileSinkTransport()];
 
     public static ISinkTransport? Find(string? kind)
     {
@@ -143,6 +143,47 @@ public sealed class NatsSinkTransport : ISinkTransport
             {
                 Key = "credentials", Label = ".creds file contents", Type = TransportFieldTypes.Secret, Group = "auth", Mono = true,
                 Placeholder = "Paste the contents of a NATS .creds file",
+            },
+        ],
+    };
+}
+
+/// <summary>Plan 012: a local file as an <see cref="ISinkTransport"/> — the egress twin of the
+/// <c>file</c> source kind, and the platform's first sink that isn't a broker. All the work is
+/// <see cref="FileSinkClient"/>'s; read its class doc for the append-only/fixed-header/no-rotation
+/// contract this kind sells.</summary>
+public sealed class FileSinkTransport : ISinkTransport
+{
+    public string Kind => SinkKinds.File;
+
+    public bool IsConfigured(SinkSpec spec) => spec.File is { } f && !string.IsNullOrWhiteSpace(f.Path);
+
+    public ISinkClient Create(SinkSpec spec, string entityKind, string entityName, Action<string, Exception>? onFailure) =>
+        new FileSinkClient(spec.File!, entityKind, entityName, onFailure);
+
+    public TransportDescriptor Describe() => new()
+    {
+        Kind = SinkKinds.File,
+        Label = "File",
+        Help = "Appends to a file on the HOST's filesystem, never truncates it. In a container the path must be a mounted volume. No rotation and no size cap — the file grows until something else prunes it.",
+        ConfigProperty = "file",
+        Fields =
+        [
+            new TransportField
+            {
+                Key = "path", Label = "Path", Required = true, Mono = true, Placeholder = "/data/out/{name}.csv",
+                Help = "{name} is replaced with this pipeline's id / table's name. Missing directories are created.",
+            },
+            new TransportField
+            {
+                Key = "format", Label = "Format", Type = TransportFieldTypes.Select,
+                Options = [FileFormats.Csv, FileFormats.Ndjson], Default = FileFormats.Csv,
+                Help = "NDJSON writes the same record a NATS sink publishes, one JSON object per line. 'json' is absent on purpose: an append-only writer can never close the array.",
+            },
+            new TransportField
+            {
+                Key = "columns", Label = "CSV columns", Mono = true, Placeholder = "symbol,qty,_weight",
+                Help = "Optional, CSV only. Empty = the first written row's column order (or the existing file's header). Fixed for the life of the file either way.",
             },
         ],
     };

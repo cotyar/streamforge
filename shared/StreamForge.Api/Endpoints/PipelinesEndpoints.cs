@@ -164,6 +164,20 @@ public static class PipelinesEndpoints
             Results.Ok(await pipelines.GetRecentResultsAsync(id, limit ?? 100))
         ).Produces<List<ResultEnvelope>>().RequireAuthorization("Viewer");
 
+        // Plan 012: the recent-results buffer as a file — the pipeline twin of /api/tables/{id}/rows.csv.
+        group.MapGet("/{id}/results.csv", async (string id, int? limit, ICatalogFacade registry, IPipelineReadFacade pipelines) =>
+        {
+            var def = await registry.GetPipelineAsync(id);
+            if (def is null)
+            {
+                return Results.NotFound();
+            }
+
+            var results = await pipelines.GetRecentResultsAsync(id, Math.Clamp(limit ?? 10_000, 1, 100_000));
+            var csv = CsvExport.Rows(results.Select(r => r.Row));
+            return Results.File(Encoding.UTF8.GetBytes(csv), "text/csv; charset=utf-8", $"{def.Name}.csv");
+        }).RequireAuthorization("Viewer");
+
         group.MapGet("/{id}/metrics", async (string id, IPipelineReadFacade pipelines) =>
             Results.Ok(await pipelines.GetMetricsAsync(id))
         ).RequireAuthorization("Viewer");

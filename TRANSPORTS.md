@@ -3,6 +3,11 @@
 A **transport** is how bytes get into StreamForge (a source kind) or out of it (a sink kind). NATS is the
 reference implementation of both directions; this document is the recipe for the next one.
 
+Built in today: `nats` inbound and outbound, and (plan 012) a `file` sink that appends rows to a local
+file as CSV or NDJSON — the egress twin of the `file`/`folder` source kinds, and the proof that this seam
+holds for a destination that is not a broker at all. `FileSinkTransport`/`FileSinkClient` are worth
+reading next to the NATS pair: same interfaces, same fire-and-forget contract, a third of the code.
+
 The design goal is stated as a test, not as a promise:
 [`TransportRegistryTests`](orleans/tests/StreamForge.Host.Tests/TransportRegistryTests.cs) registers a
 transport the repository has never heard of and asserts the platform validates it, masks its credentials,

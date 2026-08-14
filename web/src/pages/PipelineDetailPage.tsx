@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Check, CircleAlert, Play, Trash2, TriangleAlert, Undo2 } from 'lucide-react'
+import { Check, CircleAlert, Download, Play, Trash2, TriangleAlert, Undo2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { pipelinesApi } from '../api/pipelines'
+import { downloadCsv } from '../api/csv'
 import { sourcesApi } from '../api/sources'
 import type { Metadata, PipelineDefinition, SinkSpec, SourceDefinition, SqlDiagnostic, Tags } from '../api/types'
 import { useAuth } from '../api/auth'
@@ -411,6 +412,21 @@ export function PipelineDetailPage() {
                   <LiveChart rows={rows} />
                 </CardContent>
               </Card>
+              <div className="flex items-center justify-end">
+                {/* Plan 012: downloads the server's recent-results buffer, not this page's live rows. */}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    void downloadCsv(`/api/pipelines/${id}/results.csv`, `${name || 'pipeline'}.csv`).catch((err: unknown) =>
+                      toast.error(err instanceof Error ? err.message : 'Download failed.'),
+                    )
+                  }}
+                >
+                  <Download data-icon="inline-start" /> CSV
+                </Button>
+              </div>
               <Card className="min-h-[20rem] flex-1 overflow-hidden py-0">
                 <ResultsTable rows={rows} />
               </Card>

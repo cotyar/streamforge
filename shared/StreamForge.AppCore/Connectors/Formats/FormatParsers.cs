@@ -89,10 +89,20 @@ public static class FormatParsers
     /// <para><b>Duplicate header dedup</b>: when the header row repeats a column name, only the
     /// LAST occurrence of that name is kept (using that occurrence's own column value) — earlier
     /// duplicates are dropped entirely rather than silently overwritten in an unpredictable order.
-    /// </para></summary>
-    public static List<JsonElement> ParseCsv(string text)
+    /// </para>
+    ///
+    /// <para><b>Plan 012 — "and similar files"</b>: the delimiter is sniffed from the header line when
+    /// the caller doesn't name one, which is what makes TSV, semicolon-separated (the shape Excel writes
+    /// in a decimal-comma locale) and pipe-separated exports work through the same "csv" format rather
+    /// than through three more format constants and three more config fields nobody would find. See
+    /// <see cref="SniffDelimiter"/> for the rule and its one honest failure mode.</para></summary>
+    public static List<JsonElement> ParseCsv(string text) => ParseCsv(text, null);
+
+    /// <param name="delimiter">Null = sniff (see <see cref="SniffDelimiter"/>).</param>
+    /// <inheritdoc cref="ParseCsv(string)"/>
+    public static List<JsonElement> ParseCsv(string text, char? delimiter)
     {
-        var records = ParseCsvRecords(text);
+        var records = ParseCsvRecords(text, delimiter ?? SniffDelimiter(text));
         if (records.Count == 0)
         {
             return [];
@@ -162,11 +172,74 @@ public static class FormatParsers
         writer.WriteStringValue(raw);
     }
 
+    /// <summary>Just the header names of a CSV text, in column order (empty when there is no first
+    /// record). Exists for the file sink, which appends to a file it may not have created and must reuse
+    /// that file's existing column order rather than impose its own — reading the header back with the
+    /// same tokenizer that wrote it is what keeps a quoted or delimiter-bearing column name working
+    /// across a host restart.</summary>
+    public static List<string> CsvHeader(string text)
+    {
+        var records = ParseCsvRecords(text, SniffDelimiter(text));
+        return records.Count == 0 ? [] : records[0];
+    }
+
+    /// <summary>Candidate delimiters, in precedence order — a tie goes to the earlier one, so a file with
+    /// no separator at all (a single column) is read as comma-delimited, which is what it was before this
+    /// existed.</summary>
+    private static readonly char[] DelimiterCandidates = [',', '\t', ';', '|'];
+
+    /// <summary>Picks the delimiter by counting candidates in the HEADER line only, outside quotes. The
+    /// header is the right sample: it is the one line whose cell count is definitional, and it rarely
+    /// contains free text. The failure mode is visible rather than subtle — guess wrong and every row
+    /// becomes one wide column with a header to match, which is obvious in the console's schema preview
+    /// on the first poll, not a quiet mis-parse of individual values.</summary>
+    private static char SniffDelimiter(string text)
+    {
+        var counts = new int[DelimiterCandidates.Length];
+        var inQuotes = false;
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+                continue;
+            }
+
+            if (inQuotes)
+            {
+                continue;
+            }
+
+            if (c is '\n' or '\r')
+            {
+                break; // header line ends here.
+            }
+
+            var idx = Array.IndexOf(DelimiterCandidates, c);
+            if (idx >= 0)
+            {
+                counts[idx]++;
+            }
+        }
+
+        var best = 0;
+        for (var i = 1; i < counts.Length; i++)
+        {
+            if (counts[i] > counts[best])
+            {
+                best = i;
+            }
+        }
+
+        return counts[best] == 0 ? ',' : DelimiterCandidates[best];
+    }
+
     /// <summary>Tokenizes RFC 4180 CSV text into rows of raw field strings. A quote is only
     /// recognized as the start of a quoted field at the very start of a field (RFC 4180 doesn't allow
     /// quotes to appear inside an unquoted field) — anything else involving a stray <c>"</c> is
     /// rejected as malformed rather than silently mangled.</summary>
-    private static List<List<string>> ParseCsvRecords(string text)
+    private static List<List<string>> ParseCsvRecords(string text, char delimiter)
     {
         var records = new List<List<string>>();
         var field = new StringBuilder();
@@ -207,6 +280,14 @@ public static class FormatParsers
                 continue;
             }
 
+            if (c == delimiter)
+            {
+                record.Add(field.ToString());
+                field.Clear();
+                i++;
+                continue;
+            }
+
             switch (c)
             {
                 case '"' when field.Length == 0:
@@ -218,12 +299,6 @@ public static class FormatParsers
                 case '"':
                     throw new FormatException(
                         $"CSV parse error on line {lineNumber}: unexpected '\"' inside an unquoted field.");
-
-                case ',':
-                    record.Add(field.ToString());
-                    field.Clear();
-                    i++;
-                    break;
 
                 case '\r':
                     record.Add(field.ToString());

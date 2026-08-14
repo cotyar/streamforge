@@ -228,6 +228,25 @@ public static class TablesEndpoints
             return Results.Ok(new TableRowsResponse(rows, total, seq, frontierEpoch, shardNote));
         }).Produces<TableRowsResponse>().RequireAuthorization("Viewer");
 
+        // Plan 012: the same rows as a file. Deliberately its OWN route rather than a ?format=csv branch on
+        // /rows: that one is .Produces<TableRowsResponse>(), and the per-entity OpenAPI document
+        // (EntityOpenApiEndpoints) rewrites its row shape into this table's real output schema — a second
+        // content type on the same operation would have made that document describe two things at once.
+        group.MapGet("/{id}/rows.csv", async (string id, int? limit, int? offset, ICatalogFacade registry, ITableReadFacade tables) =>
+        {
+            var def = await registry.GetTableAsync(id);
+            if (def is null)
+            {
+                return Results.NotFound();
+            }
+
+            // Cap higher than /rows' 100 (this is an export, not a console poll) but still capped: an
+            // unbounded default on a million-row table would render the whole thing into one string.
+            var rows = await tables.GetRowsAsync(def.Name, Math.Clamp(limit ?? 10_000, 1, 100_000), offset ?? 0);
+            var csv = CsvExport.Table(def, rows);
+            return Results.File(Encoding.UTF8.GetBytes(csv), "text/csv; charset=utf-8", $"{def.Name}.csv");
+        }).RequireAuthorization("Viewer");
+
         group.MapGet("/{id}/metrics", async (string id, ICatalogFacade registry, ITableReadFacade tables) =>
         {
             var def = await registry.GetTableAsync(id);
