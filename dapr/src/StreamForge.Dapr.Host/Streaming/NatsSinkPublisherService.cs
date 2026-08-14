@@ -178,21 +178,20 @@ public sealed class NatsSinkPublisherService(
             return;
         }
 
-        foreach (var result in envelope.Results)
+        // Plan 014: the batch survives to the fan-out instead of being taken apart here. For NATS and file
+        // clients this is the same calls in a different nesting (see SinkFanout's doc for why that is
+        // unobservable); for a client whose delivery unit is a transaction it is the difference between one
+        // commit and one per row — and that decision now lives in one place rather than in this method and
+        // the three others shaped like it.
+        var messages = envelope.Results.Select(result => new NatsPipelineRowMessage
         {
-            var message = new NatsPipelineRowMessage
-            {
-                PipelineId = result.PipelineId,
-                Seq = result.Seq,
-                TimestampMs = result.TimestampMs,
-                Row = result.Row,
-            };
+            PipelineId = result.PipelineId,
+            Seq = result.Seq,
+            TimestampMs = result.TimestampMs,
+            Row = result.Row,
+        }).ToList();
 
-            foreach (var client in clients)
-            {
-                await client.PublishAsync(message, CancellationToken.None).ConfigureAwait(false);
-            }
-        }
+        await SinkFanout.PublishAllAsync(clients, messages, CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>Registered as an <see cref="ITableDeltaSink"/> — fanned out to automatically by the
@@ -213,21 +212,17 @@ public sealed class NatsSinkPublisherService(
             return;
         }
 
-        foreach (var delta in envelope.Deltas)
+        // Same swap as OnPipelineResultsAsync above, and it matters more here: a delta batch is exactly the
+        // set of changes a transactional sink would want to apply atomically.
+        var messages = envelope.Deltas.Select(delta => new NatsTableDeltaMessage
         {
-            var message = new NatsTableDeltaMessage
-            {
-                Table = envelope.Table,
-                Seq = envelope.Seq,
-                Row = delta.Row,
-                Weight = delta.Weight,
-            };
+            Table = envelope.Table,
+            Seq = envelope.Seq,
+            Row = delta.Row,
+            Weight = delta.Weight,
+        }).ToList();
 
-            foreach (var client in clients)
-            {
-                await client.PublishAsync(message, CancellationToken.None).ConfigureAwait(false);
-            }
-        }
+        await SinkFanout.PublishAllAsync(clients, messages, CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>Small inline equivalent of the Orleans host's internal <c>StartupSignal</c> helper — same

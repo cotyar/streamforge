@@ -32,6 +32,19 @@ namespace StreamForge.Dapr.Host.Actors;
 /// reconnecting forever with its own internal backoff (see that class's doc comment for why its backoff
 /// is a local copy of the same D-E formula rather than a shared call).</para>
 ///
+/// <para><b>Plan 014 added a third shape to the poll side, not a fourth timer:</b> a kind registered in
+/// <see cref="PolledTransports"/> (a database, say) is PULL-shaped — it wants the same one-shot timer, plus
+/// a durable cursor. It gets exactly that. <see cref="StartAsync"/> already falls through to the timer for
+/// any kind that is neither grpc nor a registered message transport, so nothing there changed; the whole
+/// arm is one branch in <see cref="TickAsync"/> that calls <see cref="PolledSourceCore.RunCycleAsync"/>,
+/// and <see cref="ConnectorActorState.Cursor"/> riding along on the <c>SaveAsync</c> that tick already
+/// performs. <b>Nothing is re-armed by an actor reminder</b> — including the
+/// <see cref="PolledBatch.HasMore"/> "come back immediately" case, which merely sets
+/// <see cref="ConnectorActorState.NextRunMs"/> to now so the tick's existing re-arm computes a zero due
+/// time. That is not squeamishness about reminders: the containerized Dapr stack runs with timers only
+/// (no scheduler container — see AGENTS.md), so a reminder-based path would work in dev and silently never
+/// fire in compose.</para>
+///
 /// <para><b>State is fully persisted</b> (state name "connector") — Def, Running, the dedup/ledger
 /// trackers' persistable snapshots, and every <see cref="ConnectorRuntimeStatus"/> field — because,
 /// exactly like <see cref="GeneratorActor"/>, Dapr actor timers do NOT survive deactivation/
@@ -144,7 +157,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         var next = BackoffPolicy.NextRun(ConnectorBookkeeping.EffectiveSchedule(def), nowUtc, _state.ConsecutiveFailures);
         _state.NextRunMs = next?.ToUnixTimeMilliseconds();
         await SaveAsync();
-        await ArmTimerAsync(DueFrom(next, nowUtc));
+        await ArmTimerAsync(ConnectorBookkeeping.DueFrom(next, nowUtc));
     }
 
     public async Task StopAsync()
@@ -158,18 +171,8 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
 
     public Task<bool> IsRunningAsync() => Task.FromResult(_state.Running);
 
-    public Task<ConnectorRuntimeStatus> GetStatusAsync() => Task.FromResult(new ConnectorRuntimeStatus
-    {
-        SourceName = Id.GetId(),
-        NextRunMs = _state.NextRunMs,
-        LastRunMs = _state.LastRunMs,
-        LastStatus = _state.LastStatus,
-        LastError = _state.LastError,
-        ConsecutiveFailures = _state.ConsecutiveFailures,
-        EventsEmittedTotal = _state.EventsEmittedTotal,
-        CoercionFailuresTotal = _state.CoercionFailuresTotal,
-        LastBatchCount = _state.LastBatchCount,
-    });
+    public Task<ConnectorRuntimeStatus> GetStatusAsync() =>
+        Task.FromResult(ConnectorBookkeeping.ToStatus(_state, Id.GetId()));
 
     public async Task RecordSubscriberBatchAsync(
         int rowCount, string status, string? error, List<string>? dedupKeys = null, int coercionFailures = 0)
@@ -221,20 +224,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
     {
         var nowUtc = DateTimeOffset.UtcNow;
         var next = _state.NextRunMs.HasValue ? DateTimeOffset.FromUnixTimeMilliseconds(_state.NextRunMs.Value) : (DateTimeOffset?)null;
-        await ArmTimerAsync(DueFrom(next, nowUtc));
-    }
-
-    private static TimeSpan DueFrom(DateTimeOffset? next, DateTimeOffset nowUtc)
-    {
-        if (next is null)
-        {
-            // Schedule failed to compute (e.g. an invalid spec that slipped past source-create
-            // validation) — fall back to the D-E base backoff delay rather than never firing again.
-            return TimeSpan.FromSeconds(30);
-        }
-
-        var due = next.Value - nowUtc;
-        return due < TimeSpan.Zero ? TimeSpan.Zero : due;
+        await ArmTimerAsync(ConnectorBookkeeping.DueFrom(next, nowUtc));
     }
 
     /// <summary>One-shot timer callback: runs exactly one <see cref="ConnectorPollCycle"/> for this
@@ -257,15 +247,29 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         var ledger = new FileLedger(_state.Ledger);
 
         PollCycleResult result;
+        var hasMore = false;
         try
         {
-            result = def.Kind switch
+            // Plan 014: a registered PULL transport is checked before the built-in switch, so a kind this
+            // assembly has never heard of is driven without appearing in any list here — that is the whole
+            // extensibility claim. The built-in kinds cannot be shadowed by accident: PolledTransports
+            // never resolves them (PolledTransportRegistryTests pins that both ways).
+            if (PolledTransports.Find(def.Kind) is { } polled)
             {
-                SourceKinds.Url => await ExecuteUrlKindAsync(def, dedup, nowMs),
-                SourceKinds.File => ConnectorPollCycle.ExecuteFile(def, ledger, dedup, nowMs),
-                SourceKinds.Folder => ConnectorPollCycle.ExecuteFolder(def, ledger, dedup, nowMs),
-                _ => new PollCycleResult([], $"unsupported connector kind '{def.Kind}' for a scheduled poll cycle"),
-            };
+                var cycle = await ConnectorBookkeeping.RunPolledCycleAsync(_state, polled, dedup, nowMs, CancellationToken.None);
+                result = cycle.Result;
+                hasMore = cycle.HasMore;
+            }
+            else
+            {
+                result = def.Kind switch
+                {
+                    SourceKinds.Url => await ExecuteUrlKindAsync(def, dedup, nowMs),
+                    SourceKinds.File => ConnectorPollCycle.ExecuteFile(def, ledger, dedup, nowMs),
+                    SourceKinds.Folder => ConnectorPollCycle.ExecuteFolder(def, ledger, dedup, nowMs),
+                    _ => new PollCycleResult([], $"unsupported connector kind '{def.Kind}' for a scheduled poll cycle"),
+                };
+            }
         }
         catch (Exception ex)
         {
@@ -274,6 +278,10 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
             // in the mapping/format core) must still leave the timer re-armed at the next backoff slot —
             // same "never let a tick's exception silently kill the timer" rule GeneratorActor.TickAsync
             // documents for its own publish try/catch.
+            //
+            // Landing here on the polled arm also leaves _state.Cursor exactly as it was: the single
+            // assignment to it happens after RunCycleAsync has already returned, so an exception on the
+            // way there cannot advance it past rows nobody emitted.
             logger.LogWarning(ex, "ConnectorActor[{Source}]: unhandled exception during poll cycle.", def.Name);
             result = new PollCycleResult([], $"{ex.GetType().Name}: {ex.Message}");
         }
@@ -281,6 +289,16 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         _state.DedupKeys = dedup.ToPersistable();
         _state.Ledger = ledger.ToPersistable();
         ConnectorBookkeeping.ApplyPollResult(_state, result, nowUtc);
+
+        if (hasMore)
+        {
+            // "Re-arm immediately" expressed as a due time rather than as a second scheduler: the tail of
+            // this method already re-arms the one-shot timer from NextRunMs, and DueFrom clamps a past due
+            // time to zero. Writing it into the persisted state rather than into a local also means a
+            // deactivation mid-snapshot resumes the paging at once on reactivation, instead of waiting out
+            // a schedule interval that the half-read snapshot has no reason to observe.
+            ConnectorBookkeeping.MarkDueNow(_state, nowUtc);
+        }
 
         if (result.Rows.Count > 0)
         {
@@ -290,7 +308,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         await SaveAsync();
 
         var next = _state.NextRunMs.HasValue ? DateTimeOffset.FromUnixTimeMilliseconds(_state.NextRunMs.Value) : (DateTimeOffset?)null;
-        await ArmTimerAsync(DueFrom(next, DateTimeOffset.UtcNow));
+        await ArmTimerAsync(ConnectorBookkeeping.DueFrom(next, DateTimeOffset.UtcNow));
     }
 
     private async Task PublishAsync(string sourceName, List<Dictionary<string, object?>> rows)
@@ -551,6 +569,23 @@ public sealed class ConnectorActorState
     public long CoercionFailuresTotal { get; set; }
 
     public int LastBatchCount { get; set; }
+
+    /// <summary>Plan 014: the opaque cursor of a POLLED kind (<see cref="PolledTransports"/>) — null for
+    /// every other kind and for a polled source's first ever cycle. Only the transport that minted it knows
+    /// whether it is an LSN, a <c>(ts,id)</c> pair or a bigint; this actor persists the string and hands it
+    /// back, and that is the entire contract.
+    ///
+    /// <para>Adding it here is free precisely because this class is a plain POCO rather than a
+    /// <c>[GenerateSerializer]</c> contract — no <c>[Id(n)]</c> to burn, no frozen-contract test to satisfy,
+    /// and System.Text.Json fills it with null when reading state written before this field existed, which
+    /// is exactly the right answer for a source that has never polled.</para>
+    ///
+    /// <para><b>Not reset by <see cref="ConnectorActor.StartAsync"/></b>, which runs on every catalog upsert:
+    /// wiping the cursor on a config edit would silently re-read the whole table. Nor is it seeded from
+    /// <see cref="DbSourceConfig.InitialCursor"/> here — the transport receives the whole
+    /// <see cref="SourceDefinition"/> along with a null cursor and decides what "start here" means for its
+    /// own dialect, which keeps this actor ignorant of what a cursor is.</para></summary>
+    public string? Cursor { get; set; }
 }
 
 /// <summary>
@@ -558,7 +593,11 @@ public sealed class ConnectorActorState
 /// can be unit tested without any actor/timer/Dapr-sidecar machinery — same rationale as
 /// <see cref="GeneratorActor"/>'s own <c>GeneratorBatching</c> (see
 /// dapr/tests/StreamForge.Dapr.Tests/ConnectorActorLogicTests.cs). Framework-free: takes/returns plain
-/// <see cref="ConnectorActorState"/>/<see cref="PollCycleResult"/>/CLR values only.
+/// <see cref="ConnectorActorState"/>/<see cref="PollCycleResult"/>/CLR values and AppCore interfaces only —
+/// no <c>ActorHost</c>, no <c>DaprClient</c>, no sidecar. Plan 014 leaned on that harder than plan 006 did:
+/// the polled arm's cursor rules are the part of <see cref="ConnectorActor.TickAsync"/> most worth testing
+/// and the least reachable through an actor, so they live here (<see cref="RunPolledCycleAsync"/>) and the
+/// tick is one call plus its timer.
 /// </summary>
 public static class ConnectorBookkeeping
 {
@@ -567,6 +606,45 @@ public static class ConnectorBookkeeping
     /// unconfigured connector never hot-polls.</summary>
     public static ScheduleSpec EffectiveSchedule(SourceDefinition def) =>
         def.Connector?.Schedule ?? new ScheduleSpec { IntervalMs = 30_000 };
+
+    /// <summary>Turns a committed next-run instant into the one-shot timer's due time. A due time already
+    /// in the past clamps to zero (fire now) rather than throwing, which is what makes
+    /// <see cref="MarkDueNow"/> a complete implementation of "re-arm immediately". A null
+    /// <paramref name="next"/> means the schedule failed to compute (e.g. an invalid spec that slipped past
+    /// source-create validation) — fall back to the D-E base backoff delay rather than never firing again.
+    ///
+    /// <para>Lives here rather than in the actor for one reason: it is half of the re-arm claim, and a
+    /// private static in an actor cannot be asserted on without a sidecar. The actor's three call sites are
+    /// unchanged in behaviour.</para></summary>
+    public static TimeSpan DueFrom(DateTimeOffset? next, DateTimeOffset nowUtc)
+    {
+        if (next is null)
+        {
+            return TimeSpan.FromSeconds(30);
+        }
+
+        var due = next.Value - nowUtc;
+        return due < TimeSpan.Zero ? TimeSpan.Zero : due;
+    }
+
+    /// <summary>Projects the persisted state onto the wire contract the console reads. Every field is a
+    /// straight copy — the projection exists as a method rather than an object initializer inside
+    /// <see cref="ConnectorActor.GetStatusAsync"/> so that "the cursor actually reaches
+    /// <see cref="ConnectorRuntimeStatus"/>" is a testable claim rather than a line nobody can execute
+    /// without an actor host.</summary>
+    public static ConnectorRuntimeStatus ToStatus(ConnectorActorState state, string sourceName) => new()
+    {
+        SourceName = sourceName,
+        NextRunMs = state.NextRunMs,
+        LastRunMs = state.LastRunMs,
+        LastStatus = state.LastStatus,
+        LastError = state.LastError,
+        ConsecutiveFailures = state.ConsecutiveFailures,
+        EventsEmittedTotal = state.EventsEmittedTotal,
+        CoercionFailuresTotal = state.CoercionFailuresTotal,
+        LastBatchCount = state.LastBatchCount,
+        Cursor = state.Cursor,
+    };
 
     /// <summary>Applies one poll cycle's outcome to <paramref name="state"/> in place (plan 006 D-E):
     /// a null <see cref="PollCycleResult.Error"/> is success — resets the failure streak, sets
@@ -658,4 +736,55 @@ public static class ConnectorBookkeeping
             state.DedupKeys = dedupKeys;
         }
     }
+
+    // ------------------------------------------------------------------
+    // Plan 014 — the polled (PULL) arm
+    // ------------------------------------------------------------------
+
+    /// <summary>Runs one <see cref="IPolledTransport"/> cycle and folds its cursor into
+    /// <paramref name="state"/>. Everything a runtime could plausibly get wrong about a cursor —
+    /// "unchanged" vs "reset", a failed cycle, a rejected batch, a null batch — is already decided by
+    /// <see cref="PolledSourceCore.RunCycleAsync"/>, which is why this method has no branch: it assigns
+    /// whatever it was handed. A branch here would be a second opinion on rules that already have one, and
+    /// the Orleans twin would eventually disagree with it.
+    ///
+    /// <para>Only the cursor is written. The dedup snapshot, the status bookkeeping and the next run are the
+    /// tick's own business (<see cref="ApplyPollResult"/> / <see cref="MarkDueNow"/>), shared with the
+    /// url/file/folder kinds — a polled cycle differs from theirs in what it reads, not in how it reports.</para></summary>
+    /// <param name="dedup">The tracker seeded from the persisted snapshot; mutated in place, exactly as the
+    /// built-in kinds mutate it, and snapshotted back by the caller.</param>
+    public static async Task<PolledTickOutcome> RunPolledCycleAsync(
+        ConnectorActorState state, IPolledTransport transport, DedupTracker dedup, long nowMs, CancellationToken ct)
+    {
+        var def = state.Def ?? throw new InvalidOperationException("RunPolledCycleAsync requires state.Def to be set");
+
+        var outcome = await PolledSourceCore.RunCycleAsync(
+            transport, def, state.Cursor, dedup, nowMs, ct, DedupKeyColumn(def));
+
+        state.Cursor = outcome.Cursor;
+        return new PolledTickOutcome(outcome.Result, outcome.HasMore);
+    }
+
+    /// <summary>Which emitted field suppresses a re-read row, read from the kind's OWN config rather than
+    /// from <c>MappingSpec.DedupKeyField</c> — a polled row source has no mapping document, and a source
+    /// carrying a stale one would otherwise start dropping rows for a reason nothing on screen explains.
+    /// Empty (the contract default) means no dedup: the honest at-least-once default that a
+    /// <c>&gt;=</c> cursor implies, not a silent one.</summary>
+    public static string? DedupKeyColumn(SourceDefinition def) =>
+        def.Connector?.Db?.DedupKeyColumn is { Length: > 0 } column ? column : null;
+
+    /// <summary>Brings the next run forward to now — how <see cref="PolledBatch.HasMore"/> re-arms without a
+    /// second scheduler and without a reminder (the compose stack has no Dapr scheduler; see
+    /// <see cref="ConnectorActor"/>'s doc). Applied AFTER <see cref="ApplyPollResult"/>, whose scheduled
+    /// next run it deliberately overrides: a snapshot with pages left is due now, whatever the interval
+    /// says. Persisting it rather than keeping it in a local is what makes a deactivation mid-snapshot
+    /// resume at once instead of idling out the interval.</summary>
+    public static void MarkDueNow(ConnectorActorState state, DateTimeOffset nowUtc) =>
+        state.NextRunMs = nowUtc.ToUnixTimeMilliseconds();
 }
+
+/// <summary>What one polled cycle leaves for <see cref="ConnectorActor.TickAsync"/> to act on: the same
+/// <see cref="PollCycleResult"/> every other kind reports through, plus the one bit that is new — whether to
+/// come straight back. The cursor is deliberately absent: it has already been written to the state the tick
+/// is about to persist, so returning it too would invite a caller to persist a different one.</summary>
+public sealed record PolledTickOutcome(PollCycleResult Result, bool HasMore);
