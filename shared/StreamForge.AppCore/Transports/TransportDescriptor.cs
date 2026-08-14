@@ -10,6 +10,13 @@ namespace StreamForge.AppCore.Transports;
 /// cross-field rules and computed defaults all belong to server-side validation, which already returns a
 /// list of messages the modal renders. Adding a rules language here would duplicate that validator in
 /// TypeScript and let the two disagree — the console asks the server what is wrong, it does not decide.</para>
+///
+/// <para><b>Plan 014 adds three booleans, not a capability object.</b> <see cref="Polled"/>,
+/// <see cref="Mapping"/> and <see cref="CanProbe"/> each answer one question the console used to answer from
+/// a hardcoded array of kind strings ("does this kind take a schedule", "does it get a mapping editor", "can
+/// it discover its own schema"). Flags leave the flat-field doctrine above intact: they select which of the
+/// console's EXISTING blocks render, and describe no behaviour the server would then have to honor a second
+/// time.</para>
 /// </summary>
 public sealed record TransportDescriptor
 {
@@ -31,6 +38,24 @@ public sealed record TransportDescriptor
     public IReadOnlyList<TransportField> Fields { get; init; } = [];
 
     public IReadOnlyList<TransportGroup> Groups { get; init; } = [];
+
+    /// <summary>Plan 014: this kind is driven by <c>IPolledTransport</c> — it runs on the source's Schedule,
+    /// so the console renders the schedule editor for it. False for the message family, whose Schedule is
+    /// ignored (a subscription has nothing to schedule) and where showing the editor invited exactly the
+    /// misconfiguration it looks like it prevents.</summary>
+    public bool Polled { get; init; }
+
+    /// <summary>Plan 014: this kind's rows go through a <c>MappingSpec</c>, so the console offers the mapping
+    /// editor. <b>Defaults to true</b> so every pre-014 transport keeps the editor it has today without
+    /// touching its descriptor; a polled row source sets it false, because there the SELECT list already IS
+    /// the mapping and a second way to say the same thing can only disagree with the first.</summary>
+    public bool Mapping { get; init; } = true;
+
+    /// <summary>Plan 014: the transport also implements <c>ISchemaProbe</c>, so the console renders its
+    /// generic "Discover schema" button and posts to <c>/api/transports/{kind}/probe</c>. Declared rather
+    /// than inferred client-side because the console has no way to type-test a server object — and a button
+    /// rendered hopefully, which then 400s, is worse than no button.</summary>
+    public bool CanProbe { get; init; }
 }
 
 /// <summary>One editable property of a transport's config object.</summary>
@@ -100,6 +125,10 @@ public static class TransportFieldTypes
     public const string Number = "number";
     public const string Bool = "bool";
     public const string Select = "select";
+    /// <summary>Plan 014: a multiline string — SQL, principally. Same value and same validation as
+    /// <see cref="String"/>; the only difference is that the console gives it a textarea, because a
+    /// twelve-line query typed into a one-line input is unreviewable and therefore unreviewed.</summary>
+    public const string Text = "text";
 }
 
 /// <summary><c>GET /api/transports</c> response.</summary>

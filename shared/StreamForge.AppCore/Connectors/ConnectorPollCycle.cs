@@ -24,7 +24,9 @@ public sealed record PollCycleResult(List<Dictionary<string, object?>> Rows, str
 /// I/O is BCL. gRPC kind is NOT handled here — it decodes already-typed rows off the wire and applies
 /// its own coercion pass (ConnectorGrain/ConnectorActor). NATS (plan 009 B1) IS handled here —
 /// <see cref="ExecuteNatsMessage"/> — because it shares the exact same format/mapping path a polled
-/// body uses; only its transport (a persistent subscription) is different.</summary>
+/// body uses; only its transport (a persistent subscription) is different. Plan 014 adds
+/// <see cref="ExecuteRows"/> for sources whose rows arrive already structured (a database result set):
+/// same coercion, dedup and stamping, minus the parse step there is nothing to apply.</summary>
 public static class ConnectorPollCycle
 {
     /// <summary>Effective mapping: the configured one, else a pass-through built from the source's
@@ -116,6 +118,26 @@ public static class ConnectorPollCycle
     public static PollCycleResult ExecuteMessage(SourceDefinition def, string format, string payloadText, DedupTracker dedup, long nowMs)
         => ParseAndExtract(def, format, payloadText, dedup, nowMs);
 
+    /// <summary>Plan 014: rows that arrive ALREADY STRUCTURED — a database result set, driven through
+    /// <c>IPolledTransport</c>/<c>PolledSourceCore</c>. It shares the exact <see cref="Emit"/> the url and
+    /// message paths use, so coercion, dedup and the "_source"/"_ts" stamps are byte-identical; the only
+    /// step it skips is the parse, because there is nothing to parse. Serializing a <c>numeric</c> or a
+    /// <c>timestamptz</c> to JSON purely to re-enter <see cref="ParseAndExtract"/> would lose fidelity for
+    /// nothing, which is why this entry point exists at all rather than the transport handing over bytes.
+    ///
+    /// <para>It also skips <c>MappingSpec</c> extraction: for a row source the SELECT list IS the mapping,
+    /// and a JSONPath layer on top would be a second way to say the same thing — one that starts disagreeing
+    /// with the first the moment a column is renamed in only one of them. Consequently the dedup key comes
+    /// from <paramref name="dedupKeyField"/> (the transport's own config, via the driver) and NOT from
+    /// <c>MappingSpec.DedupKeyField</c>, which such a source never populates. Null disables dedup.</para></summary>
+    public static PollCycleResult ExecuteRows(
+        SourceDefinition def,
+        IReadOnlyList<Dictionary<string, object?>> rows,
+        string? dedupKeyField,
+        DedupTracker dedup,
+        long nowMs)
+        => EmitCore(def, [.. rows], dedup, nowMs, dedupKeyField);
+
     private static PollCycleResult ParseAndExtract(SourceDefinition def, string format, string text, DedupTracker dedup, long nowMs)
     {
         List<JsonElement> items;
@@ -143,6 +165,13 @@ public static class ConnectorPollCycle
         => RecordExtractor.Extract(root, EffectiveMapping(def), nowMs);
 
     private static PollCycleResult Emit(SourceDefinition def, List<Dictionary<string, object?>> rows, DedupTracker dedup, long nowMs)
+        => EmitCore(def, rows, dedup, nowMs, def.Connector?.Mapping?.DedupKeyField);
+
+    /// <summary>Plan 014: <see cref="Emit"/> with the dedup field passed in rather than read off the
+    /// mapping document, so <see cref="ExecuteRows"/> — whose sources have no mapping document — reaches the
+    /// same coerce/dedup/stamp code instead of growing its own near-copy of it. Every pre-014 path goes
+    /// through <see cref="Emit"/> and is unchanged.</summary>
+    private static PollCycleResult EmitCore(SourceDefinition def, List<Dictionary<string, object?>> rows, DedupTracker dedup, long nowMs, string? dedupField)
     {
         // Plan 009 C2: coerce every declared field to its type BEFORE dedup/admission — a RejectBatch
         // rejection must leave nothing behind, same rule A1.1 states for push ingress.
@@ -152,7 +181,6 @@ public static class ConnectorPollCycle
             return new PollCycleResult([], $"coercion rejected batch: {coercion.RejectReason}", coercion.FailureCount);
         }
 
-        var dedupField = def.Connector?.Mapping?.DedupKeyField;
         var emitted = new List<Dictionary<string, object?>>(coercion.Rows.Count);
         foreach (var row in coercion.Rows)
         {
