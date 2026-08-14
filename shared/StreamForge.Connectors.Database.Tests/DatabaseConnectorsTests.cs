@@ -19,6 +19,13 @@ public class DatabaseConnectorsTests
 {
     static DatabaseConnectorsTests() => DatabaseConnectors.RegisterAll();
 
+    /// <summary>The four kinds this assembly registers as polled sources — the two cursor-polled kinds
+    /// from plan 014 and the two CDC-polled kinds from plan 017. Shared across the tests below so
+    /// extending coverage to the new kinds is a matter of using this list, not writing a parallel set of
+    /// CDC-specific assertions.</summary>
+    private static readonly string[] AllPolledKinds =
+        [SourceKinds.Postgres, SourceKinds.MsSql, SourceKinds.PostgresCdc, SourceKinds.MsSqlCdc];
+
     [Fact]
     public void RegisterAllPutsBothKindsInBothRegistries()
     {
@@ -26,6 +33,23 @@ public class DatabaseConnectorsTests
         Assert.NotNull(PolledTransports.Find(SourceKinds.MsSql));
         Assert.NotNull(SinkTransports.Find(SinkKinds.Postgres));
         Assert.NotNull(SinkTransports.Find(SinkKinds.MsSql));
+    }
+
+    [Fact]
+    public void TheCdcKindsAreRegisteredAsPolledSourcesAndNothingElse()
+    {
+        // CDC is ingress only — there is no CDC sink kind at all, so the assertion is that these two
+        // kinds simply do not resolve through SinkTransports, not that they resolve to something null-ish.
+        Assert.NotNull(PolledTransports.Find(SourceKinds.PostgresCdc));
+        Assert.NotNull(PolledTransports.Find(SourceKinds.MsSqlCdc));
+        Assert.Null(SinkTransports.Find(SourceKinds.PostgresCdc));
+        Assert.Null(SinkTransports.Find(SourceKinds.MsSqlCdc));
+    }
+
+    [Fact]
+    public void PolledTransportsKindsContainsExactlyTheFourExpectedKindsAfterRegisterAll()
+    {
+        Assert.Equal(AllPolledKinds.ToHashSet(StringComparer.Ordinal), PolledTransports.Kinds.ToHashSet(StringComparer.Ordinal));
     }
 
     [Fact]
@@ -44,14 +68,13 @@ public class DatabaseConnectorsTests
     {
         // The message registry drives a subscription; routing a polled kind through it would silence its
         // timer, which is exactly the confusion two registries exist to prevent.
-        Assert.Null(InboundTransports.Find(SourceKinds.Postgres));
-        Assert.Null(InboundTransports.Find(SourceKinds.MsSql));
+        Assert.All(AllPolledKinds, kind => Assert.Null(InboundTransports.Find(kind)));
     }
 
     [Fact]
     public void TheSourceDescriptorsDeclareTheThreeFlagsThatDriveTheConsole()
     {
-        foreach (var kind in new[] { SourceKinds.Postgres, SourceKinds.MsSql })
+        foreach (var kind in AllPolledKinds)
         {
             var descriptor = PolledTransports.Find(kind)!.Describe();
 
@@ -104,9 +127,10 @@ public class DatabaseConnectorsTests
     {
         // A field typed "secret" that is NOT a [Secret] property would render masked in the console while
         // being EXPORTED IN PLAINTEXT. TransportRegistryTests pins this for the NATS descriptors; these
-        // four live out of tree, so the equivalent assertion has to live here.
-        AssertSecretsAgree(PolledTransports.Find(SourceKinds.Postgres)!.Describe(), typeof(DbSourceConfig));
-        AssertSecretsAgree(PolledTransports.Find(SourceKinds.MsSql)!.Describe(), typeof(DbSourceConfig));
+        // six (four polled + two sink) live out of tree, so the equivalent assertion has to live here.
+        // All four polled kinds share DbSourceConfig (plan 017 kept the CDC fields on the same class — see
+        // its doc comment), so the same helper runs over all four rather than a separate CDC variant.
+        Assert.All(AllPolledKinds, kind => AssertSecretsAgree(PolledTransports.Find(kind)!.Describe(), typeof(DbSourceConfig)));
         AssertSecretsAgree(SinkTransports.Find(SinkKinds.Postgres)!.Describe(), typeof(DbSinkConfig));
         AssertSecretsAgree(SinkTransports.Find(SinkKinds.MsSql)!.Describe(), typeof(DbSinkConfig));
 
@@ -130,8 +154,9 @@ public class DatabaseConnectorsTests
     public void EveryDescriptorFieldNamesARealPropertyOfItsConfigObject()
     {
         // The console reads and writes connector.db[key] generically, so a key with no property behind it
-        // is an input that silently writes nowhere.
-        AssertKeysExist(PolledTransports.Find(SourceKinds.Postgres)!.Describe(), typeof(DbSourceConfig));
+        // is an input that silently writes nowhere. All four polled kinds share DbSourceConfig, so the
+        // same helper runs over all four.
+        Assert.All(AllPolledKinds, kind => AssertKeysExist(PolledTransports.Find(kind)!.Describe(), typeof(DbSourceConfig)));
         AssertKeysExist(SinkTransports.Find(SinkKinds.Postgres)!.Describe(), typeof(DbSinkConfig));
 
         static void AssertKeysExist(TransportDescriptor descriptor, Type configType)
@@ -149,7 +174,7 @@ public class DatabaseConnectorsTests
     {
         List<TransportDescriptor> descriptors =
         [
-            .. new[] { SourceKinds.Postgres, SourceKinds.MsSql }.Select(k => PolledTransports.Find(k)!.Describe()),
+            .. AllPolledKinds.Select(k => PolledTransports.Find(k)!.Describe()),
             .. new[] { SinkKinds.Postgres, SinkKinds.MsSql }.Select(k => SinkTransports.Find(k)!.Describe()),
         ];
 
@@ -167,10 +192,12 @@ public class DatabaseConnectorsTests
     }
 
     [Fact]
-    public void TheTwoKindsAreTheContractsOwnConstants()
+    public void TheFourKindsAreTheContractsOwnConstants()
     {
         Assert.Equal("postgres", SourceKinds.Postgres);
         Assert.Equal("mssql", SourceKinds.MsSql);
+        Assert.Equal("postgres-cdc", SourceKinds.PostgresCdc);
+        Assert.Equal("mssql-cdc", SourceKinds.MsSqlCdc);
         Assert.Equal(SourceKinds.Postgres, SinkKinds.Postgres);
         Assert.Equal(SourceKinds.MsSql, SinkKinds.MsSql);
     }

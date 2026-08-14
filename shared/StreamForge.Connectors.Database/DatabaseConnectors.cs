@@ -4,11 +4,21 @@ using StreamForge.AppCore.Transports;
 namespace StreamForge.Connectors.Database;
 
 /// <summary>
-/// The entire wiring surface of this assembly: four registrations behind one call, made from each host's
-/// startup. That single explicit call is the point of plan 014's out-of-core connector — it is the second
-/// real call site <c>InboundTransports.Register</c> / <c>SinkTransports.Register</c> never had, and it is
-/// what makes "a transport this platform's core has never heard of" a thing the acceptance tests can
+/// The entire wiring surface of this assembly: six registrations behind one call — two polled sources
+/// (<see cref="DbSource"/> for postgres/mssql), two CDC-polled sources (<see cref="PgCdcSource"/> and
+/// <see cref="MsSqlCdcSource"/>), and two sinks (<see cref="DbSink"/>) — made from each host's startup.
+/// That single explicit call is the point of plan 014's out-of-core connector — it is the second real
+/// call site <c>InboundTransports.Register</c> / <c>SinkTransports.Register</c> never had, and it is what
+/// makes "a transport this platform's core has never heard of" a thing the acceptance tests can
 /// demonstrate rather than a claim in a doc comment.
+///
+/// <para><b>The CDC pair is registered outside the dialect loop, deliberately.</b> The loop below is
+/// dialect-symmetric — every <see cref="ISqlDialect"/> gets a <see cref="DbSource"/> and a
+/// <see cref="DbSink"/> — but <see cref="PgCdcSource"/> and <see cref="MsSqlCdcSource"/> are not
+/// interchangeable across dialects: one speaks Postgres logical replication, the other SQL Server capture
+/// tables, and there is no CDC sink at all (CDC is ingress only). Forcing that into the loop would mean
+/// inventing a capability interface or a registry abstraction just to keep one `foreach` uniform — two
+/// explicit registrations below is the least clever expression of the actual shape.</para>
 ///
 /// <para><b>Not an <see cref="System.Runtime.Loader.AssemblyLoadContext"/> plugin, deliberately.</b>
 /// <c>Microsoft.Data.SqlClient</c> drags <c>Azure.Identity</c> and <c>Microsoft.IdentityModel.*</c>; a
@@ -31,8 +41,8 @@ public static class DatabaseConnectors
     private static readonly Lock Gate = new();
     private static bool _registered;
 
-    /// <summary>Registers the postgres and mssql source and sink transports. Call once from host startup,
-    /// before any source or sink is opened.</summary>
+    /// <summary>Registers the postgres and mssql source and sink transports, plus the postgres-cdc and
+    /// mssql-cdc sources. Call once from host startup, before any source or sink is opened.</summary>
     public static void RegisterAll()
     {
         lock (Gate)
@@ -49,6 +59,11 @@ public static class DatabaseConnectors
                 PolledTransports.Register(new DbSource(dialect));
                 SinkTransports.Register(new DbSink(dialect));
             }
+
+            // Not part of the loop above — see the class doc for why. One CDC source per dialect, ingress
+            // only (no CDC sink exists).
+            PolledTransports.Register(new PgCdcSource(new PostgresDialect()));
+            PolledTransports.Register(new MsSqlCdcSource(new SqlServerDialect()));
         }
     }
 

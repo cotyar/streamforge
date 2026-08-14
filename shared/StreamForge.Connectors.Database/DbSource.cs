@@ -184,7 +184,10 @@ public sealed class DbSource(ISqlDialect dialect) : IPolledTransport, ISchemaPro
             "Polls a table (or your own query) on a schedule, keeping a durable high-water mark. " +
             "AT-LEAST-ONCE: a cycle that fails after reading keeps the old cursor and re-reads, so set a " +
             "dedup key if repeats matter. A polled source also never sees a transaction that commits after " +
-            "a later-timestamped one — for that you want CDC (Debezium into a NATS source).",
+            $"a later-timestamped one — for that you want the '{SourceKinds.PostgresCdc}' or " +
+            $"'{SourceKinds.MsSqlCdc}' kind, which reads this database's own change log instead of a " +
+            "cursor column. Debezium into a NATS source is still the route for a database this connector " +
+            "does not speak natively (MySQL, Oracle, MongoDB).",
         ConfigProperty = "db",
         // Polled: this kind runs on the source's Schedule. Mapping: false — for a row source the SELECT
         // list IS the mapping. CanProbe: this class implements ISchemaProbe, so the console's Discover
