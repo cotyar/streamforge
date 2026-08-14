@@ -193,9 +193,19 @@ export interface TransportDescriptor {
   configProperty: string
   fields: TransportField[]
   groups: TransportGroup[]
+  /** Plan 014: this kind is driven by IPolledTransport — it runs on the source's Schedule, so the console
+   *  renders the schedule editor for it. False for the message family, whose Schedule is ignored. Always
+   *  present on the wire (a plain bool on the backend record), not optional. */
+  polled: boolean
+  /** Plan 014: this kind's rows go through a MappingSpec, so the console offers the mapping editor.
+   *  Defaults true SERVER-SIDE for every pre-014 transport; always present on the wire here too. */
+  mapping: boolean
+  /** Plan 014: the transport also implements ISchemaProbe, so the console renders "Discover schema" and
+   *  posts to POST /api/transports/{kind}/probe. */
+  canProbe: boolean
 }
 
-export type TransportFieldType = 'string' | 'secret' | 'number' | 'bool' | 'select'
+export type TransportFieldType = 'string' | 'secret' | 'number' | 'bool' | 'select' | 'text'
 
 export interface TransportField {
   key: string
@@ -275,6 +285,14 @@ export interface RemoteSchemaRequest {
 export interface RemoteSchemaResult {
   fields: FieldDef[]
   fieldNumbersJson: string
+  diagnostics: string[]
+}
+
+/** POST /api/transports/{kind}/probe — plan 014. Body is a SourceDefinition (the draft being edited);
+ *  200 always, even when the probe itself failed to reach the source — `diagnostics` carries the failure
+ *  message and `fields` is empty in that case (not an error status; see TransportDescriptor.canProbe). */
+export interface SchemaProbeResult {
+  fields: FieldDef[]
   diagnostics: string[]
 }
 

@@ -1,5 +1,6 @@
 import type { TransportDescriptor, TransportField, TransportGroup } from '@/api/types'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -182,6 +183,24 @@ function FieldInput({
             </SelectGroup>
           </SelectContent>
         </Select>
+        {help}
+      </Field>
+    )
+  }
+
+  if (field.type === 'text') {
+    return (
+      <Field>
+        {label}
+        <Textarea
+          id={id}
+          value={asString(value)}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          placeholder={field.placeholder ?? undefined}
+          rows={4}
+          className={field.mono ? 'font-mono text-xs' : undefined}
+        />
         {help}
       </Field>
     )

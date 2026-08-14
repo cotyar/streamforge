@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { findDescriptor, transportsApi } from '../api/transports'
 import { sourcesApi } from '../api/sources'
 import type { CreateSourceRequest } from '../api/sources'
+import { api } from '../api/client'
 import type {
   ConnectorConfig,
   CoercionFailurePolicy,
@@ -12,6 +13,7 @@ import type {
   FieldType,
   Metadata,
   ScheduleSpec,
+  SchemaProbeResult,
   SourceDefinition,
   SourceKind,
   TransportDescriptor,
@@ -100,12 +102,16 @@ const PROFILES: SourceDefinition['generatorProfile'][] = ['trades', 'quotes', 'o
  * line to forget. */
 const BUILTIN_KINDS: SourceKind[] = ['generator', 'url', 'file', 'folder', 'grpc', 'ingest']
 /** Kinds driven by a poll schedule (grpc and the message transports are persistent subscriptions
- * instead — their Schedule, if any, is ignored by the driver). */
+ * instead — their Schedule, if any, is ignored by the driver). Built-in kinds only — url/file/folder have
+ * no transport descriptor and never will (plan 010's registries cover message/polled transports, not the
+ * six kinds this file already knows how to draw). A REGISTERED kind (nats, postgres, mssql, …) answers
+ * this from its own descriptor's `polled` flag instead — see `isPollKind` below. */
 const POLL_KINDS: SourceKind[] = ['url', 'file', 'folder']
-/** Kinds whose payload goes through MappingSpec/RecordExtractor — url/file/folder AND every message
- * transport (plan 009 B1 / 010: a transport's payload maps to a row exactly as a polled HTTP body does,
- * by construction — that is SubscriberCore's contract); grpc decodes against its own schema and never
- * reads Connector.Mapping. */
+/** Kinds whose payload goes through MappingSpec/RecordExtractor — url/file/folder (grpc decodes against
+ * its own schema and never reads Connector.Mapping). Built-in kinds only, same reasoning as POLL_KINDS —
+ * a registered transport answers this from its descriptor's `mapping` flag (plan 014; defaults true, so
+ * nats keeps working unchanged, but a polled row source like postgres/mssql sets it false because the
+ * SELECT list already IS the mapping). See `isMappingKind` below. */
 const MAPPING_BUILTIN_KINDS: SourceKind[] = ['url', 'file', 'folder']
 /** Kinds that carry a `ConnectorConfig` (plan 006). `ingest` (plan 008 W4) has its own top-level
  * `SourceDefinition.ingest` field instead — a client push has no poll/subscribe config to hold. */
@@ -346,6 +352,12 @@ function SourceModal({
   const [form, setForm] = useState<SourceFormState>(() => toFormState(initial, []))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Plan 014: "Discover schema" (descriptor.canProbe) — POST /api/transports/{kind}/probe. A probe that
+  // fails to reach the source still answers 200 with diagnostics and no fields (not an error status), so
+  // `probeError` is reserved for the request itself failing (network, 4xx/5xx) — the two render distinctly.
+  const [probing, setProbing] = useState(false)
+  const [probeDiagnostics, setProbeDiagnostics] = useState<string[] | null>(null)
+  const [probeError, setProbeError] = useState<string | null>(null)
 
   // Plan 010: the transport list and its form descriptors come from the server, so this page has no
   // per-transport code at all. Until it arrives the modal renders every non-transport kind normally —
@@ -378,9 +390,31 @@ function SourceModal({
     setForm((f) => ({ ...f, fields, mapping: { ...f.mapping, sourcePaths: resyncSourcePaths(fields, f.mapping.sourcePaths) } }))
   }
 
-  const isPollKind = POLL_KINDS.includes(form.kind)
-  const isMappingKind = MAPPING_BUILTIN_KINDS.includes(form.kind) || !!transportDescriptor
+  // Plan 014: a registered transport answers "schedule?" / "mapping editor?" from its own descriptor
+  // rather than a hardcoded kind list — that's the whole point of TransportDescriptor.Polled/Mapping. The
+  // built-in arrays above still cover url/file/folder, which carry no descriptor at all.
+  const isPollKind = POLL_KINDS.includes(form.kind) || !!transportDescriptor?.polled
+  const isMappingKind = MAPPING_BUILTIN_KINDS.includes(form.kind) || !!transportDescriptor?.mapping
   const isConnectorKind = CONNECTOR_BUILTIN_KINDS.includes(form.kind) || !!transportDescriptor
+
+  /** Shared by submit and by the "Discover schema" probe (plan 014) — both send the same connector shape
+   * to the server, just to different endpoints. */
+  function buildConnector(): ConnectorConfig | undefined {
+    if (!isConnectorKind) return undefined
+    return {
+      schedule: isPollKind ? form.schedule : null,
+      url: form.kind === 'url' ? buildUrlConfig(form.url) : null,
+      file: form.kind === 'file' ? buildFileConfig(form.file) : null,
+      folder: form.kind === 'folder' ? buildFolderConfig(form.folder) : null,
+      grpc: form.kind === 'grpc' ? buildGrpcConfig(form.grpc) : null,
+      // Plan 010: whichever property the descriptor names, with no branch per transport.
+      ...(transportDescriptor ? { [transportDescriptor.configProperty]: form.transport } : {}),
+      mapping:
+        isMappingKind && form.mappingEnabled
+          ? buildMappingSpec(form.fields, { ...form.mapping, sourcePaths: resyncSourcePaths(form.fields, form.mapping.sourcePaths) })
+          : null,
+    }
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -395,22 +429,7 @@ function SourceModal({
       return
     }
 
-    let connector: ConnectorConfig | undefined
-    if (isConnectorKind) {
-      connector = {
-        schedule: isPollKind ? form.schedule : null,
-        url: form.kind === 'url' ? buildUrlConfig(form.url) : null,
-        file: form.kind === 'file' ? buildFileConfig(form.file) : null,
-        folder: form.kind === 'folder' ? buildFolderConfig(form.folder) : null,
-        grpc: form.kind === 'grpc' ? buildGrpcConfig(form.grpc) : null,
-        // Plan 010: whichever property the descriptor names, with no branch per transport.
-        ...(transportDescriptor ? { [transportDescriptor.configProperty]: form.transport } : {}),
-        mapping:
-          isMappingKind && form.mappingEnabled
-            ? buildMappingSpec(form.fields, { ...form.mapping, sourcePaths: resyncSourcePaths(form.fields, form.mapping.sourcePaths) })
-            : null,
-      }
-    }
+    const connector = buildConnector()
     const ingest = form.kind === 'ingest' ? buildIngestConfig(form.ingest) : undefined
     // Plan 009 C2: meaningful only where coercion actually happens — the connector poll/subscribe
     // path (url/file/folder/grpc/nats). Push ingress and the synthetic generator never read it.
@@ -458,6 +477,39 @@ function SourceModal({
     }
   }
 
+  /** Plan 014: posts the current draft to /api/transports/{kind}/probe and feeds the returned fields into
+   * the schema editor via the SAME hook UrlConfigEditor's onFieldsDerived / GrpcConfigEditor's
+   * onFieldsFetched already use (updateFields) — no third way to replace the Fields editor's content.
+   * Diagnostics render unconditionally on success (e.g. "numeric maps to Double and loses precision") —
+   * that warning is the point of the button, not an edge case of it. */
+  async function handleProbe() {
+    if (!transportDescriptor) return
+    setProbeError(null)
+    setProbeDiagnostics(null)
+    setProbing(true)
+    try {
+      const draft: SourceDefinition = {
+        name: form.name.trim() || form.kind,
+        description: form.description,
+        fields: form.fields.filter((f) => f.name.trim()),
+        generatorProfile: form.generatorProfile,
+        eventsPerSecond: form.eventsPerSecond,
+        enabled: form.enabled,
+        tags: form.tags,
+        metadata: form.metadata,
+        kind: form.kind,
+        connector: buildConnector(),
+      }
+      const result = await api.post<SchemaProbeResult>(`/api/transports/${encodeURIComponent(form.kind)}/probe`, draft)
+      setProbeDiagnostics(result.diagnostics)
+      if (result.fields.length > 0) updateFields(result.fields)
+    } catch (err) {
+      setProbeError(err instanceof Error ? err.message : 'Failed to discover schema.')
+    } finally {
+      setProbing(false)
+    }
+  }
+
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
@@ -480,7 +532,15 @@ function SourceModal({
               </Field>
               <Field>
                 <FieldLabel htmlFor="src-kind">Kind</FieldLabel>
-                <Select value={form.kind} onValueChange={(v) => setForm((f) => ({ ...f, kind: v as SourceKind }))} disabled={isEdit}>
+                <Select
+                  value={form.kind}
+                  onValueChange={(v) => {
+                    setForm((f) => ({ ...f, kind: v as SourceKind }))
+                    setProbeDiagnostics(null)
+                    setProbeError(null)
+                  }}
+                  disabled={isEdit}
+                >
                   <SelectTrigger id="src-kind" className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -602,6 +662,28 @@ function SourceModal({
                 isEdit={isEdit}
                 disabled={saving}
               />
+            )}
+            {transportDescriptor?.canProbe && (
+              <div className="flex flex-col gap-2">
+                <Button type="button" variant="outline" size="sm" className="self-start" disabled={saving || probing} onClick={() => void handleProbe()}>
+                  {probing ? 'Discovering…' : 'Discover schema'}
+                </Button>
+                {probeError && (
+                  <Alert variant="destructive">
+                    <AlertDescription>{probeError}</AlertDescription>
+                  </Alert>
+                )}
+                {probeDiagnostics && probeDiagnostics.length > 0 && (
+                  <ul className="flex flex-col gap-0.5 text-[11px] text-muted-foreground">
+                    {probeDiagnostics.map((d, i) => (
+                      <li key={i}>• {d}</li>
+                    ))}
+                  </ul>
+                )}
+                {probeDiagnostics && probeDiagnostics.length === 0 && (
+                  <p className="text-[11px] text-primary">Fields discovered — check the Fields editor below.</p>
+                )}
+              </div>
             )}
             {form.kind === 'ingest' && (
               <IngestConfigEditor
