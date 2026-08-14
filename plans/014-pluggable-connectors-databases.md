@@ -140,6 +140,12 @@ build` when `web/` is touched, and a live check on isolated ports (`--Http:Port 
   CursorColumn, CursorKind, InitialCursor, DedupKeyColumn, BatchSize=1000, Snapshot, CommandTimeoutSeconds,
   Tls, [Secret] ConnectionString` (the last wins when set). Structured rather than raw, because a raw string
   with an embedded password masks to `***` wholesale and the operator can then no longer see the host.
+- **`InitialCursor` is the TRANSPORT's job, not the driver's** (found in wave F). Neither driver seeds its
+  persisted cursor from it: the transport is handed the whole `SourceDefinition` alongside a `null` cursor and
+  decides what "start here" means in its own dialect. Wave H must implement that, or `InitialCursor` is
+  silently inert.
+- **A config edit must not reset the cursor.** Both drivers re-run their start path on every catalog upsert, so
+  a cursor reset there would re-read the entire table on any edit to the source. Documented on the field.
 - `@cursor` is **always a bound parameter**, never interpolated — injection, and type fidelity across DST.
 - The `updated_at` hazard is stated in the descriptor Help: `>` loses rows written in the same millisecond as
   the watermark, `>=` re-reads them; recommend `>=` plus `DedupKeyColumn`. Neither sees a transaction that
