@@ -301,6 +301,12 @@ public static class TablesEndpoints
             // textual pass over this table's own SQL — and it can never go stale relative to that SQL,
             // which a value persisted at upsert could.
             metrics.RowIdentityWarning = TableRowIdentityWarning.For(def);
+            // Plan 014: the successful half of the same derivation, for the console's upsert key-column
+            // prefill. Only offered when the extractor actually resolved the declared keys to output
+            // columns — where it could not, the warning above is set and a suggestion would be a guess at
+            // precisely the thing the operator has to get right.
+            var identity = TableGroupKeyExtractor.Describe(def.Sql);
+            metrics.DeclaredKeyColumns = identity.Columns is { Count: > 0 } cols ? [.. cols] : [];
             return Results.Ok(metrics);
         }).RequireAuthorization("Viewer");
 

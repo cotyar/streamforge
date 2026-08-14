@@ -447,6 +447,19 @@ public sealed class TableMetrics
     /// flavors report it from the identical code and it can never go stale relative to the SQL it
     /// describes. Additive and informational: nothing branches on it.</summary>
     [Id(10)] public string? RowIdentityWarning { get; set; }
+
+    /// <summary>Plan 014: the output columns this table's declared row identity resolves to — the same
+    /// derivation <see cref="RowIdentityWarning"/> reports the FAILURE of, reported here when it succeeds.
+    /// Empty when the SQL declares no identity, or when it declares one the extractor could not map (in
+    /// which case the warning above is non-null and a guess would be exactly the wrong thing to offer).
+    ///
+    /// It exists so the console can PREFILL a database sink's key columns in upsert mode. Deliberately a
+    /// visible, editable suggestion rather than something the sink derives for itself: a sink client is
+    /// handed only the entity name, so reaching back for its SQL would couple egress to the catalog — and
+    /// where the extractor is uncertain, the operator is the one who can tell.
+    ///
+    /// DERIVED, NOT MEASURED, on the same terms and for the same reasons as the warning above.</summary>
+    [Id(11)] public List<string> DeclaredKeyColumns { get; set; } = [];
 }
 
 /// <summary>

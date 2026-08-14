@@ -1114,7 +1114,13 @@ function SearchAndView({
           {!canEdit && sinksDraft.length === 0 && <span className="text-xs text-muted-foreground">Nothing is republished.</span>}
 
           {canEdit ? (
-            <SinksEditor value={sinksDraft} onChange={(next) => void applySinks(next)} isEdit disabled={sinksApplying} />
+            <SinksEditor
+              value={sinksDraft}
+              onChange={(next) => void applySinks(next)}
+              isEdit
+              disabled={sinksApplying}
+              declaredKeyColumns={metrics?.declaredKeyColumns}
+            />
           ) : (
             sinksDraft.map((s, i) => (
               <div key={i} className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-xs">

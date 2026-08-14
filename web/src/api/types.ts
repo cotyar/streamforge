@@ -667,6 +667,11 @@ export interface TableMetrics {
    * A warning, not a rejection — the table was accepted and runs. Render it verbatim (it names the keys
    * and the fix); see TableDetailPage's Row history card and ShardingPanel. */
   rowIdentityWarning?: string | null
+  /** Plan 014: output columns this table's declared row identity resolves to; empty when it declares
+   *  none, or when it declares one that could not be mapped (in which case rowIdentityWarning is set and
+   *  a suggestion would be a guess at the thing the operator most needs to get right). Used to prefill a
+   *  database sink's key columns in upsert mode. */
+  declaredKeyColumns?: string[]
 }
 
 export interface TableOutputField {
