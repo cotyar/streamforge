@@ -1,6 +1,6 @@
 # Plan 013 — `sf` admin CLI + MCP server
 
-Status: **IN PROGRESS**. Baseline `1d4b782` (Orleans 1676 tests, Dapr 313, both green).
+Status: **DONE**. Baseline `1d4b782` (Orleans 1676 tests, Dapr 313, both green).
 
 Request: *"Create me a CLI and MCP server to the MCP specification for dealing with the admin part
 of this stuff."*
@@ -74,14 +74,28 @@ instance is a result the model can reason about, not a transport error. Only pro
 
 ## Verification
 
-- `bun test admin/` — protocol conformance (initialize handshake and version negotiation,
-  `tools/list` schema shape, `tools/call` success + `isError` + unknown-tool JSON-RPC error, one
-  JSON object per line and **nothing** else on stdout) and the client's URL/auth construction,
-  driven against a stub `Bun.serve()` instance on an ephemeral port.
-- Live against a real isolated instance (6xxx–9xxx ports, temp data dir, killed afterwards): the
-  CLI drives a full create → validate → start → rows → CSV → stop → delete round trip, and the MCP
-  server answers a hand-written stdio session doing the same.
-- Both .NET suites stay green (this wave adds no C# — it consumes the existing API).
+- `bun test admin/` — **21 tests, green**. Protocol conformance is driven against the server as a
+  REAL SUBPROCESS over stdio pipes, not by importing its handlers: initialize + version negotiation
+  (a version we don't know is answered with one we do), `tools/list` schema and annotation shape,
+  `tools/call` success, `isError` on a backend failure, unknown-tool JSON-RPC error, a malformed
+  line surviving as a parse error, batches refused, notifications never answered, and **stdout
+  carrying nothing but one JSON-RPC message per line** — the property an in-process test would pass
+  while a stray `console.log` broke every real session. The REST client's auth (lazy login, token
+  reuse, verbatim server errors, unreachable host) rides on a stub `Bun.serve()` instance.
+- Live against a real isolated instance (7711/7712, temp data dir, killed afterwards, ports
+  confirmed free): `sf health` / `ls` / `validate` / `create` / `start` / `rows --csv` / `stop` /
+  `delete` (both the confirmation prompt and `--yes`) / `config export` / `config import
+  --mode validate`, then `sf login` writing a 0600 token and the next command authenticating from
+  it alone. The MCP server answered a hand-written stdio session against the same instance:
+  `health`, `list_entities`, `validate_sql` on deliberately broken SQL (diagnostics, correctly NOT
+  `isError` — a 200 with `ok:false` is data), and `get_rows` with `csv:true`.
+- No C# changed, so both .NET suites are untouched at Orleans 1676 / Dapr 313.
+
+## One thing the tests changed
+
+`SfClient.lifecycle` threw its "sources have no start/stop" guard *synchronously* out of a
+Promise-returning method, so `client.lifecycle(...).catch(...)` would have missed it entirely. The
+test caught it; the method is now `async` and the guard rejects.
 
 ## Deliberately not done
 

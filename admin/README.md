@@ -1,4 +1,21 @@
-# StreamForge — Cluster Admin
+# StreamForge — Admin
+
+Three admin surfaces, one folder, **zero npm dependencies** between them (the rule this folder has
+kept since plan 007):
+
+| Surface | Entry point | What it administers |
+|---|---|---|
+| Cluster app (plan 007) | `bun main.ts` → :5599 | The containerized stacks / Cloud Run services — start, health, stop, logs |
+| `sf` CLI (plan 013) | `bun sf.ts <command>` | A **running instance**: catalog, lifecycle, SQL, rows, config |
+| MCP server (plan 013) | `bun mcp.ts` (stdio) | The same, as tools an agent can call |
+
+The CLI and the MCP server share one REST client (`sfclient.ts`), so they cannot drift about what a
+command means. Both work against either flavor — `SF_URL` is the only difference between
+administering Orleans on :5199 and Dapr on :5399.
+
+---
+
+## Cluster app
 
 Fires up either flavor's containerized stack on command, shows live health, shuts it down. Plan
 007 decision D-C. Single Bun.serve() process, **zero npm dependencies** — one `main.ts` + one
@@ -76,3 +93,81 @@ graphic, per repo brand rules.
 - This app performs no destructive/mutating Cloud Run calls on its own initiative — `start`/`stop`
   in cloudrun mode only ever run `gcloud run services update --min-instances=...`; nothing here
   runs `deploy.sh` or provisions infrastructure.
+
+---
+
+## `sf` — the admin CLI (plan 013)
+
+```bash
+bun admin/sf.ts health
+SF_URL=http://localhost:5399 bun admin/sf.ts ls tables    # the Dapr flavor, same commands
+```
+
+| Command | Does |
+|---|---|
+| `sf health` | Instance health + the identity this token carries |
+| `sf login [--user U]` | Stores a token in `~/.streamforge/token.json` (mode 600). Password from `--password`, `SF_PASSWORD`, or a no-echo prompt |
+| `sf ls <sources\|pipelines\|tables>` | One line per entity (`--json` for the raw array) |
+| `sf get <kind> <id>` | One entity's full definition |
+| `sf start\|stop <pipelines\|tables> <id>` | Lifecycle |
+| `sf create <kind> -f def.json` | Create from the JSON the REST API already takes |
+| `sf delete <kind> <id> [--yes]` | Delete — asks first unless `--yes` |
+| `sf rows <table-id> [--csv] [--limit N]` | A table's rows; `--csv` is plan 012's `rows.csv` |
+| `sf results <pipeline-id> [--csv] [--limit N]` | A pipeline's recent results |
+| `sf validate <pipelines\|tables> "<sql>"` | Compiles without creating anything |
+| `sf config export [--yaml] [--secrets] [-o file]` | Catalog export (`--secrets` needs the Admin role) |
+| `sf config import <file> [--mode validate\|merge\|replace]` | Catalog import |
+| `sf api <METHOD> <path> [body.json]` | Escape hatch for anything not above — users, shards, ingest keys |
+| `sf mcp` | Runs the MCP server on stdio, same as `bun mcp.ts` |
+
+**Auth resolution order**: `--token`, `SF_TOKEN`, `~/.streamforge/token.json` (only when its stored
+URL matches the one being addressed — a token from another host is not silently sent), then a login
+with `SF_USER`/`SF_PASSWORD`. Only the JWT is ever written to disk, and only by an explicit
+`sf login`; no credential is. There are no default credentials in the code.
+
+## MCP server (plan 013)
+
+Stdio transport, written to the MCP specification (protocol `2025-06-18`, negotiating down to
+`2025-03-26` / `2024-11-05`). No SDK dependency: the server half of a tools-only server is
+`initialize`, `notifications/initialized`, `ping`, `tools/list` and `tools/call`, and the conformance
+that matters is pinned by `mcp.test.ts` rather than assumed.
+
+```jsonc
+// Claude Code / Claude Desktop MCP config
+{
+  "mcpServers": {
+    "streamforge": {
+      "command": "bun",
+      "args": ["/abs/path/to/crates-foundation/admin/mcp.ts"],
+      "env": { "SF_URL": "http://localhost:5199", "SF_USER": "admin", "SF_PASSWORD": "…" }
+    }
+  }
+}
+```
+
+**Tools** — `health`, `list_entities`, `get_entity`, `get_metrics`, `validate_sql`, `get_rows`,
+`get_results`, `create_entity`, `start_entity`, `stop_entity`, `delete_entity`, `export_config`,
+`import_config`. Read-only tools carry `readOnlyHint`; `delete_entity` and `import_config` carry
+`destructiveHint`.
+
+Two deliberate omissions, both about what an agent should be handed:
+
+- **No raw HTTP tool.** The CLI's `sf api` escape hatch has no MCP twin — an unlabelled
+  arbitrary-request tool defeats every per-tool annotation above.
+- **No secret export.** `export_config` never sets `includeSecrets`; the CLI's `--secrets` remains
+  for a human who asked for it. (The server also gates it on the Admin role regardless.)
+
+A tool that fails *executing* returns `isError: true` with the server's own message, so a model can
+see a 404 or an unreachable host and adjust. Only protocol faults — unknown tool, bad params — are
+JSON-RPC errors. **stdout carries nothing but JSON-RPC**; diagnostics go to stderr, and a test
+asserts it.
+
+## Tests
+
+```bash
+bun test admin/
+```
+
+21 tests: protocol conformance driven against the server as a real subprocess over pipes (handshake,
+version negotiation, notifications never answered, parse errors survivable, batches refused, stdout
+purity) plus the shared client's auth and error handling against a stub instance.

@@ -1,0 +1,330 @@
+// Conformance tests for the admin MCP server (plan 013) and the REST client both entry points share.
+//
+// The server is exercised as a REAL SUBPROCESS over stdio pipes, not by importing its handlers: the
+// properties worth pinning are transport-level (one JSON message per line, NOTHING else on stdout,
+// notifications never answered), and an in-process test of the handler functions would pass while a
+// stray console.log corrupted every real session.
+//
+//   bun test admin/
+//
+// The instance under test is a stub Bun.serve() that speaks just enough of the StreamForge REST API
+// to answer these calls — the real API is covered by the .NET suites; what is unproven here is this
+// client's use of it.
+
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type { Subprocess } from "bun";
+import { SfClient, SfError } from "./sfclient.ts";
+
+// --- stub StreamForge instance ---------------------------------------------------------------------
+
+interface RecordedRequest {
+  method: string;
+  path: string;
+  auth: string | null;
+  body: string;
+}
+
+const recorded: RecordedRequest[] = [];
+
+const stub = Bun.serve({
+  port: 0,
+  async fetch(req) {
+    const url = new URL(req.url);
+    recorded.push({
+      method: req.method,
+      path: url.pathname + url.search,
+      auth: req.headers.get("authorization"),
+      body: await req.text(),
+    });
+
+    const json = (value: unknown, status = 200) =>
+      new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+
+    switch (`${req.method} ${url.pathname}`) {
+      case "POST /api/auth/login":
+        return json({ token: "test-token", username: "admin", displayName: "Admin", role: "Admin" });
+      case "GET /api/healthz":
+        return json({ status: "ok", flavor: "stub" });
+      case "GET /api/auth/me":
+        return json({ username: "admin", role: "Admin" });
+      case "GET /api/tables":
+        return json([{ id: "t1", name: "positions", status: "Running" }]);
+      case "GET /api/tables/t1/rows.csv":
+        return new Response("symbol,qty\nACME,5\n", { headers: { "content-type": "text/csv" } });
+      case "POST /api/tables/t1/start":
+        return json({ id: "t1", status: "Running" });
+      case "GET /api/tables/missing":
+        return json({ error: "table 'missing' not found" }, 404);
+      default:
+        return json({ error: `stub has no route for ${req.method} ${url.pathname}` }, 404);
+    }
+  },
+});
+
+const STUB_URL = `http://127.0.0.1:${stub.port}`;
+
+// --- MCP session over real pipes ---------------------------------------------------------------------
+
+class Session {
+  private proc!: Subprocess<"pipe", "pipe", "pipe">;
+  private lines: string[] = [];
+  private buffer = "";
+  private reader!: ReadableStreamDefaultReader<Uint8Array>;
+
+  async start(): Promise<void> {
+    this.proc = Bun.spawn(["bun", `${import.meta.dir}/mcp.ts`], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, SF_URL: STUB_URL, SF_USER: "admin", SF_PASSWORD: "pw", SF_TOKEN: "" },
+    });
+    this.reader = this.proc.stdout.getReader();
+  }
+
+  /** Sends one message and, when it is a request, waits for the response carrying its id. */
+  async send(message: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    this.proc.stdin.write(JSON.stringify(message) + "\n");
+    await this.proc.stdin.flush();
+    if (message.id === undefined) return null;
+    return await this.readUntil((m) => m.id === message.id);
+  }
+
+  async sendRaw(text: string): Promise<Record<string, unknown> | null> {
+    this.proc.stdin.write(text + "\n");
+    await this.proc.stdin.flush();
+    return await this.readUntil(() => true);
+  }
+
+  private async readUntil(
+    match: (m: Record<string, unknown>) => boolean,
+  ): Promise<Record<string, unknown> | null> {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const ready = this.lines.findIndex((l) => match(JSON.parse(l) as Record<string, unknown>));
+      if (ready >= 0) return JSON.parse(this.lines.splice(ready, 1)[0]) as Record<string, unknown>;
+      if (Date.now() > deadline) return null;
+
+      const { value, done } = await this.reader.read();
+      if (done) return null;
+      this.buffer += new TextDecoder().decode(value);
+      let nl: number;
+      while ((nl = this.buffer.indexOf("\n")) >= 0) {
+        const line = this.buffer.slice(0, nl).trim();
+        this.buffer = this.buffer.slice(nl + 1);
+        if (line) this.lines.push(line);
+      }
+    }
+  }
+
+  /** Every line this server has emitted, for the "stdout carries nothing but JSON-RPC" assertion. */
+  get emitted(): string[] {
+    return this.lines;
+  }
+
+  stop(): void {
+    this.proc.kill();
+  }
+}
+
+const session = new Session();
+
+beforeAll(async () => {
+  await session.start();
+  await session.send({
+    jsonrpc: "2.0",
+    id: "init",
+    method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } },
+  });
+  await session.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+});
+
+afterAll(() => {
+  session.stop();
+  stub.stop(true);
+});
+
+async function callTool(name: string, args: Record<string, unknown> = {}) {
+  const res = await session.send({
+    jsonrpc: "2.0",
+    id: `call-${name}-${Math.random().toString(36).slice(2)}`,
+    method: "tools/call",
+    params: { name, arguments: args },
+  });
+  return res!;
+}
+
+// --- protocol ----------------------------------------------------------------------------------------
+
+describe("MCP protocol", () => {
+  test("initialize echoes a supported protocol version and declares the tools capability", async () => {
+    const fresh = new Session();
+    await fresh.start();
+    const res = (await fresh.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } },
+    }))!;
+    const result = res.result as Record<string, any>;
+
+    expect(res.jsonrpc).toBe("2.0");
+    expect(result.protocolVersion).toBe("2025-03-26");
+    expect(result.capabilities.tools).toBeDefined();
+    expect(result.serverInfo.name).toBe("streamforge-admin");
+    expect(typeof result.instructions).toBe("string");
+    fresh.stop();
+  });
+
+  test("an unsupported protocol version is answered with one this server does support", async () => {
+    const fresh = new Session();
+    await fresh.start();
+    const res = (await fresh.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "1999-01-01", capabilities: {}, clientInfo: { name: "t", version: "1" } },
+    }))!;
+
+    expect((res.result as any).protocolVersion).toBe("2025-06-18");
+    fresh.stop();
+  });
+
+  test("ping answers with an empty result", async () => {
+    const res = (await session.send({ jsonrpc: "2.0", id: "ping-1", method: "ping" }))!;
+    expect(res.result).toEqual({});
+  });
+
+  test("tools/list describes every tool with a JSON Schema and an annotation set", async () => {
+    const res = (await session.send({ jsonrpc: "2.0", id: "list", method: "tools/list" }))!;
+    const tools = (res.result as any).tools as any[];
+
+    expect(tools.length).toBeGreaterThan(5);
+    for (const tool of tools) {
+      expect(typeof tool.name).toBe("string");
+      expect(typeof tool.description).toBe("string");
+      expect(tool.inputSchema.type).toBe("object");
+    }
+    expect(tools.find((t) => t.name === "list_entities").annotations.readOnlyHint).toBe(true);
+    // The one property a model must be able to see before it acts: this deletes things.
+    expect(tools.find((t) => t.name === "delete_entity").annotations.destructiveHint).toBe(true);
+  });
+
+  test("an unknown method is a JSON-RPC error, not a crash", async () => {
+    const res = (await session.send({ jsonrpc: "2.0", id: "nope", method: "resources/list" }))!;
+    expect((res.error as any).code).toBe(-32601);
+  });
+
+  test("a malformed line is a parse error and the session survives it", async () => {
+    const res = (await session.sendRaw("{not json"))!;
+    expect((res.error as any).code).toBe(-32700);
+
+    const after = (await session.send({ jsonrpc: "2.0", id: "after-parse-error", method: "ping" }))!;
+    expect(after.result).toEqual({});
+  });
+
+  test("a JSON-RPC batch is refused explicitly", async () => {
+    const res = (await session.sendRaw('[{"jsonrpc":"2.0","id":1,"method":"ping"}]'))!;
+    expect((res.error as any).code).toBe(-32600);
+    expect(String((res.error as any).message)).toContain("batch");
+  });
+
+  test("notifications are never answered", async () => {
+    await session.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: "x" } });
+    // If the notification had produced a response, it would arrive before this ping's.
+    const res = (await session.send({ jsonrpc: "2.0", id: "after-notification", method: "ping" }))!;
+    expect(res.id).toBe("after-notification");
+  });
+
+  test("stdout carries nothing but one JSON-RPC message per line", () => {
+    expect(session.emitted.length).toBeGreaterThanOrEqual(0);
+    for (const line of session.emitted) {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      expect(parsed.jsonrpc).toBe("2.0");
+    }
+  });
+});
+
+// --- tools -------------------------------------------------------------------------------------------
+
+describe("MCP tools", () => {
+  test("health reports the instance it is pointed at", async () => {
+    const res = await callTool("health");
+    const content = (res.result as any).content[0];
+
+    expect((res.result as any).isError).toBeUndefined();
+    expect(content.type).toBe("text");
+    expect(content.text).toContain("stub");
+  });
+
+  test("list_entities returns the catalog", async () => {
+    const res = await callTool("list_entities", { kind: "tables" });
+    expect((res.result as any).content[0].text).toContain("positions");
+  });
+
+  test("get_rows can ask for CSV, which comes back as text not JSON", async () => {
+    const res = await callTool("get_rows", { id: "t1", csv: true });
+    expect((res.result as any).content[0].text).toBe("symbol,qty\nACME,5\n");
+  });
+
+  test("start_entity posts to the lifecycle route", async () => {
+    await callTool("start_entity", { kind: "tables", id: "t1" });
+    expect(recorded.some((r) => r.method === "POST" && r.path === "/api/tables/t1/start")).toBe(true);
+  });
+
+  test("a backend failure is isError, not a JSON-RPC error — the model can see and adjust", async () => {
+    const res = await callTool("get_entity", { kind: "tables", id: "missing" });
+
+    expect(res.error).toBeUndefined();
+    expect((res.result as any).isError).toBe(true);
+    expect((res.result as any).content[0].text).toContain("not found");
+  });
+
+  test("a bad argument is reported the same way, without reaching the server", async () => {
+    const res = await callTool("list_entities", { kind: "widgets" });
+    expect((res.result as any).isError).toBe(true);
+    expect((res.result as any).content[0].text).toContain("unknown kind");
+  });
+
+  test("an unknown tool is a protocol error", async () => {
+    const res = await callTool("drop_database");
+    expect((res.error as any).code).toBe(-32602);
+    expect(String((res.error as any).message)).toContain("Unknown tool");
+  });
+
+  test("credentials in the environment become a bearer token on every call", () => {
+    expect(recorded.some((r) => r.path === "/api/auth/login")).toBe(true);
+    const authed = recorded.filter((r) => r.path.startsWith("/api/tables"));
+    expect(authed.length).toBeGreaterThan(0);
+    for (const r of authed) expect(r.auth).toBe("Bearer test-token");
+  });
+});
+
+// --- the shared REST client -----------------------------------------------------------------------------
+
+describe("SfClient", () => {
+  test("logs in lazily and reuses the token", async () => {
+    const before = recorded.filter((r) => r.path === "/api/auth/login").length;
+    const client = new SfClient({ url: STUB_URL, user: "admin", password: "pw" });
+
+    await client.list("tables");
+    await client.list("tables");
+
+    expect(recorded.filter((r) => r.path === "/api/auth/login").length).toBe(before + 1);
+  });
+
+  test("a server error message is surfaced verbatim rather than restated", async () => {
+    const client = new SfClient({ url: STUB_URL, user: "admin", password: "pw" });
+    expect(client.get("tables", "missing")).rejects.toThrow("table 'missing' not found");
+  });
+
+  test("sources have no lifecycle, and say so before making a request", async () => {
+    const client = new SfClient({ url: STUB_URL, token: "t" });
+    expect(client.lifecycle("sources", "trades", "start")).rejects.toThrow(SfError);
+  });
+
+  test("an unreachable instance is one clear error, not a raw fetch failure", async () => {
+    const client = new SfClient({ url: "http://127.0.0.1:1", token: "t" });
+    expect(client.health()).rejects.toThrow("cannot reach");
+  });
+});

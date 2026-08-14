@@ -75,6 +75,12 @@ calling over the catalog facades — needs `GEMINI_API_KEY` (or `Gemini:ApiKey`)
 without it; capped per login session by `ChatRateLimiter` (`Chat:MaxRequestsPerSession`, default 10,
 ≤0 disables), 429 past that. Chat logic lives in `shared/StreamForge.Api/Chat/`.
 
+**Admin CLI + MCP server** (plan 013, `admin/`, zero npm deps like the rest of that folder):
+`bun admin/sf.ts <health|login|ls|get|start|stop|create|delete|rows|results|validate|config|api>`
+administers a running instance over REST (`SF_URL`, default :5199 — point it at :5399 for Dapr);
+`bun admin/mcp.ts` serves the same operations as MCP tools over stdio (hand-written to the spec, no
+SDK). Both share `admin/sfclient.ts`. Tests: `bun test admin/` (21).
+
 **Dapr flavor extras**: `dapr/tools/run.sh` starts the sidecar'd host on 5399 (sidecar 3599/4599);
 `dapr/tools/reset.sh` SCANs and deletes this app's Redis keys to reseed (the Dapr-flavor equivalent
 of deleting Orleans' `data/`); `dapr stop --app-id streamforge-dapr` stops it. Polyglot processors
