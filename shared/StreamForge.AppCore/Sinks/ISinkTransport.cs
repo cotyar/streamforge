@@ -50,6 +50,23 @@ public interface ISinkTransport
 
     /// <summary>Console form descriptor — see <see cref="TransportDescriptor"/> and the inbound twin.</summary>
     TransportDescriptor Describe();
+
+    /// <summary>Appends a human-readable message per problem with <paramref name="spec"/>'s transport
+    /// config — the sink-side twin of <see cref="StreamForge.AppCore.Transports.IInboundTransport.Validate"/>
+    /// and <see cref="StreamForge.AppCore.Transports.IPolledTransport.Validate"/>. Never throws; an empty
+    /// <paramref name="errors"/> on return means accepted.
+    ///
+    /// <para><b>Plan 014: there is no sink validation anywhere in this repo today.</b> A sink with a wrong
+    /// host, a typo'd subject or any other broken config is silently <see cref="IsConfigured"/> == false
+    /// (see that member's doc) and simply never runs — no error surfaces anywhere, no status field, no log
+    /// line, nothing an operator can act on. A default no-op implementation means <see cref="NatsSinkTransport"/>
+    /// and <see cref="FileSinkTransport"/> — which have shipped without validation since plan 009 B2 and
+    /// plan 012 respectively — do not need to change to pick up this seam; a NEW transport (plan 014's
+    /// database sink, which has a KeyColumns-required-for-upsert rule that genuinely deserves a real error
+    /// message instead of "nothing happened") can finally implement it and refuse a broken config instead of
+    /// quietly doing nothing. Wiring the actual call site (so this method's output reaches an operator) is a
+    /// later wave's job — this default method is only the seam.</para></summary>
+    void Validate(SinkSpec spec, List<string> errors) { }
 }
 
 /// <summary>Sink-side twin of <c>InboundTransports</c> — see that class's doc comment for why this is a plain
