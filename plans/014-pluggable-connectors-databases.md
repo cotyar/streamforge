@@ -154,7 +154,14 @@ build` when `web/` is touched, and a live check on isolated ports (`--Http:Port 
 - Schema discovery is a generic `ISchemaProbe` capability + `POST /api/transports/{kind}/probe`, so
   `StreamForge.Api` learns nothing about databases.
 - Upsert: `KeyColumns` explicit and required; the console prefills from
-  `TableGroupKeyExtractor.Describe(sql).DeclaredKeys`. Deletes run last within the transaction. Upsert is
+  `TableGroupKeyExtractor.Describe(sql).DeclaredKeys`. **"Deletes last" is not sufficient on its own** (wave H):
+  a table UPDATE arrives as two deltas on the *same* key — `-1` old row, `+1` new row — so a sink honouring
+  "deletes last" would delete the row the update just wrote. Both servers also refuse a batch naming one key
+  twice (SQL Server 8672, Postgres "cannot affect row a second time"). Each key therefore resolves to its
+  **last delta in the batch** first; the upsert and delete sets are then disjoint and ordering is a convention
+  rather than a load-bearing rule. Assumes the batch is in causal order, which a delta batch is.
+  **`InitialCursor` is required in query mode** (wave H): there is no `MAX` to seed from in arbitrary SQL and
+  no safe sentinel. `Snapshot` is table-mode only for the same reason. Upsert is
   rejected on a *pipeline* sink — a pipeline emits results, not deltas, so "mirror current state" is meaningless.
 - Failed commit: rollback, count, throttled failure callback, **drop the batch**. One retry on a classified
   transient connection fault. The at-most-once ceiling is in the descriptor Help in those words.
