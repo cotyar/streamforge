@@ -102,6 +102,7 @@ const UPPERCASE_WORDS = new Set([
   'STRING', 'DOUBLE', 'LONG', 'BOOL', 'TIMESTAMP', 'TEXT', 'BIGINT', 'INT', 'BOOLEAN', 'PRECISION',
   'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'ABS', 'ROUND', 'UPPER', 'LOWER', 'COALESCE',
   'TO_LONG', 'TO_DOUBLE', 'TO_BOOL', 'TO_TIMESTAMP', 'TO_STRING',
+  'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'IF',
 ])
 
 const INDENT_UNIT = '  '

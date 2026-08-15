@@ -16,6 +16,8 @@ const KEYWORDS = new Set([
   'UNION', 'ALL',
   // Plan 009 Round C wave C1: CAST(expr AS type) sugar.
   'CAST',
+  // Searched CASE — desugars to nested IF(cond, then, else) in the parser.
+  'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
 ])
 
 const AGGREGATE_FNS = new Set(['COUNT', 'SUM', 'AVG', 'MIN', 'MAX'])
@@ -23,6 +25,8 @@ const SCALAR_FNS = new Set([
   'ABS', 'ROUND', 'UPPER', 'LOWER', 'COALESCE',
   // Plan 009 Round C wave C1: type-conversion functions.
   'TO_LONG', 'TO_DOUBLE', 'TO_BOOL', 'TO_TIMESTAMP', 'TO_STRING',
+  // The searched-CASE desugar target, callable directly.
+  'IF',
 ])
 const FUNCTIONS = new Set([...AGGREGATE_FNS, ...SCALAR_FNS])
 

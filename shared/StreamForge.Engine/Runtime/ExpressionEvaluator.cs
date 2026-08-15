@@ -187,6 +187,16 @@ internal static class ExpressionEvaluator
 
     private static object? EvalFunction(FunctionCallExpr f, EvalContext ctx)
     {
+        // IF — and therefore every searched CASE, which Sql/Parser.cs desugars into nested IF calls — is
+        // the one function that must not evaluate all of its arguments up front: a five-branch CASE is
+        // five nested IFs, and evaluating every arm of every level would do O(n^2) work to return one of
+        // them. Truthiness is IsTrue's exact rule (`value is true`), so a NULL or non-bool condition
+        // takes the else-branch; the Validator already diagnoses a statically non-boolean condition.
+        if (f.Args.Count == 3 && string.Equals(f.Name, "IF", StringComparison.OrdinalIgnoreCase))
+        {
+            return Eval(IsTrue(Eval(f.Args[0], ctx)) ? f.Args[1] : f.Args[2], ctx);
+        }
+
         var args = f.Args.Select(a => Eval(a, ctx)).ToList();
         return f.Name.ToUpperInvariant() switch
         {

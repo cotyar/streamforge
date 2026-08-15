@@ -968,7 +968,51 @@ internal sealed class Validator
             case "TO_STRING":
                 _exprKind[node] = FieldKind.String;
                 break;
+            case "IF":
+                RecordIfKind(node, f);
+                break;
         }
+    }
+
+    /// <summary>`IF(cond, then, else)` — and therefore every searched CASE, which desugars to it. The
+    /// result kind is the branches' common kind, so the two branches have to agree: a table column whose
+    /// type depends on which row it came from is not something the rest of the planner can represent.
+    /// Long/Double mix widens to Double, matching what <see cref="RecordBinaryKind"/> already does for
+    /// mixed arithmetic; anything else that disagrees is a diagnostic, positioned on the call so a
+    /// nested CASE points at the branch that broke it. An unknown branch kind (NULL literal, an
+    /// unresolved column that already produced its own diagnostic) is deferred to, not guessed at —
+    /// same tolerance COALESCE has.</summary>
+    private void RecordIfKind(Expr node, FunctionCallExpr f)
+    {
+        if (f.Args.Count != 3) return; // arity already diagnosed
+
+        // A non-Bool condition is never true at runtime (truthiness here is `value is true`, nothing
+        // wider), so it would silently always take the else-branch. Loud beats silent.
+        if (GetExprKind(f.Args[0]) is { } condKind && condKind != FieldKind.Bool)
+        {
+            _diags.Add(new SqlDiagnostic(
+                $"CASE/IF condition must be a boolean expression, got {condKind}", f.Args[0].Line, f.Args[0].Column));
+        }
+
+        var thenKind = GetExprKind(f.Args[1]);
+        var elseKind = GetExprKind(f.Args[2]);
+        if (thenKind is null || elseKind is null)
+        {
+            if ((thenKind ?? elseKind) is { } known) _exprKind[node] = known;
+            return;
+        }
+        if (thenKind == elseKind)
+        {
+            _exprKind[node] = thenKind.Value;
+            return;
+        }
+        if (thenKind is FieldKind.Long or FieldKind.Double && elseKind is FieldKind.Long or FieldKind.Double)
+        {
+            _exprKind[node] = FieldKind.Double;
+            return;
+        }
+        _diags.Add(new SqlDiagnostic(
+            $"CASE/IF branches must produce the same type, got {thenKind} and {elseKind}", f.Line, f.Column));
     }
 
     private void RecordAggregateKind(Expr node, AggregateCallExpr agg)
@@ -1139,6 +1183,9 @@ internal sealed class Validator
     {
         "ABS", "ROUND", "UPPER", "LOWER", "COALESCE",
         "TO_LONG", "TO_DOUBLE", "TO_BOOL", "TO_TIMESTAMP", "TO_STRING",
+        // The searched-CASE desugar target (Sql/Parser.cs ParseCaseBody). Callable directly as
+        // IF(cond, then, else) too — same node, same rules, nothing extra to implement either way.
+        "IF",
     };
 
     private void ValidateFunctionArity(FunctionCallExpr f)
@@ -1155,6 +1202,7 @@ internal sealed class Validator
             "ROUND" => n is 1 or 2,
             "COALESCE" => n >= 1,
             "TO_LONG" or "TO_DOUBLE" or "TO_BOOL" or "TO_TIMESTAMP" or "TO_STRING" => n == 1,
+            "IF" => n == 3,
             _ => true,
         };
         if (!ok)

@@ -860,6 +860,9 @@ internal sealed class Parser
         // Plan 009 Round C wave C1: CAST(expr AS type) sugar — only intercepted when followed by '(' so
         // a column genuinely named "cast" (unlikely, but not reserved) still parses as a plain identifier.
         if (string.Equals(name, "CAST", StringComparison.OrdinalIgnoreCase) && Current.IsSymbol("(")) return ParseCastBody(tok.Line, tok.Column);
+        // Searched CASE. Same "only when the next token proves it" interception CAST uses above, so a
+        // column genuinely named "case" still parses as an identifier everywhere it isn't followed by WHEN.
+        if (string.Equals(name, "CASE", StringComparison.OrdinalIgnoreCase) && Current.IsKeyword("WHEN")) return ParseCaseBody(tok.Line, tok.Column);
 
         if (Current.IsSymbol("("))
         {
@@ -906,6 +909,46 @@ internal sealed class Parser
         }
 
         return new FunctionCallExpr(name, args, line, col);
+    }
+
+    // ------------------------------------------------------------------
+    // Searched CASE sugar
+    // ------------------------------------------------------------------
+
+    /// <summary>`CASE WHEN cond THEN expr [WHEN cond THEN expr]... [ELSE expr] END`, desugared right
+    /// here into nested three-argument <c>IF</c> <see cref="FunctionCallExpr"/> nodes — the same trick
+    /// <see cref="ParseCastBody"/> plays with TO_*, and for the same reason: a new AST node would have to
+    /// be taught to every switch that walks an Expr (Validator resolution + kind inference, the Planner's
+    /// scalar-subquery and predicate rewrites, ExpressionEvaluator, aggregate detection, structural
+    /// equality for GROUP BY matching), whereas a function call already flows through all of them.
+    /// `CASE WHEN a THEN 1 WHEN b THEN 2 ELSE 3 END` becomes `IF(a, 1, IF(b, 2, 3))`; an omitted ELSE
+    /// supplies NULL, which is what SQL's CASE does. Only the searched form is supported — there is no
+    /// simple `CASE expr WHEN value THEN ...`, which would need its own equality semantics.
+    ///
+    /// <para>Positions are taken from each branch's own condition rather than the CASE keyword, so a
+    /// diagnostic about the third WHEN points at the third WHEN.</para></summary>
+    private Expr ParseCaseBody(int line, int col)
+    {
+        // The caller only enters here having already seen WHEN, so branches is never empty.
+        var branches = new List<(Expr Cond, Expr Then)>();
+        while (MatchKeyword("WHEN"))
+        {
+            var cond = ParseOr();
+            ExpectKeyword("THEN");
+            branches.Add((cond, ParseOr()));
+        }
+
+        Expr result = MatchKeyword("ELSE") ? ParseOr() : new NullLiteral(line, col);
+        ExpectKeyword("END");
+
+        // Fold right-to-left: the last branch's else-arm is the ELSE expression, and each earlier branch
+        // wraps everything after it.
+        for (int i = branches.Count - 1; i >= 0; i--)
+        {
+            var (cond, then) = branches[i];
+            result = new FunctionCallExpr("IF", [cond, then, result], cond.Line, cond.Column);
+        }
+        return result;
     }
 
     // ------------------------------------------------------------------
