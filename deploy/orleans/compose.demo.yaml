@@ -1,0 +1,13 @@
+# Overlay for the ac-co OTC Terms hedge-fund demo:
+#   docker compose -f deploy/orleans/compose.yaml -f deploy/orleans/compose.demo.yaml up -d --build
+# Adds the demo web origin to CORS (requires the configurable-CORS change in
+# StreamForge.Api) and lets the postgres-cdc source reach the demo Postgres
+# published on the host at 6432 via host.docker.internal.
+services:
+  streamforge-orleans:
+    environment:
+      Cors__AllowedOrigins__0: "http://localhost:5173"
+      Cors__AllowedOrigins__1: "https://otc-terms.ac-co.localhost:1355"
+      Cors__AllowedOrigins__2: "https://otc-addin.ac-co.localhost:1355"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

@@ -87,10 +87,19 @@ public static class StreamForgeApiExtensions
             .AddPolicy("Editor", p => p.RequireRole("Editor", "Admin"))
             .AddPolicy("Admin", p => p.RequireRole("Admin"));
 
+        // Cors:AllowedOrigins (env: Cors__AllowedOrigins__0, __1, ...) extends/replaces the
+        // dev-SPA default so an external console (e.g. an Office add-in or another web app)
+        // can call REST + negotiate SignalR cross-origin. Unset = the historical 5173-only.
+        var corsOrigins = configuration.GetSection("Cors:AllowedOrigins").Get<string[]>();
+        if (corsOrigins is null || corsOrigins.Length == 0)
+        {
+            corsOrigins = ["http://localhost:5173"];
+        }
+
         services.AddCors(options =>
         {
             options.AddPolicy(SpaCorsPolicy, p => p
-                .WithOrigins("http://localhost:5173")
+                .WithOrigins(corsOrigins)
                 .AllowAnyHeader()
                 .AllowAnyMethod()
                 .AllowCredentials());
