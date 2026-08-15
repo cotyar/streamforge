@@ -293,3 +293,41 @@ that emits weight −1 for the last asserted row of that key in a `LATEST BY`
 table (only meaningful for LATEST BY consumers — reject otherwise at validate),
 or `DELETE /api/tables/{id}/rows?key=…` for LATEST BY tables. Either lets the
 demo free `scenario_inputs` and `mc_paths` keys instead of tombstoning.
+
+## 14. BUG: an aggregate created over an already-populated `LATEST BY` table collapses to zero
+
+`shared/StreamForge.Engine/Runtime/Ops/TableReduceOp.cs` — `Groups.Remove(key)`
+whenever a group's running weight touches zero; a group cannot carry negative
+weight. `LATEST BY` emits a bare assert (+1) on first sight of a key and
+retract(−1)+assert(+1) thereafter. So a GROUP BY table created *after* its
+`LATEST BY` input already holds rows never sees the original asserts (no
+backfill), receives the next retract first, hits weight −1 → clamped/removed,
+then the assert re-creates the group with one row — the aggregate ping-pongs
+between one row and none forever. Reproduced in the demo (a scenario cube
+created mid-session showed one trade per group); the base cube is only correct
+because it was created while its inputs were empty.
+
+Wanted (either): (a) backfill on table creation — replay the upstream table's
+current rows as asserts to the new consumer (this is also wishlist "no
+historical backfill" from the /sql page); or (b) at minimum a diagnostic at
+create time when an input `LATEST BY` table is non-empty, plus documented
+guidance. Workaround used: the consumer CROSS JOINs a *derived*
+`(SELECT … FROM src LATEST BY (k))` subquery — a nested operator with its own
+empty key map — instead of the materialized table
+(`apps/websites/otc-terms/lib/streamforge/provision-doc.ts`, and
+`lib/streamforge/rebuild.ts` documents which tables must never be recreated
+warm).
+
+## 15. Retract/assert of one upstream change should be applied atomically downstream
+
+A LEFT JOIN onto an aggregate table observes the aggregate's retract(−1) before
+its assert(+1) as two separate deltas: for part of every tick the joined column
+reads NULL (`scenario_trigger_monitor.threshold_headroom` flaps to null in the
+demo; the UI recomputes headroom from the stable side to hide it). Wanted:
+deltas produced by one upstream epoch are applied to a downstream operator as
+one batch (retracts and asserts together, differential-dataflow style) before
+the downstream emits — or at least the SignalR `tableDelta` for one epoch
+carries both so clients don't paint the intermediate state. Pointers:
+`Runtime/Ops/TableReduceOp.cs:6-14` (emits retract then assert), join ops under
+`Runtime/Ops/`, `Runtime/TableExecutorImpl.cs:41` (upstream deltas → alias
+input).
