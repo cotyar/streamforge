@@ -18,6 +18,9 @@ const KEYWORDS = new Set([
   'CAST',
   // Searched CASE — desugars to nested IF(cond, then, else) in the parser.
   'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
+  // Reserved words the highlighter was missing; sqlScope.ts's CLAUSE_KEYWORDS (kept in sync by hand,
+  // see its comment) needs the same five plus UNION, which is already here.
+  'LATEST', 'UNNEST', 'IN', 'EXISTS',
 ])
 
 const AGGREGATE_FNS = new Set(['COUNT', 'SUM', 'AVG', 'MIN', 'MAX'])

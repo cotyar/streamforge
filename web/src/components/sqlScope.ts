@@ -147,6 +147,10 @@ function isSelectSpan(masked: string, span: ParenSpan): boolean {
 const CLAUSE_KEYWORDS = new Set([
   'SELECT', 'FROM', 'WHERE', 'GROUP', 'BY', 'WINDOW', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER',
   'CROSS', 'ON', 'WITHIN', 'AS', 'EMIT', 'CHANGES', 'FINAL', 'AND', 'OR', 'WITH',
+  // Reserved in shared/StreamForge.Engine/Sql/Parser.cs's ClauseKeywords for exactly this reason and
+  // missing here, so `FROM trades LATEST BY (id) WHERE …` read LATEST as an AS-less alias for trades
+  // and column completion after WHERE came back empty — on the shape every table-mode CDC mirror uses.
+  'LATEST', 'UNNEST', 'UNION', 'IN', 'EXISTS',
 ])
 
 // ---------------------------------------------------------------------------
