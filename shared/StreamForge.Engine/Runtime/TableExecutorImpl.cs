@@ -346,6 +346,13 @@ public sealed partial class TableExecutor
     /// no policy is configured.</summary>
     internal int RetainedStateCount => _retentionScope?.RetainedCount ?? -1;
 
+    /// <summary>Introspection hook in the same spirit as <see cref="DebtCount"/>: how many retractions
+    /// this table's GROUP BY has received for a group it had never asserted. Non-zero means this table
+    /// was attached to an upstream that ALREADY HELD ROWS and those rows were never replayed to it, so
+    /// its aggregates are missing them — see TableReduceOp.UnmatchedRetractions. -1 when the plan has no
+    /// GROUP BY, so "no aggregate here" is distinguishable from "an aggregate with nothing wrong".</summary>
+    internal long UnmatchedRetractions => _reduce?.UnmatchedRetractions ?? -1;
+
     private List<TableDelta> HandleIncoming(string name, EventRecord evt, long weight)
     {
         if (_unionRoles is not null) return HandleIncomingUnion(name, evt, weight);

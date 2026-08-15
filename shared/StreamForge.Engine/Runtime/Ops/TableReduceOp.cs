@@ -33,6 +33,14 @@ internal sealed class TableReduceOp : ITableOp
         public long TotalWeight;
     }
 
+    /// <summary>How many times a retraction arrived for a group this op had never asserted — i.e. the
+    /// upstream believes a row exists that this op has never seen. It is not an internal inconsistency:
+    /// it means this op was attached to an ALREADY-POPULATED upstream and the rows that were there
+    /// before it attached were never replayed to it, so its arithmetic is missing them. Counted rather
+    /// than thrown because the deltas are individually well-formed and the op cannot repair the gap on
+    /// its own — only a backfill of the upstream's current contents can.</summary>
+    public long UnmatchedRetractions { get; private set; }
+
     private readonly CompiledTablePlan _plan;
 
     /// <summary>This op's state: group-key string -> running per-group aggregate state. See class doc for
@@ -66,6 +74,11 @@ internal sealed class TableReduceOp : ITableOp
         bool hadOutput = state.TotalWeight > 0;
         EventRecord? oldRow = hadOutput ? BuildRow(state) : null;
 
+        if (weight < 0 && state.TotalWeight <= 0)
+        {
+            UnmatchedRetractions++;
+        }
+
         for (int i = 0; i < _plan.AggregateNodes.Count; i++)
         {
             var node = _plan.AggregateNodes[i];
@@ -80,10 +93,21 @@ internal sealed class TableReduceOp : ITableOp
         {
             results.Add(new TableDelta(BuildRow(state), 1));
         }
-        else
+        else if (state.TotalWeight == 0)
         {
+            // Exactly zero is a group that genuinely has no rows — drop it, which is what keeps a
+            // long-lived table from accumulating dead groups.
             Groups.Remove(key);
         }
+        // NEGATIVE weight is deliberately KEPT, where it used to be dropped along with the group's
+        // accumulated aggregator state. Dropping it turned a missing-backfill situation into a
+        // convincing wrong answer: LATEST BY emits retract(-1)+assert(+1) per change, so an op attached
+        // to an already-populated upstream saw the retract first, destroyed the (empty) group, and then
+        // the assert rebuilt it from that ONE row — reporting a group of one where the real group had
+        // hundreds. Carrying the negative weight instead means the arithmetic stays honest: the group
+        // reports nothing until the asserts it never received are supplied, and if a backfill ever
+        // replays them the group converges to the right answer instead of double-counting. Nothing
+        // that starts from a correct (empty) upstream can reach this branch at all.
 
         return results;
     }
