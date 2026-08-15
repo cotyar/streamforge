@@ -1,5 +1,7 @@
 using System.Collections.Generic;
 
+using StreamForge.Engine.Runtime;
+
 namespace StreamForge.Engine.Sql;
 
 /// <summary>A resolved, validated JOIN: its equi-key component lists (null only when validation already
@@ -1033,6 +1035,9 @@ internal sealed class Validator
             "SUM" => argKind == FieldKind.Long ? FieldKind.Long : FieldKind.Double,
             "AVG" => FieldKind.Double,
             "MIN" or "MAX" => argKind ?? FieldKind.Double,
+            // Every statistical aggregate is a real number even over integer input — a variance is not
+            // an integer, and MEDIAN interpolates between the two middle observations.
+            _ when StatAggregatorNames.Canonical(agg.Name) is not null => FieldKind.Double,
             // A registered aggregate states its own; Double stays the fallback for anything that
             // declines to (same "unknown means don't guess narrower" rule the scalars use).
             _ => SqlFunctions.FindAggregate(agg.Name)?.ResultKind(argKind) ?? FieldKind.Double,

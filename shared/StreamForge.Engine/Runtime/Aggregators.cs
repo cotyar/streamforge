@@ -7,13 +7,21 @@ public abstract class Aggregator
     public abstract void Add(object? value);
     public abstract object? Result { get; }
 
-    public static Aggregator Create(string name, bool isStar) => name.ToUpperInvariant() switch
+    public static Aggregator Create(string name, bool isStar) => CreateCanonical(
+        StatAggregatorNames.Canonical(name.ToUpperInvariant()) ?? name.ToUpperInvariant(), isStar);
+
+    private static Aggregator CreateCanonical(string name, bool isStar) => name switch
     {
         "COUNT" => new CountAggregator(isStar),
         "SUM" => new SumAggregator(),
         "AVG" => new AvgAggregator(),
         "MIN" => new MinMaxAggregator(isMin: true),
         "MAX" => new MinMaxAggregator(isMin: false),
+        StatAggregatorNames.VarSamp => new VarianceAggregator(sample: true, stdDev: false),
+        StatAggregatorNames.VarPop => new VarianceAggregator(sample: false, stdDev: false),
+        StatAggregatorNames.StdDevSamp => new VarianceAggregator(sample: true, stdDev: true),
+        StatAggregatorNames.StdDevPop => new VarianceAggregator(sample: false, stdDev: true),
+        StatAggregatorNames.Median => new MedianAggregator(),
         // Registered aggregates are consulted only after the built-ins, and SqlFunctions refuses to
         // register a built-in's name, so this lookup can never change what an existing query means.
         _ => Sql.SqlFunctions.FindAggregate(name)?.CreateStream()

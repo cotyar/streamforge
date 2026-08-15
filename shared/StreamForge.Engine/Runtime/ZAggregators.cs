@@ -11,13 +11,21 @@ public interface IZAggregator
 
 internal static class ZAggregator
 {
-    public static IZAggregator Create(string name, bool isStar) => name.ToUpperInvariant() switch
+    public static IZAggregator Create(string name, bool isStar) => CreateCanonical(
+        StatAggregatorNames.Canonical(name.ToUpperInvariant()) ?? name.ToUpperInvariant(), isStar);
+
+    private static IZAggregator CreateCanonical(string name, bool isStar) => name switch
     {
         "COUNT" => new CountZAggregator(isStar),
         "SUM" => new SumZAggregator(),
         "AVG" => new AvgZAggregator(),
         "MIN" => new MinMaxZAggregator(isMin: true),
         "MAX" => new MinMaxZAggregator(isMin: false),
+        StatAggregatorNames.VarSamp => new VarianceZAggregator(sample: true, stdDev: false),
+        StatAggregatorNames.VarPop => new VarianceZAggregator(sample: false, stdDev: false),
+        StatAggregatorNames.StdDevSamp => new VarianceZAggregator(sample: true, stdDev: true),
+        StatAggregatorNames.StdDevPop => new VarianceZAggregator(sample: false, stdDev: true),
+        StatAggregatorNames.Median => new MedianZAggregator(),
         // See Aggregator.Create: built-ins first, registry second, never the other way round.
         _ => Sql.SqlFunctions.FindAggregate(name)?.CreateZ()
              ?? throw new ArgumentException($"Unknown aggregate '{name}'"),

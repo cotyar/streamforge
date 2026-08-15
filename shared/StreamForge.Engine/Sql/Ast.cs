@@ -92,7 +92,8 @@ internal sealed class FunctionCallExpr(string name, List<Expr> args, int line, i
 
 internal static class AggregateNames
 {
-    public static readonly string[] All = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
+    public static readonly string[] All =
+        ["COUNT", "SUM", "AVG", "MIN", "MAX", .. Runtime.StatAggregatorNames.All];
 
     /// <summary>Built-ins first, then <see cref="SqlFunctions"/>'s registered aggregates — this is what
     /// makes the parser build an <see cref="AggregateCallExpr"/> (rather than a plain function call) for

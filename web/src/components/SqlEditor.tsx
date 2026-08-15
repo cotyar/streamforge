@@ -23,7 +23,11 @@ const KEYWORDS = new Set([
   'LATEST', 'UNNEST', 'IN', 'EXISTS',
 ])
 
-const AGGREGATE_FNS = new Set(['COUNT', 'SUM', 'AVG', 'MIN', 'MAX'])
+const AGGREGATE_FNS = new Set([
+  'COUNT', 'SUM', 'AVG', 'MIN', 'MAX',
+  // Statistical aggregates. STDDEV/VARIANCE are the bare spellings of the _SAMP forms.
+  'VAR_SAMP', 'VAR_POP', 'STDDEV_SAMP', 'STDDEV_POP', 'VARIANCE', 'STDDEV', 'MEDIAN',
+])
 const SCALAR_FNS = new Set([
   'ABS', 'ROUND', 'UPPER', 'LOWER', 'COALESCE',
   // Plan 009 Round C wave C1: type-conversion functions.
