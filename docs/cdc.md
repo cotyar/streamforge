@@ -559,7 +559,7 @@ the same way you interact with any other source kind:
     {
       "name": "orders_latest",
       "description": "",
-      "sql": "SELECT * FROM \"orders-cdc\" LATEST BY id WHERE _op <> 'd'",
+      "sql": "SELECT * FROM \"orders-cdc\" WHERE _op <> 'd' LATEST BY (id)",
       "running": true,
       "searchEnabled": false,
       "searchMode": "Exact",
@@ -583,7 +583,7 @@ are present but empty, exactly plan 017's "eight inert fields" tradeoff describe
 console form does.
 
 **The end-to-end worked example** the `orders_latest` table above shows is the whole pattern this connector
-is built around: `LATEST BY id` keeps one row per key (the most recent event wins), and `WHERE _op <> 'd'`
+is built around: `LATEST BY (id)` keeps one row per key (the most recent event wins), and `WHERE _op <> 'd'`
 hides a row whose most recent event was a delete. Together they turn an append-only stream of
 inserts/updates/deletes into what looks like a live mirror of the source table — with the caveat spelled out
 under "the honest limit" below.
@@ -676,7 +676,7 @@ counter.
 an append-only `EventRecord` stream. `_weight` on an inbound row — `-1` from `CdcStamp.WeightOf` on a
 delete — is just a column value, not a retraction the Engine's Z-sets act on; that machinery is computed
 *from* table SQL, not carried in from ingress. Neither CDC path, nor the Debezium-envelope path it sits next
-to, frees the key a delete removed. `LATEST BY <key> WHERE _op <> 'd'` (the pattern shown above) **hides** a
+to, frees the key a delete removed. `WHERE _op <> 'd' LATEST BY (<key>)` (the pattern shown above) **hides** a
 deleted key from query results — it does not free it from the source's history. The tombstone event, and
 every insert/update before it for that key, is still sitting in the stream.
 

@@ -24,6 +24,20 @@ public class LatestByTests
         Assert.True(r.Ok, string.Join(";", r.Diagnostics));
     }
 
+    /// <summary>The CDC pattern docs/cdc.md publishes, pinned here because the doc used to print it with
+    /// the clauses the other way round (`LATEST BY id WHERE …`, and without the parentheses) — which does
+    /// not parse, and nothing caught it. WHERE comes before LATEST BY, and the key list is parenthesised.
+    /// If this test ever has to change, docs/cdc.md changes with it.</summary>
+    [Fact]
+    public void WhereComesBeforeLatestBy_theCdcMirrorPatternAsDocumented()
+    {
+        var r = CompileTable("SELECT order_id, stage FROM order_events WHERE stage <> 'CANCELLED' LATEST BY (order_id)", OrderEvents);
+        Assert.True(r.Ok, string.Join(";", r.Diagnostics));
+
+        var wrongOrder = CompileTable("SELECT order_id, stage FROM order_events LATEST BY (order_id) WHERE stage <> 'CANCELLED'", OrderEvents);
+        Assert.False(wrongOrder.Ok);
+    }
+
     [Fact]
     public void LatestByWithMultipleKeysParses()
     {
