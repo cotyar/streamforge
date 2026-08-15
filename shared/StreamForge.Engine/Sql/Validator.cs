@@ -971,6 +971,15 @@ internal sealed class Validator
             case "IF":
                 RecordIfKind(node, f);
                 break;
+            default:
+                // A registered scalar (SqlFunctions) — reached only for a name none of the built-in arms
+                // above claimed, because registration refuses a built-in's name.
+                if (SqlFunctions.FindScalar(f.Name) is { } ext)
+                {
+                    var argKinds = f.Args.Select(GetExprKind).ToArray();
+                    if (ext.ResultKind(argKinds) is { } extKind) _exprKind[node] = extKind;
+                }
+                break;
         }
     }
 
@@ -1024,7 +1033,9 @@ internal sealed class Validator
             "SUM" => argKind == FieldKind.Long ? FieldKind.Long : FieldKind.Double,
             "AVG" => FieldKind.Double,
             "MIN" or "MAX" => argKind ?? FieldKind.Double,
-            _ => FieldKind.Double,
+            // A registered aggregate states its own; Double stays the fallback for anything that
+            // declines to (same "unknown means don't guess narrower" rule the scalars use).
+            _ => SqlFunctions.FindAggregate(agg.Name)?.ResultKind(argKind) ?? FieldKind.Double,
         };
     }
 
@@ -1192,6 +1203,14 @@ internal sealed class Validator
     {
         if (!KnownFunctions.Contains(f.Name))
         {
+            if (SqlFunctions.FindScalar(f.Name) is { } ext)
+            {
+                if (!ext.IsValidArity(f.Args.Count))
+                {
+                    _diags.Add(new SqlDiagnostic($"Function '{f.Name}' called with wrong number of arguments", f.Line, f.Column));
+                }
+                return;
+            }
             _diags.Add(new SqlDiagnostic($"Unknown function '{f.Name}'", f.Line, f.Column));
             return;
         }

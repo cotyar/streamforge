@@ -93,7 +93,13 @@ internal sealed class FunctionCallExpr(string name, List<Expr> args, int line, i
 internal static class AggregateNames
 {
     public static readonly string[] All = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
-    public static bool IsAggregate(string name) => All.Contains(name, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Built-ins first, then <see cref="SqlFunctions"/>'s registered aggregates — this is what
+    /// makes the parser build an <see cref="AggregateCallExpr"/> (rather than a plain function call) for
+    /// a name the Engine has never heard of. A name that is neither still parses as a function call and
+    /// gets the Validator's "Unknown function" diagnostic, which is the right error either way.</summary>
+    public static bool IsAggregate(string name) =>
+        All.Contains(name, StringComparer.OrdinalIgnoreCase) || SqlFunctions.FindAggregate(name) is not null;
 }
 
 internal sealed class AggregateCallExpr(string name, Expr? arg, bool isStar, int line, int col) : Expr(line, col)

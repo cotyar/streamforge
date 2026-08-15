@@ -2,7 +2,7 @@ namespace StreamForge.Engine.Runtime;
 
 /// <summary>Incremental (streaming) aggregate accumulator. NULL inputs are skipped (except COUNT(*), which
 /// counts rows regardless of value).</summary>
-internal abstract class Aggregator
+public abstract class Aggregator
 {
     public abstract void Add(object? value);
     public abstract object? Result { get; }
@@ -14,7 +14,10 @@ internal abstract class Aggregator
         "AVG" => new AvgAggregator(),
         "MIN" => new MinMaxAggregator(isMin: true),
         "MAX" => new MinMaxAggregator(isMin: false),
-        _ => throw new ArgumentException($"Unknown aggregate '{name}'"),
+        // Registered aggregates are consulted only after the built-ins, and SqlFunctions refuses to
+        // register a built-in's name, so this lookup can never change what an existing query means.
+        _ => Sql.SqlFunctions.FindAggregate(name)?.CreateStream()
+             ?? throw new ArgumentException($"Unknown aggregate '{name}'"),
     };
 }
 

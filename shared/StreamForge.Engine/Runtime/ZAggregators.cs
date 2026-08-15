@@ -3,7 +3,7 @@ namespace StreamForge.Engine.Runtime;
 /// <summary>Subtractable (Z-set-aware) aggregate accumulator: Add is replaced with Apply(value, weight),
 /// where a negative weight retracts a previously-applied contribution. NULL inputs are skipped (except
 /// COUNT(*), which counts rows regardless of value).</summary>
-internal interface IZAggregator
+public interface IZAggregator
 {
     void Apply(object? value, long weight);
     object? Result { get; }
@@ -18,7 +18,9 @@ internal static class ZAggregator
         "AVG" => new AvgZAggregator(),
         "MIN" => new MinMaxZAggregator(isMin: true),
         "MAX" => new MinMaxZAggregator(isMin: false),
-        _ => throw new ArgumentException($"Unknown aggregate '{name}'"),
+        // See Aggregator.Create: built-ins first, registry second, never the other way round.
+        _ => Sql.SqlFunctions.FindAggregate(name)?.CreateZ()
+             ?? throw new ArgumentException($"Unknown aggregate '{name}'"),
     };
 }
 

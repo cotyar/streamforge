@@ -214,7 +214,11 @@ internal static class ExpressionEvaluator
             "TO_BOOL" => args.Count > 0 && args[0] is { } bv0 && FieldValueConversion.TryCoerce(FieldKind.Bool, bv0, out var bv) ? bv : null,
             "TO_TIMESTAMP" => args.Count > 0 && args[0] is { } tv0 && FieldValueConversion.TryToTimestamp(tv0, out var tv) ? tv : null,
             "TO_STRING" => args.Count > 0 ? EvalToString(f, args[0]) : null,
-            _ => null,
+            // A registered scalar (SqlFunctions). Consulted last, and never for a built-in's name, so it
+            // cannot change what an existing query computes. Registered functions are required to be
+            // total; a throwing one would kill the whole pipeline for one bad row, which is the exact
+            // failure mode every built-in here is written to avoid.
+            _ => SqlFunctions.FindScalar(f.Name)?.Eval(args),
         };
     }
 
