@@ -129,6 +129,16 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
 
         _state.Def = def;
         _state.Running = def.Enabled;
+        // Same reason as ConnectorGrain.StartAsync in the Orleans host: the failure streak belongs to the
+        // definition that produced it, and the BackoffPolicy.NextRun call below reads it. Leaving it set
+        // made a fixed config wait out the broken config's backoff.
+        //
+        // Unlike the Orleans side this needs no generation counter to go with it. Dapr's actor
+        // concurrency is turn-based for the WHOLE call — one method runs to completion, awaits included,
+        // before the next is admitted — so an in-flight poll cycle cannot interleave with this method and
+        // then re-arm the timer at its own stale backoff. Orleans yields at every await inside the
+        // activation, which is exactly the window ConnectorGrain._generation closes.
+        _state.ConsecutiveFailures = 0;
         await SaveAsync();
 
         if (!_state.Running)
@@ -149,7 +159,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
             return;
         }
 
-        // Fresh start: schedule the first run from "now" at the current (persisted) failure streak —
+        // Fresh start: schedule the first run from "now" at a cleared failure streak (reset above) —
         // StartAsync replaces the previous run wholesale, same contract as GeneratorActor.StartAsync, so
         // a config edit (CatalogStore.UpsertSourceAsync calls this on every upsert) gets an immediate
         // reschedule off the new definition's schedule.

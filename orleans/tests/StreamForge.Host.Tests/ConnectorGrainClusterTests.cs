@@ -232,6 +232,52 @@ public sealed class ConnectorGrainClusterTests : IAsyncLifetime
         }
     }
 
+    /// <summary>The failure streak belongs to the definition that produced it. Before this was cleared on
+    /// (re)start, fixing a broken source's config left it waiting out the BROKEN config's backoff — 30s
+    /// after one failure, 15 minutes after five — and a PUT, a config import and a disable/enable cycle
+    /// all behaved the same way, so restarting the host was the only prompt lever. The 15s deadline below
+    /// is the assertion: it is shorter than the >= 30s gap the preceding failure had already scheduled.</summary>
+    [Trait("Category", "Slow")]
+    [Fact]
+    public async Task Restarting_with_a_fixed_config_clears_the_failure_backoff()
+    {
+        var name = "file_conn_refix_" + Guid.NewGuid().ToString("n")[..8];
+        var missingPath = Path.Combine(_scratchDir, "does-not-exist-" + Guid.NewGuid().ToString("n") + ".ndjson");
+        var goodPath = Path.Combine(_scratchDir, name + ".ndjson");
+        await File.WriteAllTextAsync(goodPath, "{\"id\":\"x1\",\"price\":1.5}\n");
+
+        var grain = _cluster.GrainFactory.GetGrain<IConnectorGrain>(name);
+        try
+        {
+            await grain.StartAsync(MakeFileSource(name, missingPath, intervalMs: 1000));
+
+            var failed = await PollUntilAsync(
+                () => grain.GetStatusAsync(),
+                s => s.ConsecutiveFailures >= 1,
+                deadlineSeconds: 15);
+            var backoffGapMs = failed.NextRunMs!.Value - failed.LastRunMs!.Value;
+            Assert.True(backoffGapMs >= 25_000, $"expected a backoff to be in effect before the fix, got {backoffGapMs}ms");
+
+            // The fix an operator would make: same source, corrected path.
+            await grain.StartAsync(MakeFileSource(name, goodPath, intervalMs: 1000));
+
+            var recovered = await PollUntilAsync(
+                () => grain.GetStatusAsync(),
+                s => s.LastStatus == "ok",
+                deadlineSeconds: 15);
+
+            // Asserted before the streak so a timeout here reads as "never recovered" rather than as a
+            // confusing count mismatch — PollUntilAsync returns the last snapshot on timeout, it doesn't throw.
+            Assert.Equal("ok", recovered.LastStatus);
+            Assert.Equal(0, recovered.ConsecutiveFailures);
+            Assert.Null(recovered.LastError);
+        }
+        finally
+        {
+            await grain.StopAsync();
+        }
+    }
+
     [Fact]
     public async Task Registry_dispatches_file_kind_to_connector_and_leaves_generator_kind_seeds_ticking()
     {

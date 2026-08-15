@@ -96,6 +96,16 @@ public sealed class ConnectorGrain(
     private static readonly HttpClient SharedHttpClient = new() { Timeout = TimeSpan.FromSeconds(30) };
 
     private IGrainTimer? _timer;
+
+    /// <summary>Bumped by every StartAsync/StopAsync. A poll cycle captures it on entry and abandons its
+    /// result if it no longer matches — see <see cref="RunCycleAsync"/>. Grains are turn-based, not
+    /// serialized end-to-end: a cycle that yields at its `await` (writing state, pushing to the stream,
+    /// an out-of-process poll) lets a StartAsync run in between, and without this the stale cycle then
+    /// bumped the failure streak the restart had just cleared and re-armed the timer at the OLD backoff
+    /// — reintroducing exactly the "fixing the config doesn't make it poll" symptom, but only under
+    /// enough load to widen the window.</summary>
+    private int _generation;
+
     private CancellationTokenSource? _grpcCts;
     private Task? _grpcTask;
     private CancellationTokenSource? _transportCts;
@@ -123,6 +133,14 @@ public sealed class ConnectorGrain(
     {
         state.State.Def = def;
         state.State.Running = true;
+        // A (re)start is the operator saying "try this definition now". Carrying the old failure streak
+        // across it meant a source that had backed off to minutes kept waiting out that backoff even
+        // after the config that caused the failures was fixed — a PUT, a config import and a
+        // disable/enable cycle all landed here and all left the streak intact, so "restart the host" was
+        // the only way to get a prompt retry. The streak describes the PREVIOUS definition's health;
+        // ArmForKind below reads it to pick the next run, so it has to be cleared before that call.
+        state.State.ConsecutiveFailures = 0;
+        _generation++;
         EnsureTrackers();
 
         _timer?.Dispose();
@@ -142,6 +160,7 @@ public sealed class ConnectorGrain(
     public async Task StopAsync()
     {
         state.State.Running = false;
+        _generation++;
         _timer?.Dispose();
         _timer = null;
         CancelGrpc();
@@ -525,11 +544,18 @@ public sealed class ConnectorGrain(
         }
 
         EnsureTrackers();
+        var generation = _generation;
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         // Plan 014: set by a polled cycle that says there is more waiting RIGHT NOW — see the re-arm at
         // the bottom of this method. Always false for url/file/folder, which have no notion of a page.
         var hasMore = false;
+
+        // Staged rather than written straight to state.State: everything below the cycle's awaits has to
+        // be discardable, because the staleness check after them may find this whole cycle obsolete.
+        // Seeded with the current cursor so a throw leaves it unchanged, matching the "a failed cycle
+        // keeps the old cursor" rule PolledSourceCore is built around.
+        var nextCursor = state.State.Cursor;
 
         PollCycleResult result;
         try
@@ -549,7 +575,7 @@ public sealed class ConnectorGrain(
                 // Assigned unconditionally and persisted by the WriteStateAsync this cycle already does.
                 // Safe precisely because a failed outcome carries the cursor that went IN — so "persist
                 // whatever I was handed" and "never skip data on failure" are the same statement.
-                state.State.Cursor = outcome.Cursor;
+                nextCursor = outcome.Cursor;
                 hasMore = outcome.HasMore;
             }
             else
@@ -567,6 +593,17 @@ public sealed class ConnectorGrain(
         {
             result = new PollCycleResult([], $"{ex.GetType().Name}: {ex.Message}");
         }
+
+        // A StartAsync/StopAsync ran while this cycle was awaiting: its definition is gone, its result
+        // describes a source that no longer exists in this shape, and whoever replaced it has already
+        // written the status and armed the timer they want. Drop everything rather than overwrite them.
+        // The tracker state this cycle mutated in memory is rebuilt from persisted state by the
+        // EnsureTrackers() that StartAsync and the next cycle both call, so nothing leaks forward.
+        if (generation != _generation)
+        {
+            return;
+        }
+        state.State.Cursor = nextCursor;
 
         // Driver-level emit policy (design pin, W3A): a cycle either succeeds (emit everything it
         // produced, reset the failure streak) or fails (emit NOTHING this cycle, even if the cycle core
