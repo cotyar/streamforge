@@ -391,3 +391,17 @@ carries both so clients don't paint the intermediate state. Pointers:
 `Runtime/Ops/TableReduceOp.cs:6-14` (emits retract then assert), join ops under
 `Runtime/Ops/`, `Runtime/TableExecutorImpl.cs:41` (upstream deltas → alias
 input).
+
+## 16. Server-side delta coalescing per epoch on the SignalR hub
+
+A 36,000-row Monte-Carlo run (200 paths × 36 trades × 5 days) produced ~100k
+`tableDelta` messages; the browser (and Excel) fell minutes behind the engine on
+the socket, not on rendering (the client already coalesces React flushes to
+120 ms). Wanted: `/hubs/stream` should emit one `tableDelta` per (table, epoch)
+containing all deltas of that epoch — and, optionally, collapse retract+assert
+of the same key within the batch to a single assert (net Z-set) — instead of
+one message per delta. This is also the client-visible half of #15. Pointers:
+`orleans/src/StreamForge.Host` hub + `Streams:PushCapacity`, `TABLES__FLUSHMS`
+(default 250) — the flush interval exists but the message granularity does not.
+Ingest-side, the demo raised `MaxBatchRows`/`CapacityRows` to 5000/50000 and
+that half is fine.
