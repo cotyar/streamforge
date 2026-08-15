@@ -68,6 +68,10 @@ TableHistoryRuntimeSetup.AddServices(builder.Services);
 // before this line satisfies it — here, immediately before Build(), keeps it visibly paired with the
 // rest of the *RuntimeSetup wiring above rather than buried at the top of the file.
 DatabaseConnectors.RegisterAll();
+// Same deadline, same shape: the pricing scalars (QLNet-backed Black family, closed-form
+// flat-curve bond/swap/FX) register into the Engine's SqlFunctions seam so the Engine itself
+// never links a pricing library. Must precede anything that compiles SQL.
+StreamForge.Quant.QuantFunctions.RegisterAll();
 
 var app = builder.Build();
 

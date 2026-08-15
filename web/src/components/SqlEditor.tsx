@@ -5,6 +5,7 @@ import type { FieldDef, FieldType, SourceDefinition, SqlDiagnostic } from '../ap
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { findCaretScope, innerProjection, parseCtes } from './sqlScope'
+import { sqlFunctionsApi } from '../api/sqlFunctions'
 import type { CteDef, ScopeFromItem } from './sqlScope'
 
 const KEYWORDS = new Set([
@@ -37,7 +38,37 @@ const SCALAR_FNS = new Set([
   // The searched-CASE desugar target, callable directly.
   'IF',
 ])
+// The built-ins, which every deployment has. Host-registered functions (the pricing scalars, anything a
+// future assembly adds) are merged in at runtime from GET /api/sql/functions — see useSqlFunctions
+// below. Keeping the built-ins static means highlighting and completion work before that resolves, and
+// still work if it fails.
 const FUNCTIONS = new Set([...AGGREGATE_FNS, ...SCALAR_FNS])
+
+/** Names registered at host startup, learned once per page. Mutated in place so the pure
+ *  highlight/complete helpers below keep reading one set rather than threading state through. */
+const REGISTERED_FUNCTIONS = new Set<string>()
+
+let registeredFetchStarted = false
+
+function ensureRegisteredFunctionsLoaded(onLoaded: () => void) {
+  if (registeredFetchStarted) return
+  registeredFetchStarted = true
+  sqlFunctionsApi
+    .catalog()
+    .then((c) => {
+      for (const n of [...c.registeredScalars, ...c.registeredAggregates]) REGISTERED_FUNCTIONS.add(n.toUpperCase())
+      if (REGISTERED_FUNCTIONS.size > 0) onLoaded()
+    })
+    .catch(() => {
+      // A console that cannot reach this endpoint still highlights and completes every built-in —
+      // there is nothing to tell the user about, and nothing to retry on their behalf.
+      registeredFetchStarted = false
+    })
+}
+
+function isFunctionName(upper: string): boolean {
+  return FUNCTIONS.has(upper) || REGISTERED_FUNCTIONS.has(upper)
+}
 
 // Keywords that put the caret in an "expression position" when they are the last significant
 // token before the word being typed (SELECT list, WHERE/ON predicates, GROUP BY, AND/OR chains).
@@ -69,7 +100,7 @@ function tokenize(sql: string): Token[] {
     else if (m[3] !== undefined) kind = 'number'
     else if (m[4] !== undefined) {
       const upper = m[4].toUpperCase()
-      kind = KEYWORDS.has(upper) ? 'keyword' : FUNCTIONS.has(upper) ? 'function' : 'identifier'
+      kind = KEYWORDS.has(upper) ? 'keyword' : isFunctionName(upper) ? 'function' : 'identifier'
     } else if (m[5] !== undefined) kind = 'whitespace'
     else kind = 'punct' // covers plain operators as well as the JSON `->` / `->>` pair — rendered as-is, no special-casing needed
     tokens.push({ text, start, end, kind })
@@ -461,6 +492,11 @@ function buildFunctionSuggestions(): Suggestion[] {
   const fns: Suggestion[] = []
   for (const f of AGGREGATE_FNS) fns.push({ kind: 'aggregate', label: f, insertText: f, meta: 'agg' })
   for (const f of SCALAR_FNS) fns.push({ kind: 'function', label: f, insertText: f, meta: 'fn' })
+  // Host-registered names, marked distinctly: they are present because this deployment loaded the
+  // assembly that registers them, not because the dialect always has them.
+  for (const f of REGISTERED_FUNCTIONS) {
+    if (!FUNCTIONS.has(f)) fns.push({ kind: 'function', label: f, insertText: f, meta: 'ext' })
+  }
   return fns
 }
 
@@ -667,10 +703,17 @@ export function SqlEditor({
   const [activeIndex, setActiveIndex] = useState(0)
   const [anchor, setAnchor] = useState<{ top: number; left: number; placement: 'below' | 'above' } | null>(null)
 
+  // Learn the host-registered function names once per page. The bump re-runs the memo below so a name
+  // that arrives after first paint still highlights and completes; the built-ins never waited for it.
+  const [registeredEpoch, setRegisteredEpoch] = useState(0)
+  useEffect(() => {
+    ensureRegisteredFunctionsLoaded(() => setRegisteredEpoch((e) => e + 1))
+  }, [])
+
   const autocomplete = useMemo(() => {
     if (readOnly) return null
     return computeAutocomplete(value, caretPos, sources, { ignorePrefix: forceFullList })
-  }, [value, caretPos, sources, readOnly, forceFullList])
+  }, [value, caretPos, sources, readOnly, forceFullList, registeredEpoch])
 
   const showPopup = !readOnly && popupOpen && autocomplete !== null && autocomplete.suggestions.length > 0
 

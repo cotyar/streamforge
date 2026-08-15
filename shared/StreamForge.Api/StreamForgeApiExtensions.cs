@@ -240,6 +240,7 @@ public static class StreamForgeApiExtensions
         app.MapChatEndpoints();
         app.MapMetaEndpoints(options);
         app.MapTransportsEndpoints();
+        app.MapSqlFunctionsEndpoints();
         app.MapEntityOpenApiEndpoints();
         app.MapHub<StreamHub>("/hubs/stream");
 
