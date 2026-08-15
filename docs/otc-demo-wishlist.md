@@ -58,11 +58,30 @@ one of these was a coercion *failure* before, so nothing that used to produce a
 value produces a different one, which is what the class doc's "pinned to the
 inbound path byte-for-byte" warning is actually protecting.
 
-**Still open, deliberately:** `DateTime`/`DateTimeOffset` have no arm either, so
-a Postgres `timestamptz` column declared as a `Timestamp` field NULLs out the
-same way. Not fixed here because `DateTime` with `DateTimeKind.Unspecified` (what
-a plain `timestamp` column yields) has no correct timezone answer to guess, and
-that decision belongs with whoever wants the feature, not with a bug fix.
+**Follow-up, also shipped:** `DateTime`/`DateTimeOffset` had no arm either, so a
+date/time column declared as a `Timestamp` field NULLed out the same way. It was
+first left open on the grounds that `DateTimeKind.Unspecified` has no correct
+timezone to guess — which turned out to overstate the problem. Only one of the
+three kinds is ambiguous at all: `Utc` and `Local` both carry their own offset
+and convert exactly, and `DateTimeOffset` is unambiguous by construction. For
+`Unspecified` there is no new policy to invent either — this file already reads a
+zone-less timestamp as UTC on both of its string paths
+(`DateTimeStyles.AssumeUniversal`), and `PgCdcSource.ToUnixMs` does the same to a
+pgoutput commit timestamp. Reading it as `Local` instead would make the value
+depend on the host process's timezone, which is a deploy detail rather than a
+property of the data.
+
+The rule lives in one private helper used by all three timestamp entry points
+(`TryCoerce`'s `Timestamp` kind, `TO_TIMESTAMP`, and `ResolveTimestamp`) so they
+cannot drift. `Timestamp` was split out of `Long`'s numeric-only rule to carry it;
+`Long` deliberately still rejects a date/time, so a mis-declared column stays a
+visible NULL instead of quietly becoming an epoch integer.
+
+**Genuinely still open, and not additive:** a date/time coerced to a `String`
+field renders as `08/15/2026 12:00:00` (invariant-culture `ToString`) — not
+sortable, not ISO-8601, not parseable by the ISO reader on the way back in.
+Fixing it would change a value the pipeline already produces today, so unlike
+everything above it is a behavior change that needs a decision, not a bug fix.
 
 ## 4. ✅ cdc.md example doesn't parse (doc bug)
 

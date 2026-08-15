@@ -63,8 +63,12 @@ public static class FieldValueConversion
             case FieldKind.Double:
                 return TryToDouble(value, out coerced);
             case FieldKind.Long:
-            case FieldKind.Timestamp: // epoch millis - identical wire/CLR representation to Long
                 return TryToLong(value, out coerced);
+            case FieldKind.Timestamp:
+                // Still epoch millis, with the identical wire/CLR representation Long has — the only
+                // difference is that a CLR date/time VALUE means something here, so it is accepted
+                // before falling through to Long's numeric rule.
+                return TryToTimestampMillis(value, out coerced);
             case FieldKind.Bool:
                 return TryToBool(value, out coerced);
             case FieldKind.Json:
@@ -92,6 +96,12 @@ public static class FieldValueConversion
                 return true;
             case double d:
                 coerced = (long)d;
+                return true;
+            case DateTimeOffset off:
+                coerced = off.ToUnixTimeMilliseconds();
+                return true;
+            case DateTime dt:
+                coerced = ToEpochMs(dt);
                 return true;
             case string s:
                 if (long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var epoch))
@@ -129,6 +139,10 @@ public static class FieldValueConversion
                 return l;
             case double d:
                 return (long)d;
+            case DateTimeOffset dto:
+                return dto.ToUnixTimeMilliseconds();
+            case DateTime dt:
+                return ToEpochMs(dt);
             case string s when DateTimeOffset.TryParse(
                 s, CultureInfo.InvariantCulture,
                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dto):
@@ -145,6 +159,42 @@ public static class FieldValueConversion
         IFormattable f => f.ToString(null, CultureInfo.InvariantCulture),
         _ => value.ToString() ?? "",
     };
+
+    /// <summary>The Timestamp-only half of the coercion rule: a CLR date/time value is epoch millis
+    /// directly, and anything else falls through to <see cref="TryToLong"/>'s numeric rule (a bare number
+    /// or numeric string), which is what this kind accepted before. Additive — a DateTime used to be a
+    /// coercion failure, i.e. a silent NULL, which is how a Postgres `timestamptz` column declared as a
+    /// Timestamp field emptied itself out.</summary>
+    private static bool TryToTimestampMillis(object value, out object? coerced)
+    {
+        switch (value)
+        {
+            case DateTimeOffset dto:
+                coerced = dto.ToUnixTimeMilliseconds();
+                return true;
+            case DateTime dt:
+                coerced = ToEpochMs(dt);
+                return true;
+            default:
+                return TryToLong(value, out coerced);
+        }
+    }
+
+    /// <summary>The one place this file decides what a <see cref="DateTime"/> means, so the three
+    /// timestamp rules above (<see cref="TryCoerce"/>'s Timestamp kind, <c>TO_TIMESTAMP</c>, and
+    /// <see cref="ResolveTimestamp"/>) cannot drift apart.
+    ///
+    /// <para>Two of the three <see cref="DateTimeKind"/>s carry their own answer: <c>Utc</c> (what a
+    /// driver hands back for a zone-aware column) and <c>Local</c> both convert exactly, because the CLR
+    /// knows the offset. <c>Unspecified</c> — a Postgres `timestamp without time zone`, a SQL Server
+    /// `datetime2` — genuinely does not, and is read as UTC. That is not a fresh guess: it is the rule
+    /// this file already applies to timestamp TEXT, where both parsers use
+    /// <c>DateTimeStyles.AssumeUniversal</c>, and the same one <c>PgCdcSource.ToUnixMs</c> applies to a
+    /// pgoutput commit timestamp. Reading it as Local instead would make the value depend on the host
+    /// process's timezone — a deploy detail, not a property of the data.</para></summary>
+    private static long ToEpochMs(DateTime value) => new DateTimeOffset(
+        value.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(value, DateTimeKind.Utc) : value)
+        .ToUnixTimeMilliseconds();
 
     private static bool TryToDouble(object value, out object? coerced)
     {

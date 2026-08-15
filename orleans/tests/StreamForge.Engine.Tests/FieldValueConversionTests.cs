@@ -48,6 +48,71 @@ public class FieldValueConversionTests
     // TryCoerce(FieldKind.Double, …)
     // ------------------------------------------------------------------
 
+    /// <summary>The other half of that finding: a date/time column declared as a Timestamp field NULLed
+    /// out the same way, because Timestamp shared Long's purely-numeric rule. Utc and Local carry their
+    /// own offset and convert exactly; Unspecified is read as UTC, the same rule the string paths below
+    /// already apply via DateTimeStyles.AssumeUniversal.</summary>
+    [Fact]
+    public void Timestamp_accepts_clr_date_times_on_every_DateTimeKind()
+    {
+        var utc = new DateTime(2026, 8, 15, 12, 0, 0, DateTimeKind.Utc);
+        long expected = 1_786_795_200_000; // 2026-08-15T12:00:00Z
+        Assert.Equal(expected, new DateTimeOffset(utc).ToUnixTimeMilliseconds()); // pins the constant itself
+
+        Assert.True(FieldValueConversion.TryCoerce(FieldKind.Timestamp, utc, out var fromUtc));
+        Assert.Equal(expected, fromUtc);
+
+        // Unspecified — a Postgres `timestamp without time zone` — reads as the same instant, NOT as
+        // whatever the host process's timezone would make of it.
+        var unspecified = DateTime.SpecifyKind(utc, DateTimeKind.Unspecified);
+        Assert.True(FieldValueConversion.TryCoerce(FieldKind.Timestamp, unspecified, out var fromUnspecified));
+        Assert.Equal(expected, fromUnspecified);
+
+        // Local carries a known offset, so it converts to the instant it actually denotes.
+        var local = utc.ToLocalTime();
+        Assert.True(FieldValueConversion.TryCoerce(FieldKind.Timestamp, local, out var fromLocal));
+        Assert.Equal(expected, fromLocal);
+
+        Assert.True(FieldValueConversion.TryCoerce(FieldKind.Timestamp, new DateTimeOffset(utc), out var fromOffset));
+        Assert.Equal(expected, fromOffset);
+
+        // An offset that is NOT zero must be honoured, not dropped.
+        var plusTwo = new DateTimeOffset(2026, 8, 15, 14, 0, 0, TimeSpan.FromHours(2));
+        Assert.True(FieldValueConversion.TryCoerce(FieldKind.Timestamp, plusTwo, out var fromPlusTwo));
+        Assert.Equal(expected, fromPlusTwo);
+    }
+
+    /// <summary>The same three rules, reached through the two other timestamp entry points, so they
+    /// cannot drift apart from TryCoerce's.</summary>
+    [Fact]
+    public void The_other_two_timestamp_entry_points_agree_with_TryCoerce()
+    {
+        var utc = new DateTime(2026, 8, 15, 12, 0, 0, DateTimeKind.Utc);
+        long expected = 1_786_795_200_000;
+
+        Assert.True(FieldValueConversion.TryToTimestamp(utc, out var fnUtc));
+        Assert.Equal(expected, fnUtc);
+        Assert.True(FieldValueConversion.TryToTimestamp(new DateTimeOffset(utc), out var fnOffset));
+        Assert.Equal(expected, fnOffset);
+        Assert.True(FieldValueConversion.TryToTimestamp(DateTime.SpecifyKind(utc, DateTimeKind.Unspecified), out var fnUnspec));
+        Assert.Equal(expected, fnUnspec);
+
+        Assert.Equal(expected, FieldValueConversion.ResolveTimestamp(utc, fallbackMs: 1));
+        Assert.Equal(expected, FieldValueConversion.ResolveTimestamp(new DateTimeOffset(utc), fallbackMs: 1));
+        Assert.Equal(expected, FieldValueConversion.ResolveTimestamp(DateTime.SpecifyKind(utc, DateTimeKind.Unspecified), fallbackMs: 1));
+    }
+
+    /// <summary>A date/time is meaningful for Timestamp only. Long stays "a number" — widening it would
+    /// silently turn a mis-declared column into an epoch integer instead of the visible NULL that tells
+    /// the operator the declaration is wrong.</summary>
+    [Fact]
+    public void Long_does_not_silently_accept_a_date_time()
+    {
+        var utc = new DateTime(2026, 8, 15, 12, 0, 0, DateTimeKind.Utc);
+        Assert.False(FieldValueConversion.TryCoerce(FieldKind.Long, utc, out var coerced));
+        Assert.Null(coerced);
+    }
+
     /// <summary>The OTC-demo finding: a Postgres `numeric` column arrives from the CDC path as CLR
     /// `decimal` (PgCdcSource.Cell passes it through), and before this arm every money column declared
     /// Double coerced to NULL — silently, since coercion failure is not an error. `short`/`byte`/
