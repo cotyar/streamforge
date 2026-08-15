@@ -902,6 +902,7 @@ internal sealed class Validator
                     _diags.Add(new SqlDiagnostic("Aggregate functions cannot be nested", agg.Line, agg.Column));
                 }
                 _usedAggregates.Add(agg);
+                ValidateAggregateShape(agg);
                 if (!agg.IsStar && agg.Arg is not null) ResolveExpr(agg.Arg, scope, aggDepth + 1);
                 RecordAggregateKind(e, agg);
                 return;
@@ -1024,6 +1025,51 @@ internal sealed class Validator
         }
         _diags.Add(new SqlDiagnostic(
             $"CASE/IF branches must produce the same type, got {thenKind} and {elseKind}", f.Line, f.Column));
+    }
+
+    /// <summary>Argument count, DISTINCT placement and the parameterised aggregates' constant. Kept
+    /// apart from kind inference because these are grammar-shaped rules: they say what may be WRITTEN,
+    /// not what the result is.</summary>
+    private void ValidateAggregateShape(AggregateCallExpr agg)
+    {
+        bool takesParameter = StatAggregatorNames.TakesParameter(agg.Name);
+
+        if (!agg.IsStar)
+        {
+            int expected = takesParameter ? 2 : 1;
+            if (agg.ArgCount != expected)
+            {
+                _diags.Add(new SqlDiagnostic(
+                    takesParameter
+                        ? $"'{agg.Name}' takes exactly two arguments — a constant probability and the value, e.g. {agg.Name}(0.95, x)"
+                        : $"Aggregate '{agg.Name}' called with wrong number of arguments",
+                    agg.Line, agg.Column));
+            }
+        }
+
+        if (takesParameter && agg.ArgCount == 2 && !AggregateParameters.IsUsableProbability(agg.Parameter))
+        {
+            // A literal, not an expression: the parameter configures the aggregate for the whole group,
+            // so a per-row value would silently mean "whichever row got here first".
+            _diags.Add(new SqlDiagnostic(
+                $"'{agg.Name}'s first argument must be a constant number between 0 and 1",
+                (agg.Parameter ?? agg).Line, (agg.Parameter ?? agg).Column));
+        }
+
+        if (agg.IsDistinct)
+        {
+            if (!string.Equals(agg.Name, "COUNT", StringComparison.OrdinalIgnoreCase))
+            {
+                _diags.Add(new SqlDiagnostic(
+                    $"DISTINCT is only supported on COUNT, not on '{agg.Name}'", agg.Line, agg.Column));
+            }
+            else if (agg.Arg is null)
+            {
+                // `COUNT(DISTINCT *)` never reaches here — the grammar rejects it first, since the
+                // COUNT(*) form is recognised before DISTINCT and a bare '*' is not an expression.
+                _diags.Add(new SqlDiagnostic("COUNT(DISTINCT …) needs an expression to count", agg.Line, agg.Column));
+            }
+        }
     }
 
     private void RecordAggregateKind(Expr node, AggregateCallExpr agg)

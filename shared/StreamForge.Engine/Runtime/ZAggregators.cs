@@ -11,8 +11,13 @@ public interface IZAggregator
 
 internal static class ZAggregator
 {
-    public static IZAggregator Create(string name, bool isStar) => CreateCanonical(
-        StatAggregatorNames.Canonical(name.ToUpperInvariant()) ?? name.ToUpperInvariant(), isStar);
+    public static IZAggregator Create(Sql.AggregateCallExpr node)
+    {
+        string name = StatAggregatorNames.Canonical(node.Name) ?? node.Name;
+        if (node.IsDistinct) return new DistinctCountAggregator();
+        if (name == StatAggregatorNames.PercentileCont) return new PercentileZAggregator(AggregateParameters.Probability(node));
+        return CreateCanonical(name, node.IsStar);
+    }
 
     private static IZAggregator CreateCanonical(string name, bool isStar) => name switch
     {

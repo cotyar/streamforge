@@ -21,12 +21,14 @@ const KEYWORDS = new Set([
   // Reserved words the highlighter was missing; sqlScope.ts's CLAUSE_KEYWORDS (kept in sync by hand,
   // see its comment) needs the same five plus UNION, which is already here.
   'LATEST', 'UNNEST', 'IN', 'EXISTS',
+  // COUNT(DISTINCT x).
+  'DISTINCT',
 ])
 
 const AGGREGATE_FNS = new Set([
   'COUNT', 'SUM', 'AVG', 'MIN', 'MAX',
   // Statistical aggregates. STDDEV/VARIANCE are the bare spellings of the _SAMP forms.
-  'VAR_SAMP', 'VAR_POP', 'STDDEV_SAMP', 'STDDEV_POP', 'VARIANCE', 'STDDEV', 'MEDIAN',
+  'VAR_SAMP', 'VAR_POP', 'STDDEV_SAMP', 'STDDEV_POP', 'VARIANCE', 'STDDEV', 'MEDIAN', 'PERCENTILE_CONT',
 ])
 const SCALAR_FNS = new Set([
   'ABS', 'ROUND', 'UPPER', 'LOWER', 'COALESCE',

@@ -7,8 +7,15 @@ public abstract class Aggregator
     public abstract void Add(object? value);
     public abstract object? Result { get; }
 
-    public static Aggregator Create(string name, bool isStar) => CreateCanonical(
-        StatAggregatorNames.Canonical(name.ToUpperInvariant()) ?? name.ToUpperInvariant(), isStar);
+    /// <summary>Internal even though the class is public: the extension seam is Add/Result (what a
+    /// registered aggregate implements), not this factory, which reads a parsed call.</summary>
+    internal static Aggregator Create(Sql.AggregateCallExpr node)
+    {
+        string name = StatAggregatorNames.Canonical(node.Name) ?? node.Name;
+        if (node.IsDistinct) return new DistinctCountAggregator();
+        if (name == StatAggregatorNames.PercentileCont) return new PercentileAggregator(AggregateParameters.Probability(node));
+        return CreateCanonical(name, node.IsStar);
+    }
 
     private static Aggregator CreateCanonical(string name, bool isStar) => name switch
     {

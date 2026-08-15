@@ -89,7 +89,7 @@ internal sealed class TableReduceOp : ITableOp
     }
 
     private IZAggregator[] CreateAggregators() =>
-        _plan.AggregateNodes.Select(n => ZAggregator.Create(n.Name, n.IsStar)).ToArray();
+        _plan.AggregateNodes.Select(ZAggregator.Create).ToArray();
 
     private object?[] EvalGroupValues(WorkingRow row)
     {

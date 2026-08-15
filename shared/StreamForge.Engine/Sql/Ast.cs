@@ -103,11 +103,34 @@ internal static class AggregateNames
         All.Contains(name, StringComparer.OrdinalIgnoreCase) || SqlFunctions.FindAggregate(name) is not null;
 }
 
-internal sealed class AggregateCallExpr(string name, Expr? arg, bool isStar, int line, int col) : Expr(line, col)
+internal sealed class AggregateCallExpr(
+    string name, Expr? arg, bool isStar, int line, int col, bool isDistinct = false, Expr? parameter = null,
+    int argCount = 1)
+    : Expr(line, col)
 {
     public string Name { get; } = name.ToUpperInvariant();
+
+    /// <summary>The expression being aggregated. For a parameterised aggregate this is still the VALUE
+    /// argument (`PERCENTILE_CONT(0.05, pnl)` puts `pnl` here), so every existing consumer — argument
+    /// resolution, kind inference, the planner's projection wiring, both executors — keeps working
+    /// without knowing the aggregate takes a parameter at all.</summary>
     public Expr? Arg { get; } = arg;
+
     public bool IsStar { get; } = isStar;
+
+    /// <summary>`COUNT(DISTINCT x)`. Only legal where the Validator says so.</summary>
+    public bool IsDistinct { get; } = isDistinct;
+
+    /// <summary>The constant that configures a parameterised aggregate — the probability of
+    /// `PERCENTILE_CONT(p, x)`. Required to be a literal so it is fixed for the whole group: a
+    /// per-row probability has no meaning for an aggregate, and allowing an expression here would
+    /// silently take whichever row happened to arrive first.</summary>
+    public Expr? Parameter { get; } = parameter;
+
+    /// <summary>How many arguments were actually written. The node keeps only the ones it has a slot
+    /// for, so without this the parser silently dropped the extras and `SUM(a, b)` compiled as
+    /// `SUM(a)` — which mattered little until a parameterised aggregate made argument count load-bearing.</summary>
+    public int ArgCount { get; } = argCount;
 }
 
 /// <summary>Plan 004 N2: `expr [NOT] IN ( SELECT ... )`. Position-restricted (WHERE top-level AND-conjunct

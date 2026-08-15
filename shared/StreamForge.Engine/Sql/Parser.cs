@@ -1,3 +1,5 @@
+using StreamForge.Engine.Runtime;
+
 namespace StreamForge.Engine.Sql;
 
 internal sealed class ParseException(SqlDiagnostic diagnostic) : Exception(diagnostic.Message)
@@ -210,7 +212,9 @@ internal sealed class Parser
             case FunctionCallExpr f:
                 return new FunctionCallExpr(f.Name, f.Args.Select(a => SubstituteCtesInExpr(a, resolved, allCteNames)).ToList(), f.Line, f.Column);
             case AggregateCallExpr agg:
-                return agg.Arg is null ? agg : new AggregateCallExpr(agg.Name, SubstituteCtesInExpr(agg.Arg, resolved, allCteNames), agg.IsStar, agg.Line, agg.Column);
+                return agg.Arg is null ? agg : new AggregateCallExpr(
+                    agg.Name, SubstituteCtesInExpr(agg.Arg, resolved, allCteNames), agg.IsStar, agg.Line, agg.Column,
+                    agg.IsDistinct, agg.Parameter, agg.ArgCount);
             case JsonAccessExpr j:
                 return new JsonAccessExpr(SubstituteCtesInExpr(j.Left, resolved, allCteNames), j.ReturnText, j.Key, j.Line, j.Column);
             default:
@@ -890,6 +894,16 @@ internal sealed class Parser
             return new AggregateCallExpr(name, null, isStar: true, line, col);
         }
 
+        // `agg(DISTINCT x)`. Contextual, checked only here — immediately after an aggregate's open
+        // paren — so a column literally named "distinct" still parses as a column everywhere else.
+        // Which aggregates may actually carry it is the Validator's call, not the grammar's.
+        bool isDistinct = false;
+        if (AggregateNames.IsAggregate(name) && Current.IsKeyword("DISTINCT"))
+        {
+            Advance();
+            isDistinct = true;
+        }
+
         var args = new List<Expr>();
         if (!Current.IsSymbol(")"))
         {
@@ -904,8 +918,16 @@ internal sealed class Parser
 
         if (AggregateNames.IsAggregate(name))
         {
+            // A parameterised aggregate is written parameter-first, like SQL's own
+            // `PERCENTILE_CONT(0.05, x)`, but the VALUE argument still lands in Arg — see
+            // AggregateCallExpr.Arg for why that matters. A wrong argument count is left to the
+            // Validator so the diagnostic is positioned and phrased like every other arity error.
+            if (StatAggregatorNames.TakesParameter(name) && args.Count == 2)
+            {
+                return new AggregateCallExpr(name, args[1], isStar: false, line, col, isDistinct, args[0], args.Count);
+            }
             var arg = args.Count > 0 ? args[0] : null;
-            return new AggregateCallExpr(name, arg, isStar: false, line, col);
+            return new AggregateCallExpr(name, arg, isStar: false, line, col, isDistinct, null, args.Count);
         }
 
         return new FunctionCallExpr(name, args, line, col);

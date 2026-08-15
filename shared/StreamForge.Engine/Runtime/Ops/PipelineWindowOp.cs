@@ -164,7 +164,7 @@ internal sealed class PipelineWindowOp(CompiledPlan plan)
     }
 
     private Aggregator[] CreateAggregators() =>
-        plan.AggregateNodes.Select(n => Aggregator.Create(n.Name, n.IsStar)).ToArray();
+        plan.AggregateNodes.Select(Aggregator.Create).ToArray();
 
     private object?[] EvalGroupValues(WorkingRow row)
     {

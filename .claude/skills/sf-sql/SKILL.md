@@ -25,7 +25,8 @@ FROM source | (SELECT …) alias [, UNNEST(expr) AS l …]
 [UNION [ALL|DISTINCT] SELECT …] …    -- top level or FROM (…) alias only; UNION (no ALL): tables only
 -- durations: N MILLISECONDS|SECONDS|MINUTES|HOURS · comments: -- · GROUP BY repeats the
 -- exact expression (no alias sugar) · aggregates: COUNT/SUM/AVG/MIN/MAX + VAR_SAMP/VAR_POP/
--- STDDEV_SAMP/STDDEV_POP/MEDIAN (VARIANCE/STDDEV = the _SAMP forms; all subtractable) · fns: ABS/ROUND/
+-- STDDEV_SAMP/STDDEV_POP/MEDIAN/PERCENTILE_CONT(p,x)/COUNT(DISTINCT x) (VARIANCE/STDDEV = the _SAMP
+-- forms; p must be a constant in [0,1]; all subtractable) · fns: ABS/ROUND/
 -- UPPER/LOWER/COALESCE/TO_LONG/TO_DOUBLE/TO_BOOL/TO_TIMESTAMP/TO_STRING/IF(cond,a,b) · searched
 -- CASE WHEN cond THEN expr [WHEN …] [ELSE expr] END (sugar for nested IF; all branches must agree
 -- on type, ELSE defaults to NULL; no simple `CASE expr WHEN value` form) · CAST(expr AS type)
