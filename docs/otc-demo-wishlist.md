@@ -136,3 +136,15 @@ bound 5199/5299.
 can always be split apart. The gRPC port is now resolved once and shared with
 `StreamForgeApiOptions`, which previously read it a second time from
 configuration and would have reported 5299 while Kestrel bound something else.
+
+## 7. Console SQL editor: `LATEST BY` (and friends) parsed as a table alias
+
+`web/src/components/sqlScope.ts:147` — `CLAUSE_KEYWORDS` lacks `LATEST`,
+`UNNEST`, `UNION`, `IN`, `EXISTS` (all reserved in
+`shared/StreamForge.Engine/Sql/Parser.cs`), and `web/src/components/SqlEditor.tsx`
+`KEYWORDS` lacks `LATEST`/`UNNEST`/`IN`/`EXISTS`. So `FROM trades LATEST BY (id) WHERE `
+reads `LATEST` as an AS-less alias for `trades` and column completion after
+`WHERE` yields nothing — and every table-mode CDC mirror is written exactly that
+way. Fix is additive: add the five words to `CLAUSE_KEYWORDS` and the four to
+`KEYWORDS`. Found while porting the editor into the ac-co demo's `/sql` page
+(`apps/websites/otc-terms/app/sql/sql-scope.ts` carries the patched set).
