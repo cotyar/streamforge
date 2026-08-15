@@ -48,6 +48,39 @@ public class FieldValueConversionTests
     // TryCoerce(FieldKind.Double, …)
     // ------------------------------------------------------------------
 
+    /// <summary>The OTC-demo finding: a Postgres `numeric` column arrives from the CDC path as CLR
+    /// `decimal` (PgCdcSource.Cell passes it through), and before this arm every money column declared
+    /// Double coerced to NULL — silently, since coercion failure is not an error. `short`/`byte`/
+    /// unsigned reach the same place from smallint/tinyint. Purely additive: each of these was a
+    /// coercion FAILURE before, so nothing that used to produce a value produces a different one.</summary>
+    [Theory]
+    [InlineData(FieldKind.Double)]
+    [InlineData(FieldKind.Long)]
+    public void Driver_numerics_beyond_long_and_double_coerce_rather_than_null(FieldKind kind)
+    {
+        object[] inputs = [12.34m, (short)7, (ushort)7, (byte)7, (sbyte)7, 7u, 7ul];
+        foreach (var input in inputs)
+        {
+            Assert.True(FieldValueConversion.TryCoerce(kind, input, out var coerced), $"{input.GetType().Name} failed to coerce to {kind}");
+            Assert.NotNull(coerced);
+        }
+    }
+
+    [Fact]
+    public void Decimal_coerces_to_double_by_value_and_to_long_by_truncation()
+    {
+        Assert.True(FieldValueConversion.TryCoerce(FieldKind.Double, 12.34m, out var asDouble));
+        Assert.Equal(12.34d, Assert.IsType<double>(asDouble), 10);
+
+        Assert.True(FieldValueConversion.TryCoerce(FieldKind.Long, 12.9m, out var asLong));
+        Assert.Equal(12L, asLong); // toward zero, matching the existing double-to-long arm
+
+        Assert.True(FieldValueConversion.TryCoerce(FieldKind.Bool, 0m, out var zero));
+        Assert.Equal(false, zero);
+        Assert.True(FieldValueConversion.TryCoerce(FieldKind.Bool, 0.5m, out var nonZero));
+        Assert.Equal(true, nonZero);
+    }
+
     [Theory]
     [InlineData(3.5)]
     [InlineData(3L)]

@@ -154,6 +154,19 @@ public static class FieldValueConversion
             case float f: coerced = (double)f; return true;
             case long l: coerced = (double)l; return true;
             case int i: coerced = (double)i; return true;
+            // Every remaining CLR numeric a database driver actually hands back. `decimal` is the one
+            // that bites: Postgres `numeric`/`money` and SQL Server `decimal`/`money` arrive as decimal
+            // through the CDC and polled-source Cell mappings (both pass it through untouched), so
+            // without this arm a declared Double field silently NULLed every money column. `short`/
+            // `byte`/unsigned come from smallint/tinyint the same way. Additive only — these were
+            // coercion failures (NULL) before, never a different value.
+            case decimal m: coerced = (double)m; return true;
+            case short sh: coerced = (double)sh; return true;
+            case ushort us: coerced = (double)us; return true;
+            case byte by: coerced = (double)by; return true;
+            case sbyte sb: coerced = (double)sb; return true;
+            case uint ui: coerced = (double)ui; return true;
+            case ulong ul: coerced = (double)ul; return true;
             case bool b: coerced = b ? 1d : 0d; return true;
             case string s when double.TryParse(
                 s, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var parsed):
@@ -173,6 +186,15 @@ public static class FieldValueConversion
             case int i: coerced = (long)i; return true;
             case double d: coerced = (long)d; return true; // unchecked, see class doc's "Finding"
             case float f: coerced = (long)f; return true;
+            // See TryToDouble's note: the driver-produced numerics that had no arm at all until now.
+            // decimal narrows unchecked for the same reason double does, and truncates toward zero.
+            case decimal m: coerced = (long)m; return true;
+            case short sh: coerced = (long)sh; return true;
+            case ushort us: coerced = (long)us; return true;
+            case byte by: coerced = (long)by; return true;
+            case sbyte sb: coerced = (long)sb; return true;
+            case uint ui: coerced = (long)ui; return true;
+            case ulong ul: coerced = (long)ul; return true;
             case bool b: coerced = b ? 1L : 0L; return true;
             case string s when long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed):
                 coerced = parsed;
@@ -191,6 +213,14 @@ public static class FieldValueConversion
             case long l: coerced = l != 0; return true;
             case int i: coerced = i != 0; return true;
             case double d: coerced = d != 0; return true;
+            // Same additive widening as TryToDouble/TryToLong, on the same nonzero-is-true rule.
+            case decimal m: coerced = m != 0; return true;
+            case short sh: coerced = sh != 0; return true;
+            case ushort us: coerced = us != 0; return true;
+            case byte by: coerced = by != 0; return true;
+            case sbyte sb: coerced = sb != 0; return true;
+            case uint ui: coerced = ui != 0; return true;
+            case ulong ul: coerced = ul != 0; return true;
             case string s: coerced = bool.TryParse(s, out var parsed) ? parsed : s is not ("" or "0"); return true;
             default:
                 coerced = null;
