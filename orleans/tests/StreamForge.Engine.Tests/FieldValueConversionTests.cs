@@ -48,6 +48,32 @@ public class FieldValueConversionTests
     // TryCoerce(FieldKind.Double, …)
     // ------------------------------------------------------------------
 
+    /// <summary>A date/time reaching a String field used to render through the invariant culture's
+    /// US-style ToString ("08/15/2026 12:00:00") — not sortable as text, not readable back by this
+    /// file's own ISO parser, and a different shape for DateTime than for DateTimeOffset. One ISO-8601
+    /// UTC shape now, identical to what TO_STRING(TO_TIMESTAMP(x)) emits.</summary>
+    [Fact]
+    public void String_renders_a_date_time_as_ISO_8601_UTC()
+    {
+        var utc = new DateTime(2026, 8, 15, 12, 0, 0, DateTimeKind.Utc);
+        const string iso = "2026-08-15T12:00:00.000Z";
+
+        Assert.True(FieldValueConversion.TryCoerce(FieldKind.String, utc, out var fromUtc));
+        Assert.Equal(iso, fromUtc);
+
+        Assert.True(FieldValueConversion.TryCoerce(FieldKind.String, DateTime.SpecifyKind(utc, DateTimeKind.Unspecified), out var fromUnspec));
+        Assert.Equal(iso, fromUnspec);
+
+        // An offset-bearing value normalises to UTC rather than printing its offset, so two rows
+        // describing the same instant are the same string.
+        Assert.True(FieldValueConversion.TryCoerce(FieldKind.String, new DateTimeOffset(2026, 8, 15, 14, 0, 0, TimeSpan.FromHours(2)), out var fromOffset));
+        Assert.Equal(iso, fromOffset);
+
+        // Round-trips: the text this produces is text TryToTimestamp reads back to the same instant.
+        Assert.True(FieldValueConversion.TryToTimestamp(iso, out var backAgain));
+        Assert.Equal(new DateTimeOffset(utc).ToUnixTimeMilliseconds(), backAgain);
+    }
+
     /// <summary>The other half of that finding: a date/time column declared as a Timestamp field NULLed
     /// out the same way, because Timestamp shared Long's purely-numeric rule. Utc and Local carry their
     /// own offset and convert exactly; Unspecified is read as UTC, the same rule the string paths below

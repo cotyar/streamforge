@@ -242,8 +242,9 @@ internal static class ExpressionEvaluator
         if (value is long epochMs && f.Args.Count > 0 &&
             f.Args[0] is FunctionCallExpr inner && string.Equals(inner.Name, "TO_TIMESTAMP", StringComparison.OrdinalIgnoreCase))
         {
-            return DateTimeOffset.FromUnixTimeMilliseconds(epochMs)
-                .ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
+            // Same formatter FieldValueConversion uses for a CLR date/time landing in a String field, so
+            // the two routes to "a timestamp as text" cannot print differently.
+            return FieldValueConversion.FormatEpochMsIso8601(epochMs);
         }
 
         // FieldKind.String coercion always succeeds (see FieldValueConversion.TryCoerce's doc).

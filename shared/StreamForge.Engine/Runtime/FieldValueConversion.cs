@@ -152,13 +152,44 @@ public static class FieldValueConversion
         return fallbackMs;
     }
 
+    /// <summary>Culture-invariant rendering. A CLR date/time is written as ISO-8601 UTC rather than
+    /// through <see cref="IFormattable"/>, which produced the invariant culture's US-style
+    /// <c>08/15/2026 12:00:00</c> — not sortable as text, not round-trippable by
+    /// <see cref="TryToTimestamp"/>'s own ISO reader, and differently shaped for
+    /// <see cref="DateTime"/> vs <see cref="DateTimeOffset"/>. The format matches the one
+    /// <c>ExpressionEvaluator.EvalToString</c> already emits for <c>TO_STRING(TO_TIMESTAMP(x))</c>, so
+    /// a timestamp renders identically however it reached a String field, and the zone rule is
+    /// <see cref="ToEpochMs"/>'s — one decision, not a second one made here.</summary>
     private static string ToDisplayString(object value) => value switch
     {
         string s => s,
         bool b => b ? "true" : "false",
+        DateTime or DateTimeOffset => FormatIso8601(value),
         IFormattable f => f.ToString(null, CultureInfo.InvariantCulture),
         _ => value.ToString() ?? "",
     };
+
+    /// <summary>ISO-8601 UTC, milliseconds, always <c>Z</c> — the single textual shape for an instant in
+    /// this dialect. An offset-bearing value is normalised to UTC rather than printed with its offset,
+    /// so two rows describing the same instant compare and sort equal as text.</summary>
+    public static string FormatIso8601(object value)
+    {
+        long epochMs = value switch
+        {
+            DateTimeOffset off => off.ToUnixTimeMilliseconds(),
+            DateTime dt => ToEpochMs(dt),
+            long l => l,
+            _ => 0,
+        };
+        return FormatEpochMsIso8601(epochMs);
+    }
+
+    /// <summary>The one formatter for epoch millis → ISO-8601 text, shared with
+    /// <c>ExpressionEvaluator.EvalToString</c> so <c>TO_STRING(TO_TIMESTAMP(x))</c> and a Timestamp
+    /// value landing in a String field cannot print differently.</summary>
+    public static string FormatEpochMsIso8601(long epochMs) =>
+        DateTimeOffset.FromUnixTimeMilliseconds(epochMs)
+            .ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
 
     /// <summary>The Timestamp-only half of the coercion rule: a CLR date/time value is epoch millis
     /// directly, and anything else falls through to <see cref="TryToLong"/>'s numeric rule (a bare number
