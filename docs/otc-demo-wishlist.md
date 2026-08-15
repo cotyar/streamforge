@@ -4,9 +4,9 @@ Collected while building the hedge-fund demo (ac-co.ai-4 `apps/websites/otc-term
 + `apps/office-addins/otc-addin`) against StreamForge. Ordered by value; every
 item is small by design.
 
-**All six are now done.** Each section keeps the original report and records what
-shipped underneath it, including the one place the report turned out to be
-describing half a bug.
+Each section keeps the original report and records what shipped underneath it —
+including the places where the report turned out to be describing half of
+something. **Done: 1–7, 10, 11, 12. Half done: 14. Open: 8, 9, 13, 15.**
 
 ## 1. ✅ Configurable CORS origins (shipped 2026-08-15)
 
@@ -137,7 +137,7 @@ can always be split apart. The gRPC port is now resolved once and shared with
 `StreamForgeApiOptions`, which previously read it a second time from
 configuration and would have reported 5299 while Kestrel bound something else.
 
-## 7. Console SQL editor: `LATEST BY` (and friends) parsed as a table alias
+## 7. ✅ Console SQL editor: `LATEST BY` (and friends) parsed as a table alias
 
 `web/src/components/sqlScope.ts:147` — `CLAUSE_KEYWORDS` lacks `LATEST`,
 `UNNEST`, `UNION`, `IN`, `EXISTS` (all reserved in
@@ -148,6 +148,10 @@ reads `LATEST` as an AS-less alias for `trades` and column completion after
 way. Fix is additive: add the five words to `CLAUSE_KEYWORDS` and the four to
 `KEYWORDS`. Found while porting the editor into the ac-co demo's `/sql` page
 (`apps/websites/otc-terms/app/sql/sql-scope.ts` carries the patched set).
+
+**Shipped:** the five words `Parser.cs` reserves were added to `CLAUSE_KEYWORDS`
+(`LATEST`, `UNNEST`, `UNION`, `IN`, `EXISTS`) and four to `KEYWORDS`, exactly as
+scoped.
 
 ---
 
@@ -221,7 +225,7 @@ can't do otherwise. With #8's seed the whole trajectory is replayable.
 Workaround in the demo: a Bun driver steps days outside and re-pushes state per
 `(path_id, instrument_id)`, relying on `LATEST BY` supersession.
 
-## 10. Statistical aggregates: STDDEV/VAR, PERCENTILE_CONT/MEDIAN, COUNT(DISTINCT)
+## 10. ✅ Statistical aggregates: STDDEV/VAR, PERCENTILE_CONT/MEDIAN, COUNT(DISTINCT)
 
 Aggregates are the closed set `COUNT, SUM, AVG, MIN, MAX`
 (`shared/StreamForge.Engine/Sql/Ast.cs:93-97` `AggregateNames.All`, factories
@@ -242,7 +246,23 @@ Enables VaR/ES/breach-probability *in SQL* over the MC tables:
 `SELECT run_id, PERCENTILE_CONT(0.05) OVER pnl … GROUP BY run_id`.
 Workaround in the demo: percentiles computed client-side over `mc_path_pnl` rows.
 
-## 11. Pricing / greeks scalar functions backed by QuantLib (via QLNet)
+**Shipped in two parts.** The one-argument family — `VAR_SAMP`/`VAR_POP`/
+`STDDEV_SAMP`/`STDDEV_POP`/`MEDIAN`, with `VARIANCE`/`STDDEV` aliasing the sample
+forms — needed only new accumulators. `PERCENTILE_CONT(p, x)` and
+`COUNT(DISTINCT x)` needed grammar: a second aggregate argument and a `DISTINCT`
+keyword. All of them subtract, proven by driving values through a `LATEST BY`
+table and comparing against a from-scratch fold over what should remain.
+
+Two things worth knowing. The moments are accumulated around an offset taken from
+the first value seen, not as raw `Σx²`: over prices near 1e8 with a spread of 1
+the textbook form is wrong by ~2 (measured, by forcing the offset to zero), and
+Welford — the usual answer — cannot subtract. And `p` must be a literal, because a
+per-row probability would silently mean "whichever row arrived first".
+
+Fixed a pre-existing gap on the way: the parser kept only an aggregate's first
+argument and dropped the rest, so `SUM(a, b)` compiled as `SUM(a)`.
+
+## 11. ✅ Pricing / greeks scalar functions backed by QuantLib (via QLNet)
 
 Scalars are a closed compile-time set: `Sql/Validator.cs:1182` `KnownFunctions`
 + arity/kind switches (`:1198-1212`) + `Runtime/ExpressionEvaluator.cs:188-219`
@@ -268,7 +288,21 @@ vector table once with QuantLib-Python (`pip install QuantLib`) and assert
 Enables scenarios "curve +25 bp / vol +5 pts → positions reprice in-engine"
 instead of exposure shocks. Workaround in the demo: exposure shocks only.
 
-## 12. Function / aggregate extension seam (makes 10–11 additive)
+**Shipped**, on QLNet 1.13.1 — note 1.14 does not exist, 1.13.1 is the newest
+stable. The Black family goes through QLNet's own `BlackCalculator`, which is
+date-free (forward, stddev, discount) and so touches none of QLNet's
+`Settings.evaluationDate` thread-static global. The bond/swap measures are
+closed-form for exactly that reason: QLNet's instrument layer reads that global,
+which is incompatible with a scalar that must be pure, total and concurrently
+evaluated. Said plainly in the code so "QuantLib-backed" is not read as covering
+more than it does.
+
+Tests assert only against independently-known values — Hull's worked example,
+put-call parity, `delta_call − delta_put = e^(−qT)`, gamma/vega equal across
+call and put, a par bond at par, modified duration of a zero, DV01 against an
+actual 1bp reprice, a par swap worth nothing, covered-interest parity.
+
+## 12. ✅ Function / aggregate extension seam (makes 10–11 additive)
 
 `Aggregator`, `IZAggregator`, `KnownFunctions` and `EvalFunction` are all
 `internal`, so a `StreamForge.Quant` assembly cannot register anything without
@@ -278,6 +312,18 @@ Eval(args) }` and `IAggregateFactory { Name, CreateStream(), CreateZ() }` — th
 the Validator/Parser/Evaluator consult after the built-in switches. Console
 intellisense (`web/src/components/SqlEditor.tsx` `FUNCTIONS`) should read the
 same registry through `GET /api/sql/functions` so #10/#11 auto-complete.
+
+**Shipped.** `SqlFunctions` with `IScalarFunction`/`IAggregateFunction`, consulted
+by parser, validator and evaluator after the built-in switches. Built-ins always
+win and a colliding registration is refused *at registration*, not resolved by
+precedence — a third party redefining `SUM` would change the meaning of deployed
+SQL and the damage would appear as wrong numbers rather than an error. An
+aggregate must supply both accumulators, because a table maintains a Z-set and
+one that cannot subtract cannot be maintained incrementally.
+
+`GET /api/sql/functions` ships with it and the console's completion list reads it,
+so a registered function autocompletes; built-ins stay static there so the editor
+works before that resolves and if it fails. Verified live against a running host.
 
 ## 13. Explicit key retraction through ingest
 
@@ -294,7 +340,7 @@ table (only meaningful for LATEST BY consumers — reject otherwise at validate)
 or `DELETE /api/tables/{id}/rows?key=…` for LATEST BY tables. Either lets the
 demo free `scenario_inputs` and `mc_paths` keys instead of tombstoning.
 
-## 14. BUG: an aggregate created over an already-populated `LATEST BY` table collapses to zero
+## 14. ◐ BUG: an aggregate created over an already-populated `LATEST BY` table collapses to zero
 
 `shared/StreamForge.Engine/Runtime/Ops/TableReduceOp.cs` — `Groups.Remove(key)`
 whenever a group's running weight touches zero; a group cannot carry negative
@@ -317,6 +363,20 @@ empty key map — instead of the materialized table
 (`apps/websites/otc-terms/lib/streamforge/provision-doc.ts`, and
 `lib/streamforge/rebuild.ts` documents which tables must never be recreated
 warm).
+
+**Half shipped, and the half that was safe.** A group whose weight goes negative
+is now kept — only exactly-zero drops it — so the unmatched retraction no longer
+destroys the group for the following assert to rebuild from one row. The aggregate
+reports *nothing* instead of a plausible wrong count, and a test shows that
+replaying the missed asserts converges rather than double-counting, which is the
+property any backfill will depend on. `TableExecutor.UnmatchedRetractions` counts
+the occurrences, so an operator can see why.
+
+**Not done: the actual fix**, option (a). Replaying the upstream's contents on
+attach is a change to `TableGrain`'s subscription path in both runtimes, and it is
+only correct if the snapshot and the delta stream agree on an epoch — otherwise
+the backfill duplicates or misses rows and produces a wrong answer by a different
+route. That needs its own pass.
 
 ## 15. Retract/assert of one upstream change should be applied atomically downstream
 
