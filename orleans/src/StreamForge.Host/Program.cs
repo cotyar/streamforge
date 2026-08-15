@@ -16,11 +16,20 @@ var builder = WebApplication.CreateBuilder(args);
 // Co-hosted process listens on http://localhost:5199 (REST/SignalR/SPA, HTTP/1.1) and
 // http://localhost:5299 (gRPC, cleartext h2c — HTTP/2-only, no ALPN without TLS) by default;
 // ASPNETCORE_URLS (if set) wins and skips both explicit Kestrel endpoints below.
+//
+// PORT (the PaaS convention: Cloud Run, Heroku, fly.io all set it) moves the HTTP port, and the gRPC
+// port follows at PORT+100 — the same +100 relationship the two defaults already have. Without this,
+// `PORT=6199 dotnet run` silently still bound 5199/5299, which on a developer machine means landing on
+// whatever else already owns those ports. Http:Port / Grpc:Port still win where they are set, so an
+// explicit pair can always split the two apart.
+var envPort = builder.Configuration.GetValue<int?>("PORT");
+var httpPort = builder.Configuration.GetValue("Http:Port", envPort ?? 5199);
+// Resolved out here, not inside the `if`, because StreamForgeApiOptions below reports this same number
+// to clients — computing it twice is how the reported port and the bound port drift apart.
+var grpcPort = builder.Configuration.GetValue("Grpc:Port", envPort is { } p ? p + 100 : 5299);
+
 if (string.IsNullOrEmpty(builder.Configuration["urls"]))
 {
-    var httpPort = builder.Configuration.GetValue("Http:Port", 5199);
-    var grpcPort = builder.Configuration.GetValue("Grpc:Port", 5299);
-
     builder.WebHost.ConfigureKestrel(kestrel =>
     {
         kestrel.ListenLocalhost(httpPort, o => o.Protocols = HttpProtocols.Http1);
@@ -125,7 +134,7 @@ var app = builder.Build();
 // Program.cs resolved inline.
 var apiOptions = new StreamForgeApiOptions(
     ProtosDir: Path.Combine(app.Environment.ContentRootPath, "Protos"),
-    GrpcPort: app.Configuration.GetValue("Grpc:Port", 5299),
+    GrpcPort: grpcPort,
     GrpcStaticServices:
     [
         "SourceService", "PipelineService", "TableService", "StreamService", "IngestService", "DynamicStreamService", "ServerReflection",
