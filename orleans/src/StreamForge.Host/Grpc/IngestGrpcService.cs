@@ -2,6 +2,7 @@ using Grpc.Core;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Ingest;
 using V1 = StreamForge.Host.Grpc.V1;
 
 namespace StreamForge.Host.Grpc;
@@ -26,8 +27,16 @@ namespace StreamForge.Host.Grpc;
 /// pending, this service simply doesn't call MoveNext on the request reader, so gRPC's receive buffer
 /// fills, HTTP/2 flow control stops advertising window credit on the wire, and the client's own
 /// RequestStream.WriteAsync genuinely blocks — no client-side polling or throttle needed.
+///
+/// <para>Wishlist "explicit key retraction through ingest": this used to call
+/// <see cref="IIngressFacade.PushAsync"/> straight off the wire, which meant a <c>"_retract": true</c>
+/// row landed with no gate at all — <see cref="StreamForge.Api.SourcesEndpoints"/>'s
+/// <c>POST /{name}/events</c> is the only place that ran <see cref="RetractConsumerValidation.FindNonLatestByConsumer"/>
+/// before admission. Fixed by running the exact same check here, against the exact same method (not a
+/// second copy of "is this table LATEST BY" that could quietly drift from the REST one) — see
+/// <see cref="Ingest"/>'s body.</para>
 /// </summary>
-public sealed class IngestGrpcService(IIngressFacade ingress, IAuthorizationService authz) : V1.IngestService.IngestServiceBase
+public sealed class IngestGrpcService(IIngressFacade ingress, IAuthorizationService authz, ICatalogFacade registry) : V1.IngestService.IngestServiceBase
 {
     public override async Task Ingest(
         IAsyncStreamReader<V1.IngestRequest> requestStream,
@@ -45,6 +54,46 @@ public sealed class IngestGrpcService(IIngressFacade ingress, IAuthorizationServ
 
             var rows = request.Rows.Select(GrpcValueConverter.FromStruct).ToList();
             var idempotencyKey = string.IsNullOrEmpty(request.IdempotencyKey) ? null : request.IdempotencyKey;
+
+            // Wishlist "explicit key retraction through ingest": mirrors SourcesEndpoints.cs's
+            // POST /{name}/events gate 1:1 — same RetractConsumerValidation.FindNonLatestByConsumer
+            // call, same partial/whole-batch split, same message text. Closes the gap that commit
+            // c5847be named plainly: this path used to accept a "_retract" row silently instead of
+            // refusing it.
+            var retractRowIndexes = RetractConsumerValidation.CollectRetractRowIndexes(rows);
+            if (retractRowIndexes.Count > 0)
+            {
+                var offendingTable = RetractConsumerValidation.FindNonLatestByConsumer(
+                    request.SourceName, await registry.GetSourcesAsync().ConfigureAwait(false), await registry.GetTablesAsync().ConfigureAwait(false));
+                if (offendingTable is not null)
+                {
+                    var retractErrors = BuildRetractErrors(request.SourceName, offendingTable, retractRowIndexes);
+
+                    if (!request.Partial)
+                    {
+                        // Whole-batch rejection: no PushAsync call at all — same "a partially-admitted
+                        // batch would have no safe retry" reasoning IngressOverflowPolicy.Reject's own
+                        // doc states, applied to a validate-time rejection instead of a capacity one.
+                        // The stream itself stays open (an RpcException would end the call for every
+                        // future message, not just this one) — the bad batch gets an Invalid ack and
+                        // the client decides what to do next, exactly like a 400 leaves the HTTP
+                        // connection open for the next request.
+                        await responseStream.WriteAsync(ToAck(RejectedResult(retractErrors))).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    // Partial: admit everything else, fold the offending rows into Invalid/RowErrors —
+                    // identical to SourcesEndpoints.cs's own partial branch.
+                    var offendingSet = new HashSet<int>(retractRowIndexes);
+                    var filteredRows = rows.Where((_, i) => !offendingSet.Contains(i)).ToList();
+                    var partialResult = await ingress.PushAsync(request.SourceName, filteredRows, request.Partial, idempotencyKey).ConfigureAwait(false);
+                    partialResult.Invalid += retractErrors.Count;
+                    partialResult.RowErrors = [.. partialResult.RowErrors, .. retractErrors];
+                    await responseStream.WriteAsync(ToAck(partialResult)).ConfigureAwait(false);
+                    continue;
+                }
+            }
+
             var result = await ingress.PushAsync(request.SourceName, rows, request.Partial, idempotencyKey).ConfigureAwait(false);
             await responseStream.WriteAsync(ToAck(result)).ConfigureAwait(false);
         }
@@ -65,6 +114,32 @@ public sealed class IngestGrpcService(IIngressFacade ingress, IAuthorizationServ
         var presentedKey = context.RequestHeaders.GetValue("x-sf-ingest-key");
         return await ingress.ValidateKeyAsync(sourceName, presentedKey).ConfigureAwait(false);
     }
+
+    /// <summary>The exact per-row message SourcesEndpoints.cs's REST handler builds for the identical
+    /// situation — extracted to its own testable method (this class has no HTTP/gRPC test harness to
+    /// exercise <see cref="Ingest"/> end-to-end against, so this is the seam a unit test can pin the wording
+    /// through without one) rather than left inline, so a future edit to either copy is at least visible as
+    /// a diff to this one method instead of two independently-typed string interpolations silently drifting
+    /// apart. See <see cref="Ingest"/>'s own class-doc paragraph on why the CHECK itself
+    /// (<see cref="RetractConsumerValidation.FindNonLatestByConsumer"/>) is shared code, not just
+    /// shared wording.</summary>
+    public static List<string> BuildRetractErrors(string sourceName, string offendingTable, IReadOnlyList<int> retractRowIndexes)
+    {
+        var message = $"\"_retract\" is only valid when every running table reading source '{sourceName}' directly is a LATEST BY table; '{offendingTable}' is not";
+        return retractRowIndexes.Select(i => $"row {i}: {message}").ToList();
+    }
+
+    /// <summary>The whole-batch-rejection <see cref="IngestResult"/> shape for a request that failed
+    /// retract validation and did not ask for <c>partial</c> — no <see cref="IIngressFacade.PushAsync"/>
+    /// call happens for this shape (see <see cref="Ingest"/>'s own comment on why), so this is the entire
+    /// answer the client gets back on this message.</summary>
+    public static IngestResult RejectedResult(IReadOnlyList<string> retractErrors) => new()
+    {
+        Outcome = IngestOutcome.Invalid,
+        Invalid = retractErrors.Count,
+        Error = $"{retractErrors.Count} row(s) failed retract validation",
+        RowErrors = [.. retractErrors],
+    };
 
     private static V1.IngestAck ToAck(IngestResult result)
     {

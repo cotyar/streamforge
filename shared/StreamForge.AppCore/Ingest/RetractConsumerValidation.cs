@@ -1,4 +1,5 @@
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Json;
 using StreamForge.Engine;
 
 namespace StreamForge.AppCore.Ingest;
@@ -85,6 +86,31 @@ public static class RetractConsumerValidation
     /// signatures" header).</summary>
     private static bool IsLatestByShaped(TableCompileResult compiled) =>
         compiled.Ok && compiled.PlanSummary is not null && compiled.PlanSummary.Contains("LATEST BY ", StringComparison.Ordinal);
+
+    /// <summary>Indexes of every row in <paramref name="rows"/> that asks for a retraction — the same
+    /// scan SourcesEndpoints.cs's REST handler runs over the raw request body before admission (that
+    /// copy reads straight off <c>IngestEventsRequest.Events</c>, which is already this exact
+    /// <c>IReadOnlyList&lt;Dictionary&lt;string, object?&gt;&gt;</c> shape; it predates this method and
+    /// lives in an assembly this one cannot depend on — StreamForge.Api depends on AppCore, not the
+    /// other way). <c>IngestGrpcService</c> uses this one directly: <c>GrpcValueConverter.FromStruct</c>
+    /// already hands over the identical plain-CLR-leaf row shape <see cref="IngressRowAcceptance.Accept"/>
+    /// expects, so there is nothing gRPC-specific left to normalize. <see cref="JsonValueNormalizer.Normalize"/>
+    /// is a no-op for the plain <see cref="bool"/> a gRPC <c>Value.BoolValue</c> already decodes to — it
+    /// is called anyway so both transports resolve "is this row asking to retract" through the exact
+    /// same expression, not two expressions that happen to agree today.</summary>
+    public static List<int> CollectRetractRowIndexes(IReadOnlyList<Dictionary<string, object?>> rows)
+    {
+        var indexes = new List<int>();
+        for (var i = 0; i < rows.Count; i++)
+        {
+            if (rows[i].TryGetValue(IngressRowAcceptance.RetractField, out var raw)
+                && JsonValueNormalizer.Normalize(raw) is true)
+            {
+                indexes.Add(i);
+            }
+        }
+        return indexes;
+    }
 
     private static FieldKind MapFieldKind(FieldType type) => type switch
     {

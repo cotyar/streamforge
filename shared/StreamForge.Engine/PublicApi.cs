@@ -224,6 +224,54 @@ public sealed partial class TableExecutor
     /// re-deriving the same key by hand.</summary>
     public string CanonicalRowKey(EventRecord row) => Runtime.JsonText.SerializeCanonicalRow(row);
 
+    /// <summary>Wishlist item 16's netting half — the static twin of <see cref="CanonicalRowKey"/>, added
+    /// for a caller shape the instance method does not fit: something that wants to net a BATCH of
+    /// already-emitted rows by the exact same row-identity rule TableExecutorImpl's own epoch consolidation
+    /// uses (its private ConsolidateEpochOutput / <see cref="Runtime.ConsolidationLedger"/>, both keyed by
+    /// <see cref="Runtime.JsonText.SerializeCanonicalRow"/>) but has no live <see cref="TableExecutor"/> to
+    /// call <see cref="CanonicalRowKey"/> on and, more importantly, should not have to build one just to
+    /// reach a function of one row's fields — constructing a TableExecutor needs a compiled
+    /// <see cref="TablePlan"/>, which in turn needs the table's catalog definition and a SQL recompile, all
+    /// of it dead weight for a caller that only ever sees the wire shape (StreamForge.Host's
+    /// StreamBridgeService, coalescing a table's SignalR deltas per flush window, is the concrete caller —
+    /// see its own doc comment on why it must not invent its own row-identity rule: this is the
+    /// <see cref="Runtime.ConsolidationLedger"/> class doc's own "exposed to Host only via the public …
+    /// wrapper" story, extended with the one wrapper shape that was still missing). ADDITIVE — a new static
+    /// member beside the existing instance one; nothing existing changes shape. Byte-identical output to
+    /// <see cref="CanonicalRowKey"/> for the same fields.</summary>
+    public static string CanonicalRowKeyOf(IReadOnlyDictionary<string, object?> row) => Runtime.JsonText.SerializeCanonicalRow(row);
+
+    /// <summary>
+    /// Wishlist #14 option (a) — REAL backfill on attach. The epoch (see TableExecutorImpl.cs's own EPOCH
+    /// doc paragraph) most recently allocated by <see cref="OnStreamEvent"/>/<see cref="OnTableDelta"/>/
+    /// <see cref="OnTableDeltaBatch"/> — i.e. the epoch that produced whatever <see cref="Snapshot"/>
+    /// currently reflects. -1 before this executor has ever admitted anything.
+    ///
+    /// THE CONTRACT THIS EXISTS TO SERVE: a caller (TableGrain.AttachSnapshotAsync / TableActor's Dapr
+    /// mirror) reads <c>Snapshot()</c> and <c>LastEpoch</c> together, with NO <c>await</c> in between, so
+    /// nothing else can have run on this single-threaded executor between the two reads — the pair is
+    /// therefore an atomically-consistent (rows, epoch-as-of-those-rows) fact. A brand-new downstream table
+    /// attaching to this one as a table input can then: (1) subscribe to this table's own published delta
+    /// stream FIRST; (2) call this attach-snapshot pair; (3) admit the returned rows as its own initial
+    /// batch (exactly like any other <see cref="OnTableDeltaBatch"/> admission — through the SAME plan, so
+    /// GROUP BY/JOIN/LATEST BY state is correctly built up, not bypassed); (4) for every batch it goes on to
+    /// receive from step 1's subscription (whether "received" before or after step 2's read — Orleans/Dapr
+    /// both queue delivery to a single-threaded consumer, so anything from step 1 that arrives before this
+    /// table finishes starting is simply processed after, not lost), apply it only if its OWN stamped epoch
+    /// (see TableDeltaDto.Epoch) is STRICTLY GREATER than the LastEpoch this attach returned — anything
+    /// &lt;= that epoch is, by construction, already reflected in the snapshot step 3 admitted, and
+    /// re-admitting it would double the row's Z-set weight; anything strictly greater is, by the same
+    /// single-threaded-monotonic-epoch argument, guaranteed not to already be in the snapshot. No gap, no
+    /// double-count, regardless of exactly when between steps 1 and 2 the upstream happens to publish.
+    ///
+    /// Every producer this repo owns (TableGrain/TableActor's own ordinary publish path, and TableOutputGrain
+    /// for a coordinator-mode/Parallelism&gt;=2 upstream — see that grain's own doc comment) stamps
+    /// TableDeltaDto.Epoch from exactly this property at the moment of publishing, so the cutoff a consumer
+    /// reads from one AttachSnapshotAsync call is always comparable against what it later receives on that
+    /// same table's delta stream.
+    /// </summary>
+    public long LastEpoch => _lastEpoch;
+
     /// <summary>
     /// Plan 011 C2 — the eviction seam. ADDITIVE: not calling it (or passing
     /// <see cref="TableRetentionPolicy.None"/>) leaves this executor byte-for-byte the pre-011 one.

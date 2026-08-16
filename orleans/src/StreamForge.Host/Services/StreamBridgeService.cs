@@ -282,19 +282,98 @@ public sealed class StreamBridgeService(
         await base.StopAsync(cancellationToken);
     }
 
-    /// <summary>One `tableDelta` per (table, flush) rather than per engine publish. Deltas are relayed
-    /// in arrival order and never netted: two entries for the same row are left as they are, because
-    /// collapsing them correctly needs the engine's own row-identity rule, and a bridge that guessed at
-    /// it would silently change what the client's Z-set converges to. The engine already nets within an
-    /// epoch (TableExecutor's epoch consolidation), which is where that knowledge lives.</summary>
+    /// <summary>One `tableDelta` per (table, flush) rather than per engine publish, with same-key
+    /// retract+assert pairs inside that flush window collapsed to their net effect (wishlist item 16's
+    /// netting half). Netted BY THE ENGINE'S OWN ROW-IDENTITY RULE
+    /// (<see cref="TableExecutor.CanonicalRowKeyOf"/>, the exact canonicalization TableExecutorImpl's own
+    /// epoch consolidation keys by — see <see cref="NetByRowIdentity"/>'s own doc for why this bridge does
+    /// not invent its own notion of "same row"), never a guess: a bridge-local guess at row identity could
+    /// net two rows the engine considers distinct (silently dropping a real change) or fail to net two the
+    /// engine considers identical (leaving redundant frames on the wire), and either mistake would quietly
+    /// change what the client's Z-set converges to relative to the engine's own state — which is exactly
+    /// the failure mode a coalescing layer must never introduce. A batch that nets to nothing (every key's
+    /// weight cancelled across the window) sends NOTHING — see <see cref="NetByRowIdentity"/>'s own
+    /// call site below.</summary>
     private async Task SendTableDeltasAsync(string tableName, List<TableDeltaDto> deltas)
     {
+        var netted = NetByRowIdentity(deltas);
+        if (netted.Count == 0)
+        {
+            // Every key's net weight across this flush window was exactly zero — e.g. a row asserted and
+            // then retracted (or the reverse) entirely within the window. Nothing changed as far as any
+            // consumer of this table's OUTPUT can tell, so there is nothing to notify: no hub send, no seq
+            // bump. This is not the same thing as the "never drop a delta" rule above — that rule is about
+            // never losing a delta that carries real information; a net-zero window carries none by
+            // construction (the engine's own ConsolidateEpochOutput makes the identical call for exactly
+            // this reason, within one epoch — see TableExecutorImpl's own doc comment on it).
+            return;
+        }
+
         long seq;
         lock (_tableGate)
         {
             seq = _tableSeq[tableName] = _tableSeq.GetValueOrDefault(tableName) + 1;
         }
-        await hub.Clients.Group($"table:{tableName}").SendAsync("tableDelta", tableName, deltas, seq);
+        await hub.Clients.Group($"table:{tableName}").SendAsync("tableDelta", tableName, netted, seq);
+    }
+
+    /// <summary>Wishlist item 16's netting half. Collapses same-canonical-row entries within ONE flush
+    /// window's deltas to their net weight, dropping any key whose net weight is exactly zero — the
+    /// identical algorithm <c>TableExecutorImpl.ConsolidateEpochOutput</c> runs for one engine epoch (see
+    /// that method's own doc comment: "net every delta … by canonical row key … and drop any key whose net
+    /// weight is exactly zero"), applied here to a flush window's worth of already-published
+    /// <see cref="TableDeltaDto"/>s instead of one epoch's raw op output. Row identity comes from
+    /// <see cref="TableExecutor.CanonicalRowKeyOf"/> — the Engine's own canonicalization, added to
+    /// PublicApi.cs specifically because the existing instance-shaped <c>TableExecutor.CanonicalRowKey</c>
+    /// needs a live executor (and therefore a compiled <see cref="TablePlan"/>) this bridge has no reason
+    /// to build. ORDER-PRESERVING: a key's SURVIVING entry keeps the first occurrence's position and Row/
+    /// Evicted content — only its Weight becomes the window's net sum for that key — mirroring
+    /// ConsolidateEpochOutput's own "safe to keep whichever literal row instance was seen first for a key"
+    /// reasoning, which holds here for the identical reason: two deltas that canonicalize to the same key
+    /// are byte-identical in content by construction.
+    ///
+    /// A CLIENT APPLYING THESE NETTED DELTAS MUST CONVERGE TO EXACTLY THE SAME ROWS AS BEFORE NETTING —
+    /// this changes message SIZE, never the Z-set the client ends up with; see
+    /// StreamBridgeTableDeltaNettingTests for the proof.</summary>
+    public static List<TableDeltaDto> NetByRowIdentity(List<TableDeltaDto> deltas)
+    {
+        if (deltas.Count <= 1)
+        {
+            return deltas;
+        }
+
+        var netWeight = new Dictionary<string, long>();
+        var first = new Dictionary<string, TableDeltaDto>();
+        var order = new List<string>();
+
+        foreach (var delta in deltas)
+        {
+            var key = TableExecutor.CanonicalRowKeyOf(delta.Row);
+            if (netWeight.TryGetValue(key, out var existing))
+            {
+                netWeight[key] = existing + delta.Weight;
+            }
+            else
+            {
+                netWeight[key] = delta.Weight;
+                first[key] = delta;
+                order.Add(key);
+            }
+        }
+
+        var netted = new List<TableDeltaDto>(order.Count);
+        foreach (var key in order)
+        {
+            var weight = netWeight[key];
+            if (weight == 0)
+            {
+                continue;
+            }
+
+            var f = first[key];
+            netted.Add(new TableDeltaDto { Row = f.Row, Weight = weight, Evicted = f.Evicted });
+        }
+        return netted;
     }
 
     /// <summary>Drains every table's pending deltas. Failures are swallowed per table so one

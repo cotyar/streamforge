@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Config;
+using StreamForge.AppCore.Sinks;
 using StreamForge.AppCore.Sql;
 using StreamForge.Engine;
 using StreamForge.Host.Grains;
@@ -43,6 +44,17 @@ public static class TablesEndpoints
             if (sugar.Diagnostics.Count > 0)
             {
                 return Results.BadRequest(new ErrorResponse(string.Join("; ", sugar.Diagnostics)));
+            }
+
+            // Wishlist item 13 gap 3: the missing ISinkTransport.Validate call site — see
+            // SinkTransports.Validate's own doc for what this does and does not change. Always run on
+            // create: 'sinks' is always the request's own (possibly empty) list here, never a
+            // carried-over stored one.
+            var sinkErrors = new List<string>();
+            SinkTransports.Validate(sinks, sinkErrors);
+            if (sinkErrors.Count > 0)
+            {
+                return Results.BadRequest(new ErrorResponse(string.Join("; ", sinkErrors)));
             }
 
             try
@@ -105,6 +117,20 @@ public static class TablesEndpoints
             if (sugar.Diagnostics.Count > 0)
             {
                 return Results.BadRequest(new ErrorResponse(string.Join("; ", sugar.Diagnostics)));
+            }
+
+            // Wishlist item 13 gap 3: only when the request is actually touching Sinks (req.Sinks is
+            // null means "leave unchanged" — see the comment above) so a PUT that edits some unrelated
+            // field on a table whose sinks predate this validation, or were saved back before this rule
+            // existed, can never be blocked by a sink spec nobody asked to change.
+            if (req.Sinks is not null)
+            {
+                var sinkErrors = new List<string>();
+                SinkTransports.Validate(sinks, sinkErrors);
+                if (sinkErrors.Count > 0)
+                {
+                    return Results.BadRequest(new ErrorResponse(string.Join("; ", sinkErrors)));
+                }
             }
 
             existing.Name = req.Name;
