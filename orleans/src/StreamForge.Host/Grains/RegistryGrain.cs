@@ -208,6 +208,22 @@ public sealed class RegistryGrain(
     public Task<SourceDefinition?> GetSourceAsync(string name) =>
         Task.FromResult(state.State.Sources.FirstOrDefault(s => s.Name == name));
 
+    /// <summary>Wishlist #8's run-on-demand. The registry owns the catalog, so it is the one place that
+    /// can turn a source NAME into "the generator activation for that source" — and forwarding is all it
+    /// does: the batch is generated and published inside <see cref="IGeneratorGrain.RunAsync"/>, on the
+    /// activation that owns that source's stream. Doing the work here instead would publish from the
+    /// wrong activation and bypass the generator's own backpressure.</summary>
+    public async Task<ScenarioRunResult> RunSourceAsync(string name, ScenarioRunRequest request)
+    {
+        var src = state.State.Sources.FirstOrDefault(s => s.Name == name);
+        if (src is null)
+        {
+            return new ScenarioRunResult { Outcome = ScenarioRunOutcome.NotFound };
+        }
+
+        return await GrainFactory.GetGrain<IGeneratorGrain>(name).RunAsync(request);
+    }
+
     public async Task UpsertSourceAsync(SourceDefinition def)
     {
         var idx = state.State.Sources.FindIndex(s => s.Name == def.Name);

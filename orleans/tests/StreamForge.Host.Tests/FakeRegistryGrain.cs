@@ -11,6 +11,11 @@ namespace StreamForge.Host.Tests;
 /// </summary>
 internal sealed class FakeRegistryGrain : IRegistryGrain
 {
+    /// <summary>Interface conformance only — wishlist #8's run-on-demand needs a real runtime to
+    /// publish, so a fake correctly reports that there is nothing to run.</summary>
+    public Task<ScenarioRunResult> RunSourceAsync(string name, ScenarioRunRequest request) =>
+        Task.FromResult(new ScenarioRunResult { Outcome = ScenarioRunOutcome.NotFound });
+
     public List<SourceDefinition> Sources { get; } = [];
     public List<PipelineDefinition> Pipelines { get; } = [];
     public List<TableDefinition> Tables { get; } = [];

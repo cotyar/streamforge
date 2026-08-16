@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace StreamForge.Abstractions;
 
 [GenerateSerializer]
@@ -51,7 +53,11 @@ public sealed class SourceDefinition
     [Id(0)] public string Name { get; set; } = "";
     [Id(1)] public string Description { get; set; } = "";
     [Id(2)] public List<FieldDef> Fields { get; set; } = [];
-    /// <summary>Generator profile: "trades" | "quotes" | "orders" | "generic".</summary>
+    /// <summary>Generator profile: "trades" | "quotes" | "orders" | "generic" | "scenario" (wishlist
+    /// #8 — see <see cref="GeneratorProfiles.Scenario"/> and <see cref="ScenarioSpec"/>) | a handful of
+    /// other literal strings <see cref="MarketDataProfiles.GenerateEvent"/> switches on directly
+    /// ("json-events", "multileg", "lifecycle" — never promoted to constants here, only the newest one
+    /// is, to keep this doc comment from becoming its own maintenance burden).</summary>
     [Id(3)] public string GeneratorProfile { get; set; } = "generic";
     [Id(4)] public double EventsPerSecond { get; set; } = 5;
     [Id(5)] public bool Enabled { get; set; } = true;
@@ -72,6 +78,307 @@ public sealed class SourceDefinition
     /// so a stringly-typed feed can be declared with real types and parsed on arrival. Default
     /// <see cref="CoercionFailurePolicy.Null"/> preserves the pre-009 lenient behavior.</summary>
     [Id(11)] public CoercionFailurePolicy OnCoercionFailure { get; set; } = CoercionFailurePolicy.Null;
+    /// <summary>Wishlist #8: non-null only for <see cref="GeneratorProfiles.Scenario"/>-profile sources.
+    /// EventsPerSecond is ignored (must be 0, by convention — nothing enforces it, mirroring how e.g. a
+    /// "url"-kind source's EventsPerSecond is simply unused) for this profile: rows are produced only by
+    /// an explicit <c>POST /api/sources/{name}/run</c>, never by GeneratorGrain's tick timer.</summary>
+    [Id(12)] public ScenarioSpec? Scenario { get; set; }
+}
+
+/// <summary>Well-known <see cref="SourceDefinition.GeneratorProfile"/> values that have a dedicated
+/// contract type behind them (unlike "trades"/"quotes"/etc., which are opaque strings
+/// <see cref="MarketDataProfiles.GenerateEvent"/> switches on) — string constants rather than an enum,
+/// mirroring <c>SourceKinds</c>'s own additive-without-renumbering rationale in ConnectorModels.cs.</summary>
+public static class GeneratorProfiles
+{
+    /// <summary>Wishlist #8: a parametric, seedable multi-path/multi-instrument Monte-Carlo-style scenario
+    /// batch, run on demand rather than ticked. See <see cref="ScenarioSpec"/>.</summary>
+    public const string Scenario = "scenario";
+}
+
+// ============================================================================
+// Wishlist #8 — parametric, seedable scenario generator.
+//
+// SHAPE: Paths (N) independent Monte Carlo paths x Instruments (K) x Days (D) = N*K*D rows, one shock/
+// value per (path, instrument, day). Determinism is the entire point (see AppCore/Generators/
+// ScenarioGenerator.cs's class doc for the exact RNG-ordering contract that makes "same seed -> byte-
+// identical batch" true): every run seeds its OWN System.Random from ScenarioSpec.Seed (or the request's
+// override), NEVER Random.Shared, which is exactly what MarketDataProfiles.GenerateEvent uses for every
+// OTHER profile and is exactly what a seedable, reproducible source cannot share.
+//
+// CORRELATION: one common factor per Group plus idiosyncratic noise, mixed by Rho (single-factor model:
+// standardizedShock = sqrt(Rho)*groupFactor + sqrt(1-Rho)*idiosyncratic — both terms drawn from the same
+// Distribution, both variance 1, so Corr(shock_i, shock_j) = Rho for any two instruments i != j sharing a
+// Group, in the large-sample limit). An instrument with no Group (blank/null) is its own singleton group,
+// so Rho has no observable effect on it (matches the wishlist's rho=0/rho=1 sanity checks).
+//
+// TOTAL: ScenarioSpec.Validate() enumerates EVERY config problem (never throws, never stops at the first
+// one) so a caller sees the whole list in one 400, and ScenarioGenerator.GenerateBatch NEVER throws for a
+// bad spec/request — a bad config is always a ScenarioRunResult with Outcome != Accepted, Rows empty,
+// Errors populated. MaxBatchRows caps Paths*Instruments.Count*Days for ANY run (including overrides);
+// exceeding it is one more Validate() entry, not a truncated batch and not an exception mid-emit.
+//
+// KNOWN GAP (documented, not silently dropped): the wishlist allows Instruments to be either an inline
+// list or "a reference to a source/table name". Only the inline list is implemented — a spec that sets
+// InstrumentsSourceName always fails validation with an explicit message (see ScenarioSpec.Validate)
+// rather than being ignored or silently falling back to an empty instrument set.
+// ============================================================================
+
+/// <summary>The marginal shape of a scenario run's standardized shocks (mean 0, variance 1 before Vol
+/// scaling) — see <see cref="ScenarioSpec.Distribution"/>. A string Kind rather than an enum, same
+/// additive-without-renumbering reasoning as <see cref="GeneratorProfiles"/>.</summary>
+[GenerateSerializer]
+public sealed class ScenarioDistributionSpec
+{
+    /// <summary>"normal" | "lognormal" | "student_t" (case-insensitive). Anything else is a validation
+    /// error, never a silent fallback to "normal".</summary>
+    [Id(0)] public string Kind { get; set; } = "normal";
+    /// <summary>Degrees of freedom — "student_t" only, ignored otherwise. Must be &gt; 2: at df &lt;= 2
+    /// the Student-t distribution's variance is infinite/undefined, so "standardize to variance 1" (what
+    /// ScenarioGenerator does to every distribution so Vol means the same thing regardless of Kind) would
+    /// itself be undefined.</summary>
+    [Id(1)] public double Df { get; set; } = 5;
+}
+
+/// <summary>One instrument in a scenario spec's inline instrument list.</summary>
+[GenerateSerializer]
+public sealed class ScenarioInstrumentSpec
+{
+    [Id(0)] public string Id { get; set; } = "";
+    /// <summary>Day-0 level. Must be &gt; 0 when the spec's Distribution is "lognormal" (a multiplicative
+    /// process starting at/below 0 has no meaningful next value) — enforced by ScenarioSpec.Validate, not
+    /// by clamping at generation time.</summary>
+    [Id(1)] public double Base { get; set; }
+    /// <summary>Per-day volatility applied to the (already unit-variance) mixed standardized shock.</summary>
+    [Id(2)] public double Vol { get; set; }
+    /// <summary>Correlation group name. Instruments sharing a Group share one common factor draw per
+    /// (path, day) — see this file's Wishlist #8 class doc. Blank/null = its own singleton group.</summary>
+    [Id(3)] public string Group { get; set; } = "";
+}
+
+/// <summary>Wishlist #8: the persisted, reusable definition of one scenario source's generator —
+/// everything a run needs except the per-run RunId/Seed-override/Overrides, which arrive on
+/// <see cref="ScenarioRunRequest"/> instead so the same spec can be replayed with different knobs without
+/// mutating the catalog entry.</summary>
+[GenerateSerializer]
+public sealed class ScenarioSpec
+{
+    /// <summary>N: number of independent Monte Carlo paths. Must be &gt; 0.</summary>
+    [Id(0)] public int Paths { get; set; } = 1;
+    /// <summary>K: instruments, declared inline (see this file's Wishlist #8 class doc for why this is
+    /// the only supported form today). Must be non-empty with unique, non-blank Ids.</summary>
+    [Id(1)] public List<ScenarioInstrumentSpec> Instruments { get; set; } = [];
+    /// <summary>KNOWN GAP: reserved for the source/table-reference form of Instruments the wishlist also
+    /// describes. Always rejected by Validate (never silently ignored) — see this file's class doc.</summary>
+    [Id(2)] public string? InstrumentsSourceName { get; set; }
+    [Id(3)] public ScenarioDistributionSpec Distribution { get; set; } = new();
+    /// <summary>Common-factor correlation weight, must be in [0,1]. 0 = every instrument moves off its own
+    /// idiosyncratic draw only (its Group is decorative); 1 = every instrument in a Group is driven by the
+    /// identical daily factor.</summary>
+    [Id(4)] public double Rho { get; set; }
+    /// <summary>D: horizon in days. 1 = a single shock (rows carry Day == 1 only, no Day == 0 baseline
+    /// row — see ScenarioGenerator, this keeps the row COUNT exactly N*K*D as the wishlist states it).
+    /// Must be &gt; 0.</summary>
+    [Id(5)] public int Days { get; set; } = 1;
+    /// <summary>Default seed used when a run request doesn't override one. 0 is a legitimate seed, not
+    /// "unset" — a run always has a concrete seed, spec default or request override, never a process-
+    /// random one (this is what makes "same seed -> identical batch" possible at all).</summary>
+    [Id(6)] public long Seed { get; set; }
+    /// <summary>Hard cap on Paths*Instruments.Count*Days for ANY run of this spec, including overrides.
+    /// Exceeding it is a Validate() error — never a partial/truncated emit — so "the batch" in the
+    /// wishlist's row contract always means the WHOLE batch or nothing. Named/shaped after
+    /// <see cref="IngestConfig.MaxBatchRows"/> but enforced at spec-validation time rather than at buffer-
+    /// admission time: a scenario run has no shared buffer to admit into (see GeneratorGrain.RunAsync's
+    /// doc comment for how "honouring backpressure" is interpreted here instead).</summary>
+    [Id(7)] public int MaxBatchRows { get; set; } = 100_000;
+
+    /// <summary>Every problem with this spec, TOTAL (never throws, never short-circuits after the first
+    /// finding) — <paramref name="effectivePaths"/>/<paramref name="effectiveDays"/>/
+    /// <paramref name="effectiveRho"/>/<paramref name="effectiveDistribution"/> are the values AFTER a
+    /// run request's overrides are applied (see <see cref="ScenarioRunOverrides"/>), so a run-time
+    /// override that breaks the spec is caught here too, not just the stored defaults.</summary>
+    public List<string> Validate(int effectivePaths, int effectiveDays, double effectiveRho, ScenarioDistributionSpec effectiveDistribution)
+    {
+        var errors = new List<string>();
+
+        if (effectivePaths <= 0)
+        {
+            errors.Add("scenario.paths must be > 0");
+        }
+
+        if (effectiveDays <= 0)
+        {
+            errors.Add("scenario.days must be > 0");
+        }
+
+        if (double.IsNaN(effectiveRho) || effectiveRho < 0 || effectiveRho > 1)
+        {
+            errors.Add("scenario.rho must be within [0,1]");
+        }
+
+        if (!string.IsNullOrEmpty(InstrumentsSourceName))
+        {
+            errors.Add("scenario.instrumentsSourceName (reference-based instruments) is not supported yet — use an inline scenario.instruments list");
+        }
+
+        if (Instruments.Count == 0)
+        {
+            errors.Add("scenario.instruments must be non-empty");
+        }
+        else
+        {
+            var seenIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var instrument in Instruments)
+            {
+                if (string.IsNullOrWhiteSpace(instrument.Id))
+                {
+                    errors.Add("scenario.instruments[].id must be non-blank");
+                }
+                else if (!seenIds.Add(instrument.Id))
+                {
+                    errors.Add($"scenario.instruments[].id '{instrument.Id}' is duplicated");
+                }
+
+                if (instrument.Vol < 0)
+                {
+                    errors.Add($"scenario.instruments['{instrument.Id}'].vol must be >= 0");
+                }
+            }
+        }
+
+        var kind = effectiveDistribution.Kind?.Trim().ToLowerInvariant();
+        if (kind is not ("normal" or "lognormal" or "student_t"))
+        {
+            errors.Add("scenario.distribution.kind must be 'normal', 'lognormal', or 'student_t'");
+        }
+        else if (kind == "student_t" && effectiveDistribution.Df <= 2)
+        {
+            errors.Add("scenario.distribution.df must be > 2 for student_t (variance is undefined at or below 2 degrees of freedom)");
+        }
+        else if (kind == "lognormal")
+        {
+            foreach (var instrument in Instruments)
+            {
+                if (instrument.Base <= 0)
+                {
+                    errors.Add($"scenario.instruments['{instrument.Id}'].base must be > 0 when scenario.distribution.kind is 'lognormal'");
+                }
+            }
+        }
+
+        if (MaxBatchRows <= 0)
+        {
+            errors.Add("scenario.maxBatchRows must be > 0");
+        }
+        else if (errors.Count == 0)
+        {
+            // Only meaningful once paths/days/instruments are individually sane — an already-invalid
+            // spec would otherwise also report a confusing "0 rows exceeds maxBatchRows" or similar.
+            var totalRows = (long)effectivePaths * Instruments.Count * effectiveDays;
+            if (totalRows > MaxBatchRows)
+            {
+                errors.Add($"scenario run would emit {totalRows} rows (paths={effectivePaths} x instruments={Instruments.Count} x days={effectiveDays}), exceeding scenario.maxBatchRows ({MaxBatchRows})");
+            }
+        }
+
+        return errors;
+    }
+}
+
+/// <summary>Wishlist #8: a run request's optional per-run overrides — everything else (Instruments,
+/// InstrumentsSourceName, MaxBatchRows, and the spec's default Seed) always comes from the stored
+/// <see cref="ScenarioSpec"/>; deliberately NOT extended to override those too, so MaxBatchRows stays an
+/// honest cap a caller cannot raise from the request path, and Instruments stays a catalog-time concern.</summary>
+[GenerateSerializer]
+public sealed class ScenarioRunOverrides
+{
+    [Id(0)] public int? Paths { get; set; }
+    [Id(1)] public int? Days { get; set; }
+    [Id(2)] public double? Rho { get; set; }
+    [Id(3)] public ScenarioDistributionSpec? Distribution { get; set; }
+}
+
+/// <summary>Body of <c>POST /api/sources/{name}/run</c>. JsonPropertyName pins the wire shape to the
+/// wishlist's literal <c>{ run_id, seed?, overrides? }</c> — snake_case here (unlike the rest of this
+/// API's camelCase-by-default bodies) specifically to match the row contract's own field names
+/// (<see cref="ScenarioRow"/>), since a caller round-tripping RunId between a run request and the rows it
+/// produced should see the identical spelling in both places.</summary>
+[GenerateSerializer]
+public sealed class ScenarioRunRequest
+{
+    /// <summary>Caller-supplied identity for this run, stamped onto every emitted row's RunId. Required —
+    /// it's the field a "before/after a CSA amendment" comparison joins two runs' rows on.</summary>
+    [Id(0)]
+    [JsonPropertyName("run_id")]
+    public string RunId { get; set; } = "";
+    /// <summary>Overrides <see cref="ScenarioSpec.Seed"/> for this run only. Null = use the spec's stored
+    /// default seed. Either way the run has a concrete seed — see ScenarioSpec.Seed's own doc comment.</summary>
+    [Id(1)] public long? Seed { get; set; }
+    [Id(2)] public ScenarioRunOverrides? Overrides { get; set; }
+
+    // NOTE: the wishlist's nice-to-have `step: true` (emit only day d+1 of an existing run) is NOT
+    // implemented — it presumes the bounded-feedback-loop / "scenario clock" machinery from wishlist #9,
+    // which this change does not touch. Deliberately no Step field here rather than one that would
+    // silently do nothing if set.
+}
+
+/// <summary>One emitted row — the wishlist's exact row contract (run_id/path_id/instrument_id/day/factor/
+/// shock/value), plus TsMs. TsMs is supplied by the CALLER (GenerateBatch takes it as a parameter, never
+/// reads the clock itself) specifically so the deterministic fields can be tested byte-for-byte without
+/// also having to control wall-clock time — see ScenarioGenerator.GenerateBatch's doc comment.</summary>
+[GenerateSerializer]
+public sealed class ScenarioRow
+{
+    [Id(0)] [JsonPropertyName("run_id")] public string RunId { get; set; } = "";
+    [Id(1)] [JsonPropertyName("path_id")] public long PathId { get; set; }
+    [Id(2)] [JsonPropertyName("instrument_id")] public string InstrumentId { get; set; } = "";
+    [Id(3)] [JsonPropertyName("day")] public long Day { get; set; }
+    /// <summary>The (path, day, group) common-factor draw actually used for this row's instrument —
+    /// always drawn even when Rho == 0 (keeps the RNG draw SEQUENCE, and therefore every OTHER row's
+    /// values, identical regardless of Rho; only the mixing weight differs). Standardized (mean 0,
+    /// variance 1) — not yet scaled by Vol.</summary>
+    [Id(4)] [JsonPropertyName("factor")] public double Factor { get; set; }
+    /// <summary>The mixed, standardized shock actually applied: sqrt(Rho)*Factor + sqrt(1-Rho)*idiosyncratic.
+    /// Mean 0, variance 1 — not yet scaled by Vol; see Value for the scaled/evolved result.</summary>
+    [Id(5)] [JsonPropertyName("shock")] public double Shock { get; set; }
+    /// <summary>This instrument's level after Day days of evolution from its Base — additive
+    /// (Base + sum of Vol*Shock) for "normal"/"student_t", multiplicative (Base * product of
+    /// exp(Vol*Shock - Vol^2/2)) for "lognormal". See ScenarioGenerator.</summary>
+    [Id(6)] [JsonPropertyName("value")] public double Value { get; set; }
+    /// <summary>Wire name "_ts" — the wishlist's row contract lists this as "(+ `_ts`)", matching
+    /// <c>EventRecord.TimestampField</c>'s literal reserved-key spelling exactly (see
+    /// ScenarioGenerator.ToEventRecord, which stamps this value onto that same key).</summary>
+    [Id(7)] [JsonPropertyName("_ts")] public long TsMs { get; set; }
+}
+
+public enum ScenarioRunOutcome
+{
+    /// <summary>The whole batch was generated; Accepted == Rows.Count == Paths*Instruments.Count*Days.</summary>
+    Accepted = 0,
+    /// <summary>The spec/request failed ScenarioSpec.Validate — see Errors. Rows is empty; nothing was
+    /// emitted (never a partial batch).</summary>
+    ValidationError = 1,
+    /// <summary>No such source, or the source has never been started (no SourceDefinition on file for
+    /// this generator activation).</summary>
+    NotFound = 2,
+    /// <summary>The source exists but its GeneratorProfile isn't <see cref="GeneratorProfiles.Scenario"/>
+    /// (or its Scenario spec is null) — mirrors IngestOutcome.WrongKind's reasoning: running a non-
+    /// scenario generator on demand would make its tick-driven semantics unreconcilable.</summary>
+    WrongProfile = 3,
+}
+
+/// <summary>Result of one <c>POST /api/sources/{name}/run</c> — the wishlist's literal
+/// <c>{ accepted, rows }</c> response shape, plus Outcome/Errors for the non-Accepted cases.</summary>
+[GenerateSerializer]
+public sealed class ScenarioRunResult
+{
+    [Id(0)] public ScenarioRunOutcome Outcome { get; set; }
+    /// <summary>Rows.Count when Outcome == Accepted; 0 otherwise.</summary>
+    [Id(1)] public int Accepted { get; set; }
+    [Id(2)] public List<ScenarioRow> Rows { get; set; } = [];
+    /// <summary>Populated for ValidationError; one entry per independent problem (TOTAL — see
+    /// ScenarioSpec.Validate).</summary>
+    [Id(3)] public List<string> Errors { get; set; } = [];
 }
 
 /// <summary>Plan 009 C2: what happens to a value that will not coerce to its declared field type.

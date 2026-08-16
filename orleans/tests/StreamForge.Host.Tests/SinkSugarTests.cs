@@ -383,6 +383,11 @@ public class SinkSugarTests
     /// file is not something this wave edits.</summary>
     private sealed class MemoryCatalog : ICatalogFacade
     {
+    /// <summary>Interface conformance only — wishlist #8's run-on-demand needs a real runtime to
+    /// publish, so a fake correctly reports that there is nothing to run.</summary>
+    public Task<ScenarioRunResult> RunSourceAsync(string name, ScenarioRunRequest request) =>
+        Task.FromResult(new ScenarioRunResult { Outcome = ScenarioRunOutcome.NotFound });
+
         private int _nextId;
 
         public List<SourceDefinition> Sources { get; } = [];

@@ -27,6 +27,18 @@ public interface IGeneratorGrain : IGrainWithStringKey
     Task StopAsync();
     /// <summary>Keep-alive; timers alone don't extend activation lifetime.</summary>
     Task PingAsync();
+
+    /// <summary>Wishlist #8: run-on-demand for a <see cref="GeneratorProfiles.Scenario"/>-profile source
+    /// — generates the whole deterministic batch (via <c>StreamForge.Host.Generators.ScenarioGenerator</c>,
+    /// shared/StreamForge.AppCore/Generators/ScenarioGenerator.cs) and publishes each row onto this
+    /// source's existing stream (the SAME (StreamConstants.SourcesNamespace, source name) stream
+    /// StartAsync's timer publishes onto — a table/pipeline reading this source doesn't know or care
+    /// whether a row arrived from a tick or from RunAsync), then returns the result. Uses whatever
+    /// SourceDefinition this activation was last StartAsync'd with — StartAsync unconditionally caches Def
+    /// regardless of EventsPerSecond (see GeneratorGrain.StartAsync), so a scenario source with
+    /// EventsPerSecond == 0 (the wishlist's "ignored/0 for this kind") still has one on file the moment
+    /// the registry creates/enables it, before any run is ever requested.</summary>
+    Task<ScenarioRunResult> RunAsync(ScenarioRunRequest request);
 }
 
 /// <summary>Key = table name. One activation per running table. Materializes a Z-set (DBSP-style)

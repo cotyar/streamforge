@@ -70,6 +70,15 @@ public interface ICatalogFacade
     /// truth for proto field numbering — gRPC reflection descriptors and downloadable .proto files
     /// must both obtain numbers here so generated clients stay compatible across schema edits.</summary>
     Task<string> EnsureFieldNumbersAsync(string entityKey, List<FieldDef> fields);
+
+    /// <summary>Wishlist #8's run-on-demand: generate a source's scenario batch and PUBLISH it, once.
+    /// It lives on the facade rather than in the endpoint because publishing is the whole point and only
+    /// a runtime can do it — the endpoint assembly deliberately has no Orleans or Dapr dependency, so an
+    /// endpoint that computed the batch itself could return the rows while emitting nothing, which is
+    /// exactly the shape this method exists to prevent. Orleans satisfies it on IRegistryGrain (which
+    /// inherits this interface) by forwarding to the generator grain; Dapr's adapter forwards to the
+    /// generator actor.</summary>
+    Task<ScenarioRunResult> RunSourceAsync(string name, ScenarioRunRequest request);
 }
 
 /// <summary>User credential store — everything <see cref="IUserStoreGrain"/> exposes except

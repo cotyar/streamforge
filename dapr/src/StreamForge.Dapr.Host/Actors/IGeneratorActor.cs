@@ -13,6 +13,12 @@ namespace StreamForge.Dapr.Host.Actors;
 /// </summary>
 public interface IGeneratorActor : IActor
 {
+    /// <summary>Wishlist #8's run-on-demand: generate a scenario batch and publish it, once. Declared
+    /// here and not only on the actor class because <c>ActorProxy.Create&lt;IGeneratorActor&gt;</c> can only
+    /// dispatch what the interface declares — without this line the implementation exists and is
+    /// unreachable, which is precisely how the REST endpoint ended up unable to publish anything.</summary>
+    Task<ScenarioRunResult> RunAsync(ScenarioRunRequest request);
+
     /// <summary>(Re)starts this source's generator with the given definition, replacing any timer from a
     /// previous call. A definition with <c>EventsPerSecond &lt;= 0</c> is accepted but registers no
     /// timer (mirrors Orleans' <c>GeneratorGrain.StartAsync</c>). Idempotent — safe to call repeatedly

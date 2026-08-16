@@ -53,6 +53,22 @@ internal sealed class DaprCatalogFacade : ICatalogFacade
 
     public Task<SourceDefinition?> GetSourceAsync(string name) => _actor.GetSourceAsync(name);
 
+    /// <summary>Wishlist #8's run-on-demand, the Dapr mirror of RegistryGrain.RunSourceAsync. Goes
+    /// straight to the generator actor rather than through the registry actor: the batch has to be
+    /// published from the activation that owns the source's pub/sub topic, and unlike Orleans — where
+    /// IRegistryGrain inherits this facade and already has a GrainFactory — there is nothing to gain by
+    /// routing an extra actor hop through the registry first.</summary>
+    public async Task<ScenarioRunResult> RunSourceAsync(string name, ScenarioRunRequest request)
+    {
+        if (await _actor.GetSourceAsync(name) is null)
+        {
+            return new ScenarioRunResult { Outcome = ScenarioRunOutcome.NotFound };
+        }
+
+        var generator = ActorProxy.Create<IGeneratorActor>(new ActorId(name), nameof(GeneratorActor), ActorProxyDefaults.Options);
+        return await generator.RunAsync(request);
+    }
+
     public Task UpsertSourceAsync(SourceDefinition def) => _actor.UpsertSourceAsync(def);
 
     public Task<bool> DeleteSourceAsync(string name) => _actor.DeleteSourceAsync(name);

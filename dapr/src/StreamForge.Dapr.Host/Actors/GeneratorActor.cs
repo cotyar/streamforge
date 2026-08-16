@@ -61,6 +61,10 @@ public sealed class GeneratorActor(ActorHost host, DaprClient daprClient, ILogge
     /// 50ms minimum" floor from the wave brief.</summary>
     private static readonly TimeSpan TickPeriod = TimeSpan.FromMilliseconds(200);
 
+    /// <summary>Wishlist #8's RunAsync chunk size — same "batched, not per-event" reasoning as
+    /// <see cref="TickPeriod"/> above, sized for a one-off large batch rather than a steady tick rate.</summary>
+    private const int RunBatchChunkSize = 500;
+
     private SourceDefinition? _def;
     private bool _running;
     private bool _timerArmed;
@@ -107,6 +111,57 @@ public sealed class GeneratorActor(ActorHost host, DaprClient daprClient, ILogge
     }
 
     public Task<bool> IsRunningAsync() => Task.FromResult(_running);
+
+    /// <summary>Wishlist #8 — Dapr mirror of Orleans' <c>GeneratorGrain.RunAsync</c>
+    /// (orleans/src/StreamForge.Host/Grains/GeneratorGrain.cs): run-on-demand for a
+    /// <see cref="StreamForge.Abstractions.GeneratorProfiles.Scenario"/>-profile source. Delegates the
+    /// whole spec/request-validation + deterministic row-math decision to the pure, TOTAL
+    /// <c>ScenarioGenerator.GenerateBatch</c> (shared/StreamForge.AppCore/Generators/ScenarioGenerator.cs
+    /// — the exact same call Orleans' GeneratorGrain makes, so both flavors produce byte-identical rows
+    /// for the same seed) and, only for <see cref="ScenarioRunOutcome.Accepted"/>, publishes the rows on
+    /// this actor's two existing topics via the same batched-envelope shape <see cref="TickAsync"/> uses
+    /// (see this class's "batched, not per-event" decision D-E doc — a run-on-demand batch is exactly the
+    /// unbounded-tick-count case that doc warns against, so it is chunked into <see cref="RunBatchChunkSize"/>-
+    /// row envelopes rather than either one huge envelope or one sidecar round-trip per row).
+    ///
+    /// <para><b>KNOWN GAP — not reachable via ActorProxy today.</b> This method exists and is exercised
+    /// directly by AppCore-level tests of <c>ScenarioGenerator</c> (the part that matters — see that
+    /// file's determinism/correlation tests), but it is deliberately NOT added to
+    /// <see cref="IGeneratorActor"/>: that interface file was outside this change's file-ownership scope
+    /// (a sibling-agent wave discipline constraint — see AGENTS.md's "Multi-agent wave discipline"), and
+    /// every actor call in this codebase goes through a strongly-typed <c>ActorProxy.Create&lt;TInterface&gt;</c>
+    /// (see e.g. DaprLifecycleOrchestrator's *ActorProxy helpers), so a method absent from the interface
+    /// cannot be invoked remotely no matter how it's implemented here. Closing this gap needs exactly one
+    /// line added to IGeneratorActor.cs: <c>Task&lt;ScenarioRunResult&gt; RunAsync(ScenarioRunRequest request);</c>
+    /// — plus wiring <c>POST /api/sources/{name}/run</c> (shared/StreamForge.Api/Endpoints/SourceRunEndpoints.cs)
+    /// to actually call through a proxy for this flavor, which today it does not (see that endpoint's own
+    /// class doc for why: shared/StreamForge.Api has no Dapr/Orleans-specific dependencies at all, and the
+    /// DI registration such a call would need lives in Program.cs / Facades wiring outside this change's
+    /// ownership too).</para>
+    /// </summary>
+    public async Task<ScenarioRunResult> RunAsync(ScenarioRunRequest request)
+    {
+        if (_def is null)
+        {
+            return new ScenarioRunResult { Outcome = ScenarioRunOutcome.NotFound };
+        }
+
+        var result = ScenarioGenerator.GenerateBatch(_def, request, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        if (result.Outcome != ScenarioRunOutcome.Accepted)
+        {
+            return result;
+        }
+
+        foreach (var chunk in result.Rows.Chunk(RunBatchChunkSize))
+        {
+            var events = chunk.Select(row => (Dictionary<string, object?>)ScenarioGenerator.ToEventRecord(row, _def.Name)).ToList();
+            var envelope = new SourceEventsEnvelope { Source = _def.Name, Events = events };
+            await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, StreamingRuntimeSetup.SourcesTopic, envelope);
+            await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + _def.Name, envelope);
+        }
+
+        return result;
+    }
 
     /// <summary>Named "SaveAsync", not "SaveStateAsync", to avoid hiding <see cref="Actor.SaveStateAsync"/>
     /// (that base member flushes StateManager's buffered changes; this project instead writes state
