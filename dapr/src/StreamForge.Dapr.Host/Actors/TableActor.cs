@@ -349,19 +349,54 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         return ActorResult<TableInputNames>.Success(new TableInputNames(_streamInputs.ToList(), _tableInputs.ToList()));
     }
 
-    /// <summary>Wishlist #14, option (b) — Dapr-flavor mirror of <c>TableGrain.WarnIfTableInputsAlreadyHoldRowsAsync</c>
-    /// (see its doc comment for why this is the loud diagnostic and not the backfill fix: there is no
-    /// snapshot/subscription synchronization point on this flavor either — see class doc's D-F descope, no
-    /// coordinator mode exists here at all to have grown one). Checks each declared table input
+    /// <summary>
+    /// Wishlist #14, STILL option (b) on THIS flavor — NOT superseded here the way
+    /// <c>TableGrain.AttachToTableInputAsync</c> (Orleans) now supersedes its own former
+    /// WarnIfTableInputsAlreadyHoldRowsAsync sibling. Real investigation, not an assumption: the Orleans fix
+    /// needs two things this actor cannot get within this change's file ownership —
+    ///
+    /// <para><b>1. An atomic (snapshot, epoch) read on the UPSTREAM actor.</b> Orleans added
+    /// <c>ITableGrain.AttachSnapshotAsync</c> (a new grain method returning both
+    /// <c>TableExecutor.Snapshot()</c> and <c>TableExecutor.LastEpoch</c> together, synchronously, so nothing
+    /// can advance between the two reads). Dapr actors are only invocable through their declared
+    /// <see cref="ITableActor"/> interface methods (Dapr's actor RPC dispatch is interface-method-based,
+    /// exactly like Orleans grain interfaces) — a new method on the ACTOR CLASS with no interface
+    /// counterpart is simply uncallable from another actor. <see cref="ITableActor"/> is declared in
+    /// <c>ITableActor.cs</c>, a file this change does not own (per its file-ownership list, only
+    /// <c>TableActor.cs</c> itself is in scope). Every EXISTING method on that interface was checked for a
+    /// substitute: <see cref="ITableActor.GetRowsAsync"/> reads the write-behind-FLUSHED cache (up to
+    /// <see cref="TableDefinition.FlushMs"/> stale — see class doc's "flushed vs. live" split), not a live
+    /// snapshot, and carries no epoch at all; <see cref="ITableActor.GetSeqAsync"/> is a DIFFERENT counter
+    /// (flush-generation, ticks on a timer) that does not correspond 1:1 with <c>TableExecutor.LastEpoch</c>
+    /// admissions — using either as a stand-in cutoff would not merely be incomplete, it would be WRONG
+    /// (silently double-counting or dropping rows under exactly the same "wrong answer by a different route"
+    /// hazard the epoch contract exists to prevent), so this was rejected rather than shipped as a
+    /// partial fix.</para>
+    ///
+    /// <para><b>2. A subscribe-before-attach ordering guarantee.</b> Orleans' fix relies on
+    /// <c>TableGrain</c> being non-reentrant: any delta delivered to a stream subscription registered while
+    /// <c>StartClassicAsync</c> is still running is QUEUED by Orleans until that whole call returns, so
+    /// nothing published between "subscribed" and "attached" is ever lost. Dapr has no equivalent point to
+    /// hook this into: this actor never subscribes to anything itself (class doc's "where events/deltas come
+    /// from" paragraph) — <c>Streaming.TableEventRouter</c> is what makes upstream deltas reach this actor
+    /// at all, and <c>Lifecycle.DaprLifecycleOrchestrator.StartTableAsync</c> only calls
+    /// <c>tableRouter.Register(...)</c> AFTER this actor's own <see cref="StartAsync"/> has already
+    /// returned — a gap this actor has no way to close from inside its own turn, since the registration call
+    /// happens in a DIFFERENT object entirely. Both of those files are also outside this change's ownership.
+    /// </para>
+    ///
+    /// <para>So: still the loud diagnostic only. <see cref="TableDeltaDto.Epoch"/> IS now stamped on every
+    /// batch this actor publishes (see <see cref="ApplyAndPublishAsync"/>) — the wire-contract half is real
+    /// and ready for whoever next owns <c>ITableActor.cs</c>/<c>TableEventRouter.cs</c>/
+    /// <c>DaprLifecycleOrchestrator.cs</c> to finish the other half. Checks each declared table input
     /// (<see cref="_tableInputs"/>, populated by <see cref="ActivateExecutor"/> just above) for a non-zero
     /// row count via its own <see cref="ITableActor.GetRowCountAsync"/>, BEFORE this actor's own delta
-    /// subscription (wired by the caller once <see cref="StartAsync"/> returns — see
-    /// <c>TableEventRouter</c>) goes live, and logs — by table name and row count — exactly the situation
-    /// wishlist #14 describes. Advisory only: a failed/not-yet-started upstream actor is swallowed (Dapr
-    /// virtual actors auto-activate on first call, so a table input that has never run answers 0 rows
-    /// harmlessly rather than throwing), and the count itself is a best-effort read with no synchronization
-    /// guarantee against the subscription that follows — see the Orleans-flavor sibling's identical
-    /// caveat.</summary>
+    /// routing goes live, and logs — by table name and row count — exactly the situation wishlist #14
+    /// describes. Advisory only: a failed/not-yet-started upstream actor is swallowed (Dapr virtual actors
+    /// auto-activate on first call, so a table input that has never run answers 0 rows harmlessly rather
+    /// than throwing), and the count itself is a best-effort read with no synchronization guarantee against
+    /// the routing that follows.</para>
+    /// </summary>
     private async Task WarnIfTableInputsAlreadyHoldRowsAsync()
     {
         foreach (var upstreamName in _tableInputs.Distinct())
@@ -679,7 +714,19 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         _deltaSeq++;
         // Plan 011 C2: Evicted rides along so TableHistoryActor can tell a retention eviction apart from an
         // ordinary upstream retraction — see TableDeltaDto.Evicted. Every other subscriber ignores it.
-        var dtos = deltas.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight, Evicted = d.Retention }).ToList();
+        //
+        // Wishlist #14 option (a) — WIRE-CONTRACT HALF ONLY (see WarnIfTableInputsAlreadyHoldRowsAsync's own
+        // doc comment for the full account of why the REST of option (a) is not implemented on this flavor).
+        // Epoch is TableExecutor.LastEpoch read HERE, synchronously — no `await` since the
+        // _executor.OnStreamEvent/OnTableDelta/OnTableDeltaBatch call that produced `deltas` returned — so
+        // it means exactly the same thing here as on the Orleans side (see that property's own doc comment
+        // in PublicApi.cs): NOT _deltaSeq (a per-publish-call counter local to this actor, unrelated to the
+        // Engine's own admission epoch) and NOT GetSeqAsync's flush-generation counter (ticks on a timer,
+        // not once per admission) — either of those would be a DIFFERENT number from what an
+        // epoch-cutoff-based consumer needs, which is exactly the "wrong answer by a different route" this
+        // field exists to avoid producing.
+        var epoch = _executor!.LastEpoch;
+        var dtos = deltas.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight, Evicted = d.Retention, Epoch = epoch }).ToList();
 
         try
         {

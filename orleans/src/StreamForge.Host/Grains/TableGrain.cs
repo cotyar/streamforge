@@ -308,6 +308,12 @@ public sealed class TableGrain(
     private readonly List<StreamSubscriptionHandle<EventRecord>> _streamSubs = [];
     private readonly List<StreamSubscriptionHandle<List<TableDeltaDto>>> _tableSubs = [];
 
+    /// <summary>Wishlist #14 option (a) — upstream table name -> the epoch (TableAttachSnapshot.Epoch)
+    /// this table's backfill was taken at, for OnTableDeltaBatchAsync's epoch filter — see
+    /// AttachToTableInputAsync's own doc comment for the full protocol. Populated once per table input
+    /// during StartClassicAsync, before that method's turn ends; cleared on StopAsync.</summary>
+    private readonly Dictionary<string, long> _tableInputCutoffEpoch = new(StringComparer.Ordinal);
+
     private bool _dirty;
     private bool _rebuilding;
     private long _deltasIn;
@@ -476,8 +482,6 @@ public sealed class TableGrain(
         // FlushAsync (just without the 2s lag, since Snapshot() is an O(1) live dictionary reference).
         _searchIndex = def.SearchEnabled ? new TableSearchIndex(def.SearchMode) : null;
 
-        await WarnIfTableInputsAlreadyHoldRowsAsync(def.Name, compileResult.TableInputs);
-
         var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
         foreach (var name in compileResult.StreamInputs.Distinct())
         {
@@ -485,11 +489,11 @@ public sealed class TableGrain(
             var handle = await stream.SubscribeAsync((evt, _) => OnStreamEventAsync(name, evt));
             _streamSubs.Add(handle);
         }
+        // Wishlist #14 option (a) — see AttachToTableInputAsync's own doc comment for the full
+        // subscribe-then-attach protocol this replaces WarnIfTableInputsAlreadyHoldRowsAsync with.
         foreach (var name in compileResult.TableInputs.Distinct())
         {
-            var stream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, name));
-            var handle = await stream.SubscribeAsync((deltas, _) => OnTableDeltaBatchAsync(name, deltas));
-            _tableSubs.Add(handle);
+            await AttachToTableInputAsync(streamProvider, def.Name, name);
         }
 
         // MemoryOnly registers no flush timer at all — see class doc's persistence-mode paragraph.
@@ -503,68 +507,90 @@ public sealed class TableGrain(
     }
 
     /// <summary>
-    /// Wishlist #14, option (b) — "at minimum a diagnostic at create time when an input LATEST BY table is
-    /// non-empty". Deliberately the LOUD half rather than the fix: replaying an already-populated upstream
-    /// table's current contents into a brand-new consumer (option (a)) needs the snapshot read and the
-    /// delta-stream subscription to agree on exactly one point in the upstream's own history, and this
-    /// table's classic (Parallelism==1) subscription path has no such point to agree on — SnapshotFrontierEpoch
-    /// (see class doc's PLAN 003 M4 paragraph) is a coordinator-mode-only concept, and giving the classic
-    /// path an equivalent would mean putting an epoch stamp on every element of the
-    /// (StreamConstants.TableDeltaNamespace, tableName) delta stream, a wire-contract change every consumer
-    /// of that stream would have to agree on (TableHistoryGrain, StreamBridgeService/SignalR, this table's
-    /// own downstream tables) — out of scope here. So: this table starts anyway (a startup failure would be
-    /// a worse outcome — same call ApplyRetentionPolicy already makes for an unsupported retention policy),
-    /// but if a declared table input already holds rows AT THE MOMENT this table is about to start consuming
-    /// its delta stream, that is exactly the situation wishlist #14 describes — this table will NOT see
-    /// those rows, ever, only future changes to them — and it is logged by name and row count instead of
-    /// surfacing later as a silently-incomplete projection or (see TableExecutor.UnmatchedRetractions) a
-    /// GROUP BY that ping-pongs between one row and none.
+    /// Wishlist #14 option (a) — REAL backfill on attach, superseding option (b)'s warning-only
+    /// WarnIfTableInputsAlreadyHoldRowsAsync (removed; this method both backfills AND still warns — see
+    /// below). Subscribes to <paramref name="upstreamName"/>'s delta stream, then atomically reads its
+    /// current (rows, LastEpoch) via <see cref="ITableGrain.AttachSnapshotAsync"/>, admits those rows as
+    /// this table's own initial state for that input, and records the returned epoch as a per-input cutoff
+    /// so <see cref="OnTableDeltaBatchAsync"/> never re-applies a delta the snapshot already contains.
     ///
-    /// Advisory only, and the row count it reports is itself a best-effort snapshot with no synchronization
-    /// guarantee against the subscription this method runs just before — it can be stale in either direction
-    /// by the time the subscription below goes live. That is fine for a diagnostic (it only needs to catch
-    /// the common, not-actively-racing case: an operator creating a new aggregate over a long-since-warm
-    /// table mid-session, exactly the demo's reported symptom) and is exactly why this is NOT the fix: a
-    /// real backfill cannot tolerate that same race (see docs/otc-demo-wishlist.md #14's "THE TRAP" and "Not
-    /// done" paragraphs).
+    /// WHY SUBSCRIBING FIRST IS SAFE, NOT JUST CONVENTIONAL: this grain is non-reentrant (class doc) except
+    /// for <see cref="OnOutputBatchAsync"/> — so ANY delivery to the handler this subscribes below,
+    /// including one the stream provider dispatches while THIS StartClassicAsync call (which awaits this
+    /// method) is still mid-flight, is queued by Orleans behind this grain's current turn and cannot begin
+    /// running until StartAsync's ENTIRE call returns. Nothing published between "subscribed" and "this
+    /// method returns" is ever lost — at worst it is deferred until after <see cref="_tableInputCutoffEpoch"/>
+    /// is already populated for this input (set below, before this method returns), at which point
+    /// <see cref="OnTableDeltaBatchAsync"/>'s own epoch filter makes replaying it either a correct
+    /// application (Epoch &gt; cutoff — this table's snapshot predates it) or a correct no-op (Epoch &lt;=
+    /// cutoff — already reflected in the snapshot just admitted). Either way: no gap, no double-count,
+    /// regardless of exactly when between "subscribed" and "attached" the upstream happens to publish. See
+    /// <c>StreamForge.Engine.TableExecutor.LastEpoch</c>'s own doc comment (PublicApi.cs) for the argument
+    /// this rests on, and <see cref="ITableGrain.AttachSnapshotAsync"/>'s for why the (rows, epoch) pair
+    /// itself is atomic on the upstream side.
+    ///
+    /// Rows are admitted through <see cref="TableExecutor.OnTableDeltaBatch"/> — the SAME entry point any
+    /// live batch from <paramref name="upstreamName"/> uses — so GROUP BY/JOIN/LATEST BY state is correctly
+    /// built up from them rather than bypassed, and the result is republished via
+    /// <see cref="ApplyAndPublishAsync"/> exactly like live traffic, so a table chained off THIS one (a
+    /// three-hop A -&gt; B -&gt; C backfill) sees B's backfilled rows too when it, in turn, attaches to B.
+    ///
+    /// STILL WARNS: a PRE-EXISTING test (WarmUpstreamDiagnosticClusterTests) pins the warning's exact shape
+    /// (table name, upstream name, row count, and a "docs/otc-demo-wishlist.md #14" reference) — kept,
+    /// re-worded now that the rows it reports ARE being backfilled rather than silently dropped, and now
+    /// driven by the SAME atomic read the backfill itself uses (the old best-effort GetRowCountAsync probe,
+    /// which could itself race the subscription it described, is gone).
     /// </summary>
-    private async Task WarnIfTableInputsAlreadyHoldRowsAsync(string tableName, IReadOnlyList<string> tableInputs)
+    private async Task AttachToTableInputAsync(IStreamProvider streamProvider, string tableName, string upstreamName)
     {
-        foreach (var upstreamName in tableInputs.Distinct())
+        // A table cannot legitimately depend on itself (the SQL compiler has no recursive-table feature to
+        // produce one) — skip defensively rather than ever calling back into this same not-yet-finished
+        // StartAsync turn, which would deadlock.
+        if (upstreamName == tableName) return;
+
+        var stream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, upstreamName));
+        var handle = await stream.SubscribeAsync((deltas, _) => OnTableDeltaBatchAsync(upstreamName, deltas));
+        _tableSubs.Add(handle);
+
+        TableAttachSnapshot snapshot;
+        try
         {
-            // A table cannot legitimately depend on itself (the SQL compiler has no recursive-table
-            // feature to produce one) — skip defensively rather than ever awaiting a call back into this
-            // same not-yet-finished StartAsync turn, which would deadlock.
-            if (upstreamName == tableName) continue;
+            snapshot = await GrainFactory.GetGrain<ITableGrain>(upstreamName).AttachSnapshotAsync();
+        }
+        catch (Exception ex)
+        {
+            // Best-effort: an upstream table that hasn't been created/started yet (or errors for its own
+            // reasons) has no snapshot to backfill from — this table starts empty for that input and relies
+            // on live traffic from here, exactly like every input already does. Never let this block the
+            // table from starting.
+            logger.LogDebug(ex, "Table '{Table}': could not attach to table input '{Upstream}' for backfill — starting empty for this input.", tableName, upstreamName);
+            snapshot = new TableAttachSnapshot { Rows = [], Epoch = -1 };
+        }
 
-            int upstreamRowCount;
-            try
-            {
-                upstreamRowCount = await GrainFactory.GetGrain<ITableGrain>(upstreamName).GetRowCountAsync();
-            }
-            catch (Exception ex)
-            {
-                // Best-effort: an upstream table that hasn't been created/started yet (or that errors for
-                // its own reasons) is not this diagnostic's concern — it holds no rows for THIS table to
-                // have missed either way. Never let the check itself block this table from starting.
-                logger.LogDebug(ex, "Table '{Table}': could not read row count of table input '{Upstream}' for the warm-upstream diagnostic — skipping.", tableName, upstreamName);
-                continue;
-            }
+        // Recorded BEFORE this method returns — see this method's own doc comment for why that ordering,
+        // relative to StartAsync's turn ending, is what makes OnTableDeltaBatchAsync's filter correct for
+        // anything the subscription above queued while this call was in flight.
+        _tableInputCutoffEpoch[upstreamName] = snapshot.Epoch;
 
-            if (upstreamRowCount > 0)
+        if (snapshot.Rows.Count > 0)
+        {
+            // NOTE: each placeholder name appears exactly once — Microsoft.Extensions.Logging's
+            // structured-logging formatter binds placeholders to args POSITIONALLY, so repeating a name
+            // (e.g. two "{Table}" occurrences) silently desyncs every placeholder after the first repeat
+            // from the argument list actually supplied, rather than substituting the same value twice.
+            logger.LogWarning(
+                "Table '{Table}' is starting with table input '{Upstream}' ({RowCount} row(s) already present) " +
+                "— replaying them now as this table's initial state (wishlist #14 option (a); see " +
+                "docs/otc-demo-wishlist.md #14).",
+                tableName, upstreamName, snapshot.Rows.Count);
+
+            var seedDeltas = snapshot.Rows.Select(r => new TableDelta(new EventRecord(r.Row), r.Weight)).ToList();
+            _deltasIn += seedDeltas.Count;
+            var outAll = _executor!.OnTableDeltaBatch(upstreamName, seedDeltas);
+            _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (outAll.Count > 0)
             {
-                // NOTE: each placeholder name appears exactly once — Microsoft.Extensions.Logging's
-                // structured-logging formatter binds placeholders to args POSITIONALLY, so repeating a
-                // name (e.g. two "{Table}" occurrences) silently desyncs every placeholder after the
-                // first repeat from the 3-argument list actually supplied, rather than substituting the
-                // same value twice.
-                logger.LogWarning(
-                    "Table '{Table}' is starting with table input '{Upstream}' ({RowCount} row(s) already present). " +
-                    "Those rows are NOT backfilled — this table starts empty and only reflects changes to its table " +
-                    "input from now on. For a plain projection this self-heals as rows churn; for a GROUP BY/aggregate " +
-                    "it does not (see TableExecutor.UnmatchedRetractions) — the aggregate can report a wrong count " +
-                    "until restarted. See docs/otc-demo-wishlist.md #14.",
-                    tableName, upstreamName, upstreamRowCount);
+                await ApplyAndPublishAsync(outAll);
             }
         }
     }
@@ -704,6 +730,7 @@ public sealed class TableGrain(
             try { await handle.UnsubscribeAsync(); } catch { /* best-effort */ }
         }
         _tableSubs.Clear();
+        _tableInputCutoffEpoch.Clear(); // wishlist #14 option (a) — a restart re-attaches and re-populates this fresh.
 
         // Plan 003 M4: no stream subscription to tear down anymore (see class doc) — just drop the
         // frontier-tracking state so a stopped table reports no stale frontier.
@@ -908,6 +935,38 @@ public sealed class TableGrain(
     /// fan-out on every poll just to read one long.</summary>
     public Task<long?> GetSnapshotFrontierEpochAsync() => Task.FromResult(_coordinatorMode ? _snapshotFrontierEpoch : null);
 
+    /// <summary>Wishlist #14 option (a) — see <see cref="ITableGrain.AttachSnapshotAsync"/>'s own doc
+    /// comment for the contract and <see cref="AttachToTableInputAsync"/> for the caller side. Purely
+    /// synchronous (no `await`) so the (rows, epoch) pair is atomic by construction: this grain is
+    /// non-reentrant, so nothing can advance either <see cref="_executor"/> or <see cref="_coordinatorLedger"/>/
+    /// <see cref="_snapshotFrontierEpoch"/> between the two reads below within this one call.
+    ///
+    /// Coordinator mode reads <see cref="_coordinatorLedger"/>/<see cref="_snapshotFrontierEpoch"/> — the
+    /// SAME pair GetRowsAsync/GetMetricsAsync already read for their own consistency guarantee (class doc's
+    /// PLAN 003 M4 paragraph) — rather than <see cref="_executor"/>, which in coordinator mode is a scratch
+    /// instance never fed real admissions (see StartCoordinatorAsync's own comment: "CanonicalRowKey only,
+    /// never fed an event") and whose LastEpoch would therefore stay -1 forever.</summary>
+    public Task<TableAttachSnapshot> AttachSnapshotAsync()
+    {
+        if (_executor is null)
+        {
+            return Task.FromResult(new TableAttachSnapshot { Rows = [], Epoch = -1 });
+        }
+
+        if (_coordinatorMode)
+        {
+            var coordinatorRows = _coordinatorLedger.Visible.Values
+                .Select(v => new TableRowDto { Row = new Dictionary<string, object?>(v.Row), Weight = v.Weight })
+                .ToList();
+            return Task.FromResult(new TableAttachSnapshot { Rows = coordinatorRows, Epoch = _snapshotFrontierEpoch ?? -1 });
+        }
+
+        var classicRows = _executor.Snapshot().Values
+            .Select(v => new TableRowDto { Row = new Dictionary<string, object?>(v.Row), Weight = v.Weight })
+            .ToList();
+        return Task.FromResult(new TableAttachSnapshot { Rows = classicRows, Epoch = _executor.LastEpoch });
+    }
+
     public Task<long> GetSeqAsync() => Task.FromResult(state.State.Seq);
 
     public Task<List<TableRowDto>> SearchAsync(string query, int limit)
@@ -957,12 +1016,24 @@ public sealed class TableGrain(
     /// wishlist describes. Admitting the whole batch through <see cref="TableExecutor.OnTableDeltaBatch"/>
     /// in ONE call keeps it one epoch here too: the executor consolidates its own output before returning
     /// (see ConsolidateEpochOutput), so the intermediate state never reaches ApplyAndPublishAsync at all.
+    ///
+    /// WISHLIST #14 OPTION (A): every element of <paramref name="batch"/> carries the epoch it was admitted
+    /// under on <paramref name="table"/>'s own side (TableDeltaDto.Epoch, stamped by ApplyAndPublishAsync
+    /// from TableExecutor.LastEpoch). Anything at or below the cutoff <see cref="AttachToTableInputAsync"/>
+    /// recorded for this input is already reflected in the snapshot this table backfilled from — applying
+    /// it again would double its Z-set weight — so it is filtered out before admission. See
+    /// AttachToTableInputAsync's own doc comment for why this filter, not delivery timing, is what actually
+    /// makes the subscribe-then-attach handshake race-free.
     /// </summary>
     private async Task OnTableDeltaBatchAsync(string table, List<TableDeltaDto> batch)
     {
         if (_executor is null) return;
 
-        var deltas = batch.Select(d => new TableDelta(new EventRecord(d.Row), d.Weight)).ToList();
+        var cutoff = _tableInputCutoffEpoch.GetValueOrDefault(table, -1);
+        var admissible = cutoff < 0 ? batch : batch.Where(d => d.Epoch > cutoff).ToList();
+        if (admissible.Count == 0) return;
+
+        var deltas = admissible.Select(d => new TableDelta(new EventRecord(d.Row), d.Weight)).ToList();
         _deltasIn += deltas.Count;
         var outAll = _executor.OnTableDeltaBatch(table, deltas);
         _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -989,13 +1060,19 @@ public sealed class TableGrain(
     /// ever yields, one always runs to completion before the other can start — no GetRowsAsync call can
     /// ever observe _coordinatorLedger mid-update, and _snapshotFrontierEpoch never claims more than what
     /// was just applied. No SQL runs here — the partitioned graph already computed these deltas; this grain
-    /// only consolidates + persists + indexes them for reads.</summary>
-    public Task OnOutputBatchAsync(int fromPartition, long epochValue, List<TableDeltaDto> deltas)
+    /// only consolidates + persists + indexes them for reads.
+    ///
+    /// WISHLIST #15/#14, PART 2 — see the interface doc comment (<see cref="ITableGrain.OnOutputBatchAsync"/>)
+    /// for why the RETURN VALUE, not a publish performed here, is how this method's result reaches this
+    /// table's own delta stream: this method stays synchronous (no `await`) throughout, exactly as before —
+    /// only the CALLER (<c>TableOutputGrain.PublishAsync</c>, which already awaits freely) performs the wire
+    /// publish, with what this method computes and returns.</summary>
+    public Task<List<TableDeltaDto>> OnOutputBatchAsync(int fromPartition, long epochValue, List<TableDeltaDto> deltas)
     {
         if (!_coordinatorMode || _status != PipelineStatus.Running || _executor is null
             || _outputFrontier is null || _outputBuffer is null)
         {
-            return Task.CompletedTask;
+            return Task.FromResult<List<TableDeltaDto>>([]);
         }
 
         var epoch = new Epoch(epochValue);
@@ -1005,12 +1082,13 @@ public sealed class TableGrain(
         _outputBuffer.Add(new DeltaBatch(_terminalEdgeId, fromPartition, epoch, tableDeltas));
 
         var observation = _outputFrontier.Observe(new UpstreamId(_terminalEdgeId, fromPartition), epoch);
-        if (!observation.Advanced) return Task.CompletedTask; // another terminal partition still holds the frontier back
+        if (!observation.Advanced) return Task.FromResult<List<TableDeltaDto>>([]); // another terminal partition still holds the frontier back
 
         var ready = _outputBuffer.OnFrontier(observation.Frontier);
         var allDeltas = new List<TableDelta>();
         foreach (var batch in ready) allDeltas.AddRange(batch.Deltas);
 
+        List<TableDeltaDto> publishDtos = [];
         if (allDeltas.Count > 0)
         {
             foreach (var delta in allDeltas) ApplyCoordinatorConsolidation(delta);
@@ -1037,14 +1115,77 @@ public sealed class TableGrain(
             {
                 ReflectDeltasInSearchIndex(touched);
             }
+
+            // Wishlist #15/#14, PART 2 — coordinator mode's own "one epoch, one consolidated wire publish"
+            // (see ConsolidateCoordinatorEpochOutput's own doc comment): this is the coordinator-mode
+            // analogue of the classic path's ConsolidateEpochOutput/one-epoch-batch fix — WITHOUT it, a row
+            // one terminal partition retracted and a DIFFERENT partition (re-)asserted within this SAME
+            // epoch (e.g. a row whose hash-partitioned key changed) would previously have reached the wire
+            // as two separate, immediately-published-per-partition messages (TableOutputGrain.PublishAsync
+            // used to call stream.OnNextAsync itself, per partition arrival, before any frontier
+            // consolidation at all) — the exact NULL-flap wishlist #15 targeted, reproduced one level up.
+            // Folding the RAW allDeltas into _coordinatorLedger/search/journal above (unchanged) is
+            // deliberately NOT replaced by the consolidated version: ConsolidationLedger.Apply already folds
+            // order-independently (its own class doc), so the two converge to the identical final state —
+            // only the WIRE publish needs the transient pair removed before anything downstream can observe it.
+            var consolidated = ConsolidateCoordinatorEpochOutput(allDeltas);
+            if (consolidated.Count > 0)
+            {
+                publishDtos = consolidated
+                    .Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight, Epoch = observation.Frontier.Value })
+                    .ToList();
+            }
         }
 
         // Frontier progress is reported regardless of whether this round carried any real deltas — an
         // empty epoch still honestly advances what the snapshot is known to reflect (see EpochBuffer's own
         // doc comment: "an empty epoch still advances ... downstream consumer learn[s] that upstream
-        // reached that epoch with nothing to say").
+        // reached that epoch with nothing to say"). The WIRE publish (unlike this frontier advance) is
+        // skipped for an empty/fully-netted-to-zero epoch — mirrors the classic path's own
+        // `if (deltas.Count > 0)` gate in ApplyAndPublishAsync's callers.
         _snapshotFrontierEpoch = observation.Frontier.Value;
-        return Task.CompletedTask;
+        return Task.FromResult(publishDtos);
+    }
+
+    /// <summary>Wishlist #15/#14, PART 2 — coordinator-mode analogue of the Engine's own
+    /// ConsolidateEpochOutput (StreamForge.Engine.Runtime.TableExecutorImpl.cs's private static method of
+    /// the same shape): nets <paramref name="raw"/> (every terminal partition's own contribution to ONE
+    /// epoch, gathered by <see cref="EpochBuffer.OnFrontier"/> above) by canonical row key
+    /// (<c>TableExecutor.CanonicalRowKey</c> — the SAME identity <see cref="ApplyCoordinatorConsolidation"/>/
+    /// the journal/the search index already use) and drops any key whose net weight nets to exactly zero, so
+    /// a same-epoch retract+(re-)assert pair for the same row — whichever partition(s) produced the two
+    /// halves — reaches a wire consumer as its NET effect only, never as a visible intermediate. Order-
+    /// preserving (first-occurrence position survives), like its Engine-side counterpart.</summary>
+    private List<TableDelta> ConsolidateCoordinatorEpochOutput(List<TableDelta> raw)
+    {
+        if (raw.Count <= 1) return raw;
+
+        var netWeight = new Dictionary<string, long>(StringComparer.Ordinal);
+        var firstRow = new Dictionary<string, EventRecord>(StringComparer.Ordinal);
+        var order = new List<string>();
+
+        foreach (var delta in raw)
+        {
+            var key = _executor!.CanonicalRowKey(delta.Row);
+            if (netWeight.TryGetValue(key, out var existing))
+            {
+                netWeight[key] = existing + delta.Weight;
+            }
+            else
+            {
+                netWeight[key] = delta.Weight;
+                firstRow[key] = delta.Row;
+                order.Add(key);
+            }
+        }
+
+        var consolidated = new List<TableDelta>(order.Count);
+        foreach (var key in order)
+        {
+            var weight = netWeight[key];
+            if (weight != 0) consolidated.Add(new TableDelta(firstRow[key], weight));
+        }
+        return consolidated;
     }
 
     /// <summary>[MayInterleave] predicate (see class doc) — only OnOutputBatchAsync is allowed to jump the
@@ -1111,7 +1252,14 @@ public sealed class TableGrain(
 
         // Plan 011 C2: Evicted rides along so the row-history grain can tell a retention eviction apart
         // from an ordinary upstream retraction — see TableDeltaDto.Evicted. Every other consumer ignores it.
-        var dtos = deltas.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight, Evicted = d.Retention }).ToList();
+        //
+        // Wishlist #14 option (a): Epoch is TableExecutor.LastEpoch read HERE — synchronously, no `await`
+        // since the _executor.OnStreamEvent/OnTableDelta/OnTableDeltaBatch call that produced `deltas`
+        // returned — so it is exactly the epoch that admission was stamped with (see LastEpoch's own doc
+        // comment in PublicApi.cs). Every consumer of this stream that doesn't care about backfill ignores
+        // it, exactly like Evicted.
+        var epoch = _executor!.LastEpoch;
+        var dtos = deltas.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight, Evicted = d.Retention, Epoch = epoch }).ToList();
         var stream = this.GetStreamProvider(StreamConstants.ProviderName)
             .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, _def!.Name));
         await stream.OnNextAsync(dtos);

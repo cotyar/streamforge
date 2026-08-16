@@ -88,6 +88,13 @@ public sealed partial class TableExecutor
 
     private long _epochCounter;
 
+    /// <summary>Wishlist #14 option (a) — see <see cref="TableExecutor.LastEpoch"/>'s own doc comment (in
+    /// PublicApi.cs) for the full contract this backs. Set at the SAME point <see cref="_epochCounter"/> is
+    /// consumed in both <see cref="HandleIncoming"/> and <see cref="HandleIncomingUnionBatch"/> — i.e. once
+    /// per call that actually admits a non-empty batch against a subscribed role, regardless of whether that
+    /// call's own OUTPUT ends up empty after consolidation. -1 until the first such call.</summary>
+    private long _lastEpoch = -1;
+
     // Plan 011 C2 — row retention. All three are inert until ConfigureRetention installs an ENABLED policy,
     // so a table without one keeps the pre-011 hot path exactly (no ordering index, no per-batch check
     // beyond a single `IsEnabled` bool test). _retentionScope is whichever structure actually owns this
@@ -251,6 +258,15 @@ public sealed partial class TableExecutor
         var output = new List<TableDelta>();
         if (deltas.Count == 0) return output;
 
+        // Wishlist #14 option (a): allocate (and record as LastEpoch) unconditionally, not only when
+        // _distinct needs one — before this fix, a UNION ALL (no _distinct) branch of this method never
+        // touched _epochCounter/_lastEpoch at all, which would have left TableExecutor.LastEpoch stuck for
+        // every admission a union-without-DISTINCT table ever processed. _epochCounter is otherwise
+        // Engine-private (no pre-existing consumer could observe the value directly), so widening when it
+        // advances is behavior-invisible except through the new LastEpoch property.
+        var epoch = new Epoch(_epochCounter++);
+        _lastEpoch = epoch.Value;
+
         if (_unionRoles!.TryGetValue(name, out var branches))
         {
             foreach (var branchExecutor in branches)
@@ -261,7 +277,6 @@ public sealed partial class TableExecutor
 
         if (_distinct is not null)
         {
-            var epoch = new Epoch(_epochCounter++);
             output = _distinct.OnBatch(epoch, output).ToList();
         }
 
@@ -412,6 +427,7 @@ public sealed partial class TableExecutor
         if (!_roles.TryGetValue(name, out var roles)) return output;
 
         var epoch = new Epoch(_epochCounter++);
+        _lastEpoch = epoch.Value; // Wishlist #14 option (a) — see TableExecutor.LastEpoch's own doc comment.
 
         foreach (var role in roles)
         {

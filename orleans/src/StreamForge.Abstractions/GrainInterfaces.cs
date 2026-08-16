@@ -41,6 +41,27 @@ public interface IGeneratorGrain : IGrainWithStringKey
     Task<ScenarioRunResult> RunAsync(ScenarioRunRequest request);
 }
 
+/// <summary>Wishlist #14 option (a) — the atomic (rows, epoch) pair <see cref="ITableGrain.AttachSnapshotAsync"/>
+/// returns. Deliberately defined here (Abstractions, Orleans-only) rather than in shared Contracts: the
+/// per-file ownership for this change scopes Contracts to ONLY the additive <c>TableDeltaDto.Epoch</c> field
+/// (a wire field every consumer of that DTO — including Dapr and any future polyglot subscriber — must be
+/// able to read), whereas this combined-snapshot response is purely an Orleans grain-call return shape, used
+/// by exactly one caller (another TableGrain, mid-StartClassicAsync) and never serialized onto any shared
+/// pub/sub stream. See <c>StreamForge.Engine.TableExecutor.LastEpoch</c>'s own doc comment (PublicApi.cs)
+/// for the full backfill-on-attach protocol this exists to serve, and TableGrain.AttachSnapshotAsync's own
+/// doc comment for exactly how the two fields here are captured atomically.</summary>
+[GenerateSerializer]
+public sealed class TableAttachSnapshot
+{
+    [Id(0)] public List<TableRowDto> Rows { get; set; } = [];
+
+    /// <summary>-1 means "this table has never admitted anything yet" (equivalent to
+    /// <c>TableExecutor.LastEpoch</c>'s own default) — a caller applies EVERY subsequently-received delta
+    /// unconditionally in that case, since nothing is yet reflected in <see cref="Rows"/> to double-count
+    /// against.</summary>
+    [Id(1)] public long Epoch { get; set; } = -1;
+}
+
 /// <summary>Key = table name. One activation per running table. Materializes a Z-set (DBSP-style)
 /// incremental view: subscribes to its SQL's stream and table inputs, feeds deltas through a
 /// StreamForge.Engine TableExecutor, and publishes emitted deltas + persists a consolidated snapshot for
@@ -76,8 +97,33 @@ public interface ITableGrain : IGrainWithStringKey
     /// construction, not by convention. fromPartition/epoch are the terminal stage's own UpstreamId
     /// components (plain ints/longs, matching ITableStageGrain.PushBatchAsync's no-Dataflow-dependency
     /// rule). Not part of the table's public read surface — internal to the M2 grain topology, called only
-    /// by this table's own ITableOutputGrain.</summary>
-    Task OnOutputBatchAsync(int fromPartition, long epoch, List<TableDeltaDto> deltas);
+    /// by this table's own ITableOutputGrain.
+    ///
+    /// WISHLIST #15/#14, PART 2 — coordinator mode's own "one epoch, one consolidated wire publish": the
+    /// RETURN VALUE (additive relative to the pre-existing <c>Task</c> shape — this method has exactly one
+    /// caller, <c>TableOutputGrain.PublishAsync</c>, owned by the same change) is this epoch's consolidated,
+    /// ready-to-publish delta batch for THIS table's own (StreamConstants.TableDeltaNamespace, tableName)
+    /// stream — empty when this call didn't advance the frontier (another terminal partition still holds it
+    /// back) or when the epoch's net effect is empty. <see cref="TableGrain"/>'s implementation stays
+    /// entirely synchronous (no `await`) to preserve the existing MayInterleave safety argument (see
+    /// <c>TableGrain</c>'s own class doc: "safe to interleave because OnOutputBatchAsync's body has no
+    /// await") — the caller, which already awaits freely, performs the actual
+    /// <c>stream.OnNextAsync(...)</c> publish with what this method returns.</summary>
+    Task<List<TableDeltaDto>> OnOutputBatchAsync(int fromPartition, long epoch, List<TableDeltaDto> deltas);
+
+    /// <summary>Wishlist #14 option (a) — REAL backfill on attach, replacing the option (b) warning. Called
+    /// by a NEW downstream table's own StartClassicAsync, for each of its declared table inputs, AFTER that
+    /// input's delta-stream subscription is already active (see the caller's own doc comment for why that
+    /// order matters and why it's sufficient — Orleans queues any stream delivery to a non-reentrant grain
+    /// still mid-StartAsync rather than dropping it, so nothing published between "subscribed" and "this
+    /// call returns" is lost, only deferred). Atomically (no `await` before both fields are read — see
+    /// <see cref="TableAttachSnapshot"/>'s own doc comment) returns this table's CURRENT consolidated
+    /// snapshot together with the exact epoch it reflects: <c>TableExecutor.LastEpoch</c> for a classic
+    /// (Parallelism==1) table, <c>SnapshotFrontierEpoch</c> for a coordinator-mode one (both are the same
+    /// "epoch this table's own read-side state is fully caught up to and no further" concept — see each
+    /// field's own doc comment). Idempotent and safely re-callable — reads only, no side effect on this
+    /// table's own state or subscriptions.</summary>
+    Task<TableAttachSnapshot> AttachSnapshotAsync();
 }
 
 /// <summary>Key = table name. One activation per table with row history ever configured. Subscribes to
