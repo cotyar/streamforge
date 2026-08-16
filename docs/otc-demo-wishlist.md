@@ -6,7 +6,8 @@ item is small by design.
 
 Each section keeps the original report and records what shipped underneath it —
 including the places where the report turned out to be describing half of
-something. **Done: 1–7, 10, 11, 12. Half done: 14. Open: 8, 9, 13, 15.**
+something. **Done: 1–8, 10–13, 15. Partial: 9 (option (a) only), 14 (option (b)
+only). Nothing is untouched.**
 
 ## 1. ✅ Configurable CORS origins (shipped 2026-08-15)
 
@@ -164,7 +165,7 @@ works around client-side; each item says what the workaround is, so the demo is
 never blocked on it. Ordered by value. Row contracts are spelled out so the demo
 can swap generator/aggregate implementations without touching table SQL.
 
-## 8. Parametric, seedable "scenario generator" source with run-on-demand
+## 8. ✅ Parametric, seedable "scenario generator" source with run-on-demand
 
 Today a generator is `SourceDefinition.GeneratorProfile` ∈ {trades, quotes,
 orders, generic} + `EventsPerSecond` (`shared/StreamForge.Contracts/Models.cs:55-57`);
@@ -196,7 +197,23 @@ Wanted (new profile `scenario` or a new kind — whichever is smaller):
 Workaround in the demo: `apps/websites/otc-terms/lib/mc.ts` generates the same
 rows in Bun and pushes them to an `ingest` source; tables are unchanged.
 
-## 9. Bounded feedback loop (instead of recursive SQL) — also the "scenario clock"
+**Shipped.** The `scenario` profile with paths/instruments/distribution/rho/
+horizon/seed, and `POST /api/sources/{name}/run` that publishes the batch.
+The RNG is seeded per run, never process-global — determinism is the point, since
+"before and after a CSA amendment" only compares honestly if exactly one thing
+differs. Tests pin byte-identical repeats, exact equality within a group at ρ=1,
+and independence at ρ=0.
+
+`RunSourceAsync` sits on `ICatalogFacade` rather than in the endpoint because only
+a runtime can publish: an endpoint that generated the batch itself would return
+rows while emitting nothing — a run that looks successful and moves no data.
+
+Not implemented on purpose: instruments by reference to another source (inline
+list only; the reference is a hard validation error, not silently ignored), and
+`step: true`, which belongs with #9 — no field was added, so nothing exists that
+quietly does nothing.
+
+## 9. ◐ Bounded feedback loop (instead of recursive SQL) — also the "scenario clock"
 
 Recursive SQL was rejected for complexity; agreed. The streaming-native
 workaround is an explicit, user-declared loop with a step bound: a table's
@@ -224,6 +241,17 @@ can't do otherwise. With #8's seed the whole trajectory is replayable.
 
 Workaround in the demo: a Bun driver steps days outside and re-pushes state per
 `(path_id, instrument_id)`, relying on `LATEST BY` supersession.
+
+**Option (a) shipped, option (b) not.** `SinkKinds.Http` posts a table's deltas to
+a URL, body wire-identical to the ingest endpoint's, with the `maxDepth` guard
+dropping any row whose step has reached the bound. The native in-process
+loopback sink→source pair was not attempted.
+
+Named tradeoff: a maxDepth drop shares a counter with a network failure because
+`SinkPublishCounters` is frozen — `LastError`'s text always separates them, so
+nothing is silent. Pre-existing gap found and left alone: `ISinkTransport.Validate`
+is not wired to any REST call site in this repo, so a missing URL is correctly
+rejected and nothing shows an operator why.
 
 ## 10. ✅ Statistical aggregates: STDDEV/VAR, PERCENTILE_CONT/MEDIAN, COUNT(DISTINCT)
 
@@ -325,7 +353,7 @@ one that cannot subtract cannot be maintained incrementally.
 so a registered function autocompletes; built-ins stay static there so the editor
 works before that resolves and if it fails. Verified live against a running host.
 
-## 13. Explicit key retraction through ingest
+## 13. ✅ Explicit key retraction through ingest
 
 Ingest is append-only by design (`AppCore/Connectors/Mapping/CdcEnvelope.cs:44-52`,
 `Runtime/Ops/TableIngestOp.cs`), and retention is only allowed on P=1
@@ -339,6 +367,18 @@ that emits weight −1 for the last asserted row of that key in a `LATEST BY`
 table (only meaningful for LATEST BY consumers — reject otherwise at validate),
 or `DELETE /api/tables/{id}/rows?key=…` for LATEST BY tables. Either lets the
 demo free `scenario_inputs` and `mc_paths` keys instead of tombstoning.
+
+**Shipped.** A row may carry `_retract: true`; it flips the ingested weight to −1
+and reaches `TableLatestByOp` as a key retraction that drops what is retained for
+that key regardless of the arriving row's content. Unknown key and double retract
+are dictionary-remove misses, so idempotence is by construction. Rejected at
+validate time, by name, for any consumer that is not LATEST BY-shaped.
+
+Three gaps, stated rather than left to be found: gRPC ingest bypasses the validate
+gate (safe, but silent instead of refused); a `WHERE` over non-key columns can
+drop a retraction before it reaches LATEST BY, since a retract row carries only
+the key; and validation covers direct consumers, relying on each intermediate
+being checked in turn for chains.
 
 ## 14. ◐ BUG: an aggregate created over an already-populated `LATEST BY` table collapses to zero
 
@@ -378,7 +418,7 @@ only correct if the snapshot and the delta stream agree on an epoch — otherwis
 the backfill duplicates or misses rows and produces a wrong answer by a different
 route. That needs its own pass.
 
-## 15. Retract/assert of one upstream change should be applied atomically downstream
+## 15. ✅ Retract/assert of one upstream change should be applied atomically downstream
 
 A LEFT JOIN onto an aggregate table observes the aggregate's retract(−1) before
 its assert(+1) as two separate deltas: for part of every tick the joined column
@@ -392,7 +432,27 @@ carries both so clients don't paint the intermediate state. Pointers:
 `Runtime/Ops/`, `Runtime/TableExecutorImpl.cs:41` (upstream deltas → alias
 input).
 
-## 16. Server-side delta coalescing per epoch on the SignalR hub
+**Shipped for #15 and #14(b)** (they landed together, since both are about a
+consumer seeing a state that should never have been visible):
+
+One upstream batch is now applied as ONE epoch — `TableExecutor.OnTableDeltaBatch`,
+called once by both runtimes instead of looping per delta — and the epoch's output
+is consolidated by row key so an intermediate assert/retract pair nets out before
+leaving the table. A LEFT JOIN onto an aggregate no longer reads NULL mid-tick.
+Consolidation is gated on the INPUT batch size, not the output: a single delta can
+legitimately produce a same-content retract+assert pair, and gating on output
+silently swallowed it (caught by an existing pinned test, not by review).
+
+#14 shipped option **(b)**: `SnapshotFrontierEpoch` is coordinator-mode only, and
+the bug hits classic `Parallelism == 1` tables, which have no such point. A correct
+backfill needs an epoch on every element of the table-delta stream — a wire
+contract every consumer must agree on. Both runtimes now warn, by table name and
+row count, when a consumer attaches to an upstream that already holds rows.
+
+Neither fix covers coordinator mode (`Parallelism >= 2`), which does not route
+through `TableExecutor` at all.
+
+## 16. ◐ Server-side delta coalescing per epoch on the SignalR hub
 
 A 36,000-row Monte-Carlo run (200 paths × 36 trades × 5 days) produced ~100k
 `tableDelta` messages; the browser (and Excel) fell minutes behind the engine on
@@ -405,3 +465,25 @@ one message per delta. This is also the client-visible half of #15. Pointers:
 (default 250) — the flush interval exists but the message granularity does not.
 Ingest-side, the demo raised `MaxBatchRows`/`CapacityRows` to 5000/50000 and
 that half is fine.
+
+**Shipped, the batching half.** The bridge already sent one `tableDelta` per
+engine publish — the message shape was never per-delta. The volume came from the
+publish RATE: a bulk load publishes once per upstream batch, so tens of thousands
+of rows meant tens of thousands of socket frames, each with its own SignalR
+envelope. The cost is per message, not per row.
+
+`StreamBridgeService` now accumulates a table's deltas and sends one message per
+100 ms flush (under the client's own 120 ms render coalescing, so a merely-ticking
+table gains no perceptible latency), with an early flush at 20,000 pending so
+memory is bounded by (tables × cap). Deltas are never dropped to stay under the
+cap — a dropped delta silently desynchronises the client's Z-set.
+
+**Not done: the netting half.** Collapsing retract+assert of the same key needs
+the engine's own row-identity rule, and a bridge that guessed at it would quietly
+change what the client converges to. The engine already nets within an epoch
+(#15's consolidation); pushing that knowledge out to the bridge is a separate
+decision about where row identity lives.
+
+Also untouched: `Streams:PushCapacity` and `TABLES__FLUSHMS` are unchanged — this
+adds a message-granularity control that did not exist, rather than retuning the
+ones that did.

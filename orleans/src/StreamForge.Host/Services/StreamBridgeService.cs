@@ -19,17 +19,46 @@ public sealed class StreamBridgeService(
 {
     private const double SourceRelayMinIntervalMs = 50; // ~20 msg/s cap
 
+    /// <summary>How long a table's deltas accumulate before one `tableDelta` message carries them all.
+    /// The engine publishes one list per upstream batch, which for a bulk load (a Monte-Carlo run
+    /// pushing tens of thousands of rows) is tens of thousands of publishes — and therefore tens of
+    /// thousands of socket frames, each with its own SignalR envelope. That is what puts a browser
+    /// minutes behind the engine: the cost is per MESSAGE, not per row. 100 ms is under the client's own
+    /// 120 ms render coalescing, so this adds no perceptible latency to a table that is merely ticking,
+    /// while collapsing a bulk load into a handful of frames.</summary>
+    private const int TableDeltaCoalesceMs = 100;
+
+    /// <summary>Flush early once a table's pending deltas reach this many, so memory stays bounded by
+    /// (tables x this) rather than by how fast a producer can outrun a slow client. Deltas are NEVER
+    /// dropped to stay under it — a dropped delta silently desynchronises the client's Z-set, which is
+    /// far worse than a large frame.</summary>
+    private const int TableDeltaCoalesceMaxPending = 20_000;
+
     private readonly Dictionary<string, StreamSubscriptionHandle<List<ResultEnvelope>>> _pipelineSubs = new();
     private readonly Dictionary<string, StreamSubscriptionHandle<EventRecord>> _sourceSubs = new();
     private readonly Dictionary<string, DateTime> _lastSourceSend = new();
     private readonly Dictionary<string, StreamSubscriptionHandle<List<TableDeltaDto>>> _tableSubs = new();
     private readonly Dictionary<string, long> _tableSeq = new();
 
+    /// <summary>Deltas accumulated for a table since its last send. Guarded by <see cref="_tableGate"/>:
+    /// Orleans delivers stream items on its own scheduler and the flush timer fires on a pool thread, so
+    /// the two genuinely race — and the ORDER of deltas within a table must survive, since a retraction
+    /// that overtakes its assertion corrupts the client's row set.</summary>
+    private readonly Dictionary<string, List<TableDeltaDto>> _tablePending = new();
+    private readonly Lock _tableGate = new();
+    private Timer? _tableFlushTimer;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await StartupSignal.WaitForApplicationStartedAsync(lifetime, stoppingToken);
 
         var streamProvider = client.GetStreamProvider(StreamConstants.ProviderName);
+
+        _tableFlushTimer = new Timer(
+            _ => _ = FlushPendingTableDeltasAsync(),
+            state: null,
+            dueTime: TimeSpan.FromMilliseconds(TableDeltaCoalesceMs),
+            period: TimeSpan.FromMilliseconds(TableDeltaCoalesceMs));
 
         var lifecycleStream = streamProvider.GetStream<LifecycleEvent>(
             StreamId.Create(StreamConstants.LifecycleNamespace, StreamConstants.LifecycleEventsKey));
@@ -213,11 +242,88 @@ public sealed class StreamBridgeService(
 
         var handle = await stream.SubscribeAsync(async (deltas, _) =>
         {
-            var seq = _tableSeq[tableName] = _tableSeq.GetValueOrDefault(tableName) + 1;
-            await hub.Clients.Group($"table:{tableName}").SendAsync("tableDelta", tableName, deltas, seq);
+            List<TableDeltaDto>? sendNow = null;
+            lock (_tableGate)
+            {
+                if (!_tablePending.TryGetValue(tableName, out var pending))
+                {
+                    pending = [];
+                    _tablePending[tableName] = pending;
+                }
+                pending.AddRange(deltas);
+                if (pending.Count >= TableDeltaCoalesceMaxPending)
+                {
+                    sendNow = pending;
+                    _tablePending.Remove(tableName);
+                }
+            }
+
+            // Sending inside the lock would hold it across a network write; the cap path is the only one
+            // that sends from this callback at all, and by then the batch is already detached.
+            if (sendNow is not null)
+            {
+                await SendTableDeltasAsync(tableName, sendNow);
+            }
         });
 
         _tableSubs[tableName] = handle;
+    }
+
+    /// <summary>Stops the coalescing timer and drains whatever it was holding, so a shutdown does not
+    /// silently swallow up to one flush window of deltas from a client that is still connected.</summary>
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        if (_tableFlushTimer is not null)
+        {
+            await _tableFlushTimer.DisposeAsync();
+            _tableFlushTimer = null;
+        }
+        await FlushPendingTableDeltasAsync();
+        await base.StopAsync(cancellationToken);
+    }
+
+    /// <summary>One `tableDelta` per (table, flush) rather than per engine publish. Deltas are relayed
+    /// in arrival order and never netted: two entries for the same row are left as they are, because
+    /// collapsing them correctly needs the engine's own row-identity rule, and a bridge that guessed at
+    /// it would silently change what the client's Z-set converges to. The engine already nets within an
+    /// epoch (TableExecutor's epoch consolidation), which is where that knowledge lives.</summary>
+    private async Task SendTableDeltasAsync(string tableName, List<TableDeltaDto> deltas)
+    {
+        long seq;
+        lock (_tableGate)
+        {
+            seq = _tableSeq[tableName] = _tableSeq.GetValueOrDefault(tableName) + 1;
+        }
+        await hub.Clients.Group($"table:{tableName}").SendAsync("tableDelta", tableName, deltas, seq);
+    }
+
+    /// <summary>Drains every table's pending deltas. Failures are swallowed per table so one
+    /// disconnecting client cannot stop the others being served — the same tolerance the rest of this
+    /// bridge applies to hub sends.</summary>
+    private async Task FlushPendingTableDeltasAsync()
+    {
+        List<(string Table, List<TableDeltaDto> Deltas)> batches;
+        lock (_tableGate)
+        {
+            if (_tablePending.Count == 0) return;
+            batches = _tablePending.Where(kv => kv.Value.Count > 0)
+                .Select(kv => (kv.Key, kv.Value)).ToList();
+            foreach (var (table, _) in batches) _tablePending.Remove(table);
+        }
+
+        foreach (var (table, deltas) in batches)
+        {
+            try
+            {
+                await SendTableDeltasAsync(table, deltas);
+            }
+            catch (Exception)
+            {
+                // A hub send can fail for reasons entirely outside this table (a client vanished
+                // mid-write). Dropping this batch loses deltas for that table, which is why the cap
+                // above exists to keep batches small rather than to make this path safe.
+            }
+        }
     }
 
     private async Task UnsubscribeFromTableOutputAsync(string tableName)
