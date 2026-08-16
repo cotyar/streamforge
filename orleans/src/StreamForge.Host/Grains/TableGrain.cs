@@ -476,6 +476,8 @@ public sealed class TableGrain(
         // FlushAsync (just without the 2s lag, since Snapshot() is an O(1) live dictionary reference).
         _searchIndex = def.SearchEnabled ? new TableSearchIndex(def.SearchMode) : null;
 
+        await WarnIfTableInputsAlreadyHoldRowsAsync(def.Name, compileResult.TableInputs);
+
         var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
         foreach (var name in compileResult.StreamInputs.Distinct())
         {
@@ -498,6 +500,73 @@ public sealed class TableGrain(
 
         // Keep this activation alive for as long as the table is running — mirrors PipelineGrain.
         this.DelayDeactivation(TimeSpan.FromDays(365));
+    }
+
+    /// <summary>
+    /// Wishlist #14, option (b) — "at minimum a diagnostic at create time when an input LATEST BY table is
+    /// non-empty". Deliberately the LOUD half rather than the fix: replaying an already-populated upstream
+    /// table's current contents into a brand-new consumer (option (a)) needs the snapshot read and the
+    /// delta-stream subscription to agree on exactly one point in the upstream's own history, and this
+    /// table's classic (Parallelism==1) subscription path has no such point to agree on — SnapshotFrontierEpoch
+    /// (see class doc's PLAN 003 M4 paragraph) is a coordinator-mode-only concept, and giving the classic
+    /// path an equivalent would mean putting an epoch stamp on every element of the
+    /// (StreamConstants.TableDeltaNamespace, tableName) delta stream, a wire-contract change every consumer
+    /// of that stream would have to agree on (TableHistoryGrain, StreamBridgeService/SignalR, this table's
+    /// own downstream tables) — out of scope here. So: this table starts anyway (a startup failure would be
+    /// a worse outcome — same call ApplyRetentionPolicy already makes for an unsupported retention policy),
+    /// but if a declared table input already holds rows AT THE MOMENT this table is about to start consuming
+    /// its delta stream, that is exactly the situation wishlist #14 describes — this table will NOT see
+    /// those rows, ever, only future changes to them — and it is logged by name and row count instead of
+    /// surfacing later as a silently-incomplete projection or (see TableExecutor.UnmatchedRetractions) a
+    /// GROUP BY that ping-pongs between one row and none.
+    ///
+    /// Advisory only, and the row count it reports is itself a best-effort snapshot with no synchronization
+    /// guarantee against the subscription this method runs just before — it can be stale in either direction
+    /// by the time the subscription below goes live. That is fine for a diagnostic (it only needs to catch
+    /// the common, not-actively-racing case: an operator creating a new aggregate over a long-since-warm
+    /// table mid-session, exactly the demo's reported symptom) and is exactly why this is NOT the fix: a
+    /// real backfill cannot tolerate that same race (see docs/otc-demo-wishlist.md #14's "THE TRAP" and "Not
+    /// done" paragraphs).
+    /// </summary>
+    private async Task WarnIfTableInputsAlreadyHoldRowsAsync(string tableName, IReadOnlyList<string> tableInputs)
+    {
+        foreach (var upstreamName in tableInputs.Distinct())
+        {
+            // A table cannot legitimately depend on itself (the SQL compiler has no recursive-table
+            // feature to produce one) — skip defensively rather than ever awaiting a call back into this
+            // same not-yet-finished StartAsync turn, which would deadlock.
+            if (upstreamName == tableName) continue;
+
+            int upstreamRowCount;
+            try
+            {
+                upstreamRowCount = await GrainFactory.GetGrain<ITableGrain>(upstreamName).GetRowCountAsync();
+            }
+            catch (Exception ex)
+            {
+                // Best-effort: an upstream table that hasn't been created/started yet (or that errors for
+                // its own reasons) is not this diagnostic's concern — it holds no rows for THIS table to
+                // have missed either way. Never let the check itself block this table from starting.
+                logger.LogDebug(ex, "Table '{Table}': could not read row count of table input '{Upstream}' for the warm-upstream diagnostic — skipping.", tableName, upstreamName);
+                continue;
+            }
+
+            if (upstreamRowCount > 0)
+            {
+                // NOTE: each placeholder name appears exactly once — Microsoft.Extensions.Logging's
+                // structured-logging formatter binds placeholders to args POSITIONALLY, so repeating a
+                // name (e.g. two "{Table}" occurrences) silently desyncs every placeholder after the
+                // first repeat from the 3-argument list actually supplied, rather than substituting the
+                // same value twice.
+                logger.LogWarning(
+                    "Table '{Table}' is starting with table input '{Upstream}' ({RowCount} row(s) already present). " +
+                    "Those rows are NOT backfilled — this table starts empty and only reflects changes to its table " +
+                    "input from now on. For a plain projection this self-heals as rows churn; for a GROUP BY/aggregate " +
+                    "it does not (see TableExecutor.UnmatchedRetractions) — the aggregate can report a wrong count " +
+                    "until restarted. See docs/otc-demo-wishlist.md #14.",
+                    tableName, upstreamName, upstreamRowCount);
+            }
+        }
     }
 
     /// <summary>Plan 003 M2 — see class doc's coordinator-mode paragraph. Deploys the partitioned graph in
@@ -873,17 +942,29 @@ public sealed class TableGrain(
         }
     }
 
+    /// <summary>
+    /// Wishlist #15 — <paramref name="batch"/> is everything the upstream table's OWN
+    /// ApplyAndPublishAsync/OnOutputBatchAsync call published in ONE <c>stream.OnNextAsync</c>, i.e. one
+    /// upstream epoch's worth of deltas (see that method's own doc comment — a batch there is now itself
+    /// consolidated, atomic output of ITS single-epoch admission, since Engine-side
+    /// TableExecutor.OnTableDeltaBatch/ConsolidateEpochOutput apply the same fix one hop upstream). This
+    /// used to loop <paramref name="batch"/> through <see cref="TableExecutor.OnTableDelta"/> ONE ELEMENT AT
+    /// A TIME, which gave each element its OWN epoch on THIS table — exactly the bug wishlist #15 reports:
+    /// an upstream retract(-1)+assert(+1) pair for one changed row arrived here as two separate deltas and
+    /// got applied (and republished on THIS table's own delta stream, and folded into the search
+    /// index/journal/snapshot mirror below via ApplyAndPublishAsync) as two separate epochs, with the
+    /// retracted-but-not-yet-reasserted state observable in between — the NULL-flapping joined column the
+    /// wishlist describes. Admitting the whole batch through <see cref="TableExecutor.OnTableDeltaBatch"/>
+    /// in ONE call keeps it one epoch here too: the executor consolidates its own output before returning
+    /// (see ConsolidateEpochOutput), so the intermediate state never reaches ApplyAndPublishAsync at all.
+    /// </summary>
     private async Task OnTableDeltaBatchAsync(string table, List<TableDeltaDto> batch)
     {
         if (_executor is null) return;
 
-        var outAll = new List<TableDelta>();
-        foreach (var d in batch)
-        {
-            _deltasIn++;
-            var result = _executor.OnTableDelta(table, new TableDelta(new EventRecord(d.Row), d.Weight));
-            outAll.AddRange(result);
-        }
+        var deltas = batch.Select(d => new TableDelta(new EventRecord(d.Row), d.Weight)).ToList();
+        _deltasIn += deltas.Count;
+        var outAll = _executor.OnTableDeltaBatch(table, deltas);
         _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         _rebuilding = false;
 

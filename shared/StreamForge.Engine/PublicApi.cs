@@ -183,9 +183,10 @@ public sealed partial class TablePlan
 /// Per-table runtime: Z-set (DBSP-style) incremental view maintenance. Single-threaded (called from one
 /// grain); no frontier/timestamp machinery — tables are order-insensitive for the commutative operators
 /// this dialect supports. Feed stream events via OnStreamEvent and upstream table deltas via
-/// OnTableDelta; both return the deltas this table itself emits downstream (retraction/assertion pairs
-/// from grouped aggregation, or straight weight-passthrough for filter/project/join). Snapshot() exposes
-/// the current consolidated output (weight &gt; 0 rows only) for rehydration-free reads.
+/// OnTableDelta (or OnTableDeltaBatch — see its own doc comment); all three return the deltas this table
+/// itself emits downstream (retraction/assertion pairs from grouped aggregation, or straight weight-
+/// passthrough for filter/project/join). Snapshot() exposes the current consolidated output (weight &gt; 0
+/// rows only) for rehydration-free reads.
 /// </summary>
 public sealed partial class TableExecutor
 {
@@ -195,6 +196,25 @@ public sealed partial class TableExecutor
     public IReadOnlyList<TableDelta> OnStreamEvent(string source, EventRecord evt) => OnStreamEventCore(source, evt);
 
     public IReadOnlyList<TableDelta> OnTableDelta(string table, TableDelta delta) => OnTableDeltaCore(table, delta);
+
+    /// <summary>
+    /// Wishlist #15 — the batch sibling of <see cref="OnTableDelta"/>: every element of
+    /// <paramref name="deltas"/> is admitted, processed and emitted under ONE epoch, instead of a caller
+    /// looping <see cref="OnTableDelta"/> once per element and getting one epoch (and one downstream
+    /// publish) per element. Use this whenever the deltas being fed in are already known to have come from
+    /// a SINGLE upstream epoch/batch — e.g. one upstream table's own published delta batch — so that an
+    /// upstream change expressed as [retract(old), assert(new)] (a changed GROUP BY row, a changed
+    /// LATEST BY key) is applied and republished atomically here too, rather than splitting into as many
+    /// downstream epochs as it had elements with a wrong intermediate state observable in between (see
+    /// TableGrain.OnTableDeltaBatchAsync / TableActor.ProcessTableDeltasAsync, the two Host-side callers
+    /// this exists for).
+    ///
+    /// The returned batch is already consolidated (see the Engine-internal ConsolidateEpochOutput's doc
+    /// comment) — a row this call's own admission asserted and then retracted (or the reverse) before ever
+    /// leaving this table is not in it. <c>OnTableDelta(table, delta)</c> is exactly
+    /// <c>OnTableDeltaBatch(table, [delta])</c>; every existing single-delta caller is unaffected.
+    /// </summary>
+    public IReadOnlyList<TableDelta> OnTableDeltaBatch(string table, IReadOnlyList<TableDelta> deltas) => OnTableDeltaBatchCore(table, deltas);
 
     public IReadOnlyDictionary<string, (EventRecord Row, long Weight)> Snapshot() => SnapshotCore();
 

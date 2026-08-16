@@ -26,13 +26,33 @@ public sealed partial class TablePlan
 /// graph proper.
 ///
 /// EPOCH: single-partition, in-process — table mode has no real partitioning yet (that's M2). Each call
-/// to OnStreamEvent/OnTableDelta is stamped with its own epoch from a trivial monotonically advancing
-/// counter (plan 003 M1: "epoch = a trivial advancing counter"); every op invoked while servicing one
-/// call shares that call's epoch, since the whole call is one atomic admission from this table's point of
-/// view. No op in table mode's OnFrontier hook does anything with epochs yet (see each op's class doc) —
-/// this façade doesn't even call OnFrontier on the hot path for that reason; the hook is proven live via
-/// dedicated per-op unit tests instead (see OpsTests / TableReduceOpTests etc. — OnFrontier pass-through
-/// is asserted there, not exercised through this façade).
+/// to OnStreamEvent/OnTableDelta/OnTableDeltaBatch is stamped with its own epoch from a trivial
+/// monotonically advancing counter (plan 003 M1: "epoch = a trivial advancing counter"); every op invoked
+/// while servicing one call shares that call's epoch, since the whole call is one atomic admission from
+/// this table's point of view. No op in table mode's OnFrontier hook does anything with epochs yet (see
+/// each op's class doc) — this façade doesn't even call OnFrontier on the hot path for that reason; the
+/// hook is proven live via dedicated per-op unit tests instead (see OpsTests / TableReduceOpTests etc. —
+/// OnFrontier pass-through is asserted there, not exercised through this façade).
+///
+/// WISHLIST #15 — ONE EPOCH FOR A WHOLE INCOMING BATCH, ADMITTED AND EMITTED ATOMICALLY.
+/// <see cref="TableExecutor.OnTableDeltaBatch"/> is the batch sibling of OnStreamEvent/OnTableDelta: every
+/// element of the batch shares the ONE epoch <see cref="HandleIncoming"/> allocates for the call, instead
+/// of each element getting its own epoch the way a HOST-SIDE loop over single-item OnTableDelta calls used
+/// to produce (see TableGrain.OnTableDeltaBatchAsync / TableActor.ProcessTableDeltasAsync, both now callers
+/// of this batch entry point). OnStreamEvent/OnTableDelta themselves are unchanged in behavior — they are
+/// now one-element calls into the same batch machinery (<see cref="OnTableDeltaBatchCore"/>), so a single
+/// upstream delta still gets exactly the epoch it always did.
+///
+/// That alone is not sufficient: an op that processes a multi-element batch one input delta at a time
+/// internally (<see cref="Ops.TableReduceOp"/>'s OnDelta, <see cref="Ops.TableOuterJoinOp"/>'s OnArrival)
+/// can still walk its OWN output through a transient intermediate row between two elements that share this
+/// epoch — a stale aggregate value, a null-padded join row — even though the epoch is atomic from THIS
+/// table's point of view. <see cref="ConsolidateEpochOutput"/> is the other half: it nets this epoch's raw
+/// output by canonical row key before it is returned (and before it is folded into <see cref="_ledger"/>),
+/// so any row this epoch asserted and then retracted (or the reverse) before ever leaving the table
+/// disappears from what a caller/consumer ever sees. See that method's own doc comment for the mechanism
+/// and docs/otc-demo-wishlist.md #15 for the reported symptom (a LEFT JOIN onto a GROUP BY table observing
+/// the joined column flap to NULL and back for one upstream change).
 /// </summary>
 public sealed partial class TableExecutor
 {
@@ -216,21 +236,26 @@ public sealed partial class TableExecutor
         list.Add(exec);
     }
 
-    /// <summary>Plan 008 W3: union-root admission — feeds <paramref name="evt"/>/<paramref name="weight"/>
-    /// into every branch executor that subscribes to <paramref name="name"/> via the SAME OnTableDelta call
-    /// the plain derived-table role path already uses (see HandleIncoming's `role.Derived.OnTableDelta`
-    /// line — routing through OnTableDelta unconditionally reproduces whichever admission the outer caller
-    /// actually used, OnStreamEvent's implicit weight=1 included), concatenates every branch's own emitted
-    /// deltas, optionally dedups via <see cref="_distinct"/> (UNION only), then folds the result into this
-    /// table's own consolidated output exactly like the ordinary path does.</summary>
-    private List<TableDelta> HandleIncomingUnion(string name, EventRecord evt, long weight)
+    /// <summary>Plan 008 W3: union-root admission — feeds <paramref name="deltas"/> (as a single atomic
+    /// batch, see wishlist #15) into every branch executor that subscribes to <paramref name="name"/> via
+    /// the SAME <see cref="OnTableDeltaBatchCore"/> call the plain derived-table role path already uses
+    /// (see HandleIncoming's `role.Derived.OnTableDeltaBatchCore` line — routing through the batch entry
+    /// point unconditionally reproduces whichever admission the outer caller actually used, a one-element
+    /// batch included, so a plain OnStreamEvent/OnTableDelta caller sees byte-identical behavior to before
+    /// this batch entry point existed), concatenates every branch's own emitted deltas, optionally dedups
+    /// via <see cref="_distinct"/> (UNION only), consolidates the result exactly like the ordinary path
+    /// does (see <see cref="ConsolidateEpochOutput"/>), then folds it into this table's own consolidated
+    /// output.</summary>
+    private List<TableDelta> HandleIncomingUnionBatch(string name, IReadOnlyList<TableDelta> deltas)
     {
         var output = new List<TableDelta>();
+        if (deltas.Count == 0) return output;
+
         if (_unionRoles!.TryGetValue(name, out var branches))
         {
             foreach (var branchExecutor in branches)
             {
-                output.AddRange(branchExecutor.OnTableDelta(name, new TableDelta(evt, weight)));
+                output.AddRange(branchExecutor.OnTableDeltaBatchCore(name, deltas));
             }
         }
 
@@ -239,6 +264,13 @@ public sealed partial class TableExecutor
             var epoch = new Epoch(_epochCounter++);
             output = _distinct.OnBatch(epoch, output).ToList();
         }
+
+        // See ConsolidateEpochOutput's own doc comment for why this is gated on deltas.Count (the CALL's
+        // OWN admitted batch size), not on output.Count: a single admitted delta is allowed to legitimately
+        // emit a same-content retract+assert pair (e.g. a branch's own GROUP BY reporting an unchanged
+        // aggregate value across a contributing change) and that pair must NOT be netted away — only a
+        // multi-element admission gets the netting, which is the only shape wishlist #15 is about.
+        if (deltas.Count > 1) output = ConsolidateEpochOutput(output);
 
         foreach (var delta in output)
         {
@@ -251,13 +283,23 @@ public sealed partial class TableExecutor
     private IReadOnlyList<TableDelta> OnStreamEventCore(string source, EventRecord evt)
     {
         EnsureInit();
-        return HandleIncoming(source, evt, weight: 1);
+        return HandleIncoming(source, [new TableDelta(evt, 1)]);
     }
 
     private IReadOnlyList<TableDelta> OnTableDeltaCore(string table, TableDelta delta)
     {
         EnsureInit();
-        return HandleIncoming(table, delta.Row, delta.Weight);
+        return HandleIncoming(table, [delta]);
+    }
+
+    /// <summary>Wishlist #15 — the batch entry point (see <see cref="TableExecutor.OnTableDeltaBatch"/>
+    /// and this class's own EPOCH doc paragraph). Identical shape to <see cref="OnTableDeltaCore"/>, just
+    /// without collapsing to a one-element list first — every element of <paramref name="deltas"/> is
+    /// admitted under the SAME epoch.</summary>
+    private IReadOnlyList<TableDelta> OnTableDeltaBatchCore(string table, IReadOnlyList<TableDelta> deltas)
+    {
+        EnsureInit();
+        return HandleIncoming(table, deltas);
     }
 
     private IReadOnlyDictionary<string, (EventRecord Row, long Weight)> SnapshotCore()
@@ -353,26 +395,37 @@ public sealed partial class TableExecutor
     /// GROUP BY, so "no aggregate here" is distinguishable from "an aggregate with nothing wrong".</summary>
     internal long UnmatchedRetractions => _reduce?.UnmatchedRetractions ?? -1;
 
-    private List<TableDelta> HandleIncoming(string name, EventRecord evt, long weight)
+    /// <summary>The one admission path every entry point (OnStreamEvent, OnTableDelta, and wishlist #15's
+    /// OnTableDeltaBatch) funnels through, via <see cref="OnStreamEventCore"/>/<see cref="OnTableDeltaCore"/>
+    /// wrapping their single item as a one-element <paramref name="deltas"/> list — so a plain,
+    /// pre-batch-entry-point caller gets byte-identical behavior (one epoch, admitted and consolidated
+    /// exactly as before) to what this method did when it only ever took one (evt, weight) pair. The whole
+    /// of <paramref name="deltas"/>, however many elements, shares ONE epoch: that is wishlist #15's first
+    /// half (see this class's own EPOCH doc paragraph). <see cref="ConsolidateEpochOutput"/> below is the
+    /// second half.</summary>
+    private List<TableDelta> HandleIncoming(string name, IReadOnlyList<TableDelta> deltas)
     {
-        if (_unionRoles is not null) return HandleIncomingUnion(name, evt, weight);
+        if (_unionRoles is not null) return HandleIncomingUnionBatch(name, deltas);
 
         var output = new List<TableDelta>();
+        if (deltas.Count == 0) return output;
         if (!_roles.TryGetValue(name, out var roles)) return output;
 
         var epoch = new Epoch(_epochCounter++);
 
         foreach (var role in roles)
         {
-            // OnStreamEvent (weight=1, always an assertion) and OnTableDelta (arbitrary signed weight)
-            // both funnel through this SAME HandleIncoming — so routing a derived role's admission through
-            // OnTableDelta unconditionally reproduces whichever one the outer caller actually used,
-            // retraction sign and all (plan 004 N1: "table mode: an inline intermediate Z-set operator" —
-            // this nested-executor wiring is the equivalent, already retraction-correct by construction
-            // since it's the exact same TableExecutor machinery a real table-over-table dependency uses).
+            // OnStreamEvent (weight=1, always an assertion) and OnTableDelta/OnTableDeltaBatch (arbitrary
+            // signed weight) all funnel through this SAME HandleIncoming — so routing a derived role's
+            // admission through OnTableDeltaBatchCore unconditionally reproduces whichever the outer caller
+            // actually used, retraction sign and every element of the batch included (plan 004 N1: "table
+            // mode: an inline intermediate Z-set operator" — this nested-executor wiring is the equivalent,
+            // already retraction-correct by construction since it's the exact same TableExecutor machinery
+            // a real table-over-table dependency uses). No per-element list allocation is needed for the
+            // non-derived case: `deltas` IS already the admission this role's ingest op wants.
             IReadOnlyList<TableDelta> admission = role.Derived is null
-                ? [new TableDelta(evt, weight)]
-                : role.Derived.OnTableDelta(name, new TableDelta(evt, weight));
+                ? deltas
+                : role.Derived.OnTableDeltaBatchCore(name, deltas);
 
             if (admission.Count == 0) continue;
 
@@ -398,6 +451,20 @@ public sealed partial class TableExecutor
             }
         }
 
+        // Wishlist #15, second half — see ConsolidateEpochOutput's own doc comment: nets this epoch's raw
+        // output by canonical row key BEFORE it is returned or folded into _ledger, so a transient
+        // intermediate row an op produced while walking a multi-element batch one input delta at a time
+        // never reaches a caller/consumer of this table. Gated on deltas.Count (this CALL's own admitted
+        // batch size) rather than output.Count: a SINGLE admitted delta can legitimately produce a
+        // same-content retract+assert pair on its own (TableReduceOp always emits retract(old)+assert(new)
+        // for any contributing change to an existing group, even one that leaves the computed aggregate
+        // value unchanged — e.g. removing one of two duplicate MIN contributors) and that pair is the
+        // intended, pinned-by-existing-tests shape for a one-element admission, not the flapping this
+        // exists to remove. Only a genuinely multi-element admission — several deltas sharing one epoch,
+        // which is exactly what TableGrain.OnTableDeltaBatchAsync/TableActor.ProcessTableDeltasAsync now
+        // feed in — gets the netting.
+        if (deltas.Count > 1) output = ConsolidateEpochOutput(output);
+
         foreach (var delta in output)
         {
             ApplyConsolidation(delta);
@@ -409,6 +476,80 @@ public sealed partial class TableExecutor
         if (_retention.IsEnabled) output.AddRange(RunRetention());
 
         return output;
+    }
+
+    /// <summary>
+    /// Wishlist #15 — Z-set consolidation of ONE epoch's raw op output, applied here (centrally, once per
+    /// call) rather than inside any individual op, BEFORE the batch is returned to the caller or folded
+    /// into <see cref="_ledger"/>.
+    ///
+    /// WHY THIS IS NECESSARY EVEN THOUGH EVERY OP ALREADY PRODUCES A WELL-FORMED Z-SET DELTA STREAM: an op
+    /// that processes more than one input delta per <c>OnBatch</c> call does so ONE INPUT DELTA AT A TIME
+    /// internally (see <see cref="Ops.TableReduceOp"/>.OnDelta and <see cref="Ops.TableOuterJoinOp"/>.
+    /// OnArrival's own doc comments — neither op looks ahead at the rest of the batch before emitting).
+    /// So a single upstream CHANGE admitted in one epoch as, say, [retract(old), assert(new)] can still
+    /// walk that op's OWN output through a transient INTERMEDIATE row — a stale aggregate value, a
+    /// null-padded join row from a right-side retract that hasn't yet seen the matching assert — between
+    /// processing the retract element and the assert element, even though both share this epoch. That
+    /// intermediate row was only ever true of the op's own bookkeeping mid-batch, never of the input as a
+    /// WHOLE; a consumer downstream of this table (a LEFT JOIN, a SignalR client) that happens to observe
+    /// it sees a wrong answer for however long it takes the batch's next element to correct it — the
+    /// flapping wishlist #15 reports (`scenario_trigger_monitor.threshold_headroom` reading NULL mid-tick
+    /// in the demo).
+    ///
+    /// THE FIX: net every delta in this epoch's raw output by canonical row key (the SAME scheme
+    /// <see cref="ApplyConsolidation"/>/<see cref="ConsolidationLedger"/> already use for this table's own
+    /// ledger, applied here to the RETURNED batch instead) and drop any key whose net weight is exactly
+    /// zero — i.e. any row this epoch asserted and then retracted (or the reverse) before it ever left this
+    /// table. What survives is exactly the epoch's NET effect on each row it touched; the intermediate
+    /// never happened as far as anything downstream of this call can tell. Order-preserving (first-
+    /// occurrence position survives, later occurrences of the same key only contribute their weight) and
+    /// safe to keep whichever literal row instance was seen first for a key: the same canonical-key-means-
+    /// byte-identical-content invariant <see cref="ConsolidationLedger"/>'s class doc already relies on.
+    ///
+    /// CALLERS GATE THIS ON deltas.Count &gt; 1 (the ADMITTED BATCH's own size), not on this method's own
+    /// input size, and that gate is load-bearing, not an optimization: a SINGLE admitted delta can, on its
+    /// own, legitimately produce a same-content retract+assert pair — TableReduceOp always emits
+    /// retract(old)+assert(new) for any contributing change to an existing group, even one whose computed
+    /// aggregate value doesn't move (e.g. removing one of two duplicate MIN contributors leaves the
+    /// reported minimum unchanged, but is still reported as retract(100)+assert(100)) — and that pair is
+    /// the correct, existing-tests-pinned shape for a ONE-element admission, not an artifact of walking a
+    /// multi-element batch. Consolidating it away would be observably wrong: it would make a single
+    /// OnStreamEvent/OnTableDelta call sometimes return fewer/different deltas than it always has. This
+    /// method itself has no way to tell that case apart from a genuine multi-delta flap by inspecting the
+    /// output alone (both look like "assert then retract of the same canonical key"), so the distinction is
+    /// enforced by the caller never invoking this method for a one-element admission in the first place.
+    /// </summary>
+    private static List<TableDelta> ConsolidateEpochOutput(List<TableDelta> raw)
+    {
+        if (raw.Count <= 1) return raw;
+
+        var netWeight = new Dictionary<string, long>();
+        var firstRow = new Dictionary<string, EventRecord>();
+        var order = new List<string>();
+
+        foreach (var delta in raw)
+        {
+            var key = JsonText.SerializeCanonicalRow(delta.Row);
+            if (netWeight.TryGetValue(key, out var existing))
+            {
+                netWeight[key] = existing + delta.Weight;
+            }
+            else
+            {
+                netWeight[key] = delta.Weight;
+                firstRow[key] = delta.Row;
+                order.Add(key);
+            }
+        }
+
+        var consolidated = new List<TableDelta>(order.Count);
+        foreach (var key in order)
+        {
+            var weight = netWeight[key];
+            if (weight != 0) consolidated.Add(new TableDelta(firstRow[key], weight));
+        }
+        return consolidated;
     }
 
     private IReadOnlyList<TableRowDelta> PropagateForward(int fromStageIndexInclusive, Epoch epoch, IReadOnlyList<TableRowDelta> rows)

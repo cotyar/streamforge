@@ -1,3 +1,5 @@
+using Dapr.Actors;
+using Dapr.Actors.Client;
 using Dapr.Actors.Runtime;
 using Dapr.Client;
 using StreamForge.Abstractions;
@@ -330,6 +332,8 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             return ActorResult<TableInputNames>.Failure(_lastCompileError!);
         }
 
+        await WarnIfTableInputsAlreadyHoldRowsAsync();
+
         // Plan 009 A2: see OnActivateAsync's self-heal branch for why this has to happen here, immediately,
         // rather than waiting for the next periodic tick.
         if (_journalNeedsPersistedClear)
@@ -343,6 +347,55 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         await ArmTimerAsync(ResolveFlushPeriod());
 
         return ActorResult<TableInputNames>.Success(new TableInputNames(_streamInputs.ToList(), _tableInputs.ToList()));
+    }
+
+    /// <summary>Wishlist #14, option (b) — Dapr-flavor mirror of <c>TableGrain.WarnIfTableInputsAlreadyHoldRowsAsync</c>
+    /// (see its doc comment for why this is the loud diagnostic and not the backfill fix: there is no
+    /// snapshot/subscription synchronization point on this flavor either — see class doc's D-F descope, no
+    /// coordinator mode exists here at all to have grown one). Checks each declared table input
+    /// (<see cref="_tableInputs"/>, populated by <see cref="ActivateExecutor"/> just above) for a non-zero
+    /// row count via its own <see cref="ITableActor.GetRowCountAsync"/>, BEFORE this actor's own delta
+    /// subscription (wired by the caller once <see cref="StartAsync"/> returns — see
+    /// <c>TableEventRouter</c>) goes live, and logs — by table name and row count — exactly the situation
+    /// wishlist #14 describes. Advisory only: a failed/not-yet-started upstream actor is swallowed (Dapr
+    /// virtual actors auto-activate on first call, so a table input that has never run answers 0 rows
+    /// harmlessly rather than throwing), and the count itself is a best-effort read with no synchronization
+    /// guarantee against the subscription that follows — see the Orleans-flavor sibling's identical
+    /// caveat.</summary>
+    private async Task WarnIfTableInputsAlreadyHoldRowsAsync()
+    {
+        foreach (var upstreamName in _tableInputs.Distinct())
+        {
+            // Defensive only (see the Orleans-flavor sibling): a self-referencing table input would call
+            // straight back into this same actor id's not-yet-finished StartAsync turn and deadlock.
+            if (upstreamName == _def!.Name) continue;
+
+            int upstreamRowCount;
+            try
+            {
+                var upstream = ActorProxy.Create<ITableActor>(new ActorId(upstreamName), nameof(TableActor), ActorProxyDefaults.Options);
+                upstreamRowCount = await upstream.GetRowCountAsync();
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "TableActor[{Name}]: could not read row count of table input '{Upstream}' for the warm-upstream diagnostic — skipping.", _def!.Name, upstreamName);
+                continue;
+            }
+
+            if (upstreamRowCount > 0)
+            {
+                // NOTE: each placeholder name appears exactly once — see the Orleans-flavor sibling's
+                // identical comment on why a repeated placeholder name silently desyncs
+                // Microsoft.Extensions.Logging's positional argument binding instead of reusing the value.
+                logger.LogWarning(
+                    "TableActor[{Name}] is starting with table input '{Upstream}' ({RowCount} row(s) already present). " +
+                    "Those rows are NOT backfilled — this actor starts empty and only reflects changes to its table " +
+                    "input from now on. For a plain projection this self-heals as rows churn; for a GROUP BY/aggregate " +
+                    "it does not (see TableExecutor.UnmatchedRetractions) — the aggregate can report a wrong count " +
+                    "until restarted. See docs/otc-demo-wishlist.md #14.",
+                    _def!.Name, upstreamName, upstreamRowCount);
+            }
+        }
     }
 
     public async Task StopAsync()
@@ -409,6 +462,17 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         }
     }
 
+    /// <summary>
+    /// Wishlist #15 — Dapr-flavor mirror of <c>TableGrain.OnTableDeltaBatchAsync</c>'s identical fix (see
+    /// its doc comment for the full mechanism). <paramref name="envelope"/> carries everything the upstream
+    /// table's own ApplyAndPublishAsync published for ONE of ITS epochs; admitting it through
+    /// <see cref="TableExecutor.OnTableDeltaBatch"/> in ONE call — instead of the old per-element
+    /// <see cref="TableExecutor.OnTableDelta"/> loop — keeps it one epoch here too, so an upstream
+    /// retract(-1)+assert(+1) pair (a changed GROUP BY row, a changed LATEST BY key) is admitted,
+    /// consolidated (see Engine-side ConsolidateEpochOutput) and republished atomically instead of being
+    /// split across as many downstream epochs as the envelope had elements, with a wrong intermediate state
+    /// observable in between.
+    /// </summary>
     public async Task ProcessTableDeltasAsync(TableDeltaEnvelope envelope)
     {
         if (_executor is null || !_running)
@@ -416,16 +480,20 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             return;
         }
 
-        var outAll = new List<TableDelta>();
         foreach (var d in envelope.Deltas)
         {
-            // Same actor-wire re-normalization requirement as ProcessSourceEventsAsync.
+            // Actor-wire re-normalization: this envelope crosses the Dapr actor-invocation wire, which
+            // re-boxes every Dictionary<string, object?> value as a JsonElement regardless of whether it
+            // was already normalized once at the sf-table-delta pub/sub ingress. Re-normalize before the
+            // Engine ever sees it — same requirement as ProcessSourceEventsAsync's identical call. Still
+            // done per-element (unrelated to epoch atomicity below): each row's own dictionary needs its
+            // own pass.
             JsonValueNormalizer.NormalizeInPlace(d.Row);
-
-            _deltasIn++;
-            var result = _executor.OnTableDelta(envelope.Table, new TableDelta(new EventRecord(d.Row), d.Weight));
-            outAll.AddRange(result);
         }
+
+        var deltas = envelope.Deltas.Select(d => new TableDelta(new EventRecord(d.Row), d.Weight)).ToList();
+        _deltasIn += deltas.Count;
+        var outAll = _executor.OnTableDeltaBatch(envelope.Table, deltas);
         _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         _rebuilding = false;
 
