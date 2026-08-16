@@ -77,7 +77,7 @@ public static class SinkTransports
 
     // ponytail: a plain list, not a plugin host. Add built-in sink transports here.
     private static readonly List<ISinkTransport> Registered =
-        [new NatsSinkTransport(), new FileSinkTransport(), new HttpSinkTransport()];
+        [new NatsSinkTransport(), new FileSinkTransport(), new HttpSinkTransport(), new LoopbackSinkTransport()];
 
     public static ISinkTransport? Find(string? kind)
     {
@@ -114,6 +114,57 @@ public static class SinkTransports
             }
 
             Registered.Add(transport);
+        }
+    }
+
+    /// <summary>Wishlist item 13's gap 3 — the missing call site. <see cref="ISinkTransport.Validate"/>
+    /// has existed since plan 014 (<see cref="HttpSinkTransport"/> implements it; see that type's own doc
+    /// for "a missing URL is a validation error") but nothing in this repo ever CALLED it: a broken sink
+    /// config was accepted by POST/PUT and then simply never ran — silently <see cref="ISinkTransport.IsConfigured"/>
+    /// == false, "no error surfaces anywhere, no status field, no log line, nothing an operator can act
+    /// on" (<see cref="ISinkTransport.Validate"/>'s own doc, naming this exact gap). TablesEndpoints and
+    /// PipelinesEndpoints each call this once per create/update, over whichever sink list is actually
+    /// being written — see each call site for exactly when that is; an update that isn't touching Sinks
+    /// at all never re-validates a pre-existing definition nobody is asking to change, so a table/pipeline
+    /// saved before this method existed can't suddenly become un-editable over an old sink nobody is
+    /// touching.
+    ///
+    /// <para>Deliberately does NOT reject an unregistered <see cref="SinkSpec.Kind"/>: <see cref="Find"/>
+    /// already answers null for one, and <see cref="SinkSelection.Active"/> already treats that the exact
+    /// same "never selected, never runs" way <see cref="ISinkTransport.IsConfigured"/> == false does —
+    /// widening THAT into a new rejection is a second decision this method does not make on its own
+    /// authority; the ask was to wire the existing seam, not invent a new validation rule beside it.</para>
+    ///
+    /// <para>Every currently-registered transport but <see cref="HttpSinkTransport"/> inherits
+    /// <see cref="ISinkTransport.Validate"/>'s default no-op — <see cref="NatsSinkTransport"/> and
+    /// <see cref="FileSinkTransport"/> therefore add zero errors here no matter what they are given, so
+    /// wiring this call site changes nothing for either of them; every existing NATS/file sink config,
+    /// however incomplete, keeps saving exactly as it always has. HTTP is the only kind whose behavior
+    /// actually moves — from "silently never runs" to "400, naming the field" — and that tightening is the
+    /// literal, stated purpose of this call, not a side effect of it.</para></summary>
+    public static void Validate(IReadOnlyList<SinkSpec> sinks, List<string> errors)
+    {
+        for (var i = 0; i < sinks.Count; i++)
+        {
+            var spec = sinks[i];
+            var transport = Find(spec.Kind);
+            if (transport is null)
+            {
+                continue;
+            }
+
+            var before = errors.Count;
+            transport.Validate(spec, errors);
+            if (errors.Count == before)
+            {
+                continue;
+            }
+
+            var label = string.IsNullOrEmpty(spec.Name) ? $"sinks[{i}] (kind '{spec.Kind}')" : $"sink '{spec.Name}'";
+            for (var e = before; e < errors.Count; e++)
+            {
+                errors[e] = $"{label}: {errors[e]}";
+            }
         }
     }
 }

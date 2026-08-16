@@ -316,10 +316,25 @@ public sealed class ScenarioRunRequest
     [Id(1)] public long? Seed { get; set; }
     [Id(2)] public ScenarioRunOverrides? Overrides { get; set; }
 
-    // NOTE: the wishlist's nice-to-have `step: true` (emit only day d+1 of an existing run) is NOT
-    // implemented — it presumes the bounded-feedback-loop / "scenario clock" machinery from wishlist #9,
-    // which this change does not touch. Deliberately no Step field here rather than one that would
-    // silently do nothing if set.
+    /// <summary>Wishlist #9(b): when true, emit only ONE day — the next unemitted day of THIS RunId's
+    /// sequence — instead of the whole D-day batch. The generator (GeneratorGrain/GeneratorActor) keeps
+    /// per-RunId continuation state in memory (see <c>ScenarioGenerator.ScenarioRunState</c>,
+    /// shared/StreamForge.AppCore/Generators/ScenarioGenerator.cs) so repeated <c>step: true</c> calls
+    /// with the SAME RunId walk day 1, then 2, then 3, … — this is what makes a path-dependent
+    /// simulation possible: step t+1 can only be requested (and only makes sense) after the caller has
+    /// finished reacting to step t's rows, which is exactly the ordering a tick-driven generator cannot
+    /// offer. <see cref="Seed"/>/<see cref="Overrides"/> are read ONLY on the first <c>step: true</c> call
+    /// for a given RunId (the one that begins the run); a later step call with the same RunId ignores
+    /// them — the run's effective parameters are locked in at creation, exactly like a whole-batch run's
+    /// are locked in for its one call. A step call once every day (1..D) has already been emitted is NOT
+    /// an error: it returns <see cref="ScenarioRunOutcome.Accepted"/> with <c>Accepted == 0</c> and an
+    /// empty <see cref="ScenarioRunResult.Rows"/> — a no-op, not a new outcome value, so the REST layer
+    /// (shared/StreamForge.Api/Endpoints/SourceRunEndpoints.cs, out of this change's file-ownership scope)
+    /// needs no change to answer it correctly. Determinism contract: stepping day-by-day for a RunId
+    /// produces BYTE-IDENTICAL rows to a single non-step call with the same effective seed/spec — both
+    /// walk the identical per-day code path (<c>ScenarioGenerator.GenerateDay</c>); see
+    /// ScenarioGeneratorSteppingTests for the equivalence test that pins this.</summary>
+    [Id(3)] public bool Step { get; set; }
 }
 
 /// <summary>One emitted row — the wishlist's exact row contract (run_id/path_id/instrument_id/day/factor/
@@ -686,6 +701,16 @@ public sealed class TableDeltaDto
     /// which reclaims the evicted key's version list instead of counting one more retraction against a key
     /// that is never coming back (see TableDefinition.RetentionMaxRows' block comment).</summary>
     [Id(2)] public bool Evicted { get; set; }
+
+    /// <summary>Wishlist #14 option (a) — additive (default -1, so every pre-existing producer/consumer of
+    /// this DTO is unchanged): the epoch (<c>StreamForge.Engine.TableExecutor.LastEpoch</c> at the moment
+    /// of publish) the producing table admitted this delta under. Every element of one published batch
+    /// shares the same value — the whole batch is one atomic admission (wishlist #15). Consumers that don't
+    /// care ignore it; the one that does is a NEW table attaching to this one as a table input (see
+    /// TableExecutor.LastEpoch's own doc comment for the full backfill-on-attach protocol this exists to
+    /// make possible) — it drops any received delta whose Epoch is &lt;= the epoch its own attach snapshot
+    /// was taken at, since that delta is already reflected in the snapshot it was seeded from.</summary>
+    [Id(3)] public long Epoch { get; set; } = -1;
 }
 
 /// <summary>One row of a table's current consolidated Z-set snapshot (weight is always &gt; 0 in a

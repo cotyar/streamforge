@@ -43,6 +43,10 @@ namespace StreamForge.AppCore.Sinks;
 /// network failure are indistinguishable in <see cref="Counters"/> alone — both show up as
 /// <c>Failed</c> — but <see cref="SinkPublishCounters.LastError"/>'s text always says which one happened,
 /// so nothing is actually silent, just not separately countable without a contract change.</para>
+///
+/// <para><b>Wishlist #9(b) update.</b> The guard check and the row-flattening it runs against now live in
+/// <see cref="SinkStepGuard"/>, shared verbatim with <see cref="LoopbackSinkClient"/> — this class no
+/// longer carries its own copy. Behavior is unchanged; see that class's doc comment for the rule.</para>
 /// </summary>
 public sealed class HttpSinkClient : ISinkClient
 {
@@ -118,9 +122,9 @@ public sealed class HttpSinkClient : ISinkClient
     {
         try
         {
-            var row = RowOf(payload);
+            var row = SinkStepGuard.RowOf(payload);
 
-            if (_config.MaxDepth > 0 && TryGetStep(row, _config.StepField, out var step) && step >= _config.MaxDepth)
+            if (SinkStepGuard.ShouldDrop(row, _config.StepField, _config.MaxDepth, out var step))
             {
                 // Dropped BEFORE any network call — see this class's doc comment for why this folds into
                 // the same Failed/LastError counters every other publish failure uses.
@@ -163,57 +167,6 @@ public sealed class HttpSinkClient : ISinkClient
             // response via EnsureSuccessStatusCode, a malformed URL — folds into the same "the sink
             // failed" bucket, same call as NatsSinkClient.PublishAsync makes for the identical reasons.
             Fail(ex);
-        }
-    }
-
-    /// <summary>Flattens a sink message to the row this sink POSTs. Deliberately the same shape
-    /// <see cref="FileSinkClient"/>'s private <c>RowOf</c> produces (including <c>_weight</c> for a table
-    /// delta, so a retraction is not indistinguishable from an insert to whatever reads it downstream) —
-    /// duplicated rather than shared because neither sink's <c>RowOf</c> is on a public seam and this
-    /// wave's file ownership does not include touching <see cref="FileSinkClient"/>.</summary>
-    private static Dictionary<string, object?> RowOf<T>(T payload) => payload switch
-    {
-        NatsTableDeltaMessage d => new Dictionary<string, object?>(d.Row, StringComparer.Ordinal) { ["_weight"] = d.Weight },
-        NatsPipelineRowMessage p => new Dictionary<string, object?>(p.Row, StringComparer.Ordinal),
-        // No other payload type reaches a sink today; round-tripping it through JSON keeps a future one
-        // visible in the posted event instead of silently empty.
-        _ => JsonSerializer.Deserialize<Dictionary<string, object?>>(JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions))
-             ?? new Dictionary<string, object?>(StringComparer.Ordinal),
-    };
-
-    /// <summary>Reads <paramref name="field"/> off <paramref name="row"/> as an integer step counter.
-    /// Absent, null, or a value that is not one of the numeric CLR shapes the engine's own coercion
-    /// produces (see <c>FieldValueConversion</c>) returns false — a row without a recognizable step is
-    /// let through, not dropped, per this class's (and <see cref="HttpSinkConfig.MaxDepth"/>'s) doc
-    /// comment. Double→long uses the same UNCHECKED narrowing cast <c>FieldValueConversion</c> documents
-    /// using for the identical conversion elsewhere in this codebase, for the same consistency reason.</summary>
-    private static bool TryGetStep(Dictionary<string, object?> row, string field, out long step)
-    {
-        step = 0;
-        if (!row.TryGetValue(field, out var value) || value is null)
-        {
-            return false;
-        }
-
-        switch (value)
-        {
-            case long l:
-                step = l;
-                return true;
-            case int i:
-                step = i;
-                return true;
-            case double d:
-                step = (long)d;
-                return true;
-            case decimal m:
-                step = (long)m;
-                return true;
-            case string s when long.TryParse(s, out var parsed):
-                step = parsed;
-                return true;
-            default:
-                return false;
         }
     }
 

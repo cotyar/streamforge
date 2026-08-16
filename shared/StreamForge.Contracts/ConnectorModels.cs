@@ -134,6 +134,10 @@ public sealed class SinkSpec
 
     /// <summary>Wishlist item 9(a); set only for <see cref="SinkKinds.Http"/>. See <see cref="HttpSinkConfig"/>.</summary>
     [Id(6)] public HttpSinkConfig? Http { get; set; }
+
+    /// <summary>Wishlist item 9(b); set only for <see cref="SinkKinds.Loopback"/>. See
+    /// <see cref="LoopbackSinkConfig"/>.</summary>
+    [Id(7)] public LoopbackSinkConfig? Loopback { get; set; }
 }
 
 public static class SinkKinds
@@ -156,6 +160,12 @@ public static class SinkKinds
     /// its target is <c>/api/sources/{name}/events</c> on the SAME StreamForge host. See
     /// <see cref="HttpSinkConfig"/>.</summary>
     public const string Http = "http";
+
+    /// <summary>Wishlist item 9(b): the native in-process loopback pair — feeds a table's deltas directly
+    /// into a named generator-kind source's stream, no HTTP hop, no serialize/parse round trip. See
+    /// <see cref="LoopbackSinkConfig"/> and <c>StreamForge.Host.Generators.LoopbackHub</c>
+    /// (shared/StreamForge.AppCore/Generators/LoopbackHub.cs), the in-process "wire" this kind writes to.</summary>
+    public const string Loopback = "loopback";
 }
 
 /// <summary>Plan 009 B2. DELIVERY IS FIRE-AND-FORGET and there is no backpressure from the sink into
@@ -239,6 +249,45 @@ public sealed class HttpSinkConfig
 
     /// <summary>See this class's doc comment. 0 = the guard is off.</summary>
     [Id(5)] public int MaxDepth { get; set; }
+}
+
+/// <summary>Wishlist item 9(b): the native in-process loopback sink — the smaller-hop twin of
+/// <see cref="HttpSinkConfig"/> (option (a)): instead of POSTing JSON to
+/// <c>/api/sources/{name}/events</c>, it writes the row directly into
+/// <c>StreamForge.Host.Generators.LoopbackHub</c> (shared/StreamForge.AppCore/Generators/LoopbackHub.cs),
+/// an in-process, thread-safe hand-off that the target source's own generator (Orleans
+/// <c>GeneratorGrain</c> / Dapr <c>GeneratorActor</c>) drains on its own timer and republishes exactly as
+/// it would a synthetic tick. No URL, no header, no timeout — there is no network hop to configure.
+///
+/// <para><b>Same loop-guard semantics as <see cref="HttpSinkConfig"/>, reusing the SAME code.</b>
+/// <see cref="StepField"/>/<see cref="MaxDepth"/> mean exactly what they mean there — see that class's
+/// doc comment — and both sink kinds share one guard implementation,
+/// <c>StreamForge.AppCore.Sinks.SinkStepGuard</c>, so "the maxDepth guard must work exactly as it does in
+/// the HTTP sink" is true by construction, not by parallel maintenance.</para>
+///
+/// <para><b>The cycle this exists for.</b> A loopback edge means a table's own sink can feed the very
+/// source that feeds that table — table T reads source A, T's loopback sink targets A again. Termination
+/// is the user's SQL (<c>WHERE step &lt; D</c>); this hub only guarantees delivery/ordering and freedom
+/// from deadlock/stack-overflow, never termination — see <c>LoopbackHub</c>'s class doc for exactly why
+/// an unbounded cycle cannot corrupt the process (it just runs, and keeps running, until something stops
+/// it).</para></summary>
+[GenerateSerializer]
+public sealed class LoopbackSinkConfig
+{
+    /// <summary>The target source's name — a generator-kind source that has been started (its
+    /// GeneratorGrain/GeneratorActor activation must be Attach'd to <c>LoopbackHub</c>, which happens on
+    /// every <c>StartAsync</c> regardless of <c>EventsPerSecond</c>/profile). May contain <c>{name}</c>,
+    /// replaced with the OWNING pipeline's id / table's name — same substitution
+    /// <see cref="HttpSinkConfig.Url"/> and <see cref="NatsPubConfig.Subject"/> use, so a table named the
+    /// same as its own upstream source can loop back with one reusable spec. REQUIRED: there is no
+    /// default target.</summary>
+    [Id(0)] public string TargetSourceName { get; set; } = "";
+
+    /// <summary>See <see cref="HttpSinkConfig.StepField"/> — identical meaning, shared guard.</summary>
+    [Id(1)] public string StepField { get; set; } = "step";
+
+    /// <summary>See <see cref="HttpSinkConfig.MaxDepth"/> — identical meaning, shared guard. 0 = off.</summary>
+    [Id(2)] public int MaxDepth { get; set; }
 }
 
 /// <summary>Plan 012: the file egress sink. Rows are APPENDED, never truncated — the file is a log,
