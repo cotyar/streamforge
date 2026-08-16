@@ -533,3 +533,140 @@ ones that did.
    four consecutive runs, including two more full-solution ones. Not reproduced
    since; recorded rather than dismissed, because a load-only failure in this repo
    has already turned out to be a real race once.
+
+---
+
+## Wave 4 — after adoption (2026-08-16)
+
+These four came out of *adopting* waves 1–3 in the ac-co OTC hedge-fund demo
+(`apps/websites/otc-terms` in the ac-co.ai-4 repo) — three API-shape gaps and one
+unbounded-state question that only appear once a client drives the new surfaces
+from outside, rather than from a test inside the solution. None of them are
+shipped, so none carry the ✅ the items above do; each says what the demo does
+instead, so nothing is blocked on them.
+
+## 17. `POST /api/sources` should accept `eventsPerSecond: 0` for `generatorProfile: "scenario"`
+
+`shared/StreamForge.Api/Endpoints/SourceSchemaService.cs` — `SourceValidation.Validate`
+adds `"eventsPerSecond must be > 0"` for any `kind: "generator"` source with
+`EventsPerSecond <= 0` (`:82-89`), and a scenario-profile source is generator-kind.
+But 0 is the only correct value for it: the profile's whole convention is that
+rows come from an explicit `POST /api/sources/{name}/run`, never from a tick.
+`SourceDefinition.Scenario`'s own doc comment says so in as many words —
+"EventsPerSecond is ignored (must be 0, by convention — nothing enforces it)"
+(`shared/StreamForge.Contracts/Models.cs:81-85`). Nothing enforces it; something
+enforces the opposite.
+
+Why it matters: `Validate` gates `POST`/`PUT /api/sources`
+(`SourcesEndpoints.cs:55,84`) and the chat tools' create/update
+(`Chat/ChatTools.cs:301,354`), but not config import — so today the ONLY way to
+create a scenario-profile source is `POST /api/config/import`, and a client that
+wants one source has to build and submit a whole config document (and the
+assistant cannot create one at all).
+
+The failure mode if you work around it with a positive rate is worse than the
+rejection. `GeneratorGrain.StartAsync` arms its tick timer for any
+`EventsPerSecond > 0` (`orleans/src/StreamForge.Host/Grains/GeneratorGrain.cs:59-66`),
+and `MarketDataProfiles.GenerateEvent`
+(`shared/StreamForge.AppCore/Generators/MarketDataProfiles.cs:52`) has no
+`"scenario"` arm, so it falls through to `default: // generic` (`:206-216`), which
+honours the declared schema and fills it with random values. The source then
+accumulates random rows shaped exactly like path rows, interleaved with the real
+ones a run produces — a silent wrong-data outcome, not an error.
+
+Workaround in the demo: `apps/websites/otc-terms/lib/streamforge/provision-doc.ts`'s
+`buildMcGenSource()` is submitted through `/api/config/import` — at provisioning
+time, and again from `lib/mc-run.ts` (`syncGenSource`) whenever a run needs a
+custom per-desk vol map, since vol lives on the instrument list and is therefore
+a catalog change rather than a per-run override.
+
+## 18. `POST /api/sources/{name}/run` should support `rows: false` / a summary-only response
+
+`shared/StreamForge.Api/Endpoints/SourceRunEndpoints.cs:63` — the run endpoint
+always echoes the whole generated batch back to the caller
+(`ScenarioRunResponse(result.Accepted, result.Rows)`, `:80`). For the demo's
+Monte-Carlo that is ~1.3 MB of JSON per simulated day (200 paths × 36
+instruments), all of it discarded: the rows the caller actually wants are already
+in the engine — only a runtime can publish, which is the whole reason
+`RunSourceAsync` sits on `ICatalogFacade` (#8) — and the client reads them back
+through the materialized tables.
+
+Wanted: an opt-out flag (`rows: false` on `ScenarioRunRequest`) or a summary
+response carrying just `{ runId, rowsGenerated, days, batches }`. Either shape is
+fine; the point is that "emit the batch" and "return the batch" are currently the
+same call.
+
+Workaround in the demo: `apps/websites/otc-terms/lib/mc-run.ts` parses the payload
+and reads only `accepted`, throwing the rows away. The cost is transfer plus a
+JSON parse per day — one `POST …/run` with `step: true` per day, in a loop — and
+it is what pushed the presenter's MC beat's settle time up.
+
+## 19. Per-RunId step state should be bounded (TTL, or an explicit `POST …/run/{run_id}/close`)
+
+A `step: true` scenario run keeps its per-RunId cursor in the generator's own
+memory: `GeneratorGrain._runStates`, a `Dictionary<string, ScenarioRunState>`
+keyed by RunId (`orleans/src/StreamForge.Host/Grains/GeneratorGrain.cs:42`,
+populated at `:130-138`), and the identical field in the Dapr flavour
+(`dapr/src/StreamForge.Dapr.Host/Actors/GeneratorActor.cs:115`). It is cleared in
+exactly two places — `StartAsync` and `StopAsync` (`GeneratorGrain.cs:51,79`;
+`GeneratorActor.cs:148,173`). There is no expiry, and no way for a client to say
+"this run is finished": a completed run's state is indistinguishable from a
+paused one, since stepping past the end is Accepted-with-0-rows rather than a
+terminal state that frees anything (`GeneratorGrain.cs:141-145`).
+
+So a long-lived host that serves many runs accumulates one entry per run id for
+as long as the activation lives. The state itself is small, but it is unbounded
+in the number of runs, which is the wrong shape regardless of the constant.
+
+Wanted, either: a TTL on idle run state, or an explicit close/dispose call
+(`POST /api/sources/{name}/run/{run_id}/close`) that removes the entry. The
+run-complete case could also free itself, which would cover the common path
+without a new endpoint.
+
+Workaround in the demo: none — the demo restarts StreamForge often enough
+(`lib/streamforge/rebuild.ts`) that it never bites. Which is exactly why it would
+bite a real deployment first: the only thing keeping it invisible here is a
+lifecycle no production host has.
+
+## 20. `GET /api/sql/functions` should enumerate the built-in statistical aggregates and mark 2-arg forms
+
+`shared/StreamForge.Api/Endpoints/SqlFunctionsEndpoints.cs:29-33` returns
+`{ scalars, aggregates, registeredScalars, registeredAggregates }`, sourced from
+`SqlFunctions.BuiltInScalarNames` / `BuiltInAggregateNames`
+(`shared/StreamForge.Engine/Sql/SqlFunctions.cs:73-84`). But
+`BuiltInAggregates` is still literally `["COUNT", "SUM", "AVG", "MIN", "MAX"]`
+(`:80`) — the pre-#10 set. The language moved and this list did not: the parser's
+own set is `AggregateNames.All`, which is those five *plus*
+`Runtime.StatAggregatorNames.All` (`shared/StreamForge.Engine/Sql/Ast.cs:95-96`),
+i.e. `VAR_SAMP`, `VAR_POP`, `STDDEV_SAMP`, `STDDEV_POP`, `VARIANCE`, `VAR`,
+`STDDEV`, `STDEV`, `MEDIAN` and `PERCENTILE_CONT`
+(`shared/StreamForge.Engine/Runtime/StatAggregators.cs:14-32`), alongside
+`COUNT(DISTINCT x)`. All of them compile — verifiable from outside with
+`POST /api/tables/validate` (`TablesEndpoints.cs:214`), and the demo's own
+`mc_var` table is built on `PERCENTILE_CONT(0.05, pnl_usd)`, `MEDIAN` and
+`STDDEV_SAMP`.
+
+Worth noting where the drift came from: `SqlFunctions.cs:71-72` says
+`BuiltInScalarNames` "is asserted against the Validator's own set by a test, which
+is what keeps the two honest" — the aggregate list has no such test, and it is the
+one that drifted.
+
+Why it matters: a console or editor that builds its completion list from this
+endpoint cannot offer the statistical aggregates, and has to hardcode them —
+which is exactly the drift the endpoint exists to remove (its own doc comment,
+`:8-12`, states that purpose).
+
+Second half of the ask: the 2-arg forms need a shape hint — arity, or a signature
+string — so a client can complete `PERCENTILE_CONT(p, x)` and `COUNT(DISTINCT x)`
+correctly instead of as 1-arg calls. A flat `IReadOnlyList<string>` cannot carry
+it, and `p` must be a literal (#10), which a completion list is the natural place
+to tell someone.
+
+Workaround in the demo: `apps/websites/otc-terms/app/sql/sql-editor.tsx` reads the
+endpoint through the app's own server-side proxy
+(`app/api/sql/functions/route.ts`, so the admin token stays out of the browser)
+and unions all four lists into its completion set — which picks up the eleven
+`registeredScalars` correctly, and picks up nothing for the aggregates. The
+statistical aggregates are therefore ALSO listed statically in that file's
+`AGGREGATE_FNS`, next to a comment pointing here. When this ships the merge
+finds them already present and the static half can go.
