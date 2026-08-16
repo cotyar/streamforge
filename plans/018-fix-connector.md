@@ -109,6 +109,38 @@ the edit is bounded and enumerable. It is these ten places and nothing else:
 Not touched, deliberately: `CsvFormatter`, `FileSinkClient`, `FileSinkTransport.Describe()`,
 `web/src/components/sinks/*`.
 
+## Feasibility, verified before wave C was written
+
+A scratchpad probe (built and run, then deleted) settled the three things that would otherwise have been
+discovered mid-wave:
+
+- **`QuickFIXn.Core` 1.14.1 restores and builds under `net10.0`** (it ships a `net8.0` lib). Latest stable,
+  ~2M downloads. Namespaces moved since the tutorials: `MemoryStoreFactory`/`FileStoreFactory` are in
+  `QuickFix.Store`, `NullLogFactory`/`ScreenLogFactory` in `QuickFix.Logger`, `SocketInitiator` in
+  `QuickFix.Transport`; `Message`, `Session`, `SessionSettings`, `ThreadedSocketAcceptor` and `IApplication`
+  are in `QuickFix`.
+- **`UseDataDictionary=N` works, so no `FIX44.xml` ships with the platform.** This is the setting that makes
+  plan 018's no-dictionary decision hold all the way down: QuickFIX/n does the session layer and no message
+  validation, hands the application message over intact, and `Message.ConstructString()` returns the raw
+  SOH-delimited wire string — which is exactly the `byte[]` an `InboundMessage` carries and exactly what
+  `FixParser` then parses. Without this, a version-specific XML dictionary would have become a deployment
+  artifact for every flavour and every container image.
+- **An acceptor and an initiator log on to each other in one process**, on a 7xxx port, with
+  `StartTime=EndTime=00:00:00` (always-on) and `ResetOnLogon=Y`; an application message sent from the
+  acceptor arrives at the initiator's `FromApp` within ~100ms, and both stop cleanly. So wave C's acceptance
+  test needs no external venue, no Docker and no recorded capture — the counterparty is a fixture.
+
+Two shapes wave C must therefore follow, both taken from the house style rather than invented:
+
+- **A substitutable session seam**, mirroring `NatsInboundTransport`'s optional `Func<INatsMessageSource>`
+  constructor parameter — so most tests drive a fake and only the acceptance test opens a socket.
+- **A bounded channel bridging QuickFIX/n's callback threads to `IInboundSubscription`'s
+  `IAsyncEnumerable`.** `FromApp` is a synchronous callback on the session's own thread; blocking it applies
+  backpressure to the FIX session itself and eventually trips the counterparty's heartbeat timeout, which is
+  a worse failure than dropping. Bounded + `DropOldest` + a counter the operator can see, with the capacity
+  configurable — correct for market data (a stale quote is worthless), **wrong for drop-copy**, and that
+  asymmetry is a stated ceiling, not a bug.
+
 ## Waves
 
 Gates as always: `~/.dotnet/dotnet build` + `test` **both** solutions green with no pre-existing test file
