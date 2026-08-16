@@ -131,6 +131,9 @@ public sealed class SinkSpec
     /// address. Empty for every sink authored before that syntax existed, which is why the sugar reports
     /// an unknown target rather than guessing at a positional one.</summary>
     [Id(5)] public string Name { get; set; } = "";
+
+    /// <summary>Wishlist item 9(a); set only for <see cref="SinkKinds.Http"/>. See <see cref="HttpSinkConfig"/>.</summary>
+    [Id(6)] public HttpSinkConfig? Http { get; set; }
 }
 
 public static class SinkKinds
@@ -147,6 +150,12 @@ public static class SinkKinds
     public const string Postgres = "postgres";
     /// <summary>Plan 014: the Microsoft SQL Server twin of <see cref="Postgres"/>.</summary>
     public const string MsSql = "mssql";
+
+    /// <summary>Wishlist item 9(a): POST each row/delta as JSON to an HTTP(S) endpoint — the smaller of
+    /// the two "bounded feedback loop" options the wishlist offers, and the one the loop actually uses:
+    /// its target is <c>/api/sources/{name}/events</c> on the SAME StreamForge host. See
+    /// <see cref="HttpSinkConfig"/>.</summary>
+    public const string Http = "http";
 }
 
 /// <summary>Plan 009 B2. DELIVERY IS FIRE-AND-FORGET and there is no backpressure from the sink into
@@ -163,6 +172,73 @@ public sealed class NatsPubConfig
     [Id(3)] public string? Username { get; set; }
     [Id(4)] [Secret] public string? Password { get; set; }
     [Id(5)] [Secret] public string? Credentials { get; set; }
+}
+
+/// <summary>Wishlist item 9(a). DELIVERY IS FIRE-AND-FORGET, same honest limit as <see cref="NatsPubConfig"/>
+/// (see its doc comment) and the same reason: a slow or unreachable endpoint drops rather than stalling
+/// the pipeline/table it is attached to.
+///
+/// <para><b>The auth shape is one generic header, not a bearer-token field.</b> The wishlist's own worked
+/// example — the loop, POSTing back to this SAME host's <c>/api/sources/{name}/events</c> — authenticates
+/// with a per-source push key sent as <c>X-SF-Ingest-Key</c> (see <c>SourcesEndpoints.IsAuthorizedToPushAsync</c>),
+/// not a bearer token; a <c>BearerToken</c> field would not even cover the one destination this sink was
+/// built for. One <see cref="HeaderName"/>/<see cref="HeaderValue"/> pair covers that case (set
+/// <c>headerName: "X-SF-Ingest-Key"</c>) and an <c>Authorization: Bearer …</c> receiver equally (set
+/// <c>headerName: "Authorization"</c>, <c>headerValue: "Bearer …"</c>), without this config needing to
+/// know which scheme any given receiver expects.</para>
+///
+/// <para><b>The body is shaped for the loop's own endpoint, not a bare row.</b> Every POST body is
+/// <c>{ "events": [ &lt;row&gt; ] }</c> — exactly one event, matching <c>IngestEventsRequest</c>
+/// (<c>StreamForge.Api/Dtos.cs</c>) field-for-field on the wire. This sink cannot reference that type
+/// directly (<c>StreamForge.AppCore</c> sits BELOW <c>StreamForge.Api</c> in the dependency graph — see
+/// <c>StreamForge.AppCore.csproj</c>, which has no reference to it), so <see cref="HttpSinkClient"/> defines
+/// its own wire-identical shape rather than growing a back-reference. A one-row batch is not an
+/// optimization left on the table: batching would mean holding rows before sending, which is exactly the
+/// unbounded buffering this whole family of sinks (see <see cref="NatsPubConfig"/>'s doc) exists to avoid.</para>
+///
+/// <para><b><see cref="MaxDepth"/> is the loop's cycle-breaker</b> (wishlist item 9's "bounded feedback
+/// loop"/"scenario clock" section) — a row whose <see cref="StepField"/> value is <c>&gt;=</c> MaxDepth is
+/// DROPPED instead of POSTed, so a table that forgets its own <c>WHERE step &lt; D</c> termination clause
+/// cannot turn this sink into an unbounded loop. It is a BACKSTOP, not the primary guard — the wishlist is
+/// explicit that termination is normally the user's job via SQL (<c>WHERE step &lt; D</c> on the consuming
+/// table); this only catches the case where that guard is missing or wrong. 0 (the default) disables it:
+/// most HTTP sinks are not the loop's feedback edge at all, and a guard that fired by default on every
+/// ordinary webhook sink (dropping every row once some unrelated field happened to be named "step") would
+/// be a worse default than none. A row with no <see cref="StepField"/>, or a non-numeric value there, is
+/// NOT dropped — the guard only fires on rows that actually carry a recognizable step counter.</para></summary>
+[GenerateSerializer]
+public sealed class HttpSinkConfig
+{
+    /// <summary>Destination URL. May contain <c>{name}</c>, replaced with the pipeline id / table name —
+    /// same substitution <see cref="NatsPubConfig.Subject"/> and <see cref="FileSinkConfig.Path"/> use.
+    /// REQUIRED: there is no default host. A sink with this blank is "not yet configured"
+    /// (<see cref="StreamForge.AppCore.Sinks.HttpSinkTransport.IsConfigured"/>) rather than one that
+    /// silently posts nowhere.</summary>
+    [Id(0)] public string Url { get; set; } = "";
+
+    /// <summary>Optional extra header NAME, e.g. <c>"X-SF-Ingest-Key"</c> or <c>"Authorization"</c>. Not a
+    /// secret itself — see <see cref="HeaderValue"/> for why they are two properties, only one of which is
+    /// masked.</summary>
+    [Id(1)] public string? HeaderName { get; set; }
+
+    /// <summary>The header's value — a credential when <see cref="HeaderName"/> names an auth header, hence
+    /// <c>[Secret]</c>. Sent only when both this and <see cref="HeaderName"/> are non-empty.</summary>
+    [Id(2)] [Secret] public string? HeaderValue { get; set; }
+
+    /// <summary>Upper bound, in milliseconds, on one POST — including connect time. Mirrors
+    /// <see cref="StreamForge.AppCore.Sinks.NatsSinkClient.PublishTimeout"/>'s role (the mechanism behind
+    /// "never blocks the caller") but is per-sink here rather than a shared constant, because an HTTP
+    /// receiver's acceptable latency varies far more than one broker publish does — a same-host loopback
+    /// call (the loop's own use) and a third-party webhook do not belong under the same fixed bound.</summary>
+    [Id(3)] public int TimeoutMs { get; set; } = 3000;
+
+    /// <summary>Field name inside the row this sink reads the "scenario clock" step counter from — see
+    /// <see cref="MaxDepth"/>. Matches the wishlist's own wording ("carrying <c>step + 1</c>"); change it
+    /// only if the looping table's SQL names its own counter column something else.</summary>
+    [Id(4)] public string StepField { get; set; } = "step";
+
+    /// <summary>See this class's doc comment. 0 = the guard is off.</summary>
+    [Id(5)] public int MaxDepth { get; set; }
 }
 
 /// <summary>Plan 012: the file egress sink. Rows are APPENDED, never truncated — the file is a log,

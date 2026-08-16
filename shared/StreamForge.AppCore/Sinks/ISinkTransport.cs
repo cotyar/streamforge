@@ -76,7 +76,8 @@ public static class SinkTransports
     private static readonly Lock Gate = new();
 
     // ponytail: a plain list, not a plugin host. Add built-in sink transports here.
-    private static readonly List<ISinkTransport> Registered = [new NatsSinkTransport(), new FileSinkTransport()];
+    private static readonly List<ISinkTransport> Registered =
+        [new NatsSinkTransport(), new FileSinkTransport(), new HttpSinkTransport()];
 
     public static ISinkTransport? Find(string? kind)
     {
