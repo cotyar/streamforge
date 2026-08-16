@@ -29,17 +29,36 @@ public sealed record BatchAcceptanceResult(List<Dictionary<string, object?>> Acc
 /// coerce element-by-element; a null element is skipped, matching ProtoWireEncoder's repeated-field
 /// writer). Any failure fails the WHOLE row, not just the field — coercion is all-or-nothing per row
 /// so a batch's accepted/invalid split never depends on how far through a bad row we got.</item>
-/// <item>Keys that are neither a declared field nor "_ts"/"_source" are unknown: dropped-and-counted,
-/// or — when <c>rejectUnknownFields</c> — fail the row.</item>
+/// <item>Keys that are neither a declared field nor "_ts"/"_source"/"_retract" are unknown:
+/// dropped-and-counted, or — when <c>rejectUnknownFields</c> — fail the row.</item>
 /// <item>"_ts": honoured (via <see cref="RowTimestamp.Resolve"/>) if the client sent one, otherwise
 /// stamped with <c>arrivalMs</c> — mirrors RecordExtractor/ConnectorPollCycle's own stamping.</item>
 /// <item>"_source": ALWAYS overwritten with the source's own name — a security property, not
 /// tidiness: an attacker-controlled "_source" would inject rows into another source's SignalR group
 /// and routing (see IngestModels.cs's <see cref="IIngressFacade"/> doc).</item>
+/// <item>"_retract": wishlist "explicit key retraction through ingest" — a fourth reserved key, opt-
+/// in and additive (absent = every pre-existing row is byte-identical). Present and truthy, it is
+/// coerced to <c>bool</c> and carried into the accepted row exactly like "_ts"/"_source" are, so it
+/// survives all the way to <see cref="StreamForge.Engine.Runtime.Ops"/>'s TableIngestOp — the one
+/// place downstream that still sees this row before TableExecutorImpl's hardcoded assert-weight
+/// takes over (see that op's own doc). A present-but-uncoercible value fails the ROW, the same as a
+/// bad declared field — a retraction that doesn't parse must never be accepted and silently ignored
+/// (that is the whole failure mode this feature exists to avoid; see docs/cdc.md's "Operational
+/// hazards" for the historical version of that problem this closes for LATEST BY consumers). Whether
+/// this source even HAS a LATEST BY consumer to retract from is not decidable here — this method has
+/// no catalog access and runs identically on every ingest transport (REST, gRPC, whatever comes
+/// next) — so that check is the REST ingest endpoint's job (SourcesEndpoints.cs, backed by
+/// RetractConsumerValidation); this layer only guarantees the flag itself is well-formed.</item>
 /// </list>
 /// </summary>
 public static class IngressRowAcceptance
 {
+    /// <summary>The reserved ingest-row key TableIngestOp looks for to flip a row's Z-set weight from
+    /// the assert TableExecutorImpl otherwise hardcodes every stream event to. Named once, here, so
+    /// the one other place that has to agree on the literal (TableIngestOp.cs) can reference the same
+    /// constant instead of a second copy of the string.</summary>
+    public const string RetractField = "_retract";
+
     public static RowAcceptanceResult Accept(
         IReadOnlyList<FieldDef> fields, string sourceName, bool rejectUnknownFields,
         Dictionary<string, object?> rawRow, long arrivalMs)
@@ -62,10 +81,20 @@ public static class IngressRowAcceptance
             row[f.Name] = coerced;
         }
 
+        if (rawRow.TryGetValue(RetractField, out var retractRaw) && retractRaw is not null)
+        {
+            if (!FieldValueCoercion.TryCoerce(FieldType.Bool, retractRaw, out var coercedRetract))
+            {
+                return new RowAcceptanceResult(null, 0, $"field \"{RetractField}\" cannot be coerced to {FieldType.Bool}");
+            }
+
+            row[RetractField] = coercedRetract;
+        }
+
         var unknownDropped = 0;
         foreach (var key in rawRow.Keys)
         {
-            if (key is "_ts" or "_source" || ContainsField(fields, key))
+            if (key is "_ts" or "_source" or RetractField || ContainsField(fields, key))
             {
                 continue;
             }

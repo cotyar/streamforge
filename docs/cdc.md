@@ -680,6 +680,21 @@ to, frees the key a delete removed. `WHERE _op <> 'd' LATEST BY (<key>)` (the pa
 deleted key from query results — it does not free it from the source's history. The tombstone event, and
 every insert/update before it for that key, is still sitting in the stream.
 
+**This is no longer the whole story — there is now a way to actually free a key**, just not one either CDC
+path drives automatically. `POST /api/sources/{name}/events` accepts a `"_retract": true` row: it emits a
+real weight `-1` for the last asserted row of that key, and a `LATEST BY (<key>)` table consuming that
+source drops the key entirely — the row leaves `Snapshot()`, not just the query results a `WHERE` clause
+filters. It is deliberately narrow: only a `LATEST BY` consumer knows what "the current row for a key" is,
+so a source with any OTHER shape of running consumer (a `GROUP BY`, a plain projection) rejects the
+retraction outright rather than admitting a delta that operator has no correct way to interpret — see
+`RetractConsumerValidation` in `shared/StreamForge.AppCore/Ingest/`. Nothing about the CDC readers above
+calls this automatically: a Postgres or SQL Server delete still arrives as one more `_op = "d"` event, not a
+push to this endpoint. An operator who wants a CDC delete to actually free the key, not just hide it, has to
+bridge the two explicitly — e.g. a small consumer of the `_op = 'd'` events that turns each one into its own
+`_retract: true` push, keyed the same way the `LATEST BY` table is. That bridge is not built here; this
+paragraph exists so the gap between "CDC delivers deletes" and "the table forgets the key" is a documented
+seam, not a surprise.
+
 ## Comparison to Debezium
 
 Factual, not a sales pitch — decide from this, don't take it on faith.

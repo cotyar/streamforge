@@ -32,6 +32,18 @@ namespace StreamForge.Engine.Runtime.Ops;
 ///    history — which is out of scope for this tier; see plan 002 L3's own scoping note). A retraction that
 ///    does NOT match the currently-retained row (e.g. retracting some row that was never the latest, or
 ///    retracting after the key was already dropped) is a no-op.
+///  - KEY RETRACTION (wishlist "explicit key retraction through ingest"; weight &lt;= 0 AND the row carries
+///    TableIngestOp.RetractField under this op's own alias — see <see cref="IsKeyRetraction"/>): retracts
+///    whatever THIS op currently has retained for the key, REGARDLESS of the arriving row's content —
+///    the whole reason this exists is that a client-issued retraction only ever carries the key columns
+///    it bothered to send, not the full row it means to retract, so it can never satisfy the ordinary
+///    content-match rule above. This is also exactly why a retraction only means anything to THIS op:
+///    only <see cref="Current"/> knows what "the current row for a key" is at all — a GROUP BY or a plain
+///    projection has no equivalent concept, which is why admitting a key retraction to either of those is
+///    rejected up front, at ingest-validate time (AppCore's RetractConsumerValidation), rather than being
+///    silently accepted here. An unknown key or a second retraction of an already-freed key both land on
+///    a <see cref="Current"/> miss and are a no-op — no delta, no state change — which is what makes a
+///    double retraction idempotent for free, with no separate "already retracted" bookkeeping needed.
 ///  - PROJECTION applies to the retained WorkingRow directly (not a synthetic aggregate-state row the way
 ///    TableReduceOp's BuildRow needs — LATEST BY keeps the real row, so every output expression, key or
 ///    non-key alike, evaluates normally against it; there is no GroupByIndex substitution mechanism here).
@@ -110,6 +122,19 @@ internal sealed class TableLatestByOp : ITableOp, IRetentionScope
             return results;
         }
 
+        // KEY RETRACTION (class doc) short-circuits the content-match rule below: drop whatever is
+        // currently retained for the key, if anything, no matter what this arriving row's own fields
+        // are — a client-issued retraction never carries the full row it means to remove.
+        if (IsKeyRetraction(row))
+        {
+            if (Current.Remove(key, out var retained))
+            {
+                _order?.Remove((retained.Ts, key));
+                results.Add(new TableDelta(ProjectRow(retained.Row), -1));
+            }
+            return results;
+        }
+
         // Retraction: only meaningful when it retracts the row THIS op currently holds for the key — see
         // class doc on why any other retraction (of a non-current row) is a no-op here.
         if (Current.TryGetValue(key, out var current) && SameRow(current.Row, row))
@@ -174,6 +199,26 @@ internal sealed class TableLatestByOp : ITableOp, IRetentionScope
 
     private static bool SameRow(WorkingRow a, WorkingRow b) =>
         JsonText.SerializeCanonicalRow(a.Fields) == JsonText.SerializeCanonicalRow(b.Fields);
+
+    /// <summary>True when <paramref name="row"/> is a client-issued key retraction rather than an
+    /// ordinary delta. TableIngestOp.RetractField ("_retract") is copied into <see cref="WorkingRow"/>
+    /// by <see cref="WorkingRow.FromEvent"/> exactly like every other field on the incoming
+    /// <c>EventRecord</c> — alias-prefixed to "{alias}__retract" (WorkingRow's own doc: reserved fields
+    /// become "{alias}__ts" etc. for the same reason). Checked against every alias this row carries, not
+    /// just <see cref="_plan"/>'s FROM alias,
+    /// so this still works when a join sits upstream of this op (WorkingRow.Combine unions both sides'
+    /// Fields, so the flag survives under whichever alias TableIngestOp originally tagged it with).</summary>
+    private static bool IsKeyRetraction(WorkingRow row)
+    {
+        foreach (var alias in row.Aliases)
+        {
+            if (row.Fields.TryGetValue(alias + "_" + TableIngestOp.RetractField, out var v) && v is true)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     private string EncodeKey(WorkingRow row)
     {

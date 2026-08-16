@@ -48,8 +48,23 @@ namespace StreamForge.AppCore.Connectors.Mapping;
 /// <c>LATEST BY &lt;key&gt;</c> + <c>WHERE _op &lt;&gt; 'd'</c> on the downstream table — which HIDES a
 /// deleted key from query results but does not FREE it: the tombstone event, and everything before it,
 /// is still sitting in the source's history. This is not mirror-perfect replicated state; it is a
-/// change log an operator can query around. Threading a real ingress retraction into the Engine's
-/// Z-sets is out of scope here — see plan 014's "cut, ranked" list.</para>
+/// change log an operator can query around.
+///
+/// <para><b>Update — this is no longer the whole story for a <c>LATEST BY</c> consumer</b> (wishlist
+/// "explicit key retraction through ingest"): a client-pushed row on <c>POST
+/// /api/sources/{name}/events</c> stamped <c>"_retract": true</c> (see
+/// <c>IngressRowAcceptance.RetractField</c> and <see cref="StreamForge.Engine.Runtime.Ops"/>'s
+/// TableIngestOp/TableLatestByOp) DOES thread a real weight -1 into the Engine's Z-sets, and a
+/// <c>LATEST BY</c> table receiving one genuinely frees the key from its snapshot — the retraction plan
+/// 014 called out of scope now exists, just narrower than "any table": it is validated (rejected, not
+/// silently ignored) for any source whose running consumers aren't ALL <c>LATEST BY</c>-shaped, so it
+/// is useless to a <c>GROUP BY</c> or plain-projection table on purpose. Nothing above wires a Debezium
+/// delete into this automatically, though — <c>CdcEnvelope</c> still stamps <c>_op</c>/<c>_weight</c> as
+/// plain data, same as ever. An operator who wants a CDC delete to actually free the key, not merely be
+/// filtered out by <c>WHERE _op &lt;&gt; 'd'</c>, has to bridge the two themselves: consume the
+/// <c>_op = 'd'</c> events and re-push each one as its own <c>_retract: true</c> row, keyed the same way
+/// the <c>LATEST BY</c> table is. See docs/cdc.md's "Operational hazards" section for the fuller
+/// writeup.</para>
 /// </summary>
 public static class CdcEnvelope
 {

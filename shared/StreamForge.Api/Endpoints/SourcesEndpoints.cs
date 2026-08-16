@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Config;
 using StreamForge.AppCore.Ingest;
+using StreamForge.AppCore.Json;
 using StreamForge.Host.Auth;
 using StreamForge.Host.Grpc.Dynamic;
 
@@ -124,7 +125,7 @@ public static class SourcesEndpoints
         // for THIS source). An ingest source with zero configured keys is JWT-only, not open — see
         // IsAuthorizedToPushAsync/IIngressFacade.ValidateKeyAsync's own doc comment.
         group.MapPost("/{name}/events", async (
-            string name, IngestEventsRequest req, IIngressFacade ingress,
+            string name, IngestEventsRequest req, IIngressFacade ingress, ICatalogFacade registry,
             IAuthorizationService authz, HttpContext http) =>
         {
             if (!await IsAuthorizedToPushAsync(name, http, authz, ingress))
@@ -138,49 +139,51 @@ public static class SourcesEndpoints
                 ? req.IdempotencyKey
                 : http.Request.Headers["Idempotency-Key"].FirstOrDefault();
 
-            var result = await ingress.PushAsync(name, req.Events, req.Partial, idempotencyKey);
-            switch (result.Outcome)
+            // Wishlist "explicit key retraction through ingest": a "_retract" row is only meaningful
+            // to a LATEST BY consumer (TableLatestByOp is the only op that tracks "the current row for
+            // a key" — see its class doc). Validated HERE, before admission, because IIngressFacade's
+            // real implementations (OrleansIngressFacade/DaprIngressFacade) have no catalog access and
+            // their call into IngressRowAcceptance.AcceptBatch is a frozen call site that cannot be
+            // widened to take one — this REST handler is the one place upstream of admission that both
+            // sees the SQL catalog and can still turn a bad request into a 400 instead of a corrupted
+            // or silently-ignored table. KNOWN GAP, stated plainly: the gRPC ingest path
+            // (IngestGrpcService) calls IIngressFacade.PushAsync directly and does not run this gate —
+            // a retraction pushed that way is protected only by TableReduceOp's unmatched-retraction
+            // handling (reports nothing, never a wrong number — see its own doc) and TableLatestByOp's
+            // unknown-key no-op; safe, but silent, exactly what this gate exists to avoid on the REST
+            // path the wishlist actually asked for.
+            var retractRowIndexes = CollectRetractRowIndexes(req.Events);
+            if (retractRowIndexes.Count > 0)
             {
-                case IngestOutcome.Accepted:
-                    // DepthRows/CapacityRows aren't on IngestResult (that contract is frozen) — a
-                    // second, in-memory-only GetStatusAsync call (no extra I/O; same buffer instance)
-                    // fills them in for the 202 body.
-                    var status = await ingress.GetStatusAsync(name);
-                    return Results.Json(
-                        new IngestAcceptedResponse(
-                            result.Accepted, result.Dropped, result.Invalid, status?.DepthRows ?? 0, status?.CapacityRows ?? 0,
-                            result.Duplicate, result.Replayed),
-                        statusCode: StatusCodes.Status202Accepted);
+                var offendingTable = RetractConsumerValidation.FindNonLatestByConsumer(
+                    name, await registry.GetSourcesAsync(), await registry.GetTablesAsync());
+                if (offendingTable is not null)
+                {
+                    var message = $"\"_retract\" is only valid when every running table reading source '{name}' directly is a LATEST BY table; '{offendingTable}' is not";
+                    var retractErrors = retractRowIndexes.Select(i => $"row {i}: {message}").ToList();
 
-                case IngestOutcome.Invalid:
-                    return Results.Json(
-                        new IngestErrorResponse(result.Error ?? "one or more rows failed coercion", 0, result.RowErrors),
-                        statusCode: StatusCodes.Status400BadRequest);
+                    if (!req.Partial)
+                    {
+                        return Results.Json(
+                            new IngestErrorResponse($"{retractErrors.Count} row(s) failed retract validation", 0, retractErrors),
+                            statusCode: StatusCodes.Status400BadRequest);
+                    }
 
-                case IngestOutcome.NotFound:
-                    return Results.NotFound();
-
-                case IngestOutcome.WrongKind:
-                    return Results.Json(
-                        new IngestErrorResponse(result.Error ?? $"source '{name}' is not ingest-kind", 0, result.RowErrors),
-                        statusCode: StatusCodes.Status409Conflict);
-
-                case IngestOutcome.TooLarge:
-                    return Results.Json(
-                        new IngestErrorResponse(result.Error ?? "batch exceeds the source's ingest limits", 0, result.RowErrors),
-                        statusCode: StatusCodes.Status413PayloadTooLarge);
-
-                case IngestOutcome.Overloaded:
-                default:
-                    // Retry-After: whole seconds clamped to [1,30] — IngestResult.RetryAfterMs is the
-                    // unclamped estimate (IngressAdmission.Decision doc), this is where it becomes an
-                    // honest HTTP header.
-                    var retryAfterSeconds = Math.Clamp((int)Math.Ceiling(result.RetryAfterMs / 1000.0), 1, 30);
-                    http.Response.Headers.RetryAfter = retryAfterSeconds.ToString(CultureInfo.InvariantCulture);
-                    return Results.Json(
-                        new IngestErrorResponse(result.Error ?? "ingress buffer has no room for this batch", retryAfterSeconds * 1000, result.RowErrors),
-                        statusCode: StatusCodes.Status429TooManyRequests);
+                    // Partial: admit everything else, fold the offending rows into Invalid/RowErrors
+                    // exactly like a coercion failure would (IngestModels.cs: "Accepted + Dropped +
+                    // Invalid + Duplicate accounts for every row in the request") — an admitted
+                    // retraction into a wrongly-shaped table is not a lesser evil than dropping it.
+                    var offendingSet = new HashSet<int>(retractRowIndexes);
+                    var filteredEvents = req.Events.Where((_, i) => !offendingSet.Contains(i)).ToList();
+                    var partialResult = await ingress.PushAsync(name, filteredEvents, req.Partial, idempotencyKey);
+                    partialResult.Invalid += retractErrors.Count;
+                    partialResult.RowErrors = [.. partialResult.RowErrors, .. retractErrors];
+                    return await BuildEventsResponseAsync(name, partialResult, ingress, http);
+                }
             }
+
+            var result = await ingress.PushAsync(name, req.Events, req.Partial, idempotencyKey);
+            return await BuildEventsResponseAsync(name, result, ingress, http);
         }).AllowAnonymous(); // real gate is the manual dual check above, not route-level authorization
 
         // GET /{name}/ingest — ingress buffer status (plan 008 W4). Deliberately NOT overloaded onto
@@ -331,4 +334,76 @@ public static class SourcesEndpoints
     /// encoded, with a stable "sfk_" prefix so a leaked secret is recognizable as a StreamForge ingest
     /// key at a glance (same spirit as Stripe/GitHub-style prefixed tokens).</summary>
     private static string GenerateIngestKeySecret() => "sfk_" + RandomNumberGenerator.GetHexString(64, lowercase: true);
+
+    /// <summary>Wishlist "explicit key retraction through ingest": indexes of every row in
+    /// <paramref name="events"/> that asks for a retraction, ahead of IngressRowAcceptance.Accept ever
+    /// running (that happens inside <see cref="IIngressFacade.PushAsync"/>, after this validate-time
+    /// gate) — so this reads the raw request body's own value for
+    /// <c>IngressRowAcceptance.RetractField</c> and normalizes it itself
+    /// (<see cref="JsonValueNormalizer.Normalize"/>) rather than reusing the coerced/normalized row
+    /// IngressRowAcceptance would produce, which does not exist yet at this point in the request.</summary>
+    private static List<int> CollectRetractRowIndexes(IReadOnlyList<Dictionary<string, object?>> events)
+    {
+        var indexes = new List<int>();
+        for (var i = 0; i < events.Count; i++)
+        {
+            if (events[i].TryGetValue(IngressRowAcceptance.RetractField, out var raw)
+                && JsonValueNormalizer.Normalize(raw) is true)
+            {
+                indexes.Add(i);
+            }
+        }
+        return indexes;
+    }
+
+    /// <summary>The POST /{name}/events response mapping, extracted unchanged from the handler so the
+    /// retract-validation branch above (which may itself call <see cref="IIngressFacade.PushAsync"/>,
+    /// on the FILTERED batch, before merging its own row errors in) can reuse the exact same
+    /// IngestOutcome -&gt; HTTP mapping as the plain path below it — one switch, not two copies that
+    /// could drift.</summary>
+    private static async Task<IResult> BuildEventsResponseAsync(string name, IngestResult result, IIngressFacade ingress, HttpContext http)
+    {
+        switch (result.Outcome)
+        {
+            case IngestOutcome.Accepted:
+                // DepthRows/CapacityRows aren't on IngestResult (that contract is frozen) — a
+                // second, in-memory-only GetStatusAsync call (no extra I/O; same buffer instance)
+                // fills them in for the 202 body.
+                var status = await ingress.GetStatusAsync(name);
+                return Results.Json(
+                    new IngestAcceptedResponse(
+                        result.Accepted, result.Dropped, result.Invalid, status?.DepthRows ?? 0, status?.CapacityRows ?? 0,
+                        result.Duplicate, result.Replayed),
+                    statusCode: StatusCodes.Status202Accepted);
+
+            case IngestOutcome.Invalid:
+                return Results.Json(
+                    new IngestErrorResponse(result.Error ?? "one or more rows failed coercion", 0, result.RowErrors),
+                    statusCode: StatusCodes.Status400BadRequest);
+
+            case IngestOutcome.NotFound:
+                return Results.NotFound();
+
+            case IngestOutcome.WrongKind:
+                return Results.Json(
+                    new IngestErrorResponse(result.Error ?? $"source '{name}' is not ingest-kind", 0, result.RowErrors),
+                    statusCode: StatusCodes.Status409Conflict);
+
+            case IngestOutcome.TooLarge:
+                return Results.Json(
+                    new IngestErrorResponse(result.Error ?? "batch exceeds the source's ingest limits", 0, result.RowErrors),
+                    statusCode: StatusCodes.Status413PayloadTooLarge);
+
+            case IngestOutcome.Overloaded:
+            default:
+                // Retry-After: whole seconds clamped to [1,30] — IngestResult.RetryAfterMs is the
+                // unclamped estimate (IngressAdmission.Decision doc), this is where it becomes an
+                // honest HTTP header.
+                var retryAfterSeconds = Math.Clamp((int)Math.Ceiling(result.RetryAfterMs / 1000.0), 1, 30);
+                http.Response.Headers.RetryAfter = retryAfterSeconds.ToString(CultureInfo.InvariantCulture);
+                return Results.Json(
+                    new IngestErrorResponse(result.Error ?? "ingress buffer has no room for this batch", retryAfterSeconds * 1000, result.RowErrors),
+                    statusCode: StatusCodes.Status429TooManyRequests);
+        }
+    }
 }
