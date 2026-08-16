@@ -6,8 +6,9 @@ item is small by design.
 
 Each section keeps the original report and records what shipped underneath it —
 including the places where the report turned out to be describing half of
-something. **Done: 1–8, 10–13, 15. Partial: 9 (option (a) only), 14 (option (b)
-only). Nothing is untouched.**
+something. **All 16 done.** What remains open inside them is
+listed under each item and repeated at the bottom — mostly the Dapr flavour of the
+backfill and coordinator-mode inputs, both blocked on seams rather than unwritten.
 
 ## 1. ✅ Configurable CORS origins (shipped 2026-08-15)
 
@@ -213,7 +214,7 @@ list only; the reference is a hard validation error, not silently ignored), and
 `step: true`, which belongs with #9 — no field was added, so nothing exists that
 quietly does nothing.
 
-## 9. ◐ Bounded feedback loop (instead of recursive SQL) — also the "scenario clock"
+## 9. ✅ Bounded feedback loop (instead of recursive SQL) — also the "scenario clock"
 
 Recursive SQL was rejected for complexity; agreed. The streaming-native
 workaround is an explicit, user-declared loop with a step bound: a table's
@@ -380,7 +381,7 @@ drop a retraction before it reaches LATEST BY, since a retract row carries only
 the key; and validation covers direct consumers, relying on each intermediate
 being checked in turn for chains.
 
-## 14. ◐ BUG: an aggregate created over an already-populated `LATEST BY` table collapses to zero
+## 14. ✅ BUG: an aggregate created over an already-populated `LATEST BY` table collapses to zero
 
 `shared/StreamForge.Engine/Runtime/Ops/TableReduceOp.cs` — `Groups.Remove(key)`
 whenever a group's running weight touches zero; a group cannot carry negative
@@ -452,7 +453,7 @@ row count, when a consumer attaches to an upstream that already holds rows.
 Neither fix covers coordinator mode (`Parallelism >= 2`), which does not route
 through `TableExecutor` at all.
 
-## 16. ◐ Server-side delta coalescing per epoch on the SignalR hub
+## 16. ✅ Server-side delta coalescing per epoch on the SignalR hub
 
 A 36,000-row Monte-Carlo run (200 paths × 36 trades × 5 days) produced ~100k
 `tableDelta` messages; the browser (and Excel) fell minutes behind the engine on
@@ -487,3 +488,48 @@ decision about where row identity lives.
 Also untouched: `Streams:PushCapacity` and `TABLES__FLUSHMS` are unchanged — this
 adds a message-granularity control that did not exist, rather than retuning the
 ones that did.
+
+---
+
+# Second pass (2026-08-16) — the parts left open
+
+- **9(b)** shipped: an in-process `loopback` sink writing into a per-source
+  channel. A write never calls the reader (the reader runs only from its own drain
+  timer), so a cycle cannot grow a stack or deadlock; unbounded, it is simply
+  alive until a `WHERE` bounds it or the source is stopped. `maxDepth` is now one
+  `SinkStepGuard` shared with the HTTP sink.
+- **8's `step: true`** shipped, by reworking the generator from path-major to
+  day-major so whole-run generation is literally begin-then-loop over the per-day
+  function. Equivalence holds by construction, and the test asserts bitwise-equal
+  rows.
+- **14(a)** shipped for Orleans classic: `TableExecutor.LastEpoch` +
+  `TableDeltaDto.Epoch` + `AttachSnapshotAsync` (rows and epoch read with no await
+  between), subscribe-before-attach, and a cutoff filter on arrival. Correctness
+  rests on grain non-reentrancy, not on timing. A warm-attached table equals a
+  cold-built twin row for row.
+- **15 for coordinator mode** shipped: `TableOutputGrain` published per partition
+  arrival, before frontier consolidation; the publish moved into
+  `TableGrain.OnOutputBatchAsync`, which already buffers per (partition, epoch).
+- **16's netting** shipped, reusing the engine's canonical row key rather than a
+  bridge-local guess.
+- **13's two gaps** shipped: gRPC ingest runs the same validate gate as REST, and
+  a key retraction bypasses `WHERE` (chosen over rejecting such tables at create
+  time — a retraction is a key-level operation, not a row that must qualify).
+- **9's `Validate` gap** shipped: sink validation is wired into table/pipeline
+  create and update.
+
+**Still open, and blocked on seams rather than effort:**
+1. **The Dapr flavour of 14(a)** has only the wire field. It needs a method on
+   `ITableActor`, and Dapr has no equivalent of the subscribe-before-attach
+   ordering that grain non-reentrancy gives Orleans — routing is registered by the
+   lifecycle orchestrator after the actor's `StartAsync` returns.
+2. **A coordinator-mode table warm-attaching to its OWN upstream** — those inputs
+   arrive via `TableIngestGrain`/`ArrangementGrain`, not `TableExecutor`.
+3. **No end-to-end network test** for any REST or gRPC boundary: this repo has no
+   such harness for any endpoint. Logic is extracted into pure seams and tested
+   there; the plumbing is verified by compilation only.
+4. **Two cluster tests failed once** under whole-solution load
+   (`TableFrontierClusterTests`, `ShardedTableClusterTests`) and then passed in
+   four consecutive runs, including two more full-solution ones. Not reproduced
+   since; recorded rather than dismissed, because a load-only failure in this repo
+   has already turned out to be a real race once.
