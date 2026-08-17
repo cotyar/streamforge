@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using StreamForge.Abstractions;
 using StreamForge.Api;
 using StreamForge.Connectors.Database;
+using StreamForge.Connectors.Fix;
 using StreamForge.Dapr.Host.Actors;
 using StreamForge.Dapr.Host.Facades;
 using StreamForge.Dapr.Host.Ingest;
@@ -68,6 +69,9 @@ TableHistoryRuntimeSetup.AddServices(builder.Services);
 // before this line satisfies it — here, immediately before Build(), keeps it visibly paired with the
 // rest of the *RuntimeSetup wiring above rather than buried at the top of the file.
 DatabaseConnectors.RegisterAll();
+// Plan 018-D: same deadline, same shape, same reasoning — the out-of-core FIX session transport's
+// only call site, registering the `fix` inbound kind before any source can open one.
+FixConnectors.RegisterAll();
 // Same deadline, same shape: the pricing scalars (QLNet-backed Black family, closed-form
 // flat-curve bond/swap/FX) register into the Engine's SqlFunctions seam so the Engine itself
 // never links a pricing library. Must precede anything that compiles SQL.

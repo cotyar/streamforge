@@ -20,6 +20,7 @@
     <ProjectReference Include="..\..\..\shared\StreamForge.AppCore\StreamForge.AppCore.csproj" />
     <ProjectReference Include="..\..\..\shared\StreamForge.Api\StreamForge.Api.csproj" />
     <ProjectReference Include="..\..\..\shared\StreamForge.Connectors.Database\StreamForge.Connectors.Database.csproj" />
+    <ProjectReference Include="..\..\..\shared\StreamForge.Connectors.Fix\StreamForge.Connectors.Fix.csproj" />
     <ProjectReference Include="..\..\..\shared\StreamForge.Quant\StreamForge.Quant.csproj" />
   </ItemGroup>
 </Project>
