@@ -305,6 +305,180 @@ class doc for the canonical wording — this section restates it rather than div
 
 ---
 
+## FIX
+
+Plan 018 adds two things that are useful separately and better together: a wire **format** (`fix`) that
+any `url`/`file`/`folder`/`nats` source can name, and a receive-only session **source kind** (also spelled
+`fix` — a coincidence of both being named after the protocol, not a conflict; a `SourceDefinition.Kind`
+and a `FileFormats` value are two different registries) that speaks the session and declares
+`FormatOf => FileFormats.Fix`, so it reuses the format's parser and the whole shared mapping/coercion/dedup
+path with nothing of its own. Had the session converted FIX to JSON internally instead, it would have
+worked identically and a FIX log on disk would still be unreadable by this platform — the format existing
+independently is the point.
+
+### The `fix` format
+
+`format: "fix"` sits alongside `ndjson`/`json`/`csv`, parsed by
+[`FixParser`](shared/StreamForge.AppCore/Connectors/Formats/FixParser.cs) into the same
+one-`JsonElement`-per-item shape the other three parsers already produce.
+
+- **tag=value, delimiter sniffed.** A real session speaks SOH (`\x01`); logs, tickets and test fixtures
+  use `|` or `^`, because SOH doesn't paste into a text editor. The delimiter is sniffed once per input,
+  following `FormatParsers.SniffDelimiter`'s own doctrine: highest count over the first frame wins, a tie
+  goes to the earlier candidate, nothing counted falls back to SOH.
+- **No FIX dictionary.** Names and types come from one static table covering the common FIX 4.2/4.4/5.0
+  tag set — tag numbers are globally unique across FIX versions by design (tag 35 is `MsgType` in every
+  version from 4.0 through 5.0), so one table is correct rather than a version-specific compromise. A tag
+  this table doesn't know becomes `"tag<N>"`, a plain JSON string keyed to it. An operator who wants more
+  has declared field types (`ConnectorRowCoercion`) and 009-C1's SQL conversion functions downstream —
+  exactly what CSV's untyped columns already lean on.
+- **Values are typed from that table, never sniffed.** CSV sniffs `long`/`double`/`bool` because it has
+  nothing better to go on; FIX has a spec that says tag 44 is a price and tag 55 is a symbol, so sniffing
+  would silently turn `55=123` into the number 123. Known numeric tags become a JSON number, the FIX
+  `Boolean` type (exactly `"Y"`/`"N"`) becomes `true`/`false`, and every other tag — known or unknown —
+  stays a string.
+- **Repeating groups become nested JSON arrays.** `NoMDEntries=2` followed by two entries becomes
+  `"MDEntries": [{…}, {…}]` — **this is the most useful thing about the format**: it is what lets
+  `MappingSpec.ItemsPath = "$.MDEntries[*]"` fan one market-data snapshot out into one row per quote,
+  using the exact same JSONPath machinery every other source's mapping already runs. The framing needs no
+  dictionary: a counter tag from a known table opens a group, the tag right after it is the group's
+  delimiter tag, the first entry establishes the group's tag set, and the group ends at the first tag
+  outside that set (or the standard trailer — see the ceilings below).
+- **Length-prefixed fields are read by byte count.** `RawDataLength(95)`/`RawData(96)` and its siblings
+  (90/91, 212/213, 350/351, 354/355, 358/359, 360/361, 362/363, 364/365) carry a character count precisely
+  because the value may contain the delimiter; the parser takes the paired data tag verbatim for exactly
+  that many characters, delimiters and `=` signs included, instead of splitting on the next delimiter it
+  finds. This is FIX's answer to CSV's quoted field, and skipping it corrupts exactly the messages
+  (raw/encoded/XML payloads) that are hardest to debug afterward.
+
+**The two ceilings, stated plainly — read these before leaning on group framing:**
+
+- **Dictionary-free group framing infers a group's field set from its first entry.** A later entry that
+  carries a field the first entry omitted terminates *that later entry* right at the tag the first entry
+  never had — the trailing fields land on the *parent* object, not the entry they visually belong to.
+- **A single-entry group is bounded only by the next delimiter tag, a repeated tag, or the standard
+  trailer (93/89/10).** A single-entry group that is *not* the last thing at its nesting level absorbs
+  whatever follows it, because there is no second entry to reveal where it actually ends.
+
+Upgrade path for both: a real FIX dictionary, which knows a group's field set without needing a second
+entry to reveal it. Neither is a corner case found later by accident — `FixParserTests` names both
+explicitly, and the code carries a `// ponytail:` comment at the exact line that hits the first one.
+
+**`fix` is ingress-only.** There is no FIX sink: `FileSinkTransport.Describe()`'s format list stays
+`[csv, ndjson]`, and `FileSinkClient` has no FIX twin — writing FIX with no session to number the messages
+produces something no counterparty would accept.
+
+### The `fix` source kind
+
+A persistent FIX session — market data, drop-copy — as an `IInboundTransport`, living out of the core in
+[`shared/StreamForge.Connectors.Fix`](shared/StreamForge.Connectors.Fix) on `QuickFIXn.Core` 1.14.1,
+registered the same way TIBCO Rendezvous would be (see "Transports whose client library cannot ship in
+this repo", below): `QuickFIXn.Core` is a dependency of this one out-of-core project, not of
+`StreamForge.AppCore`. This platform is always the FIX **initiator**, dialing out to the config's
+`host`/`port`; the counterparty is always the acceptor.
+
+**Receive-only, on purpose — order entry is a separate plan.** A FIX session that both sends orders and
+receives execution reports is [`plans/019-fix-order-entry.md`](plans/019-fix-order-entry.md), and it is a
+different plan rather than a later wave of this one, in one sentence: one FIX session spans this
+platform's two independent registries (sources and sinks), `ISinkClient`'s never-throw fire-and-forget
+contract is wrong for a `NewOrderSingle`, and sequence-number persistence becomes a cluster-singleton
+correctness requirement the moment this side originates messages instead of only receiving them.
+
+Config fields (`FixSourceConfig`, `connector.fix` in a `SourceDefinition`):
+
+| Field | Purpose |
+|---|---|
+| `host` / `port` | Counterparty to dial. Always required; this side is always the initiator. |
+| `senderCompId` / `targetCompId` | This session's own CompID and the counterparty's. |
+| `beginString` | FIX version header (`FIX.4.0`–`FIX.4.4`, `FIXT.1.1`). Selects the header only — see `UseDataDictionary=N` below. |
+| `username` / `password` | Optional; sent as tags 553/554 inside the Logon(A) message. QuickFIX/n has no built-in credential exchange, so this is this platform's own addition. `password` is `[Secret]` and masks to `***` on read and export. |
+| `heartBtIntSeconds` | Session heartbeat interval, seconds. Must be > 0. |
+| `resetOnLogon` | Reset sequence numbers to 1 every logon (default `true`). |
+| `storePath` | Empty (default) = in-memory sequence-number store. Non-empty = file-backed. See the hazards below. |
+| `useSsl` | Wraps the socket in TLS. Deferred beyond this bare flag: client certificates, CA pinning. |
+| `onLogon` | Raw FIX text, one message per line, sent right after logon succeeds. See below. |
+| `msgTypes` | Comma-separated MsgType (tag 35) include-filter, e.g. `W,X`. Empty = every application message. |
+| `queueCapacity` | Capacity of the bounded, drop-oldest bridge queue. Default 10000. See the hazards below. |
+
+**`UseDataDictionary=N` is set unconditionally**, so **no `FIX44.xml` (or any version's dictionary) is a
+deployment artifact.** QuickFIX/n does the session layer and no message validation, and hands the
+application message over intact — `Message.ConstructString()` returns the raw SOH-delimited wire string,
+which is exactly the `byte[]` the format parser above then parses. `beginString` only selects which
+version header this session claims, never a schema to validate against.
+
+**`onLogon` is raw FIX text, not a request builder.** A market-data session must SEND something (a
+`MarketDataRequest`, a `SecurityListRequest`, …) right after logon to receive anything at all — this field
+holds one raw FIX message per line, delimiter-sniffed the same way the format parser sniffs a payload (SOH,
+`|` or `^`, whichever the operator actually typed). No templating, no request/response correlation, no
+resubscribe-on-reject: a typed request builder is a plan-019-sized decision, not a field on this class. A
+send failure here fails the whole connection attempt — silence would be the worst possible symptom.
+
+**Operational hazards — read these before enabling the kind:**
+
+- **The bridge from QuickFIX/n's session thread is a bounded, `DropOldest` channel.** `FromApp` is a
+  synchronous callback on the FIX session's own thread; blocking it would apply backpressure to the
+  session itself and eventually trip the counterparty's heartbeat timeout, a worse failure than dropping.
+  `DropOldest` is **right for market data** (a stale quote is worthless) and **wrong for drop-copy**,
+  where every message matters. `queueCapacity` sets the bound; a running count of drops
+  (`FixBridgeApplication.Dropped`) is logged to stderr on every increment rather than swallowed, and is a
+  best-effort operator signal (it can race the channel's own reader by one) rather than an exact ledger.
+- **`storePath` empty = in-memory store + `ResetOnLogon`, which is right for market data** — resending
+  yesterday's quotes is worse than not resending them, so a clean slate every logon is the default. Set
+  `storePath` for a drop-copy session that must not lose its place across restarts, and **in a container
+  it must be a mounted volume** — the same requirement the `file` sink's `path` field already carries.
+- **`AckAsync` is always null: at-most-once into the platform.** QuickFIX/n's sequence layer acknowledges
+  a *session* — the counterparty need not resend an in-sequence message — which is not the same thing as
+  this platform having processed the row into a table. Claiming otherwise would be exactly the lie a
+  non-null `AckAsync` is not allowed to tell.
+- **Session-level traffic never reaches the row path.** Logon/Heartbeat/TestRequest/ResendRequest/
+  SequenceReset/Logout are consumed by QuickFIX/n's own session layer and never surface to the application
+  callback, so "receive-only" costs nothing to enforce. `msgTypes` filters only the application messages
+  that do reach it.
+
+**Worked example** — a market-data source definition (`POST /api/sources` body) subscribing to EUR/USD
+top-of-book and fanning its `MDEntries` group into one row per quote:
+
+```json
+{
+  "name": "eurusd-md",
+  "description": "EUR/USD top-of-book, FIX 4.4 market data, receive-only",
+  "kind": "fix",
+  "connector": {
+    "fix": {
+      "host": "fix.venue.example.com",
+      "port": 9880,
+      "senderCompId": "STREAMFORGE",
+      "targetCompId": "VENUE",
+      "beginString": "FIX.4.4",
+      "heartBtIntSeconds": 30,
+      "resetOnLogon": true,
+      "storePath": "",
+      "useSsl": false,
+      "onLogon": "35=V|262=1|263=1|264=1|265=1|267=2|269=0|269=1|146=1|55=EUR/USD",
+      "msgTypes": "W",
+      "queueCapacity": 10000
+    },
+    "mapping": {
+      "itemsPath": "$.MDEntries[*]",
+      "fields": [
+        { "sourcePath": "MDEntryType", "field": { "name": "side", "type": "String" } },
+        { "sourcePath": "MDEntryPx", "field": { "name": "price", "type": "Double" } },
+        { "sourcePath": "MDEntrySize", "field": { "name": "size", "type": "Double" } }
+      ]
+    }
+  },
+  "onCoercionFailure": "Null"
+}
+```
+
+The `35=V` line in `onLogon` is a `MarketDataRequest`: `262=1` (MDReqID), `263=1` (Snapshot+Updates),
+`264=1` (MarketDepth top-of-book), `265=1` (IncrementalRefresh), `267=2`+`269=0`+`269=1` (NoMDEntryTypes=2:
+Bid, Offer), `146=1`+`55=EUR/USD` (NoRelatedSym=1: the symbol). The venue's `35=W` reply then arrives with
+a `NoMDEntries` group, and `itemsPath` fans it into one row per entry with `side`/`price`/`size` pulled out
+of each.
+
+---
+
 ## The console form
 
 `Describe()` returns a [`TransportDescriptor`](shared/StreamForge.AppCore/Transports/TransportDescriptor.cs),

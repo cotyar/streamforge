@@ -1,6 +1,33 @@
 # Plan 018 — FIX protocol, one direction: the `fix` wire format and a receive-only session source
 
-**Status: IN PROGRESS**
+**Status: DONE**
+
+**What actually landed (2026-08-17), and where it diverged from the plan as written:**
+
+- **`orleans/tests/StreamForge.Host.Tests/SecretWalkTests.cs` gained one line**, not zero. That fixture is
+  a forcing function by its own doc comment — it is built by naming the properties rather than by
+  reflection precisely so a NEW container on `ConnectorConfig` that nobody adds here shows up as a
+  coverage gap instead of passing vacuously — and wave 014-A made the identical one-line addition
+  for `ConnectorConfig.Db` when the database connectors landed. Wave C's `FixSourceConfig` is no
+  different: `SecretWalkTests` now also constructs a `ConnectorConfig` with `Fix` set, so the walk covers
+  `FixSourceConfig.Password`'s `[Secret]` attribute the same way it already covers every other credential
+  field.
+- **The acceptance test starts its counterparty acceptor on the first *bindable* port in the 7xxx band**,
+  not a fixed one. Two reasons: `StreamForge.Connectors.Fix.Tests` is referenced from both `.sln` files, so
+  running the Orleans and Dapr suites back to back binds the same fixed port twice within minutes for no
+  reason; and on macOS, ControlCenter's AirPlay Receiver listens on `*:7000` — a port in the reserved
+  6xxx–9xxx band is not guaranteed free just because it looks unused. `FixAcceptanceTests` retries the
+  *real* `ThreadedSocketAcceptor.Start()` across `7000..7999` on `SocketException`, rather than probing
+  with a throwaway `TcpListener` first (a probe binds loopback while QuickFIX/n binds `Any`, so a probe
+  that succeeds where the acceptor then fails would be worse than no probe at all).
+- **The Dapr flavour's `/api/transports` was not verified live.** Wave D wired `FixConnectors.RegisterAll()`
+  into both hosts identically, and the Dapr solution builds and its full test suite is green — but no
+  `dapr init` has been run on this machine, and port `5399` is off-limits per this file's own environment
+  rules, so the live REST check (`GET /api/transports` showing the `fix` kind, a source created and rows
+  landing in a table against an in-process acceptor) ran only against the Orleans flavour. Recorded
+  honestly rather than papered over: the Dapr claim rests on identical wiring + a green suite, not on an
+  observed live instance.
+
 **Depends on**: 010 (the `IInboundTransport` seam), 014 (`TransportFieldTypes.Text`, the
 `StreamForge.Connectors.Database` out-of-core project precedent)
 **Explicitly does NOT cover**: order entry. A FIX session that both sends orders and receives execution

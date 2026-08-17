@@ -22,7 +22,7 @@ Written against commit `49d6979` by the improve skill (focused `plan` invocation
 | 015 | [RBAC → entitlements, groups, approvals, escalation, audit](015-rbac-entitlements-approvals.md) | PLANNED | independent of 014 |
 | 016 | [Name resolution, versioning & dependencies, service discovery](016-identity-versioning-discovery.md) | PLANNED | 014 (plugin versions only) |
 | 017 | [Native .NET CDC](017-native-cdc.md) | IN PROGRESS (postgres-cdc + mssql-cdc registered and documented; live DB integration running concurrently) | 014 (reuses `IPolledTransport`, `DbSourceConfig`, `CdcEnvelope`'s vocabulary) |
-| 018 | [FIX protocol: the `fix` format + a receive-only session source](018-fix-connector.md) | IN PROGRESS | 010 (`IInboundTransport`), 014 (`Text` field type, out-of-core project precedent) |
+| 018 | [FIX protocol: the `fix` format + a receive-only session source](018-fix-connector.md) | DONE (the `fix` format — tag=value, dictionary-free, repeating groups as nested arrays — usable by url/file/folder/nats sources; a receive-only FIX session source in `shared/StreamForge.Connectors.Fix` on QuickFIXn.Core 1.14.1; live check on an isolated instance confirmed rows flowing from a real QuickFIX/n acceptor into a table) | 010 (`IInboundTransport`), 014 (`Text` field type, out-of-core project precedent) |
 | 019 | [FIX order entry (bidirectional session)](019-fix-order-entry.md) | PLANNED — blocked on one deliberate decision, see the doc | 018 |
 
 Design tokens source of truth: `orleans/design-system/streamforge/MASTER.md`.

@@ -24,6 +24,16 @@ instead of polling a cursor column. Their operational hazards (an undrained Post
 SQL Server's 3-day CDC retention default, `REPLICA IDENTITY FULL`) are written down in
 [`TRANSPORTS.md`](TRANSPORTS.md)'s "Change data capture" section — read it before enabling either kind.
 
+**FIX** (plan 018): `format: "fix"` is a fifth payload format — tag=value, delimiter sniffed, no FIX
+dictionary (a static table of the common 4.2/4.4/5.0 tags, unknown tags fall back to `tag<N>` strings),
+repeating groups parsed into nested JSON arrays — usable by any `url`/`file`/`folder`/`nats` source; and
+`fix` is also a live, receive-only session source kind, `shared/StreamForge.Connectors.Fix` on
+`QuickFIXn.Core`, an `IInboundTransport` out of the core like the database connectors. No FIX dictionary
+ships with the platform (`UseDataDictionary=N`); order entry is deliberately a separate, not-yet-built
+plan ([`019`](plans/019-fix-order-entry.md)). The session's operational hazards (the drop-oldest bridge
+queue, `storePath`'s in-memory-vs-file-backed choice, at-most-once delivery) are written down in
+[`TRANSPORTS.md`](TRANSPORTS.md)'s "FIX" section — read it before enabling the kind.
+
 ## Environment — non-negotiables
 
 - **dotnet**: `~/.dotnet/dotnet` (SDK 10.0.3xx). It is **NOT on PATH** — always use the full path.
