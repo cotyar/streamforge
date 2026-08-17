@@ -1,0 +1,38 @@
+{
+  "name": "@streamforge/client",
+  "version": "0.1.0",
+  "description": "TypeScript client for StreamForge live tables (gRPC + SignalR).",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src/proto"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && mkdir -p dist/proto && cp src/proto/streamforge.proto dist/proto/streamforge.proto",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/proto-loader": "^0.8.1",
+    "@microsoft/signalr": "^10.0.0",
+    "eventsource": "^3.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.6.0"
+  }
+}
