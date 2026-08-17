@@ -4,7 +4,7 @@ import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 
-const FILE_FORMATS: FileFormat[] = ['ndjson', 'json', 'csv']
+const FILE_FORMATS: FileFormat[] = ['ndjson', 'json', 'csv', 'fix']
 
 export interface FileFolderFormState {
   path: string

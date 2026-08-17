@@ -131,6 +131,7 @@ export function UrlConfigEditor({
             <SelectItem value="json">json — a JSON document (array or object)</SelectItem>
             <SelectItem value="ndjson">ndjson — one JSON value per line</SelectItem>
             <SelectItem value="csv">csv — header row; TSV / semicolon / pipe are detected too</SelectItem>
+            <SelectItem value="fix">fix — FIX tag=value; SOH or pipe delimiter detected</SelectItem>
           </SelectContent>
         </Select>
       </Field>

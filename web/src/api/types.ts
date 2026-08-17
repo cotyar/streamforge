@@ -55,7 +55,7 @@ export interface SourceDefinition {
  *  genuinely branch on a built-in kind. */
 export type SourceKind = 'generator' | 'url' | 'file' | 'folder' | 'grpc' | 'ingest' | 'nats' | (string & {})
 export const SECRET_MASK = '***'
-export type FileFormat = 'ndjson' | 'json' | 'csv'
+export type FileFormat = 'ndjson' | 'json' | 'csv' | 'fix'
 
 /** Cron (5/6-field, UTC) XOR fixed interval (min 1000 ms). */
 export interface ScheduleSpec {
