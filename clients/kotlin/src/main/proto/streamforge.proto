@@ -1,0 +1,398 @@
+syntax = "proto3";
+
+package streamforge.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
+
+option csharp_namespace = "StreamForge.Host.Grpc.V1";
+// Kotlin client build note: java_package/java_multiple_files are added to this PRIVATE COPY
+// (clients/kotlin/src/main/proto/streamforge.proto) purely for codegen ergonomics -- one
+// top-level class per message instead of everything nested under one outer class. The wire
+// contract itself (services/messages/field numbers) is untouched, copied verbatim from
+// orleans/src/StreamForge.Host/Protos/streamforge.proto.
+option java_package = "streamforge.v1";
+option java_multiple_files = true;
+
+// ============================================================================
+// Shared enums / messages
+// ============================================================================
+
+enum FieldType {
+  FIELD_TYPE_STRING = 0;
+  FIELD_TYPE_DOUBLE = 1;
+  FIELD_TYPE_LONG = 2;
+  FIELD_TYPE_BOOL = 3;
+  FIELD_TYPE_TIMESTAMP = 4;
+  FIELD_TYPE_JSON = 5;
+}
+
+// A source field. `children` is the declared nested shape of a FIELD_TYPE_JSON field
+// (drill-down schema); empty for scalar fields. Mirrors StreamForge.Abstractions.FieldDef.
+message FieldDef {
+  string name = 1;
+  FieldType type = 2;
+  repeated FieldDef children = 3;
+}
+
+enum PipelineStatus {
+  PIPELINE_STATUS_STOPPED = 0;
+  PIPELINE_STATUS_RUNNING = 1;
+  PIPELINE_STATUS_FAILED = 2;
+}
+
+enum DiagnosticSeverity {
+  DIAGNOSTIC_SEVERITY_ERROR = 0;
+  DIAGNOSTIC_SEVERITY_WARNING = 1;
+}
+
+message SqlDiagnostic {
+  string message = 1;
+  int32 line = 2;
+  int32 column = 3;
+  DiagnosticSeverity severity = 4;
+}
+
+message ValidateRequest {
+  string sql = 1;
+}
+
+enum TableSearchMode {
+  TABLE_SEARCH_MODE_EXACT = 0;
+  TABLE_SEARCH_MODE_FUZZY = 1;
+}
+
+// ============================================================================
+// SourceService — control plane for stream sources (mirrors /api/sources).
+// ============================================================================
+
+message SourceDefinition {
+  string name = 1;
+  string description = 2;
+  repeated FieldDef fields = 3;
+  // Generator profile: "trades" | "quotes" | "orders" | "generic".
+  string generator_profile = 4;
+  double events_per_second = 5;
+  bool enabled = 6;
+}
+
+message ListSourcesResponse {
+  repeated SourceDefinition sources = 1;
+}
+
+message GetSourceRequest {
+  string name = 1;
+}
+
+message UpdateSourceRequest {
+  string name = 1;
+  SourceDefinition definition = 2;
+}
+
+message DeleteSourceRequest {
+  string name = 1;
+}
+
+service SourceService {
+  rpc List(google.protobuf.Empty) returns (ListSourcesResponse);
+  rpc Get(GetSourceRequest) returns (SourceDefinition);
+  rpc Create(SourceDefinition) returns (SourceDefinition);
+  rpc Update(UpdateSourceRequest) returns (SourceDefinition);
+  rpc Delete(DeleteSourceRequest) returns (google.protobuf.Empty);
+}
+
+// ============================================================================
+// PipelineService — control plane for windowed streaming pipelines
+// (mirrors /api/pipelines).
+// ============================================================================
+
+message PipelineDefinition {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string sql = 4;
+  PipelineStatus status = 5;
+  optional string error = 6;
+  string created_by = 7;
+  int64 created_at_ms = 8;
+  int64 updated_at_ms = 9;
+}
+
+message ListPipelinesResponse {
+  repeated PipelineDefinition pipelines = 1;
+}
+
+message GetPipelineRequest {
+  string id = 1;
+}
+
+message CreatePipelineRequest {
+  string name = 1;
+  string description = 2;
+  string sql = 3;
+}
+
+message UpdatePipelineRequest {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string sql = 4;
+}
+
+message DeletePipelineRequest {
+  string id = 1;
+}
+
+message StartPipelineRequest {
+  string id = 1;
+}
+
+message StopPipelineRequest {
+  string id = 1;
+}
+
+message ValidateResponse {
+  bool ok = 1;
+  repeated SqlDiagnostic diagnostics = 2;
+  optional string plan_summary = 3;
+  repeated string source_names = 4;
+}
+
+service PipelineService {
+  rpc List(google.protobuf.Empty) returns (ListPipelinesResponse);
+  rpc Get(GetPipelineRequest) returns (PipelineDefinition);
+  rpc Create(CreatePipelineRequest) returns (PipelineDefinition);
+  rpc Update(UpdatePipelineRequest) returns (PipelineDefinition);
+  rpc Delete(DeletePipelineRequest) returns (google.protobuf.Empty);
+  rpc Start(StartPipelineRequest) returns (PipelineDefinition);
+  rpc Stop(StopPipelineRequest) returns (PipelineDefinition);
+  rpc Validate(ValidateRequest) returns (ValidateResponse);
+}
+
+// ============================================================================
+// TableService — control plane for persistent materialized TABLEs
+// (mirrors /api/tables).
+// ============================================================================
+
+message TableDefinition {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string sql = 4;
+  PipelineStatus status = 5;
+  optional string error = 6;
+  string created_by = 7;
+  int64 created_at_ms = 8;
+  int64 updated_at_ms = 9;
+  // Output row schema (name + kind) from the last successful compile.
+  repeated FieldDef output_fields = 10;
+  // Stream source names this table's SQL reads from directly.
+  repeated string stream_inputs = 11;
+  // Other table names this table's SQL reads from directly.
+  repeated string table_inputs = 12;
+  bool search_enabled = 13;
+  TableSearchMode search_mode = 14;
+}
+
+message ListTablesResponse {
+  repeated TableDefinition tables = 1;
+}
+
+message GetTableRequest {
+  string id = 1;
+}
+
+message CreateTableRequest {
+  string name = 1;
+  string description = 2;
+  string sql = 3;
+  bool search_enabled = 4;
+  TableSearchMode search_mode = 5;
+}
+
+message UpdateTableRequest {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string sql = 4;
+  bool search_enabled = 5;
+  TableSearchMode search_mode = 6;
+}
+
+message DeleteTableRequest {
+  string id = 1;
+}
+
+message StartTableRequest {
+  string id = 1;
+}
+
+message StopTableRequest {
+  string id = 1;
+}
+
+message ValidateTableResponse {
+  bool ok = 1;
+  repeated SqlDiagnostic diagnostics = 2;
+  optional string plan_summary = 3;
+  repeated string stream_inputs = 4;
+  repeated string table_inputs = 5;
+  repeated FieldDef output_schema = 6;
+}
+
+// One row of a table's current consolidated Z-set snapshot, or one Z-set delta (a row entering
+// (+1) or leaving (-1) a table's output) — the row payload is dynamic, so it travels as a Struct.
+message TableRow {
+  google.protobuf.Struct row = 1;
+  int64 weight = 2;
+}
+
+message GetTableRowsRequest {
+  string id = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+}
+
+message TableRowsResponse {
+  repeated TableRow rows = 1;
+  int32 total_rows = 2;
+  int64 seq = 3;
+}
+
+message SearchTableRequest {
+  string id = 1;
+  string query = 2;
+  int32 limit = 3;
+}
+
+message SearchTableResponse {
+  repeated TableRow rows = 1;
+  TableSearchMode mode = 2;
+  bool enabled = 3;
+  int32 total = 4;
+}
+
+service TableService {
+  rpc List(google.protobuf.Empty) returns (ListTablesResponse);
+  rpc Get(GetTableRequest) returns (TableDefinition);
+  rpc Create(CreateTableRequest) returns (TableDefinition);
+  rpc Update(UpdateTableRequest) returns (TableDefinition);
+  rpc Delete(DeleteTableRequest) returns (google.protobuf.Empty);
+  rpc Start(StartTableRequest) returns (TableDefinition);
+  rpc Stop(StopTableRequest) returns (TableDefinition);
+  rpc Validate(ValidateRequest) returns (ValidateTableResponse);
+  rpc Rows(GetTableRowsRequest) returns (TableRowsResponse);
+  rpc Search(SearchTableRequest) returns (SearchTableResponse);
+}
+
+// ============================================================================
+// StreamService — server-streaming live data (mirrors the SignalR StreamHub /
+// StreamBridgeService relays). Row payloads travel as google.protobuf.Struct for
+// Tier 1; a future tier may add typed row messages per-source/-pipeline/-table.
+// ============================================================================
+
+message SubscribeSourceRequest {
+  string name = 1;
+}
+
+// One raw synthetic event from a source generator. seq is assigned per gRPC subscription
+// (monotonic from 1); timestamp_ms mirrors the event's own "_ts" field for convenience.
+message SourceEvent {
+  string source_name = 1;
+  int64 seq = 2;
+  int64 timestamp_ms = 3;
+  google.protobuf.Struct row = 4;
+}
+
+message SubscribePipelineRequest {
+  string id = 1;
+}
+
+// One emitted pipeline result row — flattened 1:1 from the underlying result batches.
+message ResultEnvelope {
+  string pipeline_id = 1;
+  int64 seq = 2;
+  int64 timestamp_ms = 3;
+  google.protobuf.Struct row = 4;
+}
+
+message SubscribeTableRequest {
+  string name = 1;
+}
+
+message TableDelta {
+  google.protobuf.Struct row = 1;
+  int64 weight = 2;
+}
+
+// One batch of Z-set deltas for a table, matching the SignalR "tableDelta" event: seq is a
+// per-subscription, per-batch counter (not per-row).
+message TableDeltaBatch {
+  string table_name = 1;
+  int64 seq = 2;
+  repeated TableDelta deltas = 3;
+}
+
+service StreamService {
+  rpc SubscribeSource(SubscribeSourceRequest) returns (stream SourceEvent);
+  rpc SubscribePipeline(SubscribePipelineRequest) returns (stream ResultEnvelope);
+  rpc SubscribeTable(SubscribeTableRequest) returns (stream TableDeltaBatch);
+}
+
+// ============================================================================
+// IngestService — plan 008 W4: client-push ingress, bidi. Mirrors the REST
+// POST /api/sources/{name}/events surface (StreamForge.Abstractions.IIngressFacade /
+// IngestModels.cs) one IngestRequest per push, one IngestAck per response — but bidi (not unary),
+// so the server can ack a batch and signal overload WITHOUT ending the call. Overload is carried as
+// an ack field (retry_after_ms), never an RPC error status: under IngressOverflowPolicy.Block this
+// stream is the only genuine transport-level backpressure in the whole feature — the server holds
+// off reading the next IngestRequest while a push is waiting for buffer space, HTTP/2 flow control
+// then closes the window on the wire, and the client's own WriteAsync genuinely blocks.
+// ============================================================================
+
+message IngestRequest {
+  string source_name = 1;
+  repeated google.protobuf.Struct rows = 2;
+  // Admits the valid rows of a batch that has invalid ones instead of failing the whole batch —
+  // mirrors IngestEventsRequest.Partial (Dtos.cs).
+  bool partial = 3;
+  // Plan 009 A1.1: mirrors IngestEventsRequest.IdempotencyKey — a repeat of the same
+  // (source_name, idempotency_key) pair replays the original ack instead of admitting anything
+  // again. Empty string means "no idempotency key" (proto3 has no null for scalar fields).
+  string idempotency_key = 4;
+}
+
+// Mirrors StreamForge.Abstractions.IngestOutcome 1:1 (IngestModels.cs) — same REST-status-code
+// mapping intent, just as a gRPC enum instead of an HTTP status.
+enum IngestOutcome {
+  INGEST_OUTCOME_ACCEPTED = 0;
+  INGEST_OUTCOME_INVALID = 1;
+  INGEST_OUTCOME_NOT_FOUND = 2;
+  INGEST_OUTCOME_WRONG_KIND = 3;
+  INGEST_OUTCOME_TOO_LARGE = 4;
+  INGEST_OUTCOME_OVERLOADED = 5;
+}
+
+// Mirrors StreamForge.Abstractions.IngestResult (IngestModels.cs): accepted + dropped + invalid
+// accounts for every row in the request. retry_after_ms is populated only for
+// INGEST_OUTCOME_OVERLOADED (the REST layer's Retry-After header clamps this to whole seconds in
+// [1,30]; this carries the honest unclamped estimate).
+message IngestAck {
+  IngestOutcome outcome = 1;
+  int32 accepted = 2;
+  int32 dropped = 3;
+  int32 invalid = 4;
+  int32 retry_after_ms = 5;
+  string error = 6;
+  repeated string row_errors = 7;
+  // Plan 009 A1.1: mirrors IngestResult.Duplicate — rows suppressed by row-level dedup, a distinct
+  // reason from dropped (capacity) and invalid (coercion).
+  int32 duplicate = 8;
+  // Plan 009 A1.1: mirrors IngestResult.Replayed — true when this ack restates an earlier push's
+  // counts from the idempotency cache rather than a new admission.
+  bool replayed = 9;
+}
+
+service IngestService {
+  rpc Ingest(stream IngestRequest) returns (stream IngestAck);
+}
