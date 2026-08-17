@@ -44,6 +44,7 @@ public class SecretWalkTests
         Grpc = new GrpcSubConfig { Address = "http://localhost:5299", EntityKey = "source:s" },
         Nats = new NatsSubConfig { Url = "nats://localhost:4222", Subject = "t.>" },
         Db = new DbSourceConfig { Host = "localhost", Database = "d", Table = "t" },
+        Fix = new FixSourceConfig { Host = "fix.venue.example.com", Port = 9880, SenderCompId = "CLIENT", TargetCompId = "VENUE" },
         Mapping = new MappingSpec(),
         Schedule = new ScheduleSpec { IntervalMs = 30_000 },
     };

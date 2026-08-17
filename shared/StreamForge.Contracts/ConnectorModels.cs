@@ -38,6 +38,15 @@ public static class SourceKinds
     /// <see cref="DbSourceConfig.CaptureInstance"/>.</summary>
     public const string MsSqlCdc = "mssql-cdc";
 
+    /// <summary>Plan 018 wave C: a receive-only FIX session (market data, drop-copy) — a persistent
+    /// subscription like <see cref="Nats"/>, not a polled kind, so its Schedule is ignored. Implemented
+    /// out of the core in <c>StreamForge.Connectors.Fix</c>, on <c>QuickFIXn.Core</c>. See
+    /// <see cref="FixSourceConfig"/>. This string collides with <see cref="FileFormats.Fix"/> only in
+    /// spelling — a <see cref="SourceDefinition.Kind"/> and a <see cref="FileFormats"/> value are two
+    /// different registries (kinds pick a transport; formats pick a parser), so the shared spelling is
+    /// a coincidence of both being named after the protocol, not a conflict.</summary>
+    public const string Fix = "fix";
+
     /// <summary>The masked placeholder for secrets-lite values (D-H).</summary>
     public const string SecretMask = "***";
 }
@@ -68,6 +77,13 @@ public sealed class ConnectorConfig
     /// types declared in this assembly, so a config class outside it would export its password in
     /// plaintext, silently — the exact failure <c>[Secret]</c> was introduced to eliminate.</summary>
     [Id(7)] public DbSourceConfig? Db { get; set; }
+
+    /// <summary>Plan 018 wave C; set only for <see cref="SourceKinds.Fix"/>. Lives HERE for the same
+    /// <c>SecretWalk</c> reason <see cref="Db"/>'s doc comment gives — a config class declared in
+    /// <c>StreamForge.Connectors.Fix</c> would export <see cref="FixSourceConfig.Password"/> in
+    /// plaintext on every config export, because <c>SecretWalk.IsContractClass</c> only recurses into
+    /// types declared in THIS assembly.</summary>
+    [Id(8)] public FixSourceConfig? Fix { get; set; }
 }
 
 /// <summary>Plan 009 B1: NATS subject subscription. Credentials follow the secrets-lite convention
@@ -110,6 +126,76 @@ public sealed class NatsJetStreamConfig
     [Id(1)] public string Durable { get; set; } = "";
     /// <summary>Max in-flight unacked messages, the JetStream-side analogue of an ingress buffer bound.</summary>
     [Id(2)] public int MaxAckPending { get; set; } = 1000;
+}
+
+/// <summary>Plan 018 wave C: a receive-only FIX session — market data or drop-copy, never order entry
+/// (that is plan 019, a different plan, not a later wave of this one). One session, one connection: this
+/// platform is always the FIX INITIATOR, dialing out to <see cref="Host"/>/<see cref="Port"/>; the
+/// counterparty is always the acceptor. <see cref="FormatOf"/> on the transport is a constant
+/// (<see cref="FileFormats.Fix"/>) — a FIX session speaks FIX, there is nothing to choose here the way
+/// url/file/folder/nats sources choose a payload format.
+///
+/// <para><b>No FIX dictionary ships with this platform</b> (plan 018's "Decisions" section) —
+/// <c>UseDataDictionary=N</c> is set unconditionally by the session project, so <see cref="BeginString"/>
+/// only selects which version header this session claims, never a schema to validate against.</para>
+///
+/// <para><b>Session state defaults to in-memory, file-backed on request.</b> <see cref="StorePath"/> empty
+/// (the default) means <c>MemoryStoreFactory</c> — no persisted sequence numbers, paired with
+/// <see cref="ResetOnLogon"/> defaulting true: a market-data session normally wants a clean slate every
+/// logon, because resending yesterday's quotes is worse than not resending them. Setting
+/// <see cref="StorePath"/> switches to <c>FileStoreFactory</c> for a drop-copy session that must not lose
+/// its place across restarts — in a container that path must be a mounted volume, exactly as
+/// <c>FileSinkConfig.Path</c>'s doc comment already says for the file sink.</para>
+///
+/// <para><b><see cref="OnLogon"/> is raw FIX text, not a request builder.</b> A market-data session must
+/// SEND something (a <c>MarketDataRequest</c>, a <c>SecurityListRequest</c>, …) after logon to receive
+/// anything at all; this field holds one raw FIX message per line, delimiter-sniffed the same way
+/// <c>FixParser</c> sniffs a payload — SOH, <c>|</c> or <c>^</c>, whichever a user's pasted text actually
+/// uses. No templating, no request/response correlation, no resubscribe-on-reject: a typed request
+/// builder is a plan-019-sized decision, not a field on this class.</para></summary>
+[GenerateSerializer]
+public sealed class FixSourceConfig
+{
+    /// <summary>Counterparty host to dial. This platform is always the initiator.</summary>
+    [Id(0)] public string Host { get; set; } = "";
+    [Id(1)] public int Port { get; set; }
+    /// <summary>This side's SenderCompID (tag 49 on outbound, TargetCompID on inbound).</summary>
+    [Id(2)] public string SenderCompId { get; set; } = "";
+    /// <summary>The counterparty's CompID (tag 56 on outbound).</summary>
+    [Id(3)] public string TargetCompId { get; set; } = "";
+    /// <summary>FIX version header, e.g. "FIX.4.4". See this class's doc comment for why there is no
+    /// dictionary behind it.</summary>
+    [Id(4)] public string BeginString { get; set; } = "FIX.4.4";
+    /// <summary>Optional: sent as tag 553 (Username) inside the Logon(A) message when non-empty.
+    /// QuickFIX/n has no built-in credential exchange — this is the session project's own addition.</summary>
+    [Id(5)] public string? Username { get; set; }
+    /// <summary>Optional: sent as tag 554 (Password) inside the Logon(A) message when non-empty. See
+    /// <see cref="Username"/>.</summary>
+    [Id(6)] [Secret] public string? Password { get; set; }
+    /// <summary>Session heartbeat interval, seconds. Must be &gt; 0.</summary>
+    [Id(7)] public int HeartBtIntSeconds { get; set; } = 30;
+    /// <summary>Reset sequence numbers to 1 on every logon. See this class's doc comment for why true is
+    /// the market-data-shaped default.</summary>
+    [Id(8)] public bool ResetOnLogon { get; set; } = true;
+    /// <summary>Empty (default) = in-memory sequence-number store, reset on every process restart. Set to
+    /// switch to a file-backed store — see this class's doc comment.</summary>
+    [Id(9)] public string StorePath { get; set; } = "";
+    /// <summary>Wraps the socket in TLS. Deferred beyond this bare flag: client certificates, CA pinning
+    /// (plan 018's "Deferred" list).</summary>
+    [Id(10)] public bool UseSsl { get; set; }
+    /// <summary>One raw FIX message per line, sent via <c>Session.SendToTarget</c> right after logon
+    /// succeeds. See this class's doc comment.</summary>
+    [Id(11)] public string? OnLogon { get; set; }
+    /// <summary>Comma-separated include-filter over MsgType (tag 35) values, e.g. "W,X". Empty (default)
+    /// = every application message that reaches <c>FromApp</c> becomes a row. Session-level traffic
+    /// (Logon/Heartbeat/TestRequest/ResendRequest/SequenceReset/Logout) never reaches <c>FromApp</c> at
+    /// all — QuickFIX/n's own session layer consumes it — so this filter has nothing to do with those.</summary>
+    [Id(12)] public string MsgTypes { get; set; } = "";
+    /// <summary>Capacity of the bounded, drop-oldest queue bridging QuickFIX/n's own callback thread to
+    /// this platform's async consumption of the subscription. See <c>FixInboundTransport</c>'s class doc
+    /// for the backpressure ceiling this trades for: correct for market data (a stale quote is worthless),
+    /// wrong for drop-copy (every message must survive).</summary>
+    [Id(13)] public int QueueCapacity { get; set; } = 10000;
 }
 
 /// <summary>Plan 009 B2: where a pipeline's rows or a table's deltas are republished. The platform's
