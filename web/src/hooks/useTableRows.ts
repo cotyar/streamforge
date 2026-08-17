@@ -12,18 +12,49 @@ export interface LiveRow {
   weight: number
 }
 
-/** This console has no per-table catalog of key columns (unlike the OTC-terms demo `keyFields`
- * map @streamforge/client's own `keyfields.ts` ports), so it groups by a table's first/leading
- * column as a heuristic safety net against orphaned duplicates -- `Object.keys()` on a
- * JSON.parse()'d object preserves source field order, which mirrors the SELECT list, so this is
- * reliably the table's first/grouping column (e.g. `symbol`) without needing output-schema
- * metadata. @streamforge/client's own default policy deliberately does NOT guess a column (see
- * its zset.ts docstring), so this is passed to `ZSet` as an explicit `groupKeyFn` override --
- * console-specific policy layered on the package's shared bookkeeping, not a fork of it. */
+/** FALLBACK ONLY -- wishlist #18 put a table's real row-identity key on the wire
+ * (`TableDefinition.keyFields`, recomputed on every successful compile), so this console now
+ * groups by that instead of guessing (see `createZSet` below). This heuristic survives purely for
+ * an OLDER engine that predates the field: `Object.keys()` on a JSON.parse()'d object preserves
+ * source field order, which mirrors the SELECT list, so a table's first/leading column (e.g.
+ * `symbol`) is reliably its grouping column without needing output-schema metadata -- imperfect
+ * (silently wrong for a composite key or a global aggregate) but a safer default than never
+ * superseding at all on a table that used to work. @streamforge/client's own default policy
+ * deliberately does NOT guess a column (see its zset.ts docstring), so this is passed to `ZSet` as
+ * an explicit `groupKeyFn` override -- console-specific policy layered on the package's shared
+ * bookkeeping, not a fork of it. */
 function firstColumnGroupKey(row: LiveTableRow): string | null {
   const firstField = Object.keys(row)[0]
   if (firstField === undefined) return null
   return `${firstField}=${JSON.stringify(row[firstField])}`
+}
+
+/** Logged at most once per table name -- an engine old enough to omit `keyFields` entirely is a
+ * one-time-interesting fact about that table's connection, not something worth repeating on every
+ * reconnect or re-render. */
+const warnedMissingKeyFields = new Set<string>()
+
+/** `keyFields` is `TableDefinition.keyFields` exactly as the page's own fetch parsed it, so the
+ * distinction JS already makes between an absent JSON property (`undefined`) and an explicit
+ * `null` carries straight through: `undefined` means THIS ENGINE NEVER ANSWERED THE QUESTION
+ * (predates wishlist #18) -- the one case this hook still falls back to the leading-column
+ * heuristic for, via an explicit `groupKeyFn` override, and warns about once. `null` and a
+ * (possibly empty) array are both real answers FROM the engine (whole-row identity, and
+ * GROUP BY/LATEST BY key columns or `[]` for a global aggregate respectively) and are passed
+ * straight to `ZSet`'s own `keyFields`-based policy -- no heuristic involved, because there is
+ * nothing to guess. Collapsing "didn't answer" into "answered null" here would silently turn a
+ * LATEST BY table's real key into whole-row identity on an old engine and grow duplicate rows on
+ * every tick -- exactly the regression wishlist #18 exists to prevent. */
+function createZSet(tableName: string, keyFields: readonly string[] | null | undefined): ZSet {
+  if (keyFields !== undefined) return new ZSet(keyFields)
+  if (!warnedMissingKeyFields.has(tableName)) {
+    warnedMissingKeyFields.add(tableName)
+    console.warn(
+      `streamforge: table '${tableName}' has no keyFields on the wire (this engine build predates wishlist #18) -- ` +
+        'falling back to the leading-column heuristic. Upgrade the engine to get the table\'s real row-identity key.',
+    )
+  }
+  return new ZSet(null, firstColumnGroupKey)
 }
 
 /**
@@ -39,7 +70,11 @@ function firstColumnGroupKey(row: LiveTableRow): string | null {
  * is lost to the race, buffering until the snapshot lands, replaying, and the 900ms flash-key
  * timer for the UI's "this row just changed" highlight.
  */
-export function useTableRows(tableId: string | undefined, tableName: string | undefined) {
+export function useTableRows(
+  tableId: string | undefined,
+  tableName: string | undefined,
+  keyFields?: readonly string[] | null,
+) {
   const [rows, setRows] = useState<LiveRow[]>([])
   const [snapshotTotal, setSnapshotTotal] = useState(0)
   const [live, setLive] = useState(false)
@@ -48,8 +83,15 @@ export function useTableRows(tableId: string | undefined, tableName: string | un
 
   const zsetRef = useRef<ZSet>(new ZSet(null, firstColumnGroupKey))
 
+  // `table.keyFields` is a fresh array/undefined every time the page's own fetch re-resolves
+  // (SearchAndView's polling, quick-toggle edits, etc.), so depending on the array's identity
+  // would reset this hook's ZSet -- dropping and resubscribing the live view -- on every
+  // unrelated refetch. Serialize to a primitive so the effect below only re-keys when the
+  // three-way ANSWER actually changed, not the object it arrived in.
+  const keyFieldsDepKey = keyFields === undefined ? 'undefined' : keyFields === null ? 'null' : keyFields.join(' ')
+
   useEffect(() => {
-    zsetRef.current = new ZSet(null, firstColumnGroupKey)
+    zsetRef.current = createZSet(tableName ?? '', keyFields)
     setRows([])
     setSnapshotTotal(0)
     setLive(false)
@@ -158,7 +200,10 @@ export function useTableRows(tableId: string | undefined, tableName: string | un
       if (flashTimer) clearTimeout(flashTimer)
       unsub()
     }
-  }, [tableId, tableName])
+    // keyFieldsDepKey (not keyFields itself -- see its own comment above) intentionally re-keys
+    // this effect only when the resolved key actually changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tableId, tableName, keyFieldsDepKey])
 
   return { rows, snapshotTotal, live, loading, flashKeys }
 }

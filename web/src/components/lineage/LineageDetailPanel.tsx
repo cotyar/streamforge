@@ -198,7 +198,7 @@ function PipelineTabs({ pipeline }: { pipeline: PipelineDefinition }) {
 
 function TableTabs({ table }: { table: TableDefinition }) {
   const { metrics } = useTableMetrics(table.id)
-  const { rows } = useTableRows(table.id, table.name)
+  const { rows } = useTableRows(table.id, table.name, table.keyFields)
 
   return (
     <Tabs defaultValue="overview">

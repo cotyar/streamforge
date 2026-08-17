@@ -186,7 +186,7 @@ function MaterializedView({
   deltasInPerSec: number
   onRowClick?: (row: ResultRow) => void
 }) {
-  const { rows, live, flashKeys } = useTableRows(table.id, table.name)
+  const { rows, live, flashKeys } = useTableRows(table.id, table.name, table.keyFields)
 
   const sortedRows = useMemo(() => {
     const firstField = table.outputFields[0]
