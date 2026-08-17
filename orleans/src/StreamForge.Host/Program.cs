@@ -16,7 +16,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Co-hosted process listens on http://localhost:5199 (REST/SignalR/SPA, HTTP/1.1) and
 // http://localhost:5299 (gRPC, cleartext h2c — HTTP/2-only, no ALPN without TLS) by default;
-// ASPNETCORE_URLS (if set) wins and skips both explicit Kestrel endpoints below.
+// ASPNETCORE_URLS (if set) wins and takes the single-port path below instead of these two explicit
+// Kestrel endpoints.
 //
 // PORT (the PaaS convention: Cloud Run, Heroku, fly.io all set it) moves the HTTP port, and the gRPC
 // port follows at PORT+100 — the same +100 relationship the two defaults already have. Without this,
@@ -31,11 +32,58 @@ var grpcPort = builder.Configuration.GetValue("Grpc:Port", envPort is { } p ? p 
 
 if (string.IsNullOrEmpty(builder.Configuration["urls"]))
 {
+    // Explicit Http:Port/Grpc:Port split (or the bare defaults above) — two listeners, one protocol
+    // each, byte-for-byte the pre-#19 shape. This is now an OVERRIDE for anyone who genuinely wants
+    // REST/SignalR and gRPC apart (a deployment that has two ports to spend, or a TLS-terminating
+    // front end that only forwards one protocol per port) rather than the only option.
+    //
+    // ListenAnyIP, not ListenLocalhost: a loopback-only listener is unreachable from outside the
+    // process's own network namespace, which is exactly what made a published Docker port a dead end
+    // for gRPC even before the single-port work below existed (see the Dockerfile's note). AnyIP still
+    // answers on localhost, so nothing about local dev changes.
     builder.WebHost.ConfigureKestrel(kestrel =>
     {
-        kestrel.ListenLocalhost(httpPort, o => o.Protocols = HttpProtocols.Http1);
-        kestrel.ListenLocalhost(grpcPort, o => o.Protocols = HttpProtocols.Http2);
+        kestrel.ListenAnyIP(httpPort, o => o.Protocols = HttpProtocols.Http1);
+        kestrel.ListenAnyIP(grpcPort, o => o.Protocols = HttpProtocols.Http2);
     });
+}
+else
+{
+    // Wishlist #19, as literally specified: gRPC as a second PROTOCOL on the one port --urls/PORT
+    // already picks, via HttpProtocols.Http1AndHttp2 on that single endpoint.
+    //
+    // CORRECTION TO THE WISHLIST'S OWN ANALYSIS, MEASURED AGAINST A REAL RUNNING HOST — read before
+    // touching this branch. The wishlist assumed "Kestrel detects the HTTP/2 preface on a cleartext
+    // listener, so REST, SignalR and gRPC coexist on one port with no TLS/ALPN". That is not how
+    // stock Kestrel behaves. Booting this exact binary with --urls http://localhost:9199 and setting
+    // Http1AndHttp2 (whether via ConfigureEndpointDefaults or an explicit Listen*/ListenAnyIP call —
+    // both were tried) makes Kestrel itself log "HTTP/2 is not enabled for ... TLS is not enabled ...
+    // Connections to this endpoint will use HTTP/1.1", and a real h2c "prior knowledge" gRPC call
+    // against that port times out. This isn't a misconfiguration on this file's part: automatic
+    // protocol selection on a CLEARTEXT Kestrel endpoint is an open, unshipped ASP.NET Core feature
+    // request (dotnet/aspnetcore#56984, filed July 2024, still open) — Microsoft's own words on
+    // current behavior are "If an endpoint is cleartext (doesn't have TLS) then the connection always
+    // falls back to HTTP/1.1. If a client sends a prior knowledge H2C request to the server, the
+    // server will error with HTTP_1_1_REQUIRED." Genuine HTTP/1.1-and-HTTP/2 multiplexing on ONE
+    // Kestrel endpoint requires TLS + ALPN, full stop, in every version of Kestrel available as of
+    // this change.
+    //
+    // WHY THE SETTING STAYS ANYWAY. Three reasons: (1) it is exactly what the wishlist's own "Do" text
+    // asks for, verbatim; (2) it is not a regression — REST/SignalR on this endpoint are completely
+    // unaffected (proven below), so the only thing NOT achieved is the gRPC half, which was ALSO not
+    // achieved before this change (an --urls deploy never opened a gRPC listener at all); (3) it is
+    // the forward-compatible choice — the day this endpoint gains a certificate (Kestrel:Certificates:
+    // Default in config, no code change needed here), Http1AndHttp2 starts doing real ALPN-negotiated
+    // multiplexing for free. Cloud Run's own HTTP/2 end-to-end mode (`--use-http2` / a port named
+    // "h2c") is the other path to a working single port in production: Cloud Run's edge terminates the
+    // client's real TLS and then forwards EVERY request to the container as HTTP/2 cleartext, so the
+    // container never has to disambiguate REST-vs-gRPC on its own cleartext listener at all — Cloud
+    // Run's edge already did that. Neither path is exercised by this task's local verification (no
+    // cert, no Cloud Run instance to hand), so what's PROVEN here is REST/SignalR unaffected and gRPC
+    // still gated on one of the two paths above; what's NOT proven is either path actually closing the
+    // gap end-to-end, and that should not be assumed without testing it for real.
+    builder.WebHost.ConfigureKestrel(kestrel =>
+        kestrel.ConfigureEndpointDefaults(o => o.Protocols = HttpProtocols.Http1AndHttp2));
 }
 
 // Streams:Transport selects the stream transport. "pull" (DEFAULT) is Orleans' stock memory-stream

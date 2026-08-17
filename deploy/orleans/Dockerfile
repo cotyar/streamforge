@@ -56,6 +56,13 @@ COPY --from=dotnet-build /app/publish ./
 COPY --from=web-build /web/dist ./web-dist
 COPY orleans/docs ./docs
 
+# Wishlist #19: ship the .proto contract alongside the image, so a non-.NET client can compile
+# against the exact version this image runs instead of vendoring a file out of a host project.
+# Cheap (a handful of small text files) — no separate publishing pipeline built for it. Pull with
+# `docker cp <container>:/app/protos - | tar -x`, or `docker run --rm --entrypoint cat <image>
+# /app/protos/streamforge.proto`.
+COPY orleans/src/StreamForge.Host/Protos ./protos
+
 # Absolute paths so StreamForgeApiOptions resolves them regardless of ContentRootPath — see
 # Program.cs (Web:Dist was already configurable; Docs:File is the additive key this wave added,
 # mirroring the Dapr host's existing pattern one-for-one).
@@ -67,12 +74,24 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 # catalog (admin/editor/viewer + sample sources/pipelines/tables) — expected, documented in
 # deploy/README.md, and acceptable for a demo platform (persistent storage is future work).
 
-# gRPC (Grpc:Port, default 5299) stays internal-only — Cloud Run is one-port-per-service. Setting
-# --urls below makes Program.cs skip its explicit two-Kestrel-endpoint block (the
-# `if (string.IsNullOrEmpty(builder.Configuration["urls"]))` guard), so this image never opens a
-# second listening port; only the single $PORT endpoint is bound (and EXPOSEd) below. gRPC service
-# code is still mapped on the app, but with no second port to reach it on externally, it's
-# effectively internal-only — consistent with plan 007 decision D-A's "one port per service".
+# Wishlist #19: --urls below now makes Program.cs bind Kestrel's SINGLE $PORT endpoint with
+# HttpProtocols.Http1AndHttp2 (still exactly one listening port — plan 007 decision D-A's "one port
+# per service" is unchanged), instead of skipping gRPC entirely the way it used to (the pre-#19
+# two-Kestrel-endpoint block only ran when --urls was UNSET, so this image never opened a gRPC
+# listener at all).
+#
+# THAT ALONE DOES NOT MAKE gRPC REACHABLE HERE, though — measured against a real running instance
+# while building this: Kestrel does not multiplex HTTP/1.1 and HTTP/2 on a single CLEARTEXT
+# endpoint (no TLS) in any shipped ASP.NET Core version; it always falls back to HTTP/1.1 and a
+# genuine h2c "prior knowledge" gRPC call times out (open, unresolved upstream:
+# dotnet/aspnetcore#56984). REST/SignalR on $PORT are completely unaffected either way. Two paths
+# actually close the gap, neither exercised by this Dockerfile as it stands: (1) put a certificate
+# on this endpoint (Kestrel:Certificates:Default) so Http1AndHttp2 gets real TLS+ALPN negotiation;
+# (2) deploy the Cloud Run SERVICE with HTTP/2 end-to-end (`--use-http2` / a port named "h2c" —
+# an infra-level `gcloud run deploy` flag, not something this file controls), which makes Cloud
+# Run's own edge terminate the client's TLS and forward EVERY request to the container as HTTP/2
+# cleartext, so the container's single Http1AndHttp2 listener only ever has to speak one protocol
+# for real and REST traffic rides along on it transparently.
 EXPOSE 8080
 
 # Cloud Run injects PORT (default 8080 locally/compose too); shell form so ${PORT} expands, and
