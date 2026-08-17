@@ -1,0 +1,585 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "assert-only",
+      "description": "Two independent asserts, no snapshot, no supersession.",
+      "keyFields": [
+        "desk"
+      ],
+      "bufferedBatches": [],
+      "snapshot": [],
+      "liveBatches": [
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 100.0
+              },
+              "weight": 1
+            },
+            {
+              "row": {
+                "desk": "Credit",
+                "exposure_usd": 40.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 1
+        }
+      ],
+      "expectedRows": [
+        {
+          "desk": "Rates",
+          "exposure_usd": 100.0
+        },
+        {
+          "desk": "Credit",
+          "exposure_usd": 40.0
+        }
+      ]
+    },
+    {
+      "name": "retract-then-assert",
+      "description": "A LATEST BY update as the engine emits it: retract the old row, assert the new.",
+      "keyFields": [
+        "desk"
+      ],
+      "bufferedBatches": [],
+      "snapshot": [
+        {
+          "row": {
+            "desk": "Rates",
+            "exposure_usd": 100.0
+          },
+          "weight": 1
+        }
+      ],
+      "liveBatches": [
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 100.0
+              },
+              "weight": -1
+            },
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 250.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 1
+        }
+      ],
+      "expectedRows": [
+        {
+          "desk": "Rates",
+          "exposure_usd": 250.0
+        }
+      ]
+    },
+    {
+      "name": "assert-then-retract-out-of-order",
+      "description": "Same update with the two sides swapped. Arrival order is not guaranteed; the summed-weight rule must converge to the same state either way.",
+      "keyFields": [
+        "desk"
+      ],
+      "bufferedBatches": [],
+      "snapshot": [
+        {
+          "row": {
+            "desk": "Rates",
+            "exposure_usd": 100.0
+          },
+          "weight": 1
+        }
+      ],
+      "liveBatches": [
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 250.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 100.0
+              },
+              "weight": -1
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "expectedRows": [
+        {
+          "desk": "Rates",
+          "exposure_usd": 250.0
+        }
+      ]
+    },
+    {
+      "name": "coalesced-batch",
+      "description": "Both sides of a supersession plus an unrelated desk in ONE batch.",
+      "keyFields": [
+        "desk"
+      ],
+      "bufferedBatches": [],
+      "snapshot": [],
+      "liveBatches": [
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 100.0
+              },
+              "weight": 1
+            },
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 100.0
+              },
+              "weight": -1
+            },
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 250.0
+              },
+              "weight": 1
+            },
+            {
+              "row": {
+                "desk": "Credit",
+                "exposure_usd": 40.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 1
+        }
+      ],
+      "expectedRows": [
+        {
+          "desk": "Rates",
+          "exposure_usd": 250.0
+        },
+        {
+          "desk": "Credit",
+          "exposure_usd": 40.0
+        }
+      ]
+    },
+    {
+      "name": "composite-key-supersession",
+      "description": "A two-column logical key: only the row matching BOTH fields is superseded.",
+      "keyFields": [
+        "scenario_id",
+        "desk"
+      ],
+      "bufferedBatches": [],
+      "snapshot": [],
+      "liveBatches": [
+        {
+          "deltas": [
+            {
+              "row": {
+                "scenario_id": "base",
+                "desk": "Rates",
+                "v": 1.0
+              },
+              "weight": 1
+            },
+            {
+              "row": {
+                "scenario_id": "shock",
+                "desk": "Rates",
+                "v": 2.0
+              },
+              "weight": 1
+            },
+            {
+              "row": {
+                "scenario_id": "base",
+                "desk": "Rates",
+                "v": 9.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 1
+        }
+      ],
+      "expectedRows": [
+        {
+          "scenario_id": "shock",
+          "desk": "Rates",
+          "v": 2.0
+        },
+        {
+          "scenario_id": "base",
+          "desk": "Rates",
+          "v": 9.0
+        }
+      ]
+    },
+    {
+      "name": "weight-sums-to-zero-removes",
+      "description": "Weights sum per identity; a sum of zero removes the row outright rather than leaving a zero-weight ghost.",
+      "keyFields": null,
+      "bufferedBatches": [],
+      "snapshot": [],
+      "liveBatches": [
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 100.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 100.0
+              },
+              "weight": -1
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "expectedRows": []
+    },
+    {
+      "name": "weight-goes-negative-removes",
+      "description": "An over-retraction removes the row and must not leave a negative weight.",
+      "keyFields": null,
+      "bufferedBatches": [],
+      "snapshot": [],
+      "liveBatches": [
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 100.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 100.0
+              },
+              "weight": -3
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "expectedRows": []
+    },
+    {
+      "name": "global-aggregate",
+      "description": "keyFields=[] is ONE group: every new row supersedes the previous one.",
+      "keyFields": [],
+      "bufferedBatches": [],
+      "snapshot": [],
+      "liveBatches": [
+        {
+          "deltas": [
+            {
+              "row": {
+                "total": 10.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "deltas": [
+            {
+              "row": {
+                "total": 11.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "expectedRows": [
+        {
+          "total": 11.0
+        }
+      ]
+    },
+    {
+      "name": "whole-row-identity-no-supersession",
+      "description": "keyFields=null disables supersession: two rows differing in any column coexist. This is the safe fallback for an unknown table -- never guess a key.",
+      "keyFields": null,
+      "bufferedBatches": [],
+      "snapshot": [],
+      "liveBatches": [
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 100.0
+              },
+              "weight": 1
+            },
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 250.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 1
+        }
+      ],
+      "expectedRows": [
+        {
+          "desk": "Rates",
+          "exposure_usd": 100.0
+        },
+        {
+          "desk": "Rates",
+          "exposure_usd": 250.0
+        }
+      ]
+    },
+    {
+      "name": "snapshot-drops-nonpositive",
+      "description": "A snapshot read can carry weight<=0 rows; they are not part of the state.",
+      "keyFields": [
+        "desk"
+      ],
+      "bufferedBatches": [],
+      "snapshot": [
+        {
+          "row": {
+            "desk": "Rates",
+            "exposure_usd": 100.0
+          },
+          "weight": 1
+        },
+        {
+          "row": {
+            "desk": "Credit",
+            "exposure_usd": 40.0
+          },
+          "weight": 0
+        },
+        {
+          "row": {
+            "desk": "Rates",
+            "exposure_usd": 250.0
+          },
+          "weight": -1
+        }
+      ],
+      "liveBatches": [],
+      "expectedRows": [
+        {
+          "desk": "Rates",
+          "exposure_usd": 100.0
+        }
+      ]
+    },
+    {
+      "name": "snapshot-straddles-supersession",
+      "description": "A snapshot read mid-update can contain BOTH rows of one group. Seeding must keep only the last one rather than surfacing the group twice.",
+      "keyFields": [
+        "desk"
+      ],
+      "bufferedBatches": [],
+      "snapshot": [
+        {
+          "row": {
+            "desk": "Rates",
+            "exposure_usd": 100.0
+          },
+          "weight": 1
+        },
+        {
+          "row": {
+            "desk": "Rates",
+            "exposure_usd": 250.0
+          },
+          "weight": 1
+        }
+      ],
+      "liveBatches": [],
+      "expectedRows": [
+        {
+          "desk": "Rates",
+          "exposure_usd": 250.0
+        }
+      ]
+    },
+    {
+      "name": "buffered-batch-already-reflected-is-skipped",
+      "description": "A batch buffered before the snapshot whose retraction targets a row the snapshot does NOT contain: the snapshot already reflects it. Replaying it would re-delete, and for a LATEST BY group that deletes the NEWER row.",
+      "keyFields": [
+        "desk"
+      ],
+      "bufferedBatches": [
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 100.0
+              },
+              "weight": -1
+            },
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 250.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 7
+        }
+      ],
+      "snapshot": [
+        {
+          "row": {
+            "desk": "Rates",
+            "exposure_usd": 250.0
+          },
+          "weight": 1
+        }
+      ],
+      "liveBatches": [],
+      "expectedRows": [
+        {
+          "desk": "Rates",
+          "exposure_usd": 250.0
+        }
+      ]
+    },
+    {
+      "name": "buffered-batch-not-reflected-is-replayed",
+      "description": "Same shape, but the retraction's target IS still in the snapshot -- the snapshot predates the batch, so it must be replayed.",
+      "keyFields": [
+        "desk"
+      ],
+      "bufferedBatches": [
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 100.0
+              },
+              "weight": -1
+            },
+            {
+              "row": {
+                "desk": "Rates",
+                "exposure_usd": 250.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 7
+        }
+      ],
+      "snapshot": [
+        {
+          "row": {
+            "desk": "Rates",
+            "exposure_usd": 100.0
+          },
+          "weight": 1
+        }
+      ],
+      "liveBatches": [],
+      "expectedRows": [
+        {
+          "desk": "Rates",
+          "exposure_usd": 250.0
+        }
+      ]
+    },
+    {
+      "name": "buffered-assert-only-always-replays",
+      "description": "A batch with no retractions is never treated as already reflected: replaying an assert is safe, dropping one is not.",
+      "keyFields": [
+        "desk"
+      ],
+      "bufferedBatches": [
+        {
+          "deltas": [
+            {
+              "row": {
+                "desk": "Credit",
+                "exposure_usd": 40.0
+              },
+              "weight": 1
+            }
+          ],
+          "seq": 3
+        }
+      ],
+      "snapshot": [
+        {
+          "row": {
+            "desk": "Rates",
+            "exposure_usd": 100.0
+          },
+          "weight": 1
+        }
+      ],
+      "liveBatches": [],
+      "expectedRows": [
+        {
+          "desk": "Rates",
+          "exposure_usd": 100.0
+        },
+        {
+          "desk": "Credit",
+          "exposure_usd": 40.0
+        }
+      ]
+    }
+  ]
+}
