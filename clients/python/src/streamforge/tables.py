@@ -33,6 +33,24 @@ def resolve_table_id(http, name: str) -> str:
     return t["id"]
 
 
+def resolve_key_fields(http, name: str) -> list[str] | None:
+    """Wishlist #18: this table's row-identity key, read from its own definition (`GET
+    /api/tables`'s `keyFields`) instead of a hand-maintained map. TableDefinition.KeyFields is a
+    three-way answer -- a non-empty list is the resolved GROUP BY/LATEST BY key, `[]` is an
+    unkeyed global aggregate (one row, one group), and `null` is whole-row identity -- see
+    Models.cs's doc comment on the field for the full contract.
+
+    An unknown table and an engine build that doesn't report the field at all (predates wishlist
+    #18) both come back here as `None`, which `_zset.group_key_of` already treats as whole-row
+    identity -- the exact fallback an unmapped name got from the old, now-deleted `KEY_FIELDS`
+    map, so an old engine keeps working exactly as it did before this change. `Client.table()`'s
+    `key=` argument bypasses this entirely and always wins."""
+    t = get_table(http, name)
+    if t is None:
+        return None
+    return t.get("keyFields")
+
+
 def search(http, name: str, query: str, limit: int = 50) -> list[dict]:
     table_id = resolve_table_id(http, name)
     resp = http.get(f"/api/tables/{table_id}/search", params={"q": query, "limit": limit})

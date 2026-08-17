@@ -39,6 +39,7 @@ ADMIN_PASS = "admin123!"
 SOURCE_NAME = "sf_client_trades"
 LATEST_TABLE = "sf_client_latest_trade"
 AGG_TABLE = "sf_client_desk_totals"
+GLOBAL_AGG_TABLE = "sf_client_all_totals"
 
 
 def _port_free(port: int) -> bool:
@@ -134,6 +135,12 @@ def _import_fixture_config() -> None:
                 "sql": f"SELECT desk, SUM(notional) AS total FROM {LATEST_TABLE} GROUP BY desk",
                 "running": True,
             },
+            {
+                "name": GLOBAL_AGG_TABLE,
+                "description": "unkeyed global aggregate (no GROUP BY) -- exercises KeyFields=[] over the wire",
+                "sql": f"SELECT COUNT(*) AS trade_count, SUM(notional) AS total_notional FROM {LATEST_TABLE}",
+                "running": True,
+            },
         ],
     }
     resp = httpx.post(
@@ -217,6 +224,7 @@ def engine():
             "source": SOURCE_NAME,
             "latest_table": LATEST_TABLE,
             "agg_table": AGG_TABLE,
+            "global_agg_table": GLOBAL_AGG_TABLE,
         }
     finally:
         proc.terminate()

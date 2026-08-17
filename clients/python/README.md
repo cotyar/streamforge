@@ -100,10 +100,10 @@ needs to hold an admin login.
 ## Key fields
 
 `sf.table(name)` needs to know a table's logical key to supersede rows correctly on updates.
-`key=[...]` always overrides; `key=[]` means a global aggregate (one row); omitted falls back to
-a small bundled map (`_keyfields.py`, ported from the otc-terms demo's catalog) and, for a table
-that map doesn't know, to whole-row identity -- never a guessed first column. Wishlist #18 (the
-engine surfacing a table's own key columns) is what deletes this map for good.
+`key=[...]` always overrides; omitted reads the table's own `keyFields` from `GET /api/tables`
+(wishlist #18): a non-empty list is the GROUP BY/LATEST BY key, `[]` means a global aggregate (one
+row), and `null` -- or an engine build old enough not to report the field at all, or a table this
+engine doesn't know about -- falls back to whole-row identity, never a guessed first column.
 
 ## Protobuf stubs
 

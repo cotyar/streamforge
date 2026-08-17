@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from urllib.parse import urlsplit
 
-from . import _config, _keyfields
+from . import _config
 from . import ingest as _ingest
 from . import sql as _sql
 from . import tables as _tables
@@ -65,7 +65,7 @@ class Client:
     # ---- tables / live ----
 
     def table(self, name: str, key: list[str] | None = None, timeout: float = 30) -> LiveTable:
-        key_fields = key if key is not None else _keyfields.KEY_FIELDS.get(name)
+        key_fields = key if key is not None else _tables.resolve_key_fields(self._http, name)
         return LiveTable(self._live_transport, name, key_fields, timeout=timeout)
 
     def snapshot(self, name: str, limit: int = 500):

@@ -145,6 +145,67 @@ def test_adhoc_sql_roundtrip(sf, engine):
         assert sf.drop_adhoc(name) is False  # already gone
 
 
+def test_key_resolved_from_engine_latest_by(sf, engine):
+    # Wishlist #18: sf.table() with no key= must read the table's own keyFields (GET
+    # /api/tables) instead of the now-deleted hand-maintained map -- for LATEST BY this is a
+    # non-empty list, and correct supersession (never two rows for the same trade_id) is the
+    # observable proof the right key was actually used, not just that *a* key was.
+    trade_id = f"t-{uuid.uuid4().hex[:8]}"
+    t = sf.table(engine["latest_table"], timeout=30)  # no key= -- must resolve from the engine
+    try:
+        _push(sf, engine, [{"trade_id": trade_id, "desk": "Rates", "notional": 100.0}])
+        t.wait_for(lambda d: trade_id in set(d.get("trade_id", [])), timeout=20)
+
+        _push(sf, engine, [{"trade_id": trade_id, "desk": "Rates", "notional": 250.0}])
+
+        def superseded(df):
+            match = df[df["trade_id"] == trade_id]
+            return len(match) == 1 and match.iloc[0]["notional"] == 250.0
+
+        df = t.wait_for(superseded, timeout=20)
+        assert len(df[df["trade_id"] == trade_id]) == 1
+    finally:
+        t.close()
+
+
+def test_key_resolved_from_engine_group_by(sf, engine):
+    # GROUP BY: engine-resolved keyFields is ["desk"] -- pushing two rows for the same fresh desk
+    # must converge to one row with the summed total, not two.
+    desk = f"Desk-{uuid.uuid4().hex[:6]}"
+    agg = sf.table(engine["agg_table"], timeout=30)  # no key= -- must resolve from the engine
+    try:
+        _push(sf, engine, [{"trade_id": f"a-{uuid.uuid4().hex[:8]}", "desk": desk, "notional": 40.0}])
+        _push(sf, engine, [{"trade_id": f"b-{uuid.uuid4().hex[:8]}", "desk": desk, "notional": 60.0}])
+
+        def totals_100(df):
+            match = df[df["desk"] == desk]
+            return len(match) == 1 and match.iloc[0]["total"] == 100.0
+
+        agg.wait_for(totals_100, timeout=20)
+    finally:
+        agg.close()
+
+
+def test_key_resolved_from_engine_global_aggregate(sf, engine):
+    # No GROUP BY at all -- engine-resolved keyFields is [] (TableDefinition.KeyFields's "one
+    # global group" state, not "no identity"). Every push must supersede the single existing row
+    # rather than accumulate a second one; if the resolver ever collapsed [] to None (whole-row)
+    # this table would grow a duplicate row per push instead of staying at exactly one.
+    t = sf.table(engine["global_agg_table"], timeout=30)  # no key= -- must resolve from the engine
+    try:
+        _push(sf, engine, [{"trade_id": f"g-{uuid.uuid4().hex[:8]}", "desk": "Global", "notional": 10.0}])
+        t.wait_for(lambda d: len(d) >= 1, timeout=20)
+        _push(sf, engine, [{"trade_id": f"g-{uuid.uuid4().hex[:8]}", "desk": "Global", "notional": 20.0}])
+
+        def still_one_row(df):
+            return len(df) == 1
+
+        df = t.wait_for(still_one_row, timeout=20)
+        assert len(df) == 1
+    finally:
+        t.close()
+
+
 def test_reader_thread_reconnects_after_close(sf, engine):
     # Not a network-kill test (no fault injection harness here) -- exercises that closing and
     # re-subscribing to the SAME table produces a fresh, correctly-seeded LiveTable rather than
