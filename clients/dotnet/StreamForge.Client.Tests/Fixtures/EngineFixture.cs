@@ -30,6 +30,7 @@ public sealed class EngineFixture : IAsyncLifetime
     public const string SourceName = "sf_dotnet_client_trades";
     public const string LatestTable = "sf_dotnet_client_latest_trade";
     public const string AggTable = "sf_dotnet_client_desk_totals";
+    public const string GlobalAggTable = "sf_dotnet_client_all_totals";
 
     public string BaseUrl { get; } = $"http://localhost:{HttpPort}";
     public string GrpcTarget { get; } = $"localhost:{GrpcPort}";
@@ -275,6 +276,13 @@ public sealed class EngineFixture : IAsyncLifetime
                     name = AggTable,
                     description = "aggregate over the derived LATEST BY",
                     sql = $"SELECT desk, SUM(notional) AS total FROM {LatestTable} GROUP BY desk",
+                    running = true,
+                },
+                new
+                {
+                    name = GlobalAggTable,
+                    description = "unkeyed global aggregate (no GROUP BY) -- exercises KeyFields=[] over the wire",
+                    sql = $"SELECT COUNT(*) AS trade_count, SUM(notional) AS total_notional FROM {LatestTable}",
                     running = true,
                 },
             },

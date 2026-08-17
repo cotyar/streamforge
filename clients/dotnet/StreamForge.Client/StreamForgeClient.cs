@@ -156,10 +156,21 @@ public sealed class StreamForgeClient : IAsyncDisposable
     // Tables / live
     // ============================================================================
 
+    /// <summary><paramref name="keyFields"/> omitted (null, the default) resolves the table's
+    /// row-identity key from its own definition instead -- wishlist #18's <c>GET /api/tables</c>
+    /// <c>keyFields</c>, recomputed by the engine on every successful compile. A non-empty list is
+    /// the resolved GROUP BY/LATEST BY key; <c>[]</c> is an unkeyed global aggregate (one row, one
+    /// group); an engine build that predates wishlist #18 (the field is simply absent from the
+    /// JSON) or a table this engine doesn't know about both resolve to <c>null</c> here, which
+    /// <see cref="RowIdentity.GroupKeyOf"/> already treats as whole-row identity -- this client
+    /// never had a hand-maintained key map to fall back to, so that was always its behavior for an
+    /// unknown table and stays exactly that. Pass <paramref name="keyFields"/> explicitly to
+    /// bypass resolution entirely and always win.</summary>
     public async Task<LiveTable> TableAsync(
         string name, IReadOnlyList<string>? keyFields = null, TimeSpan? timeout = null, CancellationToken ct = default)
     {
-        var table = new LiveTable(_liveTransport, name, keyFields, _logger);
+        var resolvedKeyFields = keyFields ?? await ResolveKeyFieldsAsync(name, ct).ConfigureAwait(false);
+        var table = new LiveTable(_liveTransport, name, resolvedKeyFields, _logger);
         await table.StartAsync(timeout ?? TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
         return table;
     }
@@ -172,6 +183,26 @@ public sealed class StreamForgeClient : IAsyncDisposable
         return doc.RootElement.EnumerateArray()
             .Select(t => new TableSummary(t.GetProperty("id").GetString()!, t.GetProperty("name").GetString()!))
             .ToList();
+    }
+
+    /// <summary>Reads one table's <c>keyFields</c> straight off <c>GET /api/tables</c> (no
+    /// dedicated by-name endpoint, same as <see cref="ResolveTableIdAsync"/>). <c>null</c> covers
+    /// both an explicit JSON <c>null</c> (whole-row identity) and the property being absent
+    /// entirely (an engine older than wishlist #18) -- this client has no per-table key map to
+    /// fall back to either way, so the two cases need no distinguishing here (contrast web/'s
+    /// console, which does still have a heuristic fallback for the latter case only).</summary>
+    private async Task<IReadOnlyList<string>?> ResolveKeyFieldsAsync(string name, CancellationToken ct)
+    {
+        using var resp = await _http.GetAsync("api/tables", ct).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false));
+        foreach (var t in doc.RootElement.EnumerateArray())
+        {
+            if (t.GetProperty("name").GetString() != name) continue;
+            if (!t.TryGetProperty("keyFields", out var kf) || kf.ValueKind == JsonValueKind.Null) return null;
+            return kf.EnumerateArray().Select(e => e.GetString()!).ToList();
+        }
+        return null;
     }
 
     private async Task<string> ResolveTableIdAsync(string name, CancellationToken ct)

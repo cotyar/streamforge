@@ -135,6 +135,79 @@ public sealed class ContractTests
         Assert.Contains(rows, r => Equals(r["desk"], desk));
     }
 
+    [Theory]
+    [InlineData(TransportKind.Grpc)]
+    [InlineData(TransportKind.SignalR)]
+    public async Task KeyFieldsResolvedFromEngineForLatestBy(TransportKind kind)
+    {
+        // Wishlist #18: TableAsync with keyFields omitted must read the table's own keyFields
+        // (GET /api/tables) instead of a hand-maintained map -- this client never had one, so the
+        // proof is that the SAME supersession behavior as the explicit-key test above still holds
+        // with no key argument at all.
+        SkipIfEngineUnavailable();
+        await using var client = await ConnectAsync(kind);
+        var tradeId = $"t-{Guid.NewGuid():N}";
+        await using var table = await client.TableAsync(EngineFixture.LatestTable, timeout: TimeSpan.FromSeconds(20));
+
+        await client.PushAsync(EngineFixture.SourceName, [Row(tradeId, "Rates", 100.0)]);
+        await table.WaitForAsync(
+            rs => rs.Any(r => Equals(r["trade_id"], tradeId) && Convert.ToDouble(r["notional"]) == 100.0),
+            TimeSpan.FromSeconds(20));
+
+        await client.PushAsync(EngineFixture.SourceName, [Row(tradeId, "Rates", 250.0)]);
+        var rows = await table.WaitForAsync(
+            rs => rs.Any(r => Equals(r["trade_id"], tradeId) && Convert.ToDouble(r["notional"]) == 250.0),
+            TimeSpan.FromSeconds(20));
+
+        Assert.Single(rows, r => Equals(r["trade_id"], tradeId));
+    }
+
+    [Theory]
+    [InlineData(TransportKind.Grpc)]
+    [InlineData(TransportKind.SignalR)]
+    public async Task KeyFieldsResolvedFromEngineForGroupBy(TransportKind kind)
+    {
+        SkipIfEngineUnavailable();
+        await using var client = await ConnectAsync(kind);
+        var desk = $"D{Guid.NewGuid():N}"[..10];
+        var t1 = $"t-{Guid.NewGuid():N}";
+        var t2 = $"t-{Guid.NewGuid():N}";
+
+        await using var agg = await client.TableAsync(EngineFixture.AggTable, timeout: TimeSpan.FromSeconds(20));
+
+        await client.PushAsync(EngineFixture.SourceName, [Row(t1, desk, 10.0)]);
+        await client.PushAsync(EngineFixture.SourceName, [Row(t2, desk, 15.0)]);
+
+        var rows = await agg.WaitForAsync(
+            rs => rs.Any(r => Equals(r["desk"], desk) && Convert.ToDouble(r["total"]) == 25.0),
+            TimeSpan.FromSeconds(20));
+        Assert.Single(rows, r => Equals(r["desk"], desk));
+    }
+
+    [Theory]
+    [InlineData(TransportKind.Grpc)]
+    [InlineData(TransportKind.SignalR)]
+    public async Task KeyFieldsResolvedFromEngineForGlobalAggregateStaysOneRow(TransportKind kind)
+    {
+        // No GROUP BY at all -- engine-resolved keyFields is [] (TableDefinition.KeyFields's "one
+        // global group" state, not "no identity"). If TableAsync's resolver ever collapsed [] to
+        // null (whole-row identity) this table would grow a duplicate row on the second push
+        // instead of superseding down to exactly one.
+        SkipIfEngineUnavailable();
+        await using var client = await ConnectAsync(kind);
+        await using var table = await client.TableAsync(EngineFixture.GlobalAggTable, timeout: TimeSpan.FromSeconds(20));
+
+        await client.PushAsync(EngineFixture.SourceName, [Row($"g-{Guid.NewGuid():N}", "Global", 10.0)]);
+        await table.WaitForAsync(rs => rs.Count >= 1, TimeSpan.FromSeconds(20));
+
+        await client.PushAsync(EngineFixture.SourceName, [Row($"g-{Guid.NewGuid():N}", "Global", 20.0)]);
+        var rows = await table.WaitForAsync(
+            rs => rs.Count == 1 && Convert.ToInt64(rs[0]["trade_count"]) >= 2,
+            TimeSpan.FromSeconds(20));
+
+        Assert.Single(rows);
+    }
+
     [Fact]
     public async Task ValidateReportsDiagnosticsForBadSql()
     {

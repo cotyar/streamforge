@@ -63,4 +63,26 @@ public sealed class LiveSmokeTests
         Assert.True(table.Ready);
         Assert.Equal(0, table.Reconnects); // a clean run never needed to reconnect
     }
+
+    [Fact]
+    public async Task TableAsyncWithNoKeyFieldsStillConnectsAgainstAnEngineThatPredatesWishlist18()
+    {
+        // The demo at :6199 is an older build with no `keyFields` on GET /api/tables at all (the
+        // absent-field case wishlist #18's compatibility rule is about, not an explicit null) --
+        // this exercises StreamForgeClient.ResolveKeyFieldsAsync's fallback path for real: it must
+        // read the missing property as "unknown", resolve to null (whole-row identity, exactly
+        // this client's pre-#18 default for a table it had no map entry for), and connect cleanly
+        // rather than throwing on a property that isn't there.
+        await using var client = await StreamForgeClient.ConnectAsync(new ConnectOptions
+        {
+            Url = DemoUrl,
+            User = DemoUser,
+            Password = DemoPassword,
+            Transport = TransportKind.Auto,
+        });
+
+        await using var table = await client.TableAsync("trigger_monitor", timeout: TimeSpan.FromSeconds(20));
+        Assert.True(table.Ready);
+        _output.WriteLine($"connected with no keyFields override; rows={table.Rows.Count}, seq={table.Seq}");
+    }
 }
