@@ -506,6 +506,15 @@ public static class FileFormats
     public const string Ndjson = "ndjson";
     public const string JsonArray = "json";
     public const string Csv = "csv";
+    /// <summary>Plan 018: tag=value FIX protocol text — one FIX message per frame (SOH/<c>|</c>/<c>^</c>
+    /// delimited, sniffed the way <see cref="Csv"/> sniffs its own delimiter), parsed by the
+    /// dependency-free FIX parser in <c>StreamForge.AppCore.Connectors.Formats.FixParser</c>. Every kind
+    /// that names a <see cref="FileFormats"/> gets it for free — a <c>file</c>/<c>folder</c> source
+    /// replays a FIX log off disk, a <c>url</c> source reads one over HTTP, a <c>nats</c> source ingests
+    /// FIX-over-NATS. <b>Ingress-only</b>: the <c>file</c> SINK's format select deliberately does NOT
+    /// offer this constant (see <c>FileSinkTransport.Describe()</c>) — writing FIX without a session to
+    /// number the messages produces something no counterparty would accept.</summary>
+    public const string Fix = "fix";
 }
 
 /// <summary>Poll one file; re-parse on content change (hash+mtime). No tailing guarantees.</summary>

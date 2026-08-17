@@ -17,7 +17,7 @@ public sealed class NatsInboundTransport(Func<INatsMessageSource>? sourceFactory
 {
     private static readonly HashSet<string> KnownFormats = new(StringComparer.Ordinal)
     {
-        FileFormats.Ndjson, FileFormats.JsonArray, FileFormats.Csv,
+        FileFormats.Ndjson, FileFormats.JsonArray, FileFormats.Csv, FileFormats.Fix,
     };
 
     public string Kind => SourceKinds.Nats;
@@ -58,7 +58,7 @@ public sealed class NatsInboundTransport(Func<INatsMessageSource>? sourceFactory
 
         if (!KnownFormats.Contains(nats.Format))
         {
-            errors.Add($"connector.nats.format '{nats.Format}' is not recognized (expected one of: ndjson, json, csv)");
+            errors.Add($"connector.nats.format '{nats.Format}' is not recognized (expected one of: ndjson, json, csv, fix)");
         }
 
         if (nats.JetStream is { } js)
@@ -117,7 +117,7 @@ public sealed class NatsInboundTransport(Func<INatsMessageSource>? sourceFactory
             new TransportField
             {
                 Key = "format", Label = "Payload format", Type = TransportFieldTypes.Select,
-                Options = [FileFormats.Ndjson, FileFormats.JsonArray, FileFormats.Csv], Default = FileFormats.JsonArray,
+                Options = [FileFormats.Ndjson, FileFormats.JsonArray, FileFormats.Csv, FileFormats.Fix], Default = FileFormats.JsonArray,
                 Help = "How each message body is parsed, before field mapping — same vocabulary as the file/folder connectors.",
             },
             new TransportField

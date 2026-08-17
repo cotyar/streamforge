@@ -34,7 +34,7 @@ public static class SourceValidation
 
     private static readonly HashSet<string> KnownFileFormats = new(StringComparer.Ordinal)
     {
-        FileFormats.Ndjson, FileFormats.JsonArray, FileFormats.Csv,
+        FileFormats.Ndjson, FileFormats.JsonArray, FileFormats.Csv, FileFormats.Fix,
     };
 
     /// <summary>"source:{id}" | "pipeline:{id}" | "table:{id}" — the shape
@@ -193,7 +193,7 @@ public static class SourceValidation
         // on the next PUT would make an additive field a breaking one.
         if (!string.IsNullOrEmpty(url.Format) && !KnownFileFormats.Contains(url.Format))
         {
-            errors.Add($"connector.url.format '{url.Format}' is not recognized (expected one of: ndjson, json, csv)");
+            errors.Add($"connector.url.format '{url.Format}' is not recognized (expected one of: ndjson, json, csv, fix)");
         }
     }
 
@@ -213,7 +213,7 @@ public static class SourceValidation
 
         if (!KnownFileFormats.Contains(file.Format))
         {
-            errors.Add($"connector.file.format '{file.Format}' is not recognized (expected one of: ndjson, json, csv)");
+            errors.Add($"connector.file.format '{file.Format}' is not recognized (expected one of: ndjson, json, csv, fix)");
         }
     }
 
@@ -233,7 +233,7 @@ public static class SourceValidation
 
         if (!KnownFileFormats.Contains(folder.Format))
         {
-            errors.Add($"connector.folder.format '{folder.Format}' is not recognized (expected one of: ndjson, json, csv)");
+            errors.Add($"connector.folder.format '{folder.Format}' is not recognized (expected one of: ndjson, json, csv, fix)");
         }
     }
 

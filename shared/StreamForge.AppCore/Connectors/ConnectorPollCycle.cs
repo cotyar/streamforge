@@ -159,6 +159,7 @@ public static class ConnectorPollCycle
                 FileFormats.Ndjson => FormatParsers.ParseNdjson(text),
                 FileFormats.JsonArray => FormatParsers.ParseJsonArray(text),
                 FileFormats.Csv => FormatParsers.ParseCsv(text),
+                FileFormats.Fix => FixParser.Parse(text),
                 _ => throw new FormatException($"unknown format '{format}'"),
             };
         }
