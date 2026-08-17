@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>StreamForge.Client</RootNamespace>
+    <!-- Client library only: not coupled to any StreamForge.Host/StreamForge.Contracts project
+         reference. Its gRPC types are compiled fresh from the .proto below, in this assembly. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.Net.Client" Version="2.80.0" />
+    <PackageReference Include="Grpc.Tools" Version="2.80.0" PrivateAssets="All" />
+    <PackageReference Include="Google.Protobuf" Version="3.31.1" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Single source of truth: the engine's own .proto, compiled here with Grpc.Tools. No
+         ProjectReference to StreamForge.Host/StreamForge.Contracts: this is the only coupling
+         to the server, and it is a build-time codegen input, not a binary/project reference. -->
+    <Protobuf Include="../../../orleans/src/StreamForge.Host/Protos/streamforge.proto"
+              ProtoRoot="../../../orleans/src/StreamForge.Host/Protos"
+              GrpcServices="Client" />
+  </ItemGroup>
+
+</Project>
