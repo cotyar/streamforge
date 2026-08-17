@@ -53,6 +53,24 @@ internal object RestCatalog {
         return table["id"] as? String ?: throw StreamForgeError("table '$name' has no id")
     }
 
+    /** Wishlist #18: this table's row-identity key, read from its own definition (`GET
+     * /api/tables`'s `keyFields`) instead of a hand-maintained map -- this client never had one
+     * (unlike Python/TypeScript's now-deleted `KEY_FIELDS`), so this is purely additive: an
+     * unmapped table used to always resolve to `null` (whole-row identity, via `keyFields`'s own
+     * `null` default in [StreamForgeClient.table]), and now it resolves to whatever the engine
+     * actually computed instead. A non-empty list is the resolved GROUP BY/LATEST BY key, `[]` is
+     * an unkeyed global aggregate (one row, one group), and `null` -- either an explicit JSON
+     * `null` or the property being absent entirely (an engine build older than wishlist #18) --
+     * is whole-row identity; this client has no heuristic fallback to distinguish those two null
+     * cases (contrast web/'s console, which still needs to for its leading-column fallback), so
+     * both simply pass `null` straight through, exactly as an unknown table always did. */
+    @Suppress("UNCHECKED_CAST")
+    suspend fun resolveKeyFields(http: AuthClient, name: String): List<String>? {
+        val table = listTables(http).firstOrNull { it["name"] == name } ?: return null
+        val raw = table["keyFields"] ?: return null
+        return (raw as? List<Any?>)?.map { it as String }
+    }
+
     /** One-shot snapshot read, dropping weight<=0 rows -- same rule `readTableRows` in
      * `lib/streamforge/server.ts` applies. This backs [SignalRTransport]'s [TableTransport.
      * snapshot] AND the public `StreamForgeClient.snapshot()` one-shot read. */

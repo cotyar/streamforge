@@ -185,6 +185,73 @@ class ContractTest {
     @ParameterizedTest
     @EnumSource(Transport::class, names = ["GRPC", "SIGNALR"])
     @Timeout(90)
+    fun keyFieldsResolvedFromEngineForLatestBy(transport: Transport) = runBlocking {
+        // Wishlist #18: sf.table() with keyFields omitted must read the table's own keyFields
+        // (GET /api/tables) instead of a hand-maintained map -- this client never had one, so the
+        // proof is that the SAME supersession behavior as supersessionLatestBy above still holds
+        // with no keyFields argument at all.
+        connectVia(transport).use { sf ->
+            val tradeId = "t-${UUID.randomUUID().toString().take(8)}"
+            sf.table(EngineFixture.LATEST_TABLE).use { t -> // no keyFields=
+                sf.push(EngineFixture.SOURCE_NAME, listOf(mapOf("trade_id" to tradeId, "desk" to "Rates", "notional" to 100.0)))
+                t.waitFor(45.seconds) { r -> r.any { it["trade_id"] == tradeId } }
+
+                sf.push(EngineFixture.SOURCE_NAME, listOf(mapOf("trade_id" to tradeId, "desk" to "Rates", "notional" to 250.0)))
+                val rows = t.waitFor(45.seconds) { r ->
+                    val match = r.filter { it["trade_id"] == tradeId }
+                    match.size == 1 && match.first()["notional"] == 250.0
+                }
+                assertEquals(1, rows.count { it["trade_id"] == tradeId })
+            }
+        }
+    }
+
+    @Order(8)
+    @ParameterizedTest
+    @EnumSource(Transport::class, names = ["GRPC", "SIGNALR"])
+    @Timeout(90)
+    fun keyFieldsResolvedFromEngineForGroupBy(transport: Transport) = runBlocking {
+        connectVia(transport).use { sf ->
+            val desk = "Desk-${UUID.randomUUID().toString().take(6)}"
+            sf.table(EngineFixture.AGG_TABLE).use { agg -> // no keyFields=
+                sf.push(EngineFixture.SOURCE_NAME, listOf(mapOf("trade_id" to "a-${UUID.randomUUID()}", "desk" to desk, "notional" to 40.0)))
+                sf.push(EngineFixture.SOURCE_NAME, listOf(mapOf("trade_id" to "b-${UUID.randomUUID()}", "desk" to desk, "notional" to 60.0)))
+                val rows = agg.waitFor(45.seconds) { r ->
+                    val match = r.filter { it["desk"] == desk }
+                    match.size == 1 && match.first()["total"] == 100.0
+                }
+                assertEquals(1, rows.count { it["desk"] == desk })
+            }
+        }
+    }
+
+    @Order(9)
+    @ParameterizedTest
+    @EnumSource(Transport::class, names = ["GRPC", "SIGNALR"])
+    @Timeout(90)
+    fun keyFieldsResolvedFromEngineForGlobalAggregateStaysOneRow(transport: Transport) = runBlocking {
+        // No GROUP BY at all -- engine-resolved keyFields is [] (TableDefinition.KeyFields's "one
+        // global group" state, not "no identity"). If the resolver ever collapsed [] to null
+        // (whole-row identity) this table would grow a duplicate row on the second push instead
+        // of superseding down to exactly one.
+        connectVia(transport).use { sf ->
+            sf.table(EngineFixture.GLOBAL_AGG_TABLE).use { t -> // no keyFields=
+                sf.push(EngineFixture.SOURCE_NAME, listOf(mapOf("trade_id" to "g-${UUID.randomUUID()}", "desk" to "Global", "notional" to 10.0)))
+                t.waitFor(45.seconds) { r -> r.isNotEmpty() }
+
+                sf.push(EngineFixture.SOURCE_NAME, listOf(mapOf("trade_id" to "g-${UUID.randomUUID()}", "desk" to "Global", "notional" to 20.0)))
+                val rows = t.waitFor(45.seconds) { r ->
+                    r.size == 1 && (((r.first()["trade_count"] as? Number)?.toLong() ?: 0L) >= 2L)
+                }
+                assertEquals(1, rows.size)
+            }
+        }
+    }
+
+    @Order(10)
+    @ParameterizedTest
+    @EnumSource(Transport::class, names = ["GRPC", "SIGNALR"])
+    @Timeout(90)
     fun adhocSqlRoundtrip(transport: Transport) = runBlocking {
         connectVia(transport).use { sf ->
             val name = "adhoc_roundtrip_${UUID.randomUUID().toString().take(6)}"

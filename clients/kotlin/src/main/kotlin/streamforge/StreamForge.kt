@@ -107,9 +107,13 @@ class StreamForgeClient internal constructor(
     private val scope: CoroutineScope,
 ) : Closeable {
 
-    /** Subscribes, snapshots, and replays -- suspends until ready or [timeout] elapses. */
+    /** Subscribes, snapshots, and replays -- suspends until ready or [timeout] elapses.
+     * [keyFields] omitted (null, the default) resolves the table's row-identity key from its own
+     * definition instead (wishlist #18 -- see [RestCatalog.resolveKeyFields]); pass it explicitly
+     * to bypass resolution and always win. */
     suspend fun table(name: String, keyFields: List<String>? = null, timeout: Duration = 30.seconds): LiveTable {
-        val liveTable = LiveTable(liveTransport, name, keyFields, scope)
+        val resolvedKeyFields = keyFields ?: RestCatalog.resolveKeyFields(http, name)
+        val liveTable = LiveTable(liveTransport, name, resolvedKeyFields, scope)
         liveTable.awaitReady(timeout)
         return liveTable
     }

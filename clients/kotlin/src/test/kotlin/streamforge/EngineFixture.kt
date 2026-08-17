@@ -45,6 +45,7 @@ object EngineFixture {
     const val SOURCE_NAME = "sf_kotlin_client_trades"
     const val LATEST_TABLE = "sf_kotlin_client_latest_trade"
     const val AGG_TABLE = "sf_kotlin_client_desk_totals"
+    const val GLOBAL_AGG_TABLE = "sf_kotlin_client_all_totals"
 
     val baseUrl = "http://localhost:$HTTP_PORT"
     val grpcTarget = "localhost:$GRPC_PORT"
@@ -222,6 +223,12 @@ object EngineFixture {
                     "name" to AGG_TABLE,
                     "description" to "aggregate over the derived LATEST BY (per design doc §8's fixture spec)",
                     "sql" to "SELECT desk, SUM(notional) AS total FROM $LATEST_TABLE GROUP BY desk",
+                    "running" to true,
+                ),
+                mapOf(
+                    "name" to GLOBAL_AGG_TABLE,
+                    "description" to "unkeyed global aggregate (no GROUP BY) -- exercises keyFields=[] over the wire",
+                    "sql" to "SELECT COUNT(*) AS trade_count, SUM(notional) AS total_notional FROM $LATEST_TABLE",
                     "running" to true,
                 ),
             ),
