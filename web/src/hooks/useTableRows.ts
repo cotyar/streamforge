@@ -105,10 +105,31 @@ export function useTableRows(tableId: string | undefined, tableName: string | un
       flushToState()
     })
 
-    tablesApi
-      .rows(tableId, 500)
+    // Await registration (`.ready`, set by hub.ts's subscribeTable()) before issuing the snapshot
+    // read. hub.ts's `SubscribeTable` invoke resolves only once the server confirms this
+    // connection is in the table's SignalR group (StreamHub.SubscribeTable returns
+    // Groups.AddToGroupAsync itself), so this is a hard guarantee, not a timing heuristic: no
+    // delta broadcast can land in the window between subscribing and the read anymore, because
+    // there IS no such window -- the read doesn't start until registration is confirmed.
+    //
+    // The buffer-and-replay dance below stays necessary even so -- it now covers a strictly
+    // smaller window (registration confirmed -> GET /rows response actually arriving) rather than
+    // the old, unbounded one (subscribeTable() called -> registration confirmed, of unknown
+    // duration), but that window is real (a delta can still be broadcast while the REST call is
+    // in flight) and arrival order between it and the snapshot is still not guaranteed, so
+    // `alreadyReflected()`'s reconciliation is still exactly what closes it.
+    unsub.ready
+      .catch(() => {
+        // best-effort -- if registration itself failed (e.g. the connection dropped mid-handshake),
+        // still read the snapshot so the view isn't left empty; live deltas won't arrive until
+        // hub.ts's onreconnected() re-establishes the subscription on a fresh connection.
+      })
+      .then(() => {
+        if (cancelled) return undefined
+        return tablesApi.rows(tableId, 500)
+      })
       .then((res) => {
-        if (cancelled) return
+        if (cancelled || !res) return
         zsetRef.current.seed(toDeltaTuples(res.rows))
         setSnapshotTotal(res.totalRows)
 

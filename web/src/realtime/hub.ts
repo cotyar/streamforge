@@ -12,6 +12,13 @@ type MetricsHandler = (metrics: PipelineMetrics) => void
 type SourceHandler = (row: ResultRow) => void
 type TableDeltaHandler = (deltas: TableRowDto[], seq: number) => void
 type Unsubscribe = () => void
+/** Returned by subscribeTable() in addition to the plain Unsubscribe -- `ready` resolves once
+ * `SubscribeTable` has been confirmed by the server on the CURRENT connection (or rejects if that
+ * invocation fails), so a caller that needs the hard guarantee (no snapshot read before the
+ * subscription is actually registered) can `await unsub.ready` first. Callers that don't care --
+ * every existing one except useTableRows.ts -- keep working unchanged: it's still a plain callable
+ * used as a useEffect cleanup function, `ready` is just an extra property nobody has to read. */
+type TableUnsubscribe = Unsubscribe & { ready: Promise<void> }
 
 let connection: signalR.HubConnection | null = null
 let connectPromise: Promise<signalR.HubConnection> | null = null
@@ -28,6 +35,10 @@ let metricsRefCount = 0
 
 const tableDeltaHandlers = new Map<string, Set<TableDeltaHandler>>()
 const tableRefCounts = new Map<string, number>()
+/** Per-table-name promise tracking the in-flight/most-recent `SubscribeTable` invoke on the
+ * CURRENT connection -- see subscribeTable() and the onreconnected() handler below, which is the
+ * only other writer (it re-arms this on every reconnect for every table still referenced). */
+const tableReadyPromises = new Map<string, Promise<void>>()
 
 function registerListeners(conn: signalR.HubConnection) {
   conn.on('pipelineResult', (pipelineId: string, rows: ResultEnvelope[]) => {
@@ -56,8 +67,17 @@ function registerListeners(conn: signalR.HubConnection) {
     if (metricsRefCount > 0) {
       void conn.invoke('subscribeMetrics')
     }
+    // Re-arms tableReadyPromises too (not just fire-and-forget), so a `.ready` read shortly after
+    // a reconnect reflects the CURRENT connection's registration rather than a stale promise that
+    // resolved against a connection that has since dropped.
     for (const name of tableRefCounts.keys()) {
-      void conn.invoke('SubscribeTable', name)
+      const rearmed = conn.invoke('SubscribeTable', name)
+      rearmed.catch(() => {
+        // Handled here too (see subscribeTable()'s identical comment) purely so an unread
+        // rejection doesn't surface as an unhandled-rejection warning; `.ready` readers still see
+        // the real rejection via `rearmed` itself.
+      })
+      tableReadyPromises.set(name, rearmed)
     }
   })
 }
@@ -150,6 +170,7 @@ export async function disconnectHub(): Promise<void> {
   metricsRefCount = 0
   tableDeltaHandlers.clear()
   tableRefCounts.clear()
+  tableReadyPromises.clear()
   if (conn) {
     try {
       await conn.stop()
@@ -236,24 +257,50 @@ export function subscribeSource(name: string, onEvent: SourceHandler): Unsubscri
  * unsubscribe — e.g. React StrictMode's dev-only mount→cleanup→remount — can't race the
  * connection handshake into double-subscribing the server. With a ref-count-only gate, the first
  * mount's orphaned `.then()` would still see a >0 count (bumped by the second mount) and send its
- * own redundant SubscribeTable, which duplicated every delta batch server-side. */
-export function subscribeTable(name: string, onDeltas: TableDeltaHandler): Unsubscribe {
+ * own redundant SubscribeTable, which duplicated every delta batch server-side.
+ *
+ * The returned function also carries `.ready`: a promise that resolves once `SubscribeTable` has
+ * actually been confirmed by the server on the current connection (rejects if that invocation
+ * fails). `StreamHub.SubscribeTable` on the server returns `Groups.AddToGroupAsync(...)` itself,
+ * so SignalR only completes this invoke once the connection is genuinely in the table's broadcast
+ * group — awaiting it is a hard guarantee, not a heuristic. This closes the lost-update race: if a
+ * consumer (useTableRows.ts) issues its GET /rows snapshot read before this resolves, a delta
+ * broadcast in that window is never sent to this connection at all (no backfill on a later
+ * subscribe either) — a LATEST BY table then silently drops that row until something else touches
+ * it. The `tableDelta` listener itself is registered synchronously in registerListeners(), before
+ * connect/invoke ever happen, so nothing arriving after registration is ever missed — only the
+ * window before registration completes was the gap. `.ready` is additive: every existing caller
+ * that doesn't read it (ApiExplorerPage.tsx) keeps using the return value as a plain callable. */
+export function subscribeTable(name: string, onDeltas: TableDeltaHandler): TableUnsubscribe {
   if (!tableDeltaHandlers.has(name)) tableDeltaHandlers.set(name, new Set())
   tableDeltaHandlers.get(name)!.add(onDeltas)
 
   const wasZero = (tableRefCounts.get(name) ?? 0) === 0
   tableRefCounts.set(name, (tableRefCounts.get(name) ?? 0) + 1)
 
+  let ready: Promise<void>
   if (wasZero) {
-    void getConnection().then((conn) => {
-      if (tableDeltaHandlers.get(name)?.has(onDeltas)) {
-        void conn.invoke('SubscribeTable', name)
-      }
+    ready = getConnection().then(async (conn) => {
+      // Same StrictMode guard as before: only invoke if this exact handler is still the reason
+      // the table is referenced. If it's gone, treat registration as a no-op success — there is
+      // nothing left for `.ready` to gate for this (already-unsubscribed) caller.
+      if (!tableDeltaHandlers.get(name)?.has(onDeltas)) return
+      await conn.invoke('SubscribeTable', name)
     })
+    ready.catch(() => {
+      // Marks the promise "handled" so an unread rejection (e.g. nobody awaits `.ready`) doesn't
+      // surface as an unhandled-rejection warning; callers that DO await `.ready` still observe
+      // the real rejection via the `ready` reference stored below.
+    })
+    tableReadyPromises.set(name, ready)
+  } else {
+    // Another subscriber already triggered (or completed) registration for this name — reuse its
+    // promise rather than invoking SubscribeTable a second time.
+    ready = tableReadyPromises.get(name) ?? Promise.resolve()
   }
 
   let done = false
-  return () => {
+  const unsubscribe = (() => {
     if (done) return
     done = true
     tableDeltaHandlers.get(name)?.delete(onDeltas)
@@ -261,11 +308,14 @@ export function subscribeTable(name: string, onDeltas: TableDeltaHandler): Unsub
     if (next === 0) {
       tableRefCounts.delete(name)
       tableDeltaHandlers.delete(name)
+      tableReadyPromises.delete(name)
       if (connection) void connection.invoke('UnsubscribeTable', name)
     } else {
       tableRefCounts.set(name, next)
     }
-  }
+  }) as TableUnsubscribe
+  unsubscribe.ready = ready
+  return unsubscribe
 }
 
 export function subscribeMetrics(onMetrics: MetricsHandler): Unsubscribe {
