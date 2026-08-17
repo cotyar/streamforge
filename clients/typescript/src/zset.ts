@@ -90,13 +90,15 @@ export function groupKeyOf(row: Row, keyFields: readonly string[] | null): strin
  * `keyFields=[]` is a global aggregate.
  *
  * `groupKeyFn`, if given, REPLACES the `keyFields`-based policy above with a caller-supplied one --
- * an explicit escape hatch, not a second default. It exists because web/'s own console has no
- * catalog of per-table key columns (unlike the OTC-terms demo `keyFields` map this package's own
- * `keyfields.ts` ports) and instead groups by a table's first/leading column as a heuristic
- * safety net against orphaned duplicates -- a policy this package deliberately does NOT apply by
- * default (see the module docstring: "no column is ever guessed"). The weight-summation,
- * supersession bookkeeping and replay-heuristic logic below is identical either way; only "what
- * counts as the same logical row" is pluggable.
+ * an explicit escape hatch, not a second default. Wishlist #18 put a table's real key fields on
+ * the wire (`TableDefinitionDto.keyFields`, read via `tables.ts#resolveKeyFields`), so both this
+ * package's own `Client.table()` and web/'s console now pass the engine-reported `keyFields`
+ * straight to the constructor for a current engine. `groupKeyFn` survives as web/'s fallback for
+ * an OLDER engine that doesn't report the field at all: `useTableRows.ts` groups by a table's
+ * first/leading column as a heuristic safety net against orphaned duplicates in that one case --
+ * a policy this package deliberately does NOT apply by default (see the module docstring: "no
+ * column is ever guessed"). The weight-summation, supersession bookkeeping and replay-heuristic
+ * logic below is identical either way; only "what counts as the same logical row" is pluggable.
  */
 export class ZSet {
   private map = new Map<string, [Row, number]>();
@@ -135,6 +137,15 @@ export class ZSet {
       byGroup.set(gk, { key, row, weight });
     }
     return Array.from(byGroup.values());
+  }
+
+  /** The current row for one canonical key, or `undefined` if that key isn't (or is no longer)
+   * present -- reads the same `map` `.rows()`/`.entries()` project from, so a caller holding a
+   * `touched` key (see `apply()`) can resolve it to its row in O(1) instead of scanning
+   * `.rows()`. A touched key that resolves to `undefined` here means the tuple was retracted --
+   * that is exactly how a consumer distinguishes upsert (key present) from delete (key absent). */
+  get(key: string): Row | undefined {
+    return this.map.get(key)?.[0];
   }
 
   /**

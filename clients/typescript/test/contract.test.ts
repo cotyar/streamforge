@@ -119,6 +119,62 @@ describeOrSkip("contract: isolated engine", () => {
     });
   }
 
+  test("keyFields resolved from the engine (transport-agnostic, wishlist #18)", async () => {
+    // client.table() with no `key` must read the table's own `keyFields` (GET /api/tables)
+    // instead of the deleted hand-maintained map -- correct supersession (never a duplicate row)
+    // is the observable proof the resolved key was actually used, not just that *a* key was, for
+    // all three wire states: non-empty (LATEST BY), [] (global aggregate) and, implicitly, the
+    // GROUP BY case shared with the existing suite above.
+    const client = await connect({
+      url: engine.baseUrl,
+      grpc: engine.grpcTarget,
+      user: engine.user,
+      password: engine.password,
+      transport: "signalr:ws",
+    });
+    try {
+      const tag = "keyfields_engine";
+
+      // LATEST BY -- non-empty keyFields (["trade_id"]).
+      {
+        await using latest = await client.table(engine.latestTable, { timeoutMs: 30_000 }); // no key=
+        await client.push(engine.source, [{ trade_id: `${tag}-T1`, desk: "Rates", notional: 100 }]);
+        await latest.waitFor((rows) => rows.some((r) => r.trade_id === `${tag}-T1`), 15_000);
+        await client.push(engine.source, [{ trade_id: `${tag}-T1`, desk: "Rates", notional: 250 }]);
+        await latest.waitFor((rows) => rows.some((r) => r.trade_id === `${tag}-T1` && r.notional === 250), 15_000);
+        const mine = latest.rows.filter((r) => r.trade_id === `${tag}-T1`);
+        expect(mine.length).toBe(1); // superseded, not duplicated
+      }
+
+      // GROUP BY -- non-empty keyFields (["desk"]).
+      {
+        const desk = `Desk-${tag}`;
+        await using agg = await client.table(engine.aggTable, { timeoutMs: 30_000 }); // no key=
+        await client.push(engine.source, [{ trade_id: `${tag}-A1`, desk, notional: 40 }]);
+        await client.push(engine.source, [{ trade_id: `${tag}-A2`, desk, notional: 60 }]);
+        await agg.waitFor((rows) => {
+          const row = rows.find((r) => r.desk === desk);
+          return row !== undefined && Number(row.total) >= 100;
+        }, 15_000);
+        expect(agg.rows.filter((r) => r.desk === desk).length).toBe(1);
+      }
+
+      // No GROUP BY at all -- keyFields is [] (a global aggregate: one row, one group). If the
+      // resolver ever collapsed [] to null (whole-row identity) this table would grow a second
+      // row on the next push instead of staying at exactly one.
+      {
+        await using globalAgg = await client.table(engine.globalAggTable, { timeoutMs: 30_000 }); // no key=
+        await client.push(engine.source, [{ trade_id: `${tag}-G1`, desk: "Global", notional: 10 }]);
+        await globalAgg.waitFor((rows) => rows.length >= 1, 15_000);
+        await client.push(engine.source, [{ trade_id: `${tag}-G2`, desk: "Global", notional: 20 }]);
+        await globalAgg.waitFor((rows) => rows.length === 1 && Number(rows[0]?.trade_count ?? 0) >= 2, 15_000);
+        expect(globalAgg.rows.length).toBe(1);
+      }
+    } finally {
+      await client.close();
+    }
+  }, 30_000);
+
   test("validate + ad-hoc SQL create/replace/drop (transport-agnostic REST)", async () => {
     const client = await connect({
       url: engine.baseUrl,

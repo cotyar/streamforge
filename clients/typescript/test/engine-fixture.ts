@@ -29,6 +29,7 @@ export const ADMIN_PASS = "admin123!";
 export const SOURCE_NAME = "sf_ts_client_trades";
 export const LATEST_TABLE = "sf_ts_client_latest_trade";
 export const AGG_TABLE = "sf_ts_client_desk_totals";
+export const GLOBAL_AGG_TABLE = "sf_ts_client_all_totals";
 
 /** Last-N-lines buffer for a spawned process's combined stdout/stderr -- see bootEngine()'s
  * stream-draining comment for why lines must be read continuously regardless of whether anyone
@@ -138,6 +139,12 @@ async function importFixtureConfig(): Promise<void> {
         sql: `SELECT desk, SUM(notional) AS total FROM ${LATEST_TABLE} GROUP BY desk`,
         running: true,
       },
+      {
+        name: GLOBAL_AGG_TABLE,
+        description: "unkeyed global aggregate (no GROUP BY) -- exercises keyFields=[] over the wire",
+        sql: `SELECT COUNT(*) AS trade_count, SUM(notional) AS total_notional FROM ${LATEST_TABLE}`,
+        running: true,
+      },
     ],
   };
 
@@ -174,6 +181,7 @@ export interface Engine {
   source: string;
   latestTable: string;
   aggTable: string;
+  globalAggTable: string;
   stop: () => Promise<void>;
 }
 
@@ -243,6 +251,7 @@ export async function bootEngine(): Promise<Engine> {
     source: SOURCE_NAME,
     latestTable: LATEST_TABLE,
     aggTable: AGG_TABLE,
+    globalAggTable: GLOBAL_AGG_TABLE,
     stop,
   };
 }

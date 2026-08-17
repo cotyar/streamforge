@@ -20,7 +20,6 @@ import { AuthError, StreamForgeError } from "./errors.js";
 import type { GrpcIngestCapable } from "./ingest.js";
 import * as ingestModule from "./ingest.js";
 import { RestClient } from "./http.js";
-import { KEY_FIELDS } from "./keyfields.js";
 import { LiveTable } from "./live-table.js";
 import * as sqlModule from "./sql.js";
 import * as tablesModule from "./tables.js";
@@ -104,8 +103,8 @@ export class Client {
 
   // ---- tables / live ----
 
-  table(name: string, opts: TableOptions = {}): Promise<LiveTable> {
-    const keyFields = opts.key ?? KEY_FIELDS[name] ?? null;
+  async table(name: string, opts: TableOptions = {}): Promise<LiveTable> {
+    const keyFields = opts.key ?? (await tablesModule.resolveKeyFields(this.http, name));
     return LiveTable.connect(this.liveTransport, name, keyFields, opts.timeoutMs ?? 30_000);
   }
 

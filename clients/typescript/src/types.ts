@@ -37,6 +37,16 @@ export interface TableSearchResponse {
 export interface TableDefinitionDto {
   id: string;
   name: string;
+  /** Wishlist #18: this table's row-identity key, recomputed on every successful compile --
+   * server-owned, never client-writable. A non-empty array is the resolved GROUP BY/LATEST BY key
+   * columns; `[]` is an unkeyed GLOBAL AGGREGATE (exactly one row, one group); `null` is WHOLE-ROW
+   * identity (no supersession key applies). Absent entirely on an engine build older than
+   * wishlist #18 -- `[key: string]: unknown` below means a missing property and an explicit
+   * `null` both type-check as `undefined` through plain property access, so code that must tell
+   * them apart (this package's own `tables.ts#resolveKeyFields`) uses `"keyFields" in def`
+   * instead of `def.keyFields === undefined`. See Models.cs's doc comment on `KeyFields` for the
+   * full three-state contract. */
+  keyFields?: string[] | null;
   [key: string]: unknown;
 }
 

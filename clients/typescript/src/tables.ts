@@ -29,6 +29,23 @@ export async function resolveTableId(http: RestClient, name: string): Promise<st
   return t.id;
 }
 
+/** Wishlist #18: this table's row-identity key, read from its own definition (`GET
+ * /api/tables`'s `keyFields`) instead of a hand-maintained map. TableDefinitionDto.keyFields is a
+ * three-way answer -- a non-empty array is the resolved GROUP BY/LATEST BY key, `[]` is an
+ * unkeyed global aggregate (one row, one group), and `null` is whole-row identity -- see
+ * Models.cs's `TableDefinition.KeyFields` doc comment for the full contract.
+ *
+ * An unknown table and an engine build that doesn't report the field at all (predates wishlist
+ * #18) both come back here as `null`, which zset.ts's `groupKeyOf`/`ZSet` already treats as
+ * whole-row identity -- the exact fallback an unmapped name got from the old, now-deleted
+ * `KEY_FIELDS` map, so an old engine keeps working exactly as it did before this change.
+ * `Client.table()`'s `key` option bypasses this entirely and always wins. */
+export async function resolveKeyFields(http: RestClient, name: string): Promise<string[] | null> {
+  const t = await getTable(http, name);
+  if (t === null) return null;
+  return t.keyFields ?? null;
+}
+
 /** Public search: only positively-weighted rows, matching table.search.rows()'s filter elsewhere. */
 export async function search(http: RestClient, name: string, query: string, limit = 50): Promise<Row[]> {
   const id = await resolveTableId(http, name);
