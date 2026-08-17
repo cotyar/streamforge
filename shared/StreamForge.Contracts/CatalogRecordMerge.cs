@@ -41,9 +41,11 @@ public static class CatalogRecordMerge
         incoming.UpdatedAtMs = nowMs;
     }
 
-    /// <summary>Table twin of the pipeline overload. OutputFields/StreamInputs/TableInputs are recomputed
-    /// from the compile result right after this returns, and are carried for the same reason SourceNames
-    /// is on the pipeline side.</summary>
+    /// <summary>Table twin of the pipeline overload. OutputFields/StreamInputs/TableInputs/KeyFields are
+    /// recomputed from the compile result right after this returns, and are carried for the same reason
+    /// SourceNames is on the pipeline side. KeyFields (wishlist #18) joined this list the day it was
+    /// added — it is exactly as server-owned as the three fields beside it, recomputed on the identical
+    /// compile.</summary>
     public static void CarryServerOwnedFields(TableDefinition existing, TableDefinition incoming, long nowMs)
     {
         incoming.Id = existing.Id;
@@ -54,6 +56,7 @@ public static class CatalogRecordMerge
         incoming.OutputFields = existing.OutputFields;
         incoming.StreamInputs = existing.StreamInputs;
         incoming.TableInputs = existing.TableInputs;
+        incoming.KeyFields = existing.KeyFields;
         incoming.UpdatedAtMs = nowMs;
     }
 }

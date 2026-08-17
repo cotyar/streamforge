@@ -185,6 +185,15 @@ message TableDefinition {
   repeated string table_inputs = 12;
   bool search_enabled = 13;
   TableSearchMode search_mode = 14;
+  // Wishlist #18: this table's row-identity key — see StreamForge.Abstractions.TableDefinition.KeyFields'
+  // C# doc comment for the full contract. proto3 cannot express a nullable `repeated` field directly, so
+  // presence is carried explicitly: key_fields_whole_row = true means the C# value is null (WHOLE-ROW
+  // identity — no supersession key applies, and key_fields below is empty and must be ignored); false
+  // means key_fields is authoritative on its own — empty means ONE GLOBAL GROUP (an unkeyed aggregate,
+  // exactly one row, e.g. "SELECT COUNT(*) FROM x"), non-empty means the resolved GROUP BY / LATEST BY
+  // key columns, in clause order.
+  repeated string key_fields = 15;
+  bool key_fields_whole_row = 16;
 }
 
 message ListTablesResponse {

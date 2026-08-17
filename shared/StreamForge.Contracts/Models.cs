@@ -627,6 +627,42 @@ public sealed class TableDefinition
     /// Dapr flavor rejects a non-empty ShardBy at upsert, exactly as it already rejects
     /// <see cref="Parallelism"/> &gt; 1.</summary>
     [Id(28)] public List<string> ShardBy { get; set; } = [];
+
+    // ------------------------------------------------------------------
+    // Wishlist #18: row-identity KEY FIELDS on the wire. Server-owned (like OutputFields/StreamInputs/
+    // TableInputs, next to which this is recomputed on every successful compile — see
+    // StreamForge.Host.Grains.TableKeyFields.Describe) — a client payload can never set it directly.
+    // ------------------------------------------------------------------
+
+    /// <summary>This table's logical row-identity key, for every delta-stream consumer that must
+    /// supersede rows correctly instead of hand-maintaining its own key map (the problem wishlist #18
+    /// exists to fix — as of this field, the console's <c>catalog.ts</c>, the Excel add-in's
+    /// <c>KEY_FIELDS</c>, the Python client's key map, and a <c>/sql</c> editor's key box are all reading
+    /// the SAME answer the engine already computes, instead of four hand-maintained copies of it).
+    ///
+    /// THE THREE WIRE STATES ARE NOT INTERCHANGEABLE — collapsing any two of them loses real information:
+    /// <list type="bullet">
+    /// <item><b>non-empty list</b> — the table's GROUP BY / LATEST BY identity, resolved to output column
+    /// names in clause order. Supersede rows whose values agree on every one of these columns.</item>
+    /// <item><b>empty list (<c>[]</c>)</b> — an UNKEYED GLOBAL AGGREGATE (e.g. <c>SELECT COUNT(*) FROM
+    /// x</c> with no GROUP BY): the table always has exactly one row, so there is no key to compare —
+    /// any new row simply replaces the one that came before it. This is "one global group", not "no
+    /// identity".</item>
+    /// <item><b>null</b> — WHOLE-ROW identity: no supersession key applies, and the row's entire content
+    /// is what makes two rows the same or different. Covers two SQL shapes that behave identically for
+    /// this purpose: a plain per-event passthrough (no GROUP BY/LATEST BY at all — the whole row always
+    /// was the identity, and nothing is degraded), and a table that DOES declare a GROUP BY/LATEST BY key
+    /// this extractor could not confidently map to an output column (the same fallback
+    /// <c>TableRowIdentityWarning</c> reports on <c>GET /api/tables/{id}/metrics</c> when history or
+    /// sharding is on) — <c>RowKeyCodec</c> keys THOSE rows by their whole content too, so null is the
+    /// answer that matches actual dedup behavior, not merely the conservative one.</item>
+    /// </list>
+    ///
+    /// Recomputed on every successful compile (create/update, and on seed) exactly like OutputFields is,
+    /// so it is never stale relative to the table's current SQL and never client-writable — a compile
+    /// failure resets it to null (whole-row), the same fail-safe default a never-compiled table starts
+    /// with, so a wrong key can never silently collapse distinct rows.</summary>
+    [Id(29)] public List<string>? KeyFields { get; set; }
 }
 
 /// <summary>Plan 008: per-table durability policy. State is the materialized snapshot; the question is only

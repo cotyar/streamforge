@@ -147,6 +147,18 @@ internal static class ProtoMappers
         proto.OutputFields.AddRange(def.OutputFields.Select(ToProto));
         proto.StreamInputs.AddRange(def.StreamInputs);
         proto.TableInputs.AddRange(def.TableInputs);
+
+        // Wishlist #18: KeyFields' null/[] distinction (see TableDefinition.KeyFields's doc comment)
+        // needs an explicit presence flag — proto3 `repeated` has no way to say "absent" on its own.
+        if (def.KeyFields is null)
+        {
+            proto.KeyFieldsWholeRow = true;
+        }
+        else
+        {
+            proto.KeyFields.AddRange(def.KeyFields);
+        }
+
         return proto;
     }
 

@@ -177,6 +177,17 @@ public sealed partial class TablePlan
     /// CatalogStore) reject the combination up front with that message rather than accepting it and
     /// under-delivering.</summary>
     public bool SupportsRetention => Runtime.TableRetentionSupport.IsSupported(Compiled);
+
+    /// <summary>Wishlist #18 — true when this plan is an UNKEYED GLOBAL AGGREGATE: one or more aggregate
+    /// functions with no GROUP BY (e.g. <c>SELECT COUNT(*) FROM x</c>), which the executor collapses to
+    /// exactly one output row regardless of how many input rows contribute to it (see
+    /// StreamForge.Engine.Tests.TableZSetTests.GlobalAggregateWithoutGroupByIsASingleGroup). A plan WITH a
+    /// GROUP BY also has aggregates but is keyed (one row per group), so both the aggregate and the
+    /// no-GROUP-BY conditions are checked, not aggregates alone. Used by
+    /// StreamForge.Host.Grains.TableKeyFields to distinguish "one global group" ([] on the wire) from
+    /// "whole-row identity" (null on the wire) — see TableDefinition.KeyFields's doc comment for why that
+    /// distinction is load-bearing for a delta-stream consumer.</summary>
+    public bool IsGlobalAggregate => Compiled.HasAggregates && Compiled.GroupBy is null;
 }
 
 /// <summary>

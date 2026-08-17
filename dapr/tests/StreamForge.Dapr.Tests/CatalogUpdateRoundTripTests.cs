@@ -32,7 +32,7 @@ public class CatalogUpdateRoundTripTests
         ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "SourceNames"];
 
     private static readonly HashSet<string> TableServerOwned =
-        ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "OutputFields", "StreamInputs", "TableInputs"];
+        ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "OutputFields", "StreamInputs", "TableInputs", "KeyFields"];
 
     /// <summary>Values that would be rejected by validation if generated blindly (parallelism range,
     /// non-negative flush interval) or that must stay compilable/unique.</summary>

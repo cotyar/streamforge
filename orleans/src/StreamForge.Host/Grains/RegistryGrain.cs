@@ -71,6 +71,7 @@ public sealed class RegistryGrain(
                     t.OutputFields = result.OutputSchema.Fields.Select(kv => new FieldDef(kv.Key, MapFieldType(kv.Value))).ToList();
                     t.StreamInputs = result.StreamInputs.ToList();
                     t.TableInputs = result.TableInputs.ToList();
+                    t.KeyFields = TableKeyFields.Describe(t.Sql, result.Plan);
                     tableSchemas[t.Name] = result.OutputSchema;
                 }
                 else
@@ -950,12 +951,14 @@ public sealed class RegistryGrain(
             def.OutputFields = result.OutputSchema.Fields.Select(kv => new FieldDef(kv.Key, MapFieldType(kv.Value))).ToList();
             def.StreamInputs = result.StreamInputs.ToList();
             def.TableInputs = result.TableInputs.ToList();
+            def.KeyFields = TableKeyFields.Describe(def.Sql, result.Plan);
         }
         else
         {
             def.OutputFields = [];
             def.StreamInputs = [];
             def.TableInputs = [];
+            def.KeyFields = null;
         }
     }
 

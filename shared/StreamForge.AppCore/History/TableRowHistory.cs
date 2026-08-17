@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using StreamForge.Abstractions;
+using StreamForge.Engine;
 
 namespace StreamForge.Host.Grains;
 
@@ -317,6 +318,31 @@ public static class TableGroupKeyExtractor
         var j = groupByIdx + 5;
         while (j < s.Length && char.IsWhiteSpace(s[j])) j++;
         return j + 2 - groupByIdx;
+    }
+}
+
+/// <summary>Wishlist #18 — derives <c>TableDefinition.KeyFields</c> from the same compile that already
+/// produces <c>OutputFields</c>, so both are recomputed together and neither can go stale relative to the
+/// other. See that field's own doc comment for the full null/[]/non-empty wire contract; in short: a
+/// resolved GROUP BY/LATEST BY maps to its output columns, an unkeyed global aggregate (no GROUP BY,
+/// still an aggregate — see <see cref="TablePlan.IsGlobalAggregate"/>) maps to an empty list, and every
+/// other case — including the declared-but-unmappable fallback <see cref="TableRowIdentityWarning"/>
+/// already reports — maps to null, because RowKeyCodec keys those rows by their whole content regardless
+/// of what was declared, and null is the answer that matches actual behavior.</summary>
+public static class TableKeyFields
+{
+    /// <summary><paramref name="plan"/> is the successful compile's <c>TableCompileResult.Plan</c> (null
+    /// when the compile failed or hasn't happened, in which case this always returns null — the same
+    /// fail-safe whole-row default a table gets before its first successful compile).</summary>
+    public static List<string>? Describe(string? sql, TablePlan? plan)
+    {
+        var identity = TableGroupKeyExtractor.Describe(sql);
+        if (identity.Columns is { Count: > 0 } cols)
+        {
+            return cols;
+        }
+
+        return plan is { IsGlobalAggregate: true } ? [] : null;
     }
 }
 

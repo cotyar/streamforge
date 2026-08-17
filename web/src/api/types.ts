@@ -487,6 +487,18 @@ export interface TableDefinition {
    * says so). Rejected (409) together with searchEnabled: a table-wide reverse index would keep every
    * row resident and defeat sharding, so the combination is refused rather than half-served. */
   shardBy?: string[]
+  /** Wishlist #18: this table's row-identity key, recomputed on the same compile as outputFields —
+   * server-owned, never client-writable. THE THREE STATES ARE NOT INTERCHANGEABLE: a non-empty array is
+   * the resolved GROUP BY / LATEST BY key columns (supersede rows that agree on all of them); an empty
+   * array ([]) is an UNKEYED GLOBAL AGGREGATE — e.g. 'SELECT COUNT(*) FROM x' with no GROUP BY — the
+   * table always has exactly one row, so any new row simply replaces it; null/absent is WHOLE-ROW
+   * identity — either no GROUP BY/LATEST BY was declared at all (a plain per-event passthrough, where
+   * the whole row always was the identity), or one was declared but couldn't be confidently mapped to an
+   * output column (the same degraded fallback the /metrics rowIdentityWarning reports) — either way the
+   * engine keys those rows by their whole content, so null is the answer that matches actual dedup
+   * behavior, not merely the conservative default. Absent (older engine builds) should be treated the
+   * same as null. */
+  keyFields?: string[] | null
 }
 
 /** Plan 008: how a table's snapshot reaches storage (wire values are PascalCase — confirmed against
