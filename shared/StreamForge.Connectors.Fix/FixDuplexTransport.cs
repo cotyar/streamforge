@@ -65,10 +65,13 @@ public sealed class FixDuplexTransport : IDuplexTransport
         return session;
     }
 
-    /// <summary>Identical rules to <see cref="FixInboundTransport.Validate"/> — see that method's own doc
-    /// comment. Deliberately does NOT add wave 019-G's mandatory-persistence rule (StorePath required,
-    /// ResetOnLogon defaulting false) — that is a stated NOT-this-wave item; adding it here now would make
-    /// this class lie about which wave actually enforces it.</summary>
+    /// <summary>Shares <see cref="FixInboundTransport.Validate"/>'s baseline rules (host/port/CompIDs/
+    /// beginString/heartbeat/queueCapacity), plus wave 019-G's D5 rule, which does NOT apply to that class:
+    /// on an order session the store IS the record of what was sent — see the doc comment on the
+    /// StorePath/ResetOnLogon checks below and TRANSPORTS.md's FIX section ("fix-duplex — mandatory
+    /// sequence-number persistence") for the full reasoning and the recovery procedure. Plan 018's `fix`
+    /// kind keeps `ResetOnLogon=true` + in-memory store as its default and this method never runs for
+    /// it — <see cref="FixInboundTransport.Validate"/> is untouched by this wave.</summary>
     public void Validate(SourceDefinition def, List<string> errors)
     {
         var fix = def.Connector?.Fix;
@@ -112,6 +115,97 @@ public sealed class FixDuplexTransport : IDuplexTransport
         {
             errors.Add("connector.fix.queueCapacity must be > 0");
         }
+
+        ValidatePersistence(fix, errors);
+    }
+
+    /// <summary>Plan 019 D5, the reasoning this method's callers point back to: on a market-data session
+    /// (the plain <c>fix</c> kind) losing the sequence-number store costs at worst some re-sent quotes, so
+    /// <see cref="FixInboundTransport"/> defaults to an in-memory store and resets on every logon.
+    /// <b>On an order session the store IS the record of what was sent.</b> Losing it means a resend
+    /// request the platform cannot answer, and a gap the venue resolves by its own rules — see
+    /// TRANSPORTS.md's FIX section for exactly what that looks like on the wire and how an operator
+    /// recovers. So for <c>fix-duplex</c>, and only for it, persistence stops being an operator choice:
+    ///
+    /// <list type="bullet">
+    /// <item><description><see cref="FixSourceConfig.StorePath"/> must be set — an empty value here would
+    /// otherwise silently pick <see cref="QuickFix.Store.MemoryStoreFactory"/>, exactly the choice that is
+    /// safe for market data and wrong for orders.</description></item>
+    /// <item><description><see cref="FixSourceConfig.ResetOnLogon"/> must be <c>false</c> — a store that
+    /// exists but is thrown away every logon buys nothing; the two are refused together rather than one
+    /// silently undermining the other.</description></item>
+    /// <item><description><see cref="FixSourceConfig.StorePath"/> must be an absolute path — a relative
+    /// path resolves against the process's current working directory, which is not a location any
+    /// deployment can promise is stable, let alone durable.</description></item>
+    /// <item><description>A path that starts under a POSIX temp directory (<c>/tmp</c>, <c>/var/tmp</c>)
+    /// is flagged too — <b>stated as plainly as the ceiling allows</b>: this process cannot see the volume
+    /// mounted behind a path, so it cannot know whether ANY given path — under <c>/tmp</c> or not —
+    /// survives a restart or a reschedule. This one check is a strong, cheap, honest hint for the single
+    /// most common way to get this wrong (a path that is unconditionally wiped, everywhere, on every
+    /// reboot), not a certificate that any other path is safe.</description></item>
+    /// </list></summary>
+    private static void ValidatePersistence(FixSourceConfig fix, List<string> errors)
+    {
+        var hasStorePath = !string.IsNullOrWhiteSpace(fix.StorePath);
+
+        if (!hasStorePath)
+        {
+            errors.Add(
+                "connector.fix.storePath is required for fix-duplex: on an order session the sequence-number " +
+                "store IS the record of what this platform has sent and received, not just a resend-avoidance " +
+                "optimization. Without it, a restart loses that record — the platform can no longer answer a " +
+                "resend request the venue may issue, and the gap is the venue's to resolve by its own rules. " +
+                "Set storePath to a file-backed path on a volume that survives a restart; see TRANSPORTS.md's " +
+                "FIX section for the recovery procedure if this is ever lost anyway.");
+            // Deliberately does NOT return: ResetOnLogon is checked independently below, so an operator who
+            // fixes the empty storePath first does not then get a second round-trip to discover this one.
+        }
+
+        if (fix.ResetOnLogon)
+        {
+            errors.Add(
+                "connector.fix.resetOnLogon must be false for fix-duplex: resetting sequence numbers on every " +
+                "logon throws away exactly the continuity storePath exists to preserve, so a durable store " +
+                "combined with a reset-every-logon session is refused rather than left to quietly defeat " +
+                "itself — set resetOnLogon to false alongside a non-empty storePath.");
+        }
+
+        if (!hasStorePath)
+        {
+            return; // the path-shape checks below need an actual path to inspect.
+        }
+
+        if (!Path.IsPathRooted(fix.StorePath))
+        {
+            errors.Add(
+                $"connector.fix.storePath '{fix.StorePath}' must be an absolute path: a relative path resolves " +
+                "against the process's current working directory, which is not a location this platform (or " +
+                "its container orchestrator) promises is stable across a restart.");
+        }
+
+        if (IsUnderPosixTempDirectory(fix.StorePath))
+        {
+            errors.Add(
+                $"connector.fix.storePath '{fix.StorePath}' is under a POSIX temp directory (/tmp or " +
+                "/var/tmp), which is wiped on every reboot on essentially every platform that has one. This " +
+                "check cannot see the actual volume behind ANY path — it cannot confirm a different path is " +
+                "durable either — but it can say this specific pattern is known-bad, so it does. Point " +
+                "storePath at a path you know is backed by a mounted, persistent volume.");
+        }
+    }
+
+    /// <summary>String-prefix check only — no filesystem access. Deliberately does not attempt to check
+    /// writability: doing so would mean I/O (and its failure modes: permissions, a not-yet-created parent
+    /// directory, a mount that isn't attached yet) inside source validation, for a property — "is this
+    /// path writable right now" — that does not even answer the question this check exists for (a tmpfs
+    /// mount is writable AND exactly as ephemeral as /tmp). An unwritable store surfaces immediately and
+    /// loudly on the first connection attempt instead (QuickFIX/n's <c>FileStoreFactory</c> throws), which
+    /// is not a silent failure mode this validator needs to pre-empt.</summary>
+    private static bool IsUnderPosixTempDirectory(string path)
+    {
+        var normalized = path.Replace('\\', '/');
+        return normalized == "/tmp" || normalized.StartsWith("/tmp/", StringComparison.Ordinal)
+            || normalized == "/var/tmp" || normalized.StartsWith("/var/tmp/", StringComparison.Ordinal);
     }
 
     /// <summary>The console form. <see cref="TransportDescriptor.Duplex"/> = true is the one difference
@@ -127,8 +221,10 @@ public sealed class FixDuplexTransport : IDuplexTransport
         Help = "A live FIX session whose outbound half also accepts sends — pair this with a 'duplex' sink "
              + "naming this source to route orders through it. At-most-once at the seam (plan 019 D3): an "
              + "order the socket loses is the venue's resend problem, not something this transport detects. "
-             + "No FIX dictionary and no ClOrdID/OrigClOrdID chain yet (plan 019 wave F) — a row this "
-             + "transport cannot map to a FIX message is reported as a failed send, never silently dropped.",
+             + "No real FIX dictionary — outbound required-field validation (plan 019 D6) is a curated table "
+             + "for NewOrderSingle/OrderCancelRequest/OrderCancelReplaceRequest only, naming the missing tag "
+             + "when it refuses a message. A row this transport cannot map, or cannot validate, is reported "
+             + "as a failed send, never silently dropped.",
         ConfigProperty = "fix",
         Groups =
         [
@@ -160,19 +256,22 @@ public sealed class FixDuplexTransport : IDuplexTransport
             },
             new TransportField
             {
-                Key = "resetOnLogon", Label = "Reset sequence numbers on logon", Type = TransportFieldTypes.Bool, Default = "true",
-                Help = "For an order session this SHOULD usually be off, together with a non-empty Store "
-                     + "path, so sequence numbers survive a restart — plan 019 wave G makes that mandatory; "
-                     + "this wave still accepts the market-data-shaped default, so set both deliberately "
-                     + "until then.",
+                Key = "resetOnLogon", Label = "Reset sequence numbers on logon", Type = TransportFieldTypes.Bool, Default = "false",
+                Help = "Must be false for fix-duplex (plan 019 D5, enforced by Validate): a durable Store "
+                     + "path combined with resetting on every logon throws away exactly the continuity the "
+                     + "store exists to preserve. Unlike the plain 'fix' kind, this default is false, not "
+                     + "true — an order session's whole point is that sequence numbers survive a restart.",
             },
             new TransportField
             {
-                Key = "storePath", Label = "Store path", Mono = true,
-                Help = "Empty (default) = in-memory sequence-number store, reset every restart — an order "
-                     + "session that restarts on an empty store risks resending or skipping orders the "
-                     + "venue already has a sequence number for. Non-empty = a file-backed store at this "
-                     + "path — in a container this MUST be a mounted volume.",
+                Key = "storePath", Label = "Store path", Mono = true, Required = true,
+                Help = "Required for fix-duplex (plan 019 D5, enforced by Validate) — on an order session "
+                     + "this file IS the record of what was sent and received; there is no in-memory option "
+                     + "here as there is for the plain 'fix' kind. Must be an absolute path, and in a "
+                     + "container it MUST be on a mounted, persistent volume — a path this platform cannot "
+                     + "confirm is durable (this process cannot see the volume behind any path) but a path "
+                     + "under /tmp or /var/tmp is refused outright as a known-ephemeral pattern. See "
+                     + "TRANSPORTS.md's FIX section for the recovery procedure if the store is ever lost.",
             },
             new TransportField { Key = "useSsl", Label = "Use TLS", Type = TransportFieldTypes.Bool },
             new TransportField
@@ -196,6 +295,14 @@ public sealed class FixDuplexTransport : IDuplexTransport
                 Help = "Bound on the inbound drop-oldest bridge queue — see FixInboundTransport's Help text "
                      + "for the mechanism. An order-entry session should size this generously: dropping an "
                      + "ExecutionReport is a worse loss here than for market data.",
+            },
+            new TransportField
+            {
+                Key = "generateClOrdId", Label = "Generate ClOrdID when missing", Type = TransportFieldTypes.Bool,
+                Help = "Off by default (plan 019 D7): a row missing ClOrdID is refused rather than silently "
+                     + "completed. Turn this on only if the caller does not need the id before sending — a "
+                     + "generated id is learned after the fact, via the venue's ExecutionReport echoing it "
+                     + "back on the inbound half, not returned synchronously from the send itself.",
             },
         ],
     };

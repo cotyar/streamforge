@@ -477,6 +477,86 @@ Bid, Offer), `146=1`+`55=EUR/USD` (NoRelatedSym=1: the symbol). The venue's `35=
 a `NoMDEntries` group, and `itemsPath` fans it into one row per entry with `side`/`price`/`size` pulled out
 of each.
 
+### `fix-duplex` — mandatory sequence-number persistence, and how to recover (plan 019 D5)
+
+`fix-duplex` (plan 019, [`shared/StreamForge.Connectors.Fix/FixDuplexTransport.cs`](shared/StreamForge.Connectors.Fix/FixDuplexTransport.cs))
+is the same `FixSourceConfig` as the receive-only `fix` kind above, dialed the same way, but it also sends —
+and that changes what `storePath`/`resetOnLogon` are allowed to be. Above, `storePath` empty + `resetOnLogon`
+true is **the right default for market data**: resending yesterday's quotes is worse than not resending them,
+so a clean slate every logon is correct and a lost sequence count costs at worst some re-sent ticks. **None of
+that reasoning survives contact with an order session.** The store is not an optimization there — it is this
+platform's only record of what it told the venue it sent. So `Validate()` refuses, for `fix-duplex` only:
+
+- an empty (or whitespace) `storePath` — an in-memory store is refused outright, not merely warned about;
+- `resetOnLogon: true`, independently of `storePath` — a durable store that gets thrown away every logon
+  buys nothing, so the two failure modes are reported together rather than one quietly undoing the other;
+- a `storePath` that is not an absolute path — a relative path resolves against the process's working
+  directory, which no deployment of this platform promises is stable;
+- a `storePath` under `/tmp` or `/var/tmp` — the one ephemeral-location pattern this process can actually
+  detect cheaply, from the string alone, with no filesystem access. **Read the ceiling in that message
+  literally**: this process cannot see the volume mounted behind *any* path, so a path that does *not* start
+  with `/tmp` has not been confirmed durable either — it has only not been caught by the one check available
+  from inside a running process. Writability is deliberately not checked: touching the filesystem during
+  validation buys nothing (a `tmpfs` mount is writable and exactly as ephemeral as `/tmp`), and an unwritable
+  store fails loudly on the first connection attempt instead of silently.
+
+**What happens, concretely, when a container restart loses the store.** `storePath` pointing at container-local
+storage (the platform-level mistake the checks above catch what they can of) means the next process start finds
+no store file. QuickFIX/n's `FileStoreFactory` initializes a fresh one at sequence 1 on both sides of the
+session — MsgSeqNum 1 out, and this side now *expects* MsgSeqNum 1 in. The venue's acceptor did not restart:
+its own store still holds the real sequence numbers from before the crash. Two things happen on the next logon,
+depending on which side notices first:
+
+1. This side logs on claiming MsgSeqNum 1. The venue's session layer sees a **sequence number lower than
+   expected** and, per the FIX spec, rejects the Logon (or logs on and immediately issues a
+   `35=2` `ResendRequest` for the gap, depending on the venue's own leniency) rather than accepting a stream
+   that appears to have gone backwards.
+2. If the venue's session instead notices the mismatch mid-stream, it sends a `35=2` `ResendRequest` for the
+   range `[expected, infinity)`. **This platform cannot answer it.** The messages it is being asked to
+   re-send never happened in this process's lifetime — they were sent by the *previous* process, whose
+   sequence state is exactly what was lost. `FixDuplexSession` has no order log to replay from; plan 019
+   explicitly does not build one (see "Not in this plan" below).
+
+**What this looks like from the venue's side**, because the fix is coordinating with them, not guessing: they
+see a counterparty that either failed to log on at all (sequence-too-low rejection), or logged on and then
+either went silent in response to a `ResendRequest` or answered it with `35=4` `SequenceReset-GapFill`
+messages this platform never sent (because nothing on this side generated them) — in FIX terms, indistinguishable
+from a counterparty whose session state is simply wrong. Venues that are strict reject the session outright and
+require a manual sequence reset coordinated out-of-band (phone, chat, a support ticket) before trading resumes.
+Venues that are lenient may auto-reset **their own side** to match whatever this platform claims, which is the
+dangerous case: it silently accepts an under-counted sequence and any messages between the true prior sequence
+and the claimed "1" are now unaccounted for on both sides, not just missing from this platform's log.
+
+**Recovery, in order:**
+
+1. **Do not restart-and-hope.** Restarting again with the same broken `storePath` reproduces the same mismatch;
+   restarting with `resetOnLogon: true` set "to get unstuck" is exactly the setting `Validate` refuses for this
+   kind, for this reason.
+2. **Check whether the store file is actually gone, or just not where `storePath` says.** A path that pointed
+   at container-local storage before a redeploy is often recoverable if the *old* container/volume still
+   exists — mount it back and start `storePath` pointing at the recovered file before touching sequence numbers
+   at all.
+3. **If the store is genuinely gone, this is a sequence reset, coordinated with the counterparty — not a
+   restart.** Contact the venue (or, for an internal/test counterparty, whoever administers its acceptor) and
+   agree a `35=4` `SequenceReset` (hard reset, not gap-fill) to a mutually agreed number on both sides — usually
+   the venue's next-expected-inbound and next-expected-outbound, reset to a value both sides log on
+   with cleanly next. Do this *before* restarting this platform's session; logging on before the counterparty
+   has reset its own expectation reproduces the original mismatch against a moving target.
+4. **Only after the counterparty has confirmed its side is reset**, restart this platform's `fix-duplex` source
+   with `storePath` pointing at a fresh, empty, durable location, and `resetOnLogon` still `false` — the fresh
+   file's sequence numbers become the new baseline for both sides from that logon forward.
+5. **Reconcile what actually happened in the gap.** Whatever `ClOrdID`s the platform believes it sent versus
+   what the venue's execution reports (or drop-copy) confirm receiving is exactly the correlation table plan
+   019 D7 describes — run it for the affected time window before assuming any order in flight during the loss
+   either went through or didn't.
+
+**What this platform does not do, stated plainly**: it is not an OMS, it does not persist orders (only FIX
+session sequence state, and only when `storePath` is set), and a lost store is not something it can reconstruct
+from its own state — there is no order log anywhere in this design for it to replay from. The correlation table
+in D7 tells you what the venue confirms happened; it cannot tell you what this platform *meant* to send if the
+store that recorded that intent is the thing that was lost. That is what makes the check above refuse an
+in-memory store outright rather than merely recommending against it.
+
 ---
 
 ## The console form

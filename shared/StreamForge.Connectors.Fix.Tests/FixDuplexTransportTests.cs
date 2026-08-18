@@ -87,8 +87,16 @@ public class FixDuplexTransportTests
     [Fact]
     public void ValidateAcceptsAGoodConfig()
     {
+        // Plan 019 wave G (D5): "a good config" for fix-duplex now means a durable, non-resetting store —
+        // FixDuplexTestSupport's own default config (FixTestSupport.ValidConfig(), StorePath empty,
+        // ResetOnLogon true) is the market-data-shaped default and is deliberately no longer "good" here;
+        // see FixDuplexPersistenceValidationTests for the full coverage of what changed and why.
+        var config = FixTestSupport.ValidConfig();
+        config.StorePath = "/data/fix-duplex/eurusd.store";
+        config.ResetOnLogon = false;
+
         var errors = new List<string>();
-        new FixDuplexTransport().Validate(FixDuplexTestSupport.FixDuplexSource(), errors);
+        new FixDuplexTransport().Validate(FixDuplexTestSupport.FixDuplexSource(config), errors);
         Assert.Empty(errors);
     }
 
@@ -117,10 +125,13 @@ public class FixDuplexTransportTests
     }
 
     [Fact]
-    public void ValidateDoesNotRequireAStorePath()
+    public void ValidateNowRequiresAStorePath()
     {
-        // Plan 019 D5's mandatory-persistence rule is explicitly wave 019-G's job, not this wave's -- an
-        // in-memory store (StorePath empty, the FixSourceConfig default) must still validate clean here.
+        // Plan 019 D5's mandatory-persistence rule landed in wave 019-G, which is this wave -- this test
+        // used to be named ValidateDoesNotRequireAStorePath and asserted the opposite (Assert.Empty), with
+        // a comment that named itself as wave G's job to supersede. It now asserts the rule it was always
+        // going to gain: an in-memory store (StorePath empty, the FixSourceConfig default) is refused for
+        // fix-duplex. See FixDuplexPersistenceValidationTests for the message wording and full coverage.
         var config = FixTestSupport.ValidConfig();
         config.StorePath = "";
         config.ResetOnLogon = true;
@@ -128,7 +139,7 @@ public class FixDuplexTransportTests
         var errors = new List<string>();
         new FixDuplexTransport().Validate(FixDuplexTestSupport.FixDuplexSource(config), errors);
 
-        Assert.Empty(errors);
+        Assert.Contains(errors, e => e.Contains("connector.fix.storePath is required", StringComparison.Ordinal));
     }
 
     // ------------------------------------------------------------------
