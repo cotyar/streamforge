@@ -77,7 +77,7 @@ public static class SinkTransports
 
     // ponytail: a plain list, not a plugin host. Add built-in sink transports here.
     private static readonly List<ISinkTransport> Registered =
-        [new NatsSinkTransport(), new FileSinkTransport(), new HttpSinkTransport(), new LoopbackSinkTransport()];
+        [new NatsSinkTransport(), new FileSinkTransport(), new HttpSinkTransport(), new LoopbackSinkTransport(), new DuplexSinkTransport()];
 
     public static ISinkTransport? Find(string? kind)
     {

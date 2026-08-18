@@ -224,6 +224,10 @@ public sealed class SinkSpec
     /// <summary>Wishlist item 9(b); set only for <see cref="SinkKinds.Loopback"/>. See
     /// <see cref="LoopbackSinkConfig"/>.</summary>
     [Id(7)] public LoopbackSinkConfig? Loopback { get; set; }
+
+    /// <summary>Plan 019 D2; set only for <see cref="SinkKinds.Duplex"/>. See
+    /// <see cref="DuplexSinkConfig"/>.</summary>
+    [Id(8)] public DuplexSinkConfig? Duplex { get; set; }
 }
 
 public static class SinkKinds
@@ -252,6 +256,15 @@ public static class SinkKinds
     /// <see cref="LoopbackSinkConfig"/> and <c>StreamForge.Host.Generators.LoopbackHub</c>
     /// (shared/StreamForge.AppCore/Generators/LoopbackHub.cs), the in-process "wire" this kind writes to.</summary>
     public const string Loopback = "loopback";
+
+    /// <summary>Plan 019 D2: the stateless proxy for a duplex session's outbound half — <c>fix</c> order
+    /// entry is the first duplex kind (wave 019-E). Holds NO connection of its own: publishing resolves the
+    /// NAMED SOURCE's live session via <c>StreamForge.AppCore.Transports.DuplexSessions.Find</c> and
+    /// forwards to it, rather than opening a second connection the way every other sink kind does. That is
+    /// what makes tearing this client down and rebuilding it (which <c>SinkSelection.Signature</c> does on
+    /// any unrelated field edit) harmless — there is nothing here to tear down. See
+    /// <see cref="DuplexSinkConfig"/> and <c>StreamForge.AppCore.Sinks.DuplexSinkTransport</c>.</summary>
+    public const string Duplex = "duplex";
 }
 
 /// <summary>Plan 009 B2. DELIVERY IS FIRE-AND-FORGET and there is no backpressure from the sink into
@@ -374,6 +387,39 @@ public sealed class LoopbackSinkConfig
 
     /// <summary>See <see cref="HttpSinkConfig.MaxDepth"/> — identical meaning, shared guard. 0 = off.</summary>
     [Id(2)] public int MaxDepth { get; set; }
+}
+
+/// <summary>Plan 019 D2: the config for the DUPLEX proxy sink — the outbound half of a duplex session
+/// (<c>fix</c> order entry is the first duplex kind, wave 019-E), reached by NAMING the source that already
+/// holds the live session rather than opening a connection of its own. One FIX session carries
+/// <c>NewOrderSingle</c> out and <c>ExecutionReport</c> back over the SAME TCP connection / sequence-number
+/// streams, so a sink that opened its own connection would produce a second logon a real counterparty
+/// rejects — see <c>StreamForge.AppCore.Sinks.DuplexSinkTransport</c> and
+/// <c>StreamForge.AppCore.Transports.DuplexSessions</c> for the mechanics.
+///
+/// <para><b>No <c>[Secret]</c> field here, deliberately.</b> The session's own credentials live on the
+/// SOURCE definition <see cref="SourceName"/> points at (e.g. <c>FixSourceConfig.Password</c>) — this sink
+/// has no credential of its own to mask.</para></summary>
+[GenerateSerializer]
+public sealed class DuplexSinkConfig
+{
+    /// <summary>The name of the duplex-kind SOURCE whose live session this sink forwards to — resolved at
+    /// PUBLISH time via <c>DuplexSessions.Find</c>, never held as a connection. May contain <c>{name}</c>,
+    /// replaced with the OWNING pipeline's id / table's name, the same substitution every other sink config
+    /// in this file uses. REQUIRED: there is no default target. Plan 019 D2: a sink whose named source does
+    /// not exist, or is not a duplex kind, must be a validation-time error, not a runtime surprise — see
+    /// <c>DuplexSinkTransport.Validate</c>'s doc comment for exactly what this wave's validation can and
+    /// cannot enforce without a catalog lookup, and where the remaining check belongs.</summary>
+    [Id(0)] public string SourceName { get; set; } = "";
+
+    /// <summary>Plan 019 D3: when true, a pipeline/table whose duplex sink's session is not currently up is
+    /// meant to refuse to START rather than run with every send counted as a silent failure. Defaults false
+    /// so every sink authored before this flag existed behaves exactly as it did before. <b>This wave adds
+    /// the field only</b> — enforcing the refusal is a pipeline/table START-time check needing the same
+    /// catalog/runtime context the source-existence validation does (see <see cref="SourceName"/>'s doc
+    /// comment), which is out of this wave's ownership; this flag carries the operator's intent forward for
+    /// that check to read once it exists.</summary>
+    [Id(1)] public bool RequireSession { get; set; }
 }
 
 /// <summary>Plan 012: the file egress sink. Rows are APPENDED, never truncated — the file is a log,
