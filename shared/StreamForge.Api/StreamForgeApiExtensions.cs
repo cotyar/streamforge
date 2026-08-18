@@ -237,6 +237,7 @@ public static class StreamForgeApiExtensions
         app.MapPipelinesEndpoints();
         app.MapTablesEndpoints(options);
         app.MapUsersEndpoints();
+        app.MapAccessEndpoints();
         app.MapConfigEndpoints();
         app.MapChatEndpoints();
         app.MapMetaEndpoints(options);
