@@ -83,6 +83,10 @@ public sealed class SourceDefinition
     /// "url"-kind source's EventsPerSecond is simply unused) for this profile: rows are produced only by
     /// an explicit <c>POST /api/sources/{name}/run</c>, never by GeneratorGrain's tick timer.</summary>
     [Id(12)] public ScenarioSpec? Scenario { get; set; }
+    /// <summary>Plan 015: who last changed this definition. CreatedBy has always been recorded; the
+    /// counterpart was not, so "who broke prod" was unanswerable from the catalog alone. Set by
+    /// CatalogRecordMerge's 4-arg overload on every update; empty on records last written before 015.</summary>
+    [Id(13)] public string UpdatedBy { get; set; } = "";
 }
 
 /// <summary>Well-known <see cref="SourceDefinition.GeneratorProfile"/> values that have a dedicated
@@ -440,6 +444,11 @@ public sealed class PipelineDefinition
     /// <summary>Plan 009 B2: where this pipeline's result rows are republished. Empty = nowhere, the
     /// pre-009 behavior. Delivery is fire-and-forget — see <see cref="SinkSpec"/>.</summary>
     [Id(12)] public List<SinkSpec> Sinks { get; set; } = [];
+
+    /// <summary>Plan 015: who last changed this definition. CreatedBy has always been recorded; the
+    /// counterpart was not, so "who broke prod" was unanswerable from the catalog alone. Set by
+    /// CatalogRecordMerge's 4-arg overload on every update; empty on records last written before 015.</summary>
+    [Id(13)] public string UpdatedBy { get; set; } = "";
 }
 
 /// <summary>One emitted result row. Values are primitives only (string/double/long/bool/null).</summary>
@@ -566,6 +575,11 @@ public sealed class TableDefinition
     /// <summary>Plan 009 B2: where this table's deltas are republished. Empty = nowhere, the pre-009
     /// behavior. Delivery is fire-and-forget — see <see cref="SinkSpec"/>.</summary>
     [Id(25)] public List<SinkSpec> Sinks { get; set; } = [];
+
+    /// <summary>Plan 015: who last changed this definition. CreatedBy has always been recorded; the
+    /// counterpart was not, so "who broke prod" was unanswerable from the catalog alone. Set by
+    /// CatalogRecordMerge's 4-arg overload on every update; empty on records last written before 015.</summary>
+    [Id(26)] public string UpdatedBy { get; set; } = "";
 
     // ------------------------------------------------------------------
     // Plan 011 C2: opt-in ROW RETENTION. Both default to 0 = OFF, and that default is the whole reason
@@ -957,4 +971,12 @@ public sealed class UserRecord
     [Id(3)] public string PasswordHash { get; set; } = "";
     [Id(4)] public string PasswordSalt { get; set; } = "";
     [Id(5)] public long CreatedAtMs { get; set; }
+
+    // Plan 015. Only the OIDC seams land on the credential record; everything authorization reads
+    // (Disabled, effective roles, grants) lives in AccessPolicyDocument.UserAccessEntry instead — see
+    // AccessModels.cs's file header for why the resolver must never have a reason to read this type.
+    /// <summary>OIDC seam: the IdP's stable subject for this user. Null for a local account.</summary>
+    [Id(6)] public string? ExternalSubject { get; set; }
+    /// <summary>OIDC seam: which IdP <see cref="ExternalSubject"/> belongs to. Null for a local account.</summary>
+    [Id(7)] public string? IdentityProvider { get; set; }
 }

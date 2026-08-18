@@ -31,7 +31,15 @@ public static class CatalogRecordMerge
     /// after this returns; it is carried anyway so a compile failure leaves the previous value standing
     /// rather than whatever the request body happened to contain.</summary>
     public static void CarryServerOwnedFields(PipelineDefinition existing, PipelineDefinition incoming, long nowMs)
+        => CarryServerOwnedFields(existing, incoming, nowMs, existing.UpdatedBy);
+
+    /// <summary>Plan 015: same rule, plus <c>UpdatedBy</c>. <c>updatedBy</c> is the authenticated caller,
+    /// which is server-owned in the strongest sense — it is the one field a client must never be able to
+    /// set. The 3-arg overload survives (it carries the stored value forward) so a caller that has no
+    /// principal to hand — a migration, a test — is not forced to invent one.</summary>
+    public static void CarryServerOwnedFields(PipelineDefinition existing, PipelineDefinition incoming, long nowMs, string updatedBy)
     {
+        incoming.UpdatedBy = updatedBy;
         incoming.Id = existing.Id;
         incoming.Status = existing.Status;
         incoming.Error = existing.Error;
@@ -47,7 +55,12 @@ public static class CatalogRecordMerge
     /// added — it is exactly as server-owned as the three fields beside it, recomputed on the identical
     /// compile.</summary>
     public static void CarryServerOwnedFields(TableDefinition existing, TableDefinition incoming, long nowMs)
+        => CarryServerOwnedFields(existing, incoming, nowMs, existing.UpdatedBy);
+
+    /// <summary>Table twin of the 4-arg pipeline overload.</summary>
+    public static void CarryServerOwnedFields(TableDefinition existing, TableDefinition incoming, long nowMs, string updatedBy)
     {
+        incoming.UpdatedBy = updatedBy;
         incoming.Id = existing.Id;
         incoming.Status = existing.Status;
         incoming.Error = existing.Error;

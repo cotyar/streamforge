@@ -202,3 +202,82 @@ public interface IConnectorStatusFacade
 {
     Task<ConnectorRuntimeStatus?> GetStatusAsync(string sourceName);
 }
+
+// ----------------------------------------------------------------------------------------------
+// Plan 015 — access policy, approvals, audit.
+//
+// Three NEW facades rather than members on IUserStoreFacade, for the reason stated at the top of this
+// file and reinforced by AccessModels.cs: existing facade members are frozen (test fakes implement
+// them), and — more importantly — the policy store must be readable without ever touching the store
+// that holds password hashes.
+// ----------------------------------------------------------------------------------------------
+
+/// <summary>The access-policy singleton. Orleans: <c>IAccessPolicyGrain</c> (key
+/// <see cref="StreamConstants.AccessKey"/>); Dapr: <c>AccessPolicyActor</c> delegating to a pure
+/// <c>AccessPolicyStore</c>, the repo's established Dapr testability pattern.
+///
+/// <para><see cref="GetVersionAsync"/> is the whole reason revocation is fast and cheap: the
+/// per-request resolver polls THIS on a TTL (<c>Auth:PolicyCacheSeconds</c>, default 10) and refetches
+/// the document only when the number moves. One tiny call per 10s per replica, instead of a store
+/// lookup — a Dapr sidecar round trip — on every read.</para></summary>
+public interface IAccessPolicyFacade
+{
+    Task<AccessPolicyDocument> GetPolicyAsync();
+    Task<long> GetVersionAsync();
+
+    Task<RoleDefinition?> UpsertRoleAsync(RoleDefinition role, string actor);
+    /// <summary>Refuses a built-in: deleting Viewer would strand every pre-upgrade token.</summary>
+    Task<bool> DeleteRoleAsync(string name);
+
+    Task<GroupDefinition?> UpsertGroupAsync(GroupDefinition group, string actor);
+    Task<bool> DeleteGroupAsync(string name);
+
+    /// <summary>Per-user policy (disabled flag, effective roles, direct grants). Upsert semantics: an
+    /// entry is created on first write, which is also how the user store mirrors <c>UserRecord.Role</c>
+    /// here on every create/update.</summary>
+    Task<UserAccessEntry?> UpsertUserAccessAsync(UserAccessEntry entry, string actor);
+    Task<bool> DeleteUserAccessAsync(string username);
+
+    Task<ApprovalTemplate?> UpsertApprovalTemplateAsync(ApprovalTemplate template, string actor);
+    Task<bool> DeleteApprovalTemplateAsync(string name);
+}
+
+/// <summary>Request → N-of-M approve → execute/expire. Orleans: <c>IApprovalGrain</c> (key
+/// <see cref="StreamConstants.ApprovalsKey"/>); Dapr: <c>ApprovalActor</c> over a pure store.</summary>
+public interface IApprovalFacade
+{
+    /// <summary>Files a request. The store stamps Id/RequestedAtMs/ExpiresAtMs/State — a caller cannot
+    /// pre-approve its own request by sending a populated Votes list.</summary>
+    Task<ApprovalRequest> RequestAsync(ApprovalRequest request);
+    Task<ApprovalRequest?> GetAsync(string id);
+    Task<List<ApprovalRequest>> ListAsync(ApprovalState? state, int limit);
+    /// <summary>One vote. Re-voting replaces the voter's previous vote rather than counting twice; the
+    /// requester's own vote never counts (that is the entire point of a second pair of eyes).</summary>
+    Task<ApprovalRequest?> VoteAsync(string id, ApprovalVote vote);
+    Task<ApprovalRequest?> CancelAsync(string id, string username);
+    /// <summary>Marks the outcome after the approved action ran (or failed). Separate from
+    /// <see cref="VoteAsync"/> because approval and execution are different events with different
+    /// actors and both belong in the audit log.</summary>
+    Task<ApprovalRequest?> RecordOutcomeAsync(string id, bool executed, string outcome);
+    /// <summary>Expiry + escalation, driven by a shared hosted <c>BackgroundService</c> sweeper rather
+    /// than grain timers or Dapr reminders — the Dapr compose stack runs with no scheduler, so reminders
+    /// are off the table and one shape has to work on both flavours. Returns how many requests changed
+    /// state.</summary>
+    Task<int> SweepAsync(long nowMs);
+}
+
+/// <summary>Append-only, day-sharded audit. Orleans: <c>IAuditLogGrain</c>; Dapr: <c>AuditLogActor</c>,
+/// both keyed <see cref="StreamConstants.AuditKeyFor"/>.
+///
+/// <para><see cref="AppendAsync"/> is called from a bounded in-process channel with drop-on-overflow:
+/// <b>audit must never make a request fail or slow.</b> What overflow drops is counted in
+/// <see cref="AuditPage.Truncated"/>, so silence is never mistaken for absence.</para></summary>
+public interface IAuditFacade
+{
+    Task AppendAsync(AuditEntry entry);
+    /// <summary><paramref name="day"/> is <c>yyyyMMdd</c> UTC. Filters are exact-match on actor and
+    /// prefix-match on action; anything richer is a query engine this platform already is, one layer up.</summary>
+    Task<AuditPage> QueryAsync(string day, string? actor, string? actionPrefix, int limit, int offset);
+    /// <summary>Which days have entries. Cheap because it reads an index, not the shards.</summary>
+    Task<List<string>> GetDaysAsync();
+}

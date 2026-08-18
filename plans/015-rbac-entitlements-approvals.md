@@ -84,7 +84,7 @@ without their runtimes, which is a refactor of the two most dangerous files in t
 
 | Wave | What | Model |
 |---|---|---|
-| **0** | Contracts + spikes, orchestrator alone: `UserRecord` `[Id(6..13)]`, new `AccessModels.cs`, facades, `StreamConstants` keys, `CatalogRecordMerge` 4-arg overload, `types.ts`; spike the `EndpointDataSource` test and the sweeper on the scheduler-less Dapr stack | Opus 5 high |
+| **0** | Contracts + spikes, orchestrator alone: `UserRecord` OIDC seams, new `AccessModels.cs`, facades, `StreamConstants` keys, `CatalogRecordMerge` 4-arg overload, `types.ts`; spike the `EndpointDataSource` test and the sweeper on the scheduler-less Dapr stack — **DONE**, see below | Opus 5 high |
 | **1** | 4 parallel: pure evaluator (**Opus**) ∥ Orleans store ∥ Dapr store ∥ seeds + `LegacyRoleMigration`. Gate includes booting both flavours against a **pre-upgrade** data dir | mixed |
 | **2** | 3 parallel: ASP.NET binding + resolver + guard (**Opus**) ∥ coverage audit + `tools/authz-matrix.sh` ∥ access/users REST | mixed |
 | **3** | 3 parallel: REST routes ∥ gRPC + SignalR ∥ chat + config import (**Opus** — where an LLM's action is attributed to a human) | mixed |
@@ -92,6 +92,45 @@ without their runtimes, which is a refactor of the two most dangerous files in t
 | **5** | 2 parallel: approvals + audit REST ∥ before/after detail on mutation sites | Sonnet 5 high |
 | **6** | 3 parallel: permission client core + `RoleGate` shim (**Opus**) ∥ access/approvals UI ∥ audit UI | mixed |
 | **7** | 2 parallel: docs + `sf-access` skill ∥ `admin/` `access`/`approvals`/`audit` commands. The MCP server gets `request_approval` and **not** `approve` | Sonnet 5 high |
+
+### Wave 0 — what actually landed, and where it differs from the sketch above
+
+**`UserRecord` got two fields, not eight.** The sketch said `[Id(6..13)]`; the shape that survived contact
+with its own decision ("the split lets the resolver cache policy aggressively without ever caching password
+hashes") puts *everything authorization reads* — `Disabled`, effective roles, direct grants — in the access
+document as `UserAccessEntry`, not on the credential record. A resolver that had to read `UserRecord` to
+learn a user is disabled would be caching exactly the thing the split exists to avoid. So `UserRecord`
+gained only the two OIDC seams, `[Id(6)] ExternalSubject` and `[Id(7)] IdentityProvider`.
+
+That has a consequence the sketch left implicit and Wave 1 now owns: since the effective role list lives in
+`UserAccessEntry.Roles`, **the user store must mirror `UserRecord.Role` there on every create/update**, and
+`LegacyRoleMigration` does it once for an existing data dir. Without the mirror, a role *change* would keep
+taking effect only at the next login (today's behaviour) rather than within the resolver's TTL — which is
+half of what "revocation lands in ~10s" is supposed to mean. The evaluator falls back to the token's role
+claim only when no entry exists, i.e. against a pre-upgrade catalog.
+
+**`UpdatedBy` landed on all three definitions** (`SourceDefinition` `[Id(13)]`, `PipelineDefinition`
+`[Id(13)]`, `TableDefinition` `[Id(26)]`) alongside the 4-arg `CatalogRecordMerge` overload. The 3-arg
+overload survives, delegating with `existing.UpdatedBy`, so migrations and tests are not forced to invent a
+principal.
+
+**The `EndpointDataSource` spike works, and it found something on its first run.** Two facts the plan did
+not know: the routes are not in the composite `EndpointDataSource` until the routing middleware folds them
+in at `Run()` time — and `Run()` is exactly what this test refuses to call — so the test reads
+`((IEndpointRouteBuilder)app).DataSources` directly; and minimal-API parameter binding decides
+"service or request body?" at *map* time by asking the container, so every handler dependency has to be
+registered (with a throwing factory: none is ever resolved, and an accidental resolve should be loud).
+
+What it found: **`POST /api/auth/login` carried no authorization metadata at all.** Behaviourally that was
+already correct — no fallback policy is registered, so unmarked means anonymous — but "nobody marked it" and
+"deliberately open" were indistinguishable from the outside, on the one route whose whole job is to hand out
+tokens. It is now `.AllowAnonymous()`. That is the entire argument for this test, produced by the test
+before a single enforcement site was migrated.
+
+**The sweeper spike needed no code.** Both hosts already register hosted services
+(`orleans/src/StreamForge.Host/Program.cs` runs five, `dapr/src/StreamForge.Dapr.Host/Program.cs` runs
+`CatalogInitializationService`), so a `BackgroundService` sweeper is the one shape that works identically on
+a stack with no scheduler. Confirmed by reading the wiring, not by writing a throwaway service.
 
 `hasRole` survives, implemented on top of `can()` — **zero of the 57 `RoleGate` references changes at
 cut-over.** That is the whole no-flag-day answer. The SPA treats a missing `permissions[]` as an old server

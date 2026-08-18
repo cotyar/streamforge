@@ -28,7 +28,10 @@ public static class AuthEndpoints
             DocsAuthCookie.Append(http, token, JwtTokenService.Lifetime);
 
             return Results.Ok(new LoginResponse(token, user.Username, user.DisplayName, user.Role));
-        });
+        // Anonymous by construction — it is how you GET a token. Declared rather than left implicit
+        // because plan 015's endpoint-metadata test reads authorization metadata off every /api/ route,
+        // and "nobody marked it" and "deliberately open" have to be distinguishable from the outside.
+        }).AllowAnonymous();
 
         // Drops the documentation cookie. Anonymous and side-effect-free by construction: it can only
         // clear a cookie on the caller's own browser. The SPA's logout is otherwise purely client-side

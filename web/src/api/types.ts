@@ -404,6 +404,12 @@ export interface UserInfo {
   displayName: string
   role: Role
   createdAtMs: number
+  /** Plan 015, all optional: absent = a pre-015 server, and the client falls back to `role` ordering. */
+  permissions?: PermissionGrant[]
+  roles?: string[]
+  groups?: string[]
+  disabled?: boolean
+  policyVersion?: number
 }
 
 export interface CreateUserRequest {
@@ -417,6 +423,140 @@ export interface UpdateUserRequest {
   displayName?: string
   role?: Role
   password?: string
+}
+
+// ----------------------------------------------------------------------------------------------
+// Plan 015 — entitlements, groups, approvals, audit. Every field added to a PRE-EXISTING interface
+// below is optional, and the client treats its absence as "an old server": UserInfo without
+// `permissions` falls back to today's ordinal Viewer < Editor < Admin semantics, so a rolling deploy
+// is safe in both directions.
+// ----------------------------------------------------------------------------------------------
+
+export type PermissionEffect = 'Allow' | 'Deny'
+/** Tri-state on purpose — `RequiresApproval` reaches the button label ("Request approval…"). */
+export type AccessDecision = 'Denied' | 'Allowed' | 'RequiresApproval'
+
+export interface PermissionGrant {
+  /** Flat dotted string with `*` wildcards: `pipeline.write`, `source.*`, `*`. */
+  action: string
+  /** `*` | exact id/name | prefix `prod-*` | `tag:finance`. */
+  scope: string
+  effect: PermissionEffect
+  requiresApproval: boolean
+  note?: string | null
+}
+
+export interface RoleDefinition {
+  name: string
+  description: string
+  grants: PermissionGrant[]
+  builtIn: boolean
+  updatedAtMs: number
+  updatedBy: string
+}
+
+export interface GroupDefinition {
+  name: string
+  description: string
+  members: string[]
+  roles: string[]
+  grants: PermissionGrant[]
+  externalClaimValues: string[]
+  createdAtMs: number
+  updatedAtMs: number
+  updatedBy: string
+}
+
+export interface UserAccessEntry {
+  username: string
+  disabled: boolean
+  roles: string[]
+  grants: PermissionGrant[]
+  updatedAtMs: number
+  updatedBy: string
+}
+
+export interface ApprovalTemplate {
+  name: string
+  actionPattern: string
+  scopePattern: string
+  requiredApprovals: number
+  approverGroups: string[]
+  expiresAfterSeconds: number
+  /** 0 = never escalate. */
+  escalateAfterSeconds: number
+  escalationGroups: string[]
+  enabled: boolean
+}
+
+export interface AccessPolicyDocument {
+  roles: RoleDefinition[]
+  groups: GroupDefinition[]
+  users: UserAccessEntry[]
+  approvalTemplates: ApprovalTemplate[]
+  version: number
+  updatedAtMs: number
+}
+
+export type ApprovalState =
+  | 'Pending'
+  | 'Approved'
+  | 'Rejected'
+  | 'Expired'
+  | 'Executed'
+  | 'Failed'
+  | 'Cancelled'
+
+export interface ApprovalVote {
+  username: string
+  approve: boolean
+  atMs: number
+  comment?: string | null
+}
+
+export interface ApprovalRequest {
+  id: string
+  requestedBy: string
+  requestedAtMs: number
+  action: string
+  scope: string
+  reason: string
+  templateName: string
+  requiredApprovals: number
+  votes: ApprovalVote[]
+  state: ApprovalState
+  expiresAtMs: number
+  escalatedAtMs?: number | null
+  payloadJson?: string | null
+  outcome?: string | null
+  decidedAtMs?: number | null
+  /** "rest" | "chat" | "grpc" — a chat-proposed action must be visible as such in the inbox. */
+  origin: string
+  approverGroups: string[]
+}
+
+export interface AuditEntry {
+  id: string
+  atMs: number
+  actor: string
+  action: string
+  scope: string
+  /** "allowed" | "denied" | "requires-approval" | "executed" | "failed". */
+  outcome: string
+  detail?: string | null
+  /** Set when the chat acted: `actor` is the model, this is the human whose token it carried. */
+  onBehalfOf?: string | null
+  approvalId?: string | null
+  beforeJson?: string | null
+  afterJson?: string | null
+  origin: string
+}
+
+export interface AuditPage {
+  entries: AuditEntry[]
+  /** Persisted and never reset — drop-oldest silence must not read as absence. */
+  truncated: number
+  total: number
 }
 
 // SignalR hub `/hubs/stream` — client→server: subscribePipeline(id), unsubscribePipeline(id),

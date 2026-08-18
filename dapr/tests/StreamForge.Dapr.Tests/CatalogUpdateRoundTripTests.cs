@@ -28,11 +28,15 @@ public class CatalogUpdateRoundTripTests
     /// <summary>Fields the SERVER owns: identity, lifecycle, provenance, and anything recomputed from
     /// the compile result. A client's payload must NOT be able to set these, so they are excluded from
     /// the round-trip assertion and checked for preservation separately.</summary>
+    /// <para>Plan 015 added "UpdatedBy" to both lists. It is server-owned in the strongest sense in this
+    /// file's vocabulary: it is the authenticated caller, and a client that could set it could forge the
+    /// provenance of its own edit. Classifying it here is the opposite of excluding a client-owned field
+    /// from the guard — the guard's whole subject is which side of that line a property is on.</para>
     private static readonly HashSet<string> PipelineServerOwned =
-        ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "SourceNames"];
+        ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "UpdatedBy", "SourceNames"];
 
     private static readonly HashSet<string> TableServerOwned =
-        ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "OutputFields", "StreamInputs", "TableInputs", "KeyFields"];
+        ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "UpdatedBy", "OutputFields", "StreamInputs", "TableInputs", "KeyFields"];
 
     /// <summary>Values that would be rejected by validation if generated blindly (parallelism range,
     /// non-negative flush interval) or that must stay compilable/unique.</summary>
