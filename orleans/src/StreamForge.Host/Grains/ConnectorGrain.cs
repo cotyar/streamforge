@@ -183,7 +183,34 @@ public sealed class ConnectorGrain(
         EnvelopeSkippedTotal = state.State.EnvelopeSkippedTotal,
         LastBatchCount = state.State.LastBatchCount,
         Cursor = state.State.Cursor,
+        DuplexReady = DuplexReadyForCurrentDef(),
+        // Plan 019 wave C: DuplexSentTotal/DuplexFailedTotal/LastDuplexFailure are NOT populated here.
+        // IDuplexSession (shared/StreamForge.AppCore/Transports/IDuplexTransport.cs, wave A, already
+        // landed) exposes only IsReady and SendAsync — no cumulative counters this grain could read "off
+        // the live session" the way this field's own doc comment describes. The counters that actually
+        // exist live on StreamForge.AppCore.Sinks.DuplexSinkClient (wave B, DuplexSinkClient.Counters) —
+        // the SINK layer this grain was explicitly told not to reach into. Left at the record's own
+        // zero-value defaults; see this wave's report for the gap this leaves open.
     });
+
+    /// <summary>Plan 019 D3: true/false only for a duplex-KIND source (one <see cref="DuplexTransports"/>
+    /// has a transport for) — null for every other kind, per <c>ConnectorRuntimeStatus.DuplexReady</c>'s
+    /// own doc ("null and false mean genuinely different things"). Reads <see cref="DuplexSessions"/>
+    /// directly rather than tracking anything locally: the session is opened by
+    /// <see cref="IDuplexTransport.OpenDuplex"/>, called from inside <see cref="SubscriberCore"/>'s
+    /// reconnect loop (via <c>IInboundTransport.Open</c> delegating to it), never by this grain — so this
+    /// grain has no reference of its own to hold, and querying the process-local rendezvous map is the
+    /// only way to answer "is it ready right now".</summary>
+    private bool? DuplexReadyForCurrentDef()
+    {
+        var def = state.State.Def;
+        if (def is null || DuplexTransports.Find(def.Kind) is null)
+        {
+            return null;
+        }
+
+        return DuplexSessions.Find(def.Name)?.IsReady ?? false;
+    }
 
     /// <summary>gRPC onRows callback entry (reached via a captured self-reference — see
     /// IConnectorStatusSink's class doc). Decoded rows carry no _source stamp (unlike poll-cycle rows,

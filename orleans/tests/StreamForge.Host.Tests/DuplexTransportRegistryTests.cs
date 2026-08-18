@@ -334,10 +334,16 @@ public class DuplexTransportRegistryTests
         Assert.NotEmpty(fluxDescriptor.Fields);
 
         // Every OTHER descriptor defaults Duplex to false — additive, no pre-019 descriptor changed shape.
-        // (CollisionKind is excluded too: it is a FluxTransport registered directly into InboundTransports
-        // by this class's static constructor for the cross-registry collision test above, so its own
-        // Describe() also reports Duplex = true — that is a property of the fake transport, not evidence
-        // against the "defaults to false" claim, which is about descriptors this wave did not touch.)
-        Assert.All(inbound.Concat(outbound).Where(d => d.Kind is not (FluxKind or CollisionKind)), d => Assert.False(d.Duplex));
+        //
+        // The exclusion is computed from DuplexTransports rather than listed by name on purpose: other
+        // waves of plan 019 register their own duplex fakes in this same assembly (the static registries
+        // are process-wide), and a hardcoded name list would make THIS test fail for a change that is
+        // none of its business. CollisionKind is excluded separately — it is a duplex-shaped fake
+        // registered directly into InboundTransports by this class's static constructor for the
+        // cross-registry collision test above, so its Describe() reports Duplex = true without ever
+        // reaching DuplexTransports. Both exclusions are about fakes; the claim under test is about
+        // descriptors this wave did not touch.
+        var duplexKinds = DuplexTransports.Kinds.Append(CollisionKind).ToHashSet(StringComparer.Ordinal);
+        Assert.All(inbound.Concat(outbound).Where(d => !duplexKinds.Contains(d.Kind)), d => Assert.False(d.Duplex));
     }
 }
