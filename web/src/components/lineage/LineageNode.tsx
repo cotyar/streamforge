@@ -13,6 +13,15 @@ export interface LineageNodeData extends Record<string, unknown> {
   status?: PipelineStatus
   enabled?: boolean
   parallelism?: number
+  /** Plan 019 D9: this pipeline/table has an outbound edge (a duplex sink naming a live source
+   * elsewhere in the catalog) — renders the extra source-type connector so that edge has somewhere on
+   * the node to leave from. A pipeline with no duplex sink renders no such connector, same as before
+   * this wave. */
+  hasSinkOut?: boolean
+  /** Plan 019 D9: this SOURCE is the named target of another entity's duplex sink — renders the extra
+   * target-type connector so that (from this graph's usual left-to-right flow, backward-pointing)
+   * edge has somewhere to land. A source nobody writes back to renders no such connector. */
+  hasSinkIn?: boolean
 }
 
 export type LineageFlowNode = Node<LineageNodeData, 'lineage'>
@@ -43,7 +52,7 @@ export function LineageNode({ data, selected }: NodeProps<LineageFlowNode>) {
         selected ? 'border-primary ring-1 ring-primary' : 'border-border',
       )}
     >
-      {data.kind !== 'source' && <Handle type="target" position={Position.Left} className="!bg-muted-foreground" />}
+      {(data.kind !== 'source' || data.hasSinkIn) && <Handle type="target" position={Position.Left} className="!bg-muted-foreground" />}
       <Icon className="size-4 shrink-0 text-muted-foreground" />
       <div className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-xs font-medium text-foreground" title={data.label}>{data.label}</span>
@@ -59,7 +68,7 @@ export function LineageNode({ data, selected }: NodeProps<LineageFlowNode>) {
           {data.kind === 'table' && data.parallelism && data.parallelism > 1 ? ` · P${data.parallelism}` : ''}
         </span>
       </div>
-      {data.kind !== 'pipeline' && <Handle type="source" position={Position.Right} className="!bg-muted-foreground" />}
+      {(data.kind !== 'pipeline' || data.hasSinkOut) && <Handle type="source" position={Position.Right} className="!bg-muted-foreground" />}
     </div>
   )
 }

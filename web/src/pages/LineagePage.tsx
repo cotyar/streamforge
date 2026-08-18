@@ -6,7 +6,7 @@ import { Database, Table2, Workflow } from 'lucide-react'
 import { sourcesApi } from '../api/sources'
 import { pipelinesApi } from '../api/pipelines'
 import { tablesApi } from '../api/tables'
-import type { PipelineDefinition, SourceDefinition, TableDefinition } from '../api/types'
+import type { PipelineDefinition, SinkSpec, SourceDefinition, TableDefinition } from '../api/types'
 import { Topbar } from '../components/Topbar'
 import { lineageNodeTypes } from '../components/lineage/LineageNode'
 import type { LineageFlowNode } from '../components/lineage/LineageNode'
@@ -32,6 +32,30 @@ interface LineageEntry {
   refId: string
   name: string
   deps: string[]
+  /** Plan 019 D9: the first OUTBOUND edges this graph draws — node ids of duplex-kind sinks' named
+   * source, i.e. pipeline/table -> source. Deliberately NOT merged into `deps`: `rankOf` (below) walks
+   * `deps` alone, and a pipeline that both reads a source (a dep) and writes back to it via a duplex
+   * sink — the order-entry topology D9 calls out (orders out, execution reports back on the same FIX
+   * session) — must not turn into a cycle `rankOf` has to guard against. Keeping the two lists separate
+   * makes that structurally impossible rather than merely handled. */
+  sinkTargets: string[]
+}
+
+/** Plan 019 D9: only a `duplex` sink names another catalog entity (`DuplexSinkConfig.sourceName`) —
+ * every other sink kind (nats/file/http/loopback) points at something outside the catalog (a subject, a
+ * path, a URL, a generator) with no node on this graph to draw an edge to, so they draw nothing this
+ * wave. `SinkSpec` in types.ts is a deliberately partial mirror (plan 019 D8: SinksEditor.tsx already
+ * reads a sink's kind-specific config dynamically off the transport descriptor rather than a typed
+ * field), so this reads `duplex` the same loosely-typed way instead of widening the frozen contract.
+ * Only an ENABLED sink is drawn — matches SinkSelection.Active's own eligibility rule on the backend, so
+ * a disabled duplex sink (never actually published through) draws no edge either. `{name}` is substituted
+ * with the owning pipeline's id / table's name, mirroring DuplexSinkClient's own substitution
+ * (DuplexSinkTransport.cs:151), the same convention every other sink config's templated field uses. */
+function duplexSinkTarget(sink: SinkSpec, ownerName: string): string | null {
+  if (!sink.enabled || sink.kind !== 'duplex') return null
+  const raw = (sink as unknown as { duplex?: { sourceName?: string } }).duplex?.sourceName
+  if (!raw) return null
+  return raw.replaceAll('{name}', ownerName)
 }
 
 function sourceNodeId(name: string): string {
@@ -51,11 +75,16 @@ function tableNodeId(id: string): string {
 function buildEntries(sources: SourceDefinition[], pipelines: PipelineDefinition[], tables: TableDefinition[]): Map<string, LineageEntry> {
   const entries = new Map<string, LineageEntry>()
   for (const s of sources) {
-    entries.set(sourceNodeId(s.name), { id: sourceNodeId(s.name), kind: 'source', refId: s.name, name: s.name, deps: [] })
+    entries.set(sourceNodeId(s.name), { id: sourceNodeId(s.name), kind: 'source', refId: s.name, name: s.name, deps: [], sinkTargets: [] })
   }
   for (const p of pipelines) {
     const deps = (p.sourceNames ?? []).map(sourceNodeId).filter((id) => entries.has(id))
-    entries.set(pipelineNodeId(p.id), { id: pipelineNodeId(p.id), kind: 'pipeline', refId: p.id, name: p.name, deps })
+    const sinkTargets = (p.sinks ?? [])
+      .map((s) => duplexSinkTarget(s, p.id))
+      .filter((n): n is string => !!n)
+      .map(sourceNodeId)
+      .filter((id) => entries.has(id))
+    entries.set(pipelineNodeId(p.id), { id: pipelineNodeId(p.id), kind: 'pipeline', refId: p.id, name: p.name, deps, sinkTargets })
   }
   const tableIdByName = new Map(tables.map((t) => [t.name, t.id]))
   for (const t of tables) {
@@ -66,7 +95,12 @@ function buildEntries(sources: SourceDefinition[], pipelines: PipelineDefinition
         .filter((id): id is string => !!id)
         .map(tableNodeId),
     ]
-    entries.set(tableNodeId(t.id), { id: tableNodeId(t.id), kind: 'table', refId: t.id, name: t.name, deps })
+    const sinkTargets = (t.sinks ?? [])
+      .map((s) => duplexSinkTarget(s, t.name))
+      .filter((n): n is string => !!n)
+      .map(sourceNodeId)
+      .filter((id) => entries.has(id))
+    entries.set(tableNodeId(t.id), { id: tableNodeId(t.id), kind: 'table', refId: t.id, name: t.name, deps, sinkTargets })
   }
   return entries
 }
@@ -100,6 +134,12 @@ function buildGraph(sources: SourceDefinition[], pipelines: PipelineDefinition[]
   const rankCache = new Map<string, number>()
   for (const id of entries.keys()) rankOf(id, entries, rankCache, new Set())
 
+  // Plan 019 D9: every source targeted by at least one duplex sink, so those (and only those) source
+  // nodes render the extra inbound connector below — a source with no duplex sink writing to it looks
+  // exactly as it always has.
+  const sinkTargetIds = new Set<string>()
+  for (const entry of entries.values()) for (const t of entry.sinkTargets) sinkTargetIds.add(t)
+
   const byRank = new Map<number, LineageEntry[]>()
   for (const entry of entries.values()) {
     const r = rankCache.get(entry.id) ?? 0
@@ -124,6 +164,8 @@ function buildGraph(sources: SourceDefinition[], pipelines: PipelineDefinition[]
             : undefined,
           enabled: entry.kind === 'source' ? sources.find((s) => s.name === entry.refId)?.enabled : undefined,
           parallelism: entry.kind === 'table' ? tables.find((t) => t.id === entry.refId)?.parallelism : undefined,
+          hasSinkOut: entry.sinkTargets.length > 0,
+          hasSinkIn: sinkTargetIds.has(entry.id),
         },
       })
     })
@@ -142,6 +184,26 @@ function buildGraph(sources: SourceDefinition[], pipelines: PipelineDefinition[]
       })
     }
   }
+  // Plan 019 D9: the outbound half, drawn as a visually distinct (dashed, --color-chart-5) edge so it
+  // never reads as an input — the deps loop above is the only thing that can produce a plain solid
+  // muted-foreground edge. Pushed after the deps loop and keyed with a "sink:" id prefix so a pipeline
+  // that both reads and writes the same source (the legitimate order-entry cycle D9 names) gets two
+  // separate edges between the same pair of nodes instead of one id collision silently dropping one.
+  for (const entry of entries.values()) {
+    for (const sourceId of entry.sinkTargets) {
+      edges.push({
+        id: `sink:${entry.id}->${sourceId}`,
+        source: entry.id,
+        target: sourceId,
+        type: 'smoothstep',
+        label: 'duplex sink',
+        labelStyle: { fill: 'var(--color-chart-5)', fontSize: 10 },
+        labelBgStyle: { fill: 'var(--color-card)', fillOpacity: 0.85 },
+        markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--color-chart-5)' },
+        style: { stroke: 'var(--color-chart-5)', strokeDasharray: '5 4' },
+      })
+    }
+  }
 
   return { nodes, edges }
 }
@@ -157,6 +219,12 @@ function LineageLegend() {
       </span>
       <span className="flex items-center gap-1.5">
         <Table2 className="size-3.5 text-chart-2" /> Table
+      </span>
+      <span className="mt-0.5 flex items-center gap-1.5 border-t border-border/60 pt-1">
+        <svg width="14" height="8" viewBox="0 0 14 8" className="shrink-0 text-chart-5" aria-hidden="true">
+          <line x1="0" y1="4" x2="14" y2="4" stroke="currentColor" strokeWidth="1.5" strokeDasharray="3 2" />
+        </svg>
+        Duplex sink (writes back)
       </span>
     </Panel>
   )
