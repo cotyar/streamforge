@@ -40,6 +40,9 @@ public static class DaprFacadesExtensions
         // Plan 011 D1: key sharding is Orleans-only and refused at upsert here — see
         // DisabledTableShardFacade and CatalogStore.ValidateShardBy.
         services.AddSingleton<ITableShardFacade, DisabledTableShardFacade>();
+        // Plan 015 W1: the access-policy singleton. Registered here (not in a runtime-setup class) because
+        // it is a plain singleton-actor adapter with no runtime to set up, exactly like the user store.
+        services.AddSingleton<IAccessPolicyFacade, DaprAccessPolicyFacade>();
         return services;
     }
 }
@@ -189,4 +192,50 @@ internal sealed class DaprUserStoreFacade : IUserStoreFacade
         _actor.UpdateUserAsync(new UpdateUserActorRequest(username, displayName, role, password));
 
     public Task<bool> DeleteUserAsync(string username) => _actor.DeleteUserAsync(username);
+}
+
+
+/// <summary>Plan 015 W1: <see cref="IAccessPolicyFacade"/> over the "access" singleton actor — the Dapr
+/// counterpart of the Orleans <c>IAccessPolicyGrain</c> adapter. Caches one proxy in a field, like
+/// <see cref="DaprUserStoreFacade"/> and <see cref="DaprCatalogFacade"/> do and unlike the per-call
+/// resolution the keyed facades need: the id never varies, there is exactly one access document.
+///
+/// <para>The multi-argument members are packed into the request records on
+/// <see cref="IAccessPolicyActor"/> (a Dapr actor method takes at most one parameter); everything else is a
+/// straight forward. No <see cref="ActorResult{T}"/> unwrapping, because nothing on this actor fails with an
+/// error string — a refused mutation comes back as null or false.</para>
+///
+/// <para><b><see cref="GetVersionAsync"/> is the hot one.</b> Every replica's permission resolver calls it
+/// every <c>Auth:PolicyCacheSeconds</c> (default 10) and only refetches the document when the number moves.
+/// On this flavour each call is a sidecar round trip — which is the entire reason plan 015 refused to look
+/// the policy up per request (015 D:"Permissions resolve server-side per request"). Anything added to this
+/// path is paid for by every replica, forever.</para></summary>
+internal sealed class DaprAccessPolicyFacade : IAccessPolicyFacade
+{
+    private readonly IAccessPolicyActor _actor =
+        ActorProxy.Create<IAccessPolicyActor>(new ActorId(StreamConstants.AccessKey), nameof(AccessPolicyActor), ActorProxyDefaults.Options);
+
+    public Task<AccessPolicyDocument> GetPolicyAsync() => _actor.GetPolicyAsync();
+
+    public Task<long> GetVersionAsync() => _actor.GetVersionAsync();
+
+    public Task<RoleDefinition?> UpsertRoleAsync(RoleDefinition role, string actor) =>
+        _actor.UpsertRoleAsync(new UpsertRoleActorRequest(role, actor));
+
+    public Task<bool> DeleteRoleAsync(string name) => _actor.DeleteRoleAsync(name);
+
+    public Task<GroupDefinition?> UpsertGroupAsync(GroupDefinition group, string actor) =>
+        _actor.UpsertGroupAsync(new UpsertGroupActorRequest(group, actor));
+
+    public Task<bool> DeleteGroupAsync(string name) => _actor.DeleteGroupAsync(name);
+
+    public Task<UserAccessEntry?> UpsertUserAccessAsync(UserAccessEntry entry, string actor) =>
+        _actor.UpsertUserAccessAsync(new UpsertUserAccessActorRequest(entry, actor));
+
+    public Task<bool> DeleteUserAccessAsync(string username) => _actor.DeleteUserAccessAsync(username);
+
+    public Task<ApprovalTemplate?> UpsertApprovalTemplateAsync(ApprovalTemplate template, string actor) =>
+        _actor.UpsertApprovalTemplateAsync(new UpsertApprovalTemplateActorRequest(template, actor));
+
+    public Task<bool> DeleteApprovalTemplateAsync(string name) => _actor.DeleteApprovalTemplateAsync(name);
 }

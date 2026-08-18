@@ -37,6 +37,12 @@ public static class OrleansFacadesExtensions
             sp.GetRequiredService<IClusterClient>().GetGrain<IRegistryGrain>(StreamConstants.RegistryKey));
         services.AddSingleton<IUserStoreFacade>(sp =>
             sp.GetRequiredService<IClusterClient>().GetGrain<IUserStoreGrain>(StreamConstants.UsersKey));
+        // Plan 015 W1: the access-policy singleton. Same zero-adapter shape as the two above —
+        // IAccessPolicyGrain inherits IAccessPolicyFacade, so the grain reference IS-A facade. Needs no
+        // Program.cs edit: Orleans discovers the grain CLASS by assembly scanning, and this method is
+        // already called from there.
+        services.AddSingleton<IAccessPolicyFacade>(sp =>
+            sp.GetRequiredService<IClusterClient>().GetGrain<IAccessPolicyGrain>(StreamConstants.AccessKey));
         services.AddSingleton<IPipelineReadFacade, OrleansPipelineReadFacade>();
         services.AddSingleton<ITableReadFacade, OrleansTableReadFacade>();
         services.AddSingleton<ITableHistoryFacade, OrleansTableHistoryFacade>();

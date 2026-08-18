@@ -37,6 +37,7 @@ builder.Services.AddActors(options =>
 {
     options.Actors.RegisterActor<RegistryActor>();
     options.Actors.RegisterActor<UserStoreActor>();
+    options.Actors.RegisterActor<AccessPolicyActor>();
     GeneratorRuntimeSetup.RegisterActors(options);
     ConnectorRuntimeSetup.RegisterActors(options);
     PipelineRuntimeSetup.RegisterActors(options);
