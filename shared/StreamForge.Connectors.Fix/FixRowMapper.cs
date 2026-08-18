@@ -142,6 +142,22 @@ public static class FixRowMapper
     public static string? CorrelationIdOf(Dictionary<string, object?> row) =>
         row.TryGetValue(ClOrdIdColumn, out var v) && v is string { Length: > 0 } s ? s : null;
 
+    /// <summary>The row's <see cref="MsgTypeColumn"/> (tag 35), or null — the exact same rule
+    /// <see cref="TryBuildMessage"/> itself enforces before ever returning true. Plan 019 wave F: exists for
+    /// a caller (<see cref="FixDuplexSession.SendAsync"/>) that needs the value AFTER
+    /// <see cref="TryBuildMessage"/> has already succeeded (so MsgType is known present) and would
+    /// otherwise have to re-implement this two-line extraction itself.</summary>
+    public static string? MsgTypeOf(Dictionary<string, object?> row) =>
+        row.TryGetValue(MsgTypeColumn, out var v) && v is string { Length: > 0 } s ? s : null;
+
+    /// <summary>Tag number for a known outbound column NAME, or false when this table does not carry it.
+    /// Plan 019 wave F: lets <see cref="FixRequiredFields"/> name a missing field's TAG NUMBER, not just
+    /// its name, in a refusal message — by reading THIS table rather than typing the numbers out a third
+    /// time. That is not the cross-assembly duplication this class's own doc comment argues for (this
+    /// reader and <see cref="TagByName"/> are two classes in the SAME project); it is the ordinary
+    /// single-source-of-truth choice within one project boundary.</summary>
+    public static bool TryTagOf(string name, out int tag) => TagByName.TryGetValue(name, out tag);
+
     /// <summary>CLR value → FIX wire text. No FIX-type-aware formatting (that needs the dictionary wave
     /// 019-F adds) — just the handful of shapes a row realistically carries, matching
     /// <c>ConnectorRowCoercion</c>'s own output types. <c>bool</c> → "Y"/"N" mirrors <c>FixParser.TypedValue</c>'s

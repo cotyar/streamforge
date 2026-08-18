@@ -111,23 +111,40 @@ public sealed class FixDuplexSession : IDuplexSession
     }
 
     /// <summary>The outbound half. NEVER throws — every ordinary failure (a row that cannot be mapped to a
-    /// FIX message, the session not being logged on yet, <c>Session.SendToTarget</c> declining the send) is
-    /// reported in the returned <see cref="DuplexSendOutcome"/>, per <see cref="IDuplexSession.SendAsync"/>'s
-    /// own contract.
+    /// FIX message, a required field missing for its MsgType, the session not being logged on yet,
+    /// <c>Session.SendToTarget</c> declining the send) is reported in the returned
+    /// <see cref="DuplexSendOutcome"/>, per <see cref="IDuplexSession.SendAsync"/>'s own contract.
     ///
     /// <para><b>Mapping happens BEFORE the readiness check, per row</b> — deliberately, not by accident: a
     /// row this wave cannot map is exactly as much a failure whether or not the session happens to be up
     /// right now, and reporting the REAL reason (a bad column) rather than a generic "not ready" is more
     /// useful to whoever is looking at <see cref="LastFailure"/>. Only rows that DID map are checked
-    /// against readiness, and (if ready) actually sent.</para></summary>
+    /// against readiness, and (if ready) actually sent.</para>
+    ///
+    /// <para><b>Plan 019 wave F (D6): required-field validation runs AFTER the readiness check, the one
+    /// place this method's checks are NOT ordered "worst reason first".</b> A row failing readiness is
+    /// already refused regardless of its own completeness — the operator's next action is the same either
+    /// way ("get the session logged on"), and holding a message that will not be sent to a stricter
+    /// standard than one that WOULD be sent buys nothing. Once ready, though, a message missing a
+    /// required field must never reach the wire — see <see cref="FixRequiredFields"/> for the curated
+    /// table and why no real FIX dictionary backs it.</para>
+    ///
+    /// <para><b>Plan 019 wave F (D7): ClOrdID generation, opt-in via
+    /// <see cref="FixSourceConfig.GenerateClOrdId"/>, happens first of all</b> — before mapping, before
+    /// readiness, before required-field validation — because every later step (the wire message, the
+    /// correlation id on a failure, the required-field check for <c>ClOrdID</c> itself) must see the SAME
+    /// row, generated id included. See <see cref="WithGeneratedClOrdIdIfNeeded"/> for the generation
+    /// strategy and its documented uniqueness scope.</para></summary>
     public Task<DuplexSendOutcome> SendAsync(IReadOnlyList<Dictionary<string, object?>> rows, CancellationToken ct)
     {
         var sessionId = _app?.ActiveSessionId;
         var failures = new List<DuplexSendFailure>();
         var sent = 0;
 
-        foreach (var row in rows)
+        foreach (var originalRow in rows)
         {
+            var row = WithGeneratedClOrdIdIfNeeded(originalRow);
+
             if (!FixRowMapper.TryBuildMessage(row, out var message, out var mappingFailure))
             {
                 failures.Add(new DuplexSendFailure(FixRowMapper.CorrelationIdOf(row), null, mappingFailure!));
@@ -137,6 +154,13 @@ public sealed class FixDuplexSession : IDuplexSession
             if (sessionId is not { } sid)
             {
                 failures.Add(new DuplexSendFailure(FixRowMapper.CorrelationIdOf(row), null, "fix-duplex session is not logged on"));
+                continue;
+            }
+
+            if (FixRowMapper.MsgTypeOf(row) is { } msgType
+                && !FixRequiredFields.TryValidate(msgType, row, out var requiredFieldFailure))
+            {
+                failures.Add(new DuplexSendFailure(FixRowMapper.CorrelationIdOf(row), null, requiredFieldFailure!));
                 continue;
             }
 
@@ -177,6 +201,42 @@ public sealed class FixDuplexSession : IDuplexSession
         }
 
         return Task.FromResult(new DuplexSendOutcome(sent, failures.Count, failures));
+    }
+
+    /// <summary>Plan 019 wave F (D7): returns <paramref name="row"/> UNCHANGED when
+    /// <see cref="FixSourceConfig.GenerateClOrdId"/> is off (the default) or the row already carries a
+    /// non-empty <c>ClOrdID</c> — a caller-supplied id is never overwritten. Otherwise returns a COPY with
+    /// a freshly generated one, so the caller's own dictionary is never mutated out from under it.
+    ///
+    /// <para><b>Generation strategy: a random 128-bit id (<c>Guid.NewGuid</c>), nothing more.</b>
+    /// Deliberately NOT a per-session counter — a counter would need a per-instance base token to stay
+    /// unique across a reconnect (<see cref="FixDuplexTransport.OpenDuplex"/> mints a fresh
+    /// <see cref="FixDuplexSession"/>, and therefore a fresh counter starting at zero, per connection
+    /// attempt — see <see cref="SentTotal"/>'s own doc comment on that scope), which is exactly the kind of
+    /// state this generator does not need: a GUID's uniqueness does not depend on the session, the source,
+    /// a reconnect, or a process restart, so there is no scope to document being lost.</para>
+    ///
+    /// <para><b>Uniqueness — stated plainly.</b> A GENERATED id is unique for all practical purposes
+    /// (2^122 of them) without any tracked registry. A CALLER-SUPPLIED id is NOT checked for uniqueness at
+    /// all — there is no persisted or in-memory table of previously sent <c>ClOrdID</c>s to check it
+    /// against, matching plan 019 D7's own last line: "the platform has no notion of an entity that is
+    /// amended rather than appended." Two rows in the same batch, or across two batches, or across a
+    /// reconnect, that both carry the SAME caller-supplied <c>ClOrdID</c> are both sent as given; if the
+    /// venue rejects the second as a duplicate, that reject is exactly the kind of first-class inbound
+    /// outcome plan 019 D3 already promises operator visibility for, not something THIS method silently
+    /// prevents by inventing tracking state this wave was not asked to build.</para></summary>
+    private Dictionary<string, object?> WithGeneratedClOrdIdIfNeeded(Dictionary<string, object?> row)
+    {
+        if (!_config.GenerateClOrdId || FixRowMapper.CorrelationIdOf(row) is not null)
+        {
+            return row;
+        }
+
+        var withGeneratedId = new Dictionary<string, object?>(row, StringComparer.Ordinal)
+        {
+            ["ClOrdID"] = Guid.NewGuid().ToString("N"),
+        };
+        return withGeneratedId;
     }
 
     /// <summary>Stops this connection attempt's socket (if any was ever opened) and withdraws THIS instance

@@ -215,6 +215,21 @@ public sealed class FixSourceConfig
     /// for the backpressure ceiling this trades for: correct for market data (a stale quote is worthless),
     /// wrong for drop-copy (every message must survive).</summary>
     [Id(13)] public int QueueCapacity { get; set; } = 10000;
+
+    /// <summary>Plan 019 wave F (D7): opt-in <c>ClOrdID</c> (tag 11) generation for a row that omits it,
+    /// on the <see cref="SourceKinds.FixDuplex"/> outbound half only (this field is inert for the
+    /// receive-only <see cref="SourceKinds.Fix"/> kind, which has no outbound half to generate an id
+    /// for). <b>Defaults to <c>false</c></b> — deliberately, not an oversight: a <c>ClOrdID</c> this
+    /// platform invents is one the caller's own SQL/pipeline never learns synchronously (<c>SendAsync</c>'s
+    /// <c>DuplexSendOutcome</c> carries counts and FAILURES only, no per-row success payload), so a caller
+    /// that needs to correlate an order it just sent against something it does BEFORE the venue's
+    /// <c>ExecutionReport</c> comes back would silently lose that ability the moment generation is
+    /// silently on by default. The only way to observe a generated id at all is the round trip: the venue
+    /// echoes <c>ClOrdID</c> back on its <c>ExecutionReport</c>, which arrives as an ordinary inbound row
+    /// on this same source — plan 019 D7 names exactly this table, keyed on <c>ClOrdID</c>, as the plan's
+    /// cheapest large win. Set <see langword="true"/> only for a caller that is fully served by that
+    /// after-the-fact correlation and does not need the id before sending.</summary>
+    [Id(14)] public bool GenerateClOrdId { get; set; }
 }
 
 /// <summary>Plan 009 B2: where a pipeline's rows or a table's deltas are republished. The platform's
