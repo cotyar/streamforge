@@ -10,10 +10,15 @@ namespace StreamForge.Connectors.Fix;
 /// assembly scanning (see <see cref="InboundTransports"/>'s own class doc for why a static list, not DI
 /// discovery).
 ///
-/// <para><b>One kind, one registry.</b> Unlike <c>DatabaseConnectors</c> (two dialects × source + sink,
-/// plus two CDC sources), FIX is ingress-only and single-kind: <see cref="InboundTransports.Register"/>
-/// with a <see cref="FixInboundTransport"/>, nothing else. There is no FIX sink — order entry (plan 019)
-/// is a different plan, not a later wave of this one.</para>
+/// <para><b>Two kinds now, still one registration call.</b> Plan 018 shipped <see cref="FixInboundTransport"/>
+/// (kind <c>fix</c>, receive-only, registered straight into <see cref="InboundTransports"/>). Plan 019 wave
+/// E adds <see cref="FixDuplexTransport"/> (kind <c>fix-duplex</c>, an order-entry-capable session),
+/// registered through <see cref="DuplexTransports.Register"/> instead — which co-registers it into
+/// <see cref="InboundTransports"/> too (see that registry's own doc comment), so both kinds end up
+/// reachable from <see cref="InboundTransports.Find"/> and this method's single call remains the entire
+/// host-wiring surface. There is still no FIX-SPECIFIC sink: order entry's outbound half is the generic
+/// <c>duplex</c> proxy sink (wave 019-B, in <c>StreamForge.AppCore</c>) naming a <c>fix-duplex</c> source
+/// by name, not a class in this project.</para>
 ///
 /// <para><b>Registration is process-global and permanent</b> (<see cref="InboundTransports.Register"/>
 /// throws on a duplicate kind), so <see cref="RegisterAll"/> is idempotent by choice rather than by luck —
@@ -25,8 +30,8 @@ public static class FixConnectors
     private static readonly Lock Gate = new();
     private static bool _registered;
 
-    /// <summary>Registers the <c>fix</c> inbound transport. Call once from host startup, before any
-    /// source is opened.</summary>
+    /// <summary>Registers the <c>fix</c> and <c>fix-duplex</c> inbound/duplex transports. Call once from
+    /// host startup, before any source is opened.</summary>
     public static void RegisterAll()
     {
         lock (Gate)
@@ -38,6 +43,7 @@ public static class FixConnectors
 
             _registered = true;
             InboundTransports.Register(new FixInboundTransport());
+            DuplexTransports.Register(new FixDuplexTransport());
         }
     }
 }

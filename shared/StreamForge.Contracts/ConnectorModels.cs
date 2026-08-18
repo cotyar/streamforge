@@ -47,6 +47,23 @@ public static class SourceKinds
     /// a coincidence of both being named after the protocol, not a conflict.</summary>
     public const string Fix = "fix";
 
+    /// <summary>Plan 019 wave E: the FIRST duplex kind — one live FIX session whose outbound half also
+    /// accepts sends (<c>NewOrderSingle</c> out, <c>ExecutionReport</c> back, same TCP connection, same
+    /// sequence-number streams as <see cref="Fix"/>'s receive-only session). A SEPARATE kind from
+    /// <see cref="Fix"/> rather than a widening of it — plan 019's "Decisions" (D-shaped) section states
+    /// why: <see cref="Fix"/> defaults to an in-memory sequence store and <c>ResetOnLogon=true</c>, right
+    /// for market data and wrong for a session that originates orders, and
+    /// <c>StreamForge.AppCore.Transports.DuplexTransports.Register</c> co-registers into
+    /// <c>StreamForge.AppCore.Transports.InboundTransports</c>, which throws on a duplicate kind — so
+    /// <see cref="Fix"/> could not be
+    /// registered twice even if the two validation regimes could somehow be reconciled. Follows the
+    /// platform's existing <see cref="PostgresCdc"/>/<see cref="MsSqlCdc"/> naming shape: the kind names the
+    /// mechanism. Reuses <see cref="FixSourceConfig"/> — same config type as <see cref="Fix"/>, only the
+    /// registered kind (and therefore which registry opens it as: <c>IDuplexTransport.OpenDuplex</c> instead
+    /// of a plain <c>IInboundTransport.Open</c>) differs. Implemented in
+    /// <c>StreamForge.Connectors.Fix.FixDuplexTransport</c>.</summary>
+    public const string FixDuplex = "fix-duplex";
+
     /// <summary>The masked placeholder for secrets-lite values (D-H).</summary>
     public const string SecretMask = "***";
 }
@@ -78,8 +95,10 @@ public sealed class ConnectorConfig
     /// plaintext, silently — the exact failure <c>[Secret]</c> was introduced to eliminate.</summary>
     [Id(7)] public DbSourceConfig? Db { get; set; }
 
-    /// <summary>Plan 018 wave C; set only for <see cref="SourceKinds.Fix"/>. Lives HERE for the same
-    /// <c>SecretWalk</c> reason <see cref="Db"/>'s doc comment gives — a config class declared in
+    /// <summary>Plan 018 wave C; set for <see cref="SourceKinds.Fix"/> AND (plan 019 wave E)
+    /// <see cref="SourceKinds.FixDuplex"/> — one config type for both kinds, since they differ only in
+    /// which registry opens the session (see <see cref="SourceKinds.FixDuplex"/>'s own doc comment). Lives
+    /// HERE for the same <c>SecretWalk</c> reason <see cref="Db"/>'s doc comment gives — a config class declared in
     /// <c>StreamForge.Connectors.Fix</c> would export <see cref="FixSourceConfig.Password"/> in
     /// plaintext on every config export, because <c>SecretWalk.IsContractClass</c> only recurses into
     /// types declared in THIS assembly.</summary>

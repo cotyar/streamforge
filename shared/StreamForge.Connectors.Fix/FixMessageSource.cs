@@ -155,6 +155,12 @@ public sealed class FixBridgeApplication : IApplication
     private readonly Lock _dropGate = new();
     private long _dropped;
 
+    // Plan 019 wave E: this bridge is shared by both the receive-only `fix` kind and the new `fix-duplex`
+    // kind (FixDuplexSession) — the extra state below costs the receive-only path nothing (it is simply
+    // never read) and keeps ONE class owning the QuickFIX/n callback surface rather than forking it.
+    private readonly Lock _sessionGate = new();
+    private SessionID? _activeSessionId;
+
     public FixBridgeApplication(FixSourceConfig config, Channel<FixInboundMessage> channel, int capacity)
     {
         _config = config;
@@ -167,6 +173,18 @@ public sealed class FixBridgeApplication : IApplication
     /// operator can see" plan 018-C requires. Logged (not swallowed) on every increment; see
     /// <see cref="Enqueue"/>.</summary>
     public long Dropped => Interlocked.Read(ref _dropped);
+
+    /// <summary>Plan 019 wave E: the SessionID this session logged on as, or null before the first logon /
+    /// after a logout — learned in <see cref="OnLogon"/> and refreshed defensively on every outbound
+    /// application message in <see cref="ToApp"/> (belt and braces: <see cref="OnLogon"/> is the
+    /// authoritative source, <see cref="ToApp"/> just keeps this field from ever going stale while the
+    /// session is plainly still up). <see cref="FixDuplexSession.SendAsync"/> reads this to know WHERE to
+    /// call <c>Session.SendToTarget</c>, and whether it is null at all is exactly
+    /// <see cref="FixDuplexSession.IsReady"/>'s definition of "logged on".</summary>
+    public SessionID? ActiveSessionId
+    {
+        get { lock (_sessionGate) { return _activeSessionId; } }
+    }
 
     /// <summary>The only method with FIX-application logic in it: filter by MsgType (tag 35), then
     /// enqueue. Session-level traffic (Logon/Heartbeat/TestRequest/ResendRequest/SequenceReset/Logout)
@@ -225,6 +243,15 @@ public sealed class FixBridgeApplication : IApplication
     /// backoff).</summary>
     public void OnLogon(SessionID sessionID)
     {
+        // Plan 019 wave E: the bridge LEARNS its SessionID here, unconditionally — before wave E this was
+        // discarded (only used locally to send OnLogon's own lines below); a duplex session's SendAsync
+        // needs it kept around for the whole life of this logon, which is exactly this field's scope (see
+        // its own doc comment).
+        lock (_sessionGate)
+        {
+            _activeSessionId = sessionID;
+        }
+
         var onLogon = _config.OnLogon;
         if (string.IsNullOrWhiteSpace(onLogon))
         {
@@ -260,6 +287,14 @@ public sealed class FixBridgeApplication : IApplication
     /// <see cref="FixInboundTransport.Open"/> again for the next attempt.</summary>
     public void OnLogout(SessionID sessionID)
     {
+        // Plan 019 wave E: clears the learned SessionID BEFORE completing the channel — a duplex session's
+        // IsReady must go false the moment the session is no longer logged on, not one bridge callback
+        // later, and SendAsync (FixDuplexSession) reads ActiveSessionId directly with no channel involved.
+        lock (_sessionGate)
+        {
+            _activeSessionId = null;
+        }
+
         _channel.Writer.TryComplete();
     }
 
@@ -290,8 +325,22 @@ public sealed class FixBridgeApplication : IApplication
     {
     }
 
+    /// <summary>Plan 019 wave E: no longer a no-op. Fires for every OUTBOUND application message this
+    /// session sends — <see cref="OnLogon"/>'s own request lines for the receive-only <c>fix</c> kind, and
+    /// (new in this wave) every row <see cref="FixDuplexSession.SendAsync"/> hands to
+    /// <c>Session.SendToTarget</c> for the <c>fix-duplex</c> kind. It refreshes
+    /// <see cref="ActiveSessionId"/> — a defensive, redundant signal alongside <see cref="OnLogon"/>'s (see
+    /// that field's own doc comment) — and deliberately does nothing else: no field mutation, no
+    /// validation, no <c>QuickFix.DoNotSend</c>. Required-field validation and message construction are
+    /// wave 019-F's job (plan 019 D6); this wave's row → FIX mapping (<see cref="FixRowMapper"/>) already
+    /// refuses to build a <see cref="Message"/> it cannot map, so nothing reaches this callback that this
+    /// wave could usefully reject anyway.</summary>
     public void ToApp(Message message, SessionID sessionID)
     {
+        lock (_sessionGate)
+        {
+            _activeSessionId = sessionID;
+        }
     }
 
     private static HashSet<string>? ParseMsgTypes(string? msgTypes)
