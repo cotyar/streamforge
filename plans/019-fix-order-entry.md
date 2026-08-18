@@ -44,10 +44,18 @@ rather than by machinery this plan would have to invent and then be trusted with
 egress layer instead would place an order session inside the one component with *no* single-instance
 guarantee — the worst available choice, and it is available today by accident.
 
-**Cost**: an order's path now runs through a grain call, which serialises it behind that grain's turn-based
-concurrency. For an order session that is a feature, not a tax — sequence numbers demand serialisation
-anyway. But it does mean order throughput is bounded by one grain's turn rate, and that number belongs in
-the acceptance test, measured, not assumed.
+**Cost — corrected after waves C and D measured it**: the draft of this plan claimed order throughput would
+be "bounded by one grain's turn rate", on the assumption that a send travels *through* the driver. It does
+not. The driver **owns** the session; the send **finds** it — the proxy sink resolves the live session from
+the process-local `DuplexSessions` map and calls `SendAsync` directly, so no grain turn is on the send path
+at all (see D2, and `DuplexSessions`' own doc, which names routing sends through the grain as the
+*upgrade* path, not the built one). Ordering is therefore whatever the session itself imposes, which for a
+FIX session is exactly what sequence numbers already demand.
+
+The real cost is the one `DuplexSessions` states: the map is process-local, so the proxy and the
+session-holding grain must be in the same process. Both flavours' documented topology is single-instance,
+so that holds today; on a multi-silo deployment `Find` returns null in the process that does not hold the
+session, and **that** is when the grain-call hop — with its turn-rate bound — has to be paid.
 
 ### D2. Egress reaches the session through a stateless proxy sink, not a second connection
 
@@ -99,10 +107,13 @@ rationale (`InboundTransports.cs:11-16`: DI cannot reach the connector driver, w
 runtime's, not the host's). `TransportCatalog` is today `(Inbound, Outbound)`
 (`shared/StreamForge.AppCore/Transports/TransportDescriptor.cs:140-142`) and `GET /api/transports` merges
 the two inbound registries into one list precisely so the console need not know there are several
-(`shared/StreamForge.Api/Endpoints/TransportsEndpoints.cs:34-48`). A duplex kind therefore appears in
-**both** lists, flagged `Duplex = true` on its descriptor — one additive bool, and both existing kind
-pickers (`web/src/pages/SourcesPage.tsx:383-384`, `web/src/components/SinksEditor.tsx:44-54`) keep working
-with no restructuring.
+(`shared/StreamForge.Api/Endpoints/TransportsEndpoints.cs:34-48`). The draft of this decision said a duplex kind
+would appear in **both** lists flagged `Duplex = true`. **Wave B corrected it, and its reading is the
+better one**: the flag means "this kind implements `IDuplexTransport`", which is true of an inbound kind
+like `fix` and false of the generic outbound proxy sink, since one proxy can point at any duplex source.
+So `fix` carries the flag in `Inbound`, the `duplex` sink kind is an ordinary entry in `Outbound`, and both
+existing kind pickers (`web/src/pages/SourcesPage.tsx:383-384`,
+`web/src/components/SinksEditor.tsx:44-54`) keep working with no restructuring.
 
 `SourceValidation.IsKnownKind` and its unknown-kind error string gain the third registry
 (`shared/StreamForge.Api/Endpoints/SourceSchemaService.cs:32-33,64-72`).
@@ -180,7 +191,7 @@ orchestrator between waves.
 | 019-A | `IDuplexTransport` + `DuplexTransports` registry + descriptor `Duplex` flag + `TransportCatalog`/`/api/transports`/`SourceValidation` wiring. A fake duplex kind proves the seam, following `TransportRegistryTests.cs:35-39`'s static-ctor pattern | Sonnet 5 high |
 | 019-B | The proxy sink client + `SinkTransports.Validate` refusing a sink whose named source is missing or not duplex; `SinkFanout`/`SinkSelection` untouched | Sonnet 5 high |
 | 019-C | Orleans: `ConnectorGrain` owns the duplex session; the send path, the failed-state status, and the turn-rate measurement of D1 | Sonnet 5 high |
-| 019-D | Dapr: the same in `ConnectorActor` (no generation counter needed — turns run to completion, `ConnectorActor.cs:136-140`) | Sonnet 5 high |
+| 019-D | Dapr: the same in `ConnectorActor`. **The draft's parenthetical — "no generation counter needed, turns run to completion" — was wrong**: it holds for the actor's own state transitions but not for the background subscribe loop, whose async disposal runs outside every turn and can land after a restart has already published a new session. `DuplexSessions.Withdraw`'s identity check is what closes it | Sonnet 5 high |
 | 019-E | `shared/StreamForge.Connectors.Fix`: `IFixMessageSource` gains a send side, `ToApp` stops being a no-op (`FixMessageSource.cs:293-295`), `FixDuplexTransport` registered alongside the inbound one | Sonnet 5 high |
 | 019-F | The outbound FIX dictionary (D6) + required-field validation + `ClOrdID`/`OrigClOrdID` (D7) | Sonnet 5 high |
 | 019-G | Mandatory sequence persistence + validation + the documented recovery procedure (D5) | Sonnet 5 high |
@@ -198,6 +209,12 @@ A → (B ∥ C ∥ D) → E → (F ∥ G) → H → I. C and D are disjoint by f
 - **One session, proven**: assert exactly one logon reaches the acceptor while both a source and a sink
   referencing it are active, and that editing an unrelated field on the sink (which provably re-signs and
   rebuilds the client, `SinkSelection.cs:40-41`) does **not** produce a second logon.
+- **The belated-dispose race, proven** — waves C and D both pinned it, and the answer surprised the plan:
+  actor-turn serialisation does **not** cover it. `StopAsync` cancels the subscribe loop's token and
+  returns without awaiting its unwind, so a stop-then-immediate-start can have the old session's
+  `DisposeAsync` land after the new session has already published. What closes it is `DuplexSessions`'
+  compare-and-remove on reference identity, and both flavours now force the race deterministically rather
+  than hoping to observe it.
 - **Sequence persistence across restart**: kill and restart the instance, and assert the session resumes at
   the stored sequence numbers rather than resetting.
 - **Loud failure**: stop the acceptor, publish an order, and assert the `ClOrdID` appears in the failed
