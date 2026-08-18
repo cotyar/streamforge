@@ -29,10 +29,26 @@ dictionary (a static table of the common 4.2/4.4/5.0 tags, unknown tags fall bac
 repeating groups parsed into nested JSON arrays — usable by any `url`/`file`/`folder`/`nats` source; and
 `fix` is also a live, receive-only session source kind, `shared/StreamForge.Connectors.Fix` on
 `QuickFIXn.Core`, an `IInboundTransport` out of the core like the database connectors. No FIX dictionary
-ships with the platform (`UseDataDictionary=N`); order entry is deliberately a separate, not-yet-built
-plan ([`019`](plans/019-fix-order-entry.md)). The session's operational hazards (the drop-oldest bridge
+ships with the platform (`UseDataDictionary=N`); order entry is deliberately a separate plan
+([`019`](plans/019-fix-order-entry.md)). The session's operational hazards (the drop-oldest bridge
 queue, `storePath`'s in-memory-vs-file-backed choice, at-most-once delivery) are written down in
 [`TRANSPORTS.md`](TRANSPORTS.md)'s "FIX" section — read it before enabling the kind.
+
+**FIX order entry** (plan 019, DONE): `fix-duplex` is a third transport seam, `IDuplexTransport` —
+one live FIX session with both halves, declared as two entities that meet in the middle (a `fix-duplex`
+source owning the session, a `duplex` sink on any pipeline/table naming it by `sourceName`). The session
+lives in the connector driver (Orleans `ConnectorGrain` / Dapr `ConnectorActor`), not the sink, which is
+why an unrelated field edit on the sink — which does tear down and rebuild that sink's client every 30s
+— costs nothing: the sink owns no connection, only a `DuplexSessions.Find` lookup by name. A row's
+`MsgType` column picks the outbound message; `FixRequiredFields` gates `NewOrderSingle`/
+`OrderCancelRequest`/`OrderCancelReplaceRequest` against a curated table (no real dictionary); `ClOrdID`
+generation is opt-in and unchecked for uniqueness when caller-supplied. `storePath` stops being optional
+on this kind — an order session's sequence store is the record of what was sent, not a resend-avoidance
+nicety. Execution reports correlate to the orders that caused them through ordinary platform SQL, joined
+on `ClOrdID` — plan 019 D7's cheapest large win. Full wiring, the row→FIX mapping rules, and a gotcha
+found live (every row a duplex sink actually forwards carries platform-reserved columns — `_ts`/
+`_source`/`_weight` — that the outbound mapper must skip rather than refuse) are in
+[`TRANSPORTS.md`](TRANSPORTS.md)'s `fix-duplex` sections.
 
 ## Environment — non-negotiables
 

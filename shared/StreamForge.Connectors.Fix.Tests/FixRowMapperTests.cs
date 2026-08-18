@@ -120,6 +120,70 @@ public class FixRowMapperTests
         Assert.Null(FixRowMapper.CorrelationIdOf(new Dictionary<string, object?>()));
     }
 
+    /// <summary>The bug wave 019-I2's live drop-copy check found, pinned so it cannot come back.
+    ///
+    /// <para>Every row a duplex sink forwards in PRODUCTION has been through the platform's row pipeline
+    /// first, which stamps <c>_ts</c> and <c>_source</c> on every row the engine produces and <c>_weight</c>
+    /// on a table delta. <see cref="FixRowMapper.TryBuildMessage"/> refuses the whole row on any column with
+    /// no known outbound tag — so before the fix, every row a real duplex sink ever forwarded failed, 100%
+    /// of the time, and no order could reach a venue. Nothing in this plan's unit tests caught it because
+    /// they all build their rows by hand, and a hand-built row never carries these keys.</para>
+    ///
+    /// <para>That is exactly why this test exists rather than living only in the live check: the live check
+    /// is a throwaway fixture and does not run in CI, so without this the same bug can be reintroduced
+    /// tomorrow with a green suite.</para></summary>
+    [Fact]
+    public void APlatformStampedRowMapsInsteadOfBeingRefusedWholesale()
+    {
+        // The shape a duplex sink actually receives from a materialized table: business columns plus the
+        // three keys the platform stamps on the way through.
+        var row = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["MsgType"] = "D",
+            ["ClOrdID"] = "ORD-1",
+            ["Symbol"] = "EUR/USD",
+            ["Side"] = "1",
+            ["OrdType"] = "2",
+            ["OrderQty"] = "1000000",
+            ["_ts"] = 1755500000000L,
+            ["_source"] = "orders_sent",
+            ["_weight"] = 1,
+        };
+
+        Assert.True(
+            FixRowMapper.TryBuildMessage(row, out var message, out var failure),
+            $"a platform-stamped row was refused: {failure}");
+        Assert.Null(failure);
+
+        // The business fields are on the wire...
+        Assert.Equal("ORD-1", message.GetString(11));
+        Assert.Equal("EUR/USD", message.GetString(55));
+
+        // ...and the reserved keys did not smuggle themselves onto it under some tag.
+        var wire = message.ConstructString();
+        Assert.DoesNotContain("_ts", wire, StringComparison.Ordinal);
+        Assert.DoesNotContain("_source", wire, StringComparison.Ordinal);
+        Assert.DoesNotContain("_weight", wire, StringComparison.Ordinal);
+        Assert.DoesNotContain("orders_sent", wire, StringComparison.Ordinal);
+    }
+
+    /// <summary>A column that is neither a known tag nor a reserved platform key is still refused — the
+    /// fix above skips THREE specific names, it does not turn the mapper permissive. An order silently
+    /// missing a field its row carried would be the worse bug.</summary>
+    [Fact]
+    public void AnUnknownBusinessColumnIsStillRefused()
+    {
+        var row = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["MsgType"] = "D",
+            ["ClOrdID"] = "ORD-1",
+            ["desk_note"] = "not a FIX field",
+        };
+
+        Assert.False(FixRowMapper.TryBuildMessage(row, out _, out var failure));
+        Assert.Contains("desk_note", failure!, StringComparison.Ordinal);
+    }
+
     /// <summary>The one hazard this wave's design deliberately accepts, pinned so it cannot happen quietly.
     ///
     /// <para><see cref="FixRowMapper"/>'s name-to-tag table is typed out again rather than shared with

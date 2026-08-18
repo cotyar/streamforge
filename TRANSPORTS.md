@@ -477,6 +477,126 @@ Bid, Offer), `146=1`+`55=EUR/USD` (NoRelatedSym=1: the symbol). The venue's `35=
 a `NoMDEntries` group, and `itemsPath` fans it into one row per entry with `side`/`price`/`size` pulled out
 of each.
 
+### `fix-duplex` — a bidirectional session (plan 019): configuring the two halves
+
+`fix-duplex` (plan 019, [`shared/StreamForge.Connectors.Fix/FixDuplexTransport.cs`](shared/StreamForge.Connectors.Fix/FixDuplexTransport.cs))
+is one live FIX session with an inbound half (execution reports, rejects, anything the venue sends back)
+and an outbound half (orders, cancels, replaces) — the third transport seam after `IInboundTransport` and
+`IPolledTransport`, `IDuplexTransport`. It is declared as **two entities that meet in the middle**:
+
+1. **A source** of kind `fix-duplex`, carrying the same `FixSourceConfig` the receive-only `fix` kind uses
+   (host/port/CompIDs/beginString/credentials/…) plus the persistence rules below, which are stricter here
+   than for `fix`. This source's inbound half behaves exactly like a `fix` source — same format
+   (`FileFormats.Fix`), same mapping, same row path into whatever table/pipeline reads from it.
+2. **A `duplex` sink**, on any `PipelineDefinition`/`TableDefinition`, naming that source by
+   `duplex.sourceName`. The sink holds no connection of its own — every send resolves the live session by
+   name, through `DuplexSessions.Find`, and forwards. Publishing a row to a table/pipeline with this sink
+   attached is what "sending an order" means: `SELECT * FROM my_orders` into a table whose `sinks` list
+   includes `{"kind": "duplex", "duplex": {"sourceName": "fixoe"}}` sends every row that lands in that
+   table out over `fixoe`'s session.
+
+**Why two entities and not one.** The whole point (plan 019 D2) is that tearing down the sink costs
+nothing — it owns no connection — while tearing down the session would re-logon an order session
+mid-flight. A pipeline/table's `Sinks` list is re-signed and rebuilt on ANY field edit, including an
+unrelated one (`SinkSelection.Signature`, a content hash of the active sink list, re-checked every 30s);
+if the session lived there, every such edit would cost a logon. It does not, because the session lives in
+the source's connector driver (the Orleans `ConnectorGrain` / Dapr `ConnectorActor` that already owns the
+inbound half) and the sink only ever asks it, by name, whether it is there.
+
+**Row → FIX mapping, and the `MsgType`-from-row rule.** A row reaching the outbound half needs a `MsgType`
+column (tag 35, e.g. `"D"` for `NewOrderSingle`) — **the message type comes from the ROW, not from
+`FixSourceConfig`**, because one duplex source's outbound half plausibly carries more than one message
+type across its lifetime (a `NewOrderSingle` here, an `OrderCancelRequest` there), and a per-source config
+default cannot express that. Every other column is looked up in a curated name → tag table
+(`FixRowMapper.TagByName`, the outbound mirror of the inbound format's tag table) covering the order/
+execution, market-data and party fields an outbound message plausibly carries; **a column with no known
+tag refuses the WHOLE row** rather than dropping just that column — see the reserved-column gotcha below
+for the one shape of "unknown column" the mapper does NOT refuse. `TransactTime` (tag 60) is stamped when
+absent on a `NewOrderSingle`/`OrderCancelRequest`/`OrderCancelReplaceRequest` row and **never overwritten**
+when the row already carries one — QuickFIX/n's `Session` layer stamps `SendingTime` (tag 52) for every
+outbound message but does not stamp tag 60, and FIX 4.4 requires it on those three message types, so
+leaving it unstamped produced a wire message venues reject (found in review, not by a wave — see
+`plans/019-fix-order-entry.md`'s "What actually landed").
+
+**The curated required-field table, and its ceiling.** `FixRequiredFields` gates three message types —
+`NewOrderSingle` (`ClOrdID`/`Symbol`/`Side`/`OrdType`/`OrderQty`), `OrderCancelRequest`
+(`OrigClOrdID`/`ClOrdID`/`Symbol`/`Side`), `OrderCancelReplaceRequest` (a cancel's fields plus `OrdType`/
+`OrderQty`) — refusing a row missing any of them before it ever reaches the wire, naming both the field
+and its tag number in the refusal. **A `MsgType` this table has no entry for is not gated at all** — this
+is not a real FIX dictionary (plan 018's "no dictionary" decision holds outbound too, just not
+unconditionally: this one curated table is the exception), so a message type outside these three sails
+through with whatever columns the row happened to carry. Required-field validation runs AFTER the
+readiness check (an order to a session that is not logged on is refused for that reason regardless of the
+row's own completeness — the operator's next action is the same either way) but ClOrdID generation (next
+paragraph) and mapping both run BEFORE it.
+
+**Opt-in `ClOrdID` generation, and what its uniqueness is — and is not.** `generateClOrdId` (default
+`false`) fills a missing `ClOrdID` with a fresh `Guid.NewGuid()` — off by default because a row missing
+`ClOrdID` is more useful refused than silently completed; a caller-supplied `ClOrdID` is **never**
+overwritten even when generation is on. A GENERATED id is unique for all practical purposes with no
+tracked registry (2^122 of them, and a fresh one every connection attempt rather than a per-session
+counter, so a reconnect needs no persisted base token). **A CALLER-SUPPLIED id is not checked for
+uniqueness at all** — there is no in-memory or persisted table of previously-sent `ClOrdID`s to check
+against, matching plan 019 D7's "the platform has no notion of an entity that is amended rather than
+appended." Two rows with the same caller-supplied `ClOrdID`, in one batch or across a reconnect, are both
+sent as given; a venue reject for the duplicate is an ordinary first-class inbound outcome (an
+`ExecutionReport` or `OrderCancelReject` row), not something this layer prevents.
+
+**Gotcha, found live rather than by a unit test: every row a duplex sink actually forwards carries
+platform-reserved columns, and the mapper must skip them.** A hand-built `Dictionary<string, object?>` in
+a unit test carries only the columns the test wrote. A REAL row — the only kind a `duplex` sink ever
+forwards in production — always carries `_ts` and `_source` (every row the engine produces has them;
+`StreamForge.Engine.PublicApi.EventRecord`'s own doc comment: "Reserved keys: `_ts`… `_source`"), and a
+row sourced from a TABLE's delta stream additionally carries `_weight` (`SinkStepGuard.RowOf` stamps it
+so a retraction is not indistinguishable from an insert downstream). Before wave 019-I2's live drop-copy
+check — the first check to send an order through a real `TableDefinition`'s SQL output rather than call
+`FixDuplexSession.SendAsync` directly with a hand-built row — `FixRowMapper.TryBuildMessage` refused
+**every single one** of these rows, on `_ts` first (pipeline-sourced) or `_weight` (table-sourced, after
+`_ts`/`_source` were fixed), because an unmapped column refuses the whole row. `FixRowMapper` now skips
+`_ts`/`_source`/`_weight` exactly like it already skips the `MsgType` column itself — a reserved platform
+column is not a business field with an opinion about FIX tags. The lesson generalizes: **a check that
+calls the session directly with a hand-built row cannot see anything the platform itself stamps onto a
+row before a sink ever touches it** — see this file's own note in `plans/019-fix-order-entry.md`'s "What
+actually landed" for the fuller account.
+
+**Worked example** — an "orders" table whose rows are sent out over a `fixoe` `fix-duplex` source:
+
+```json
+// POST /api/sources — the duplex session itself
+{
+  "name": "fixoe",
+  "kind": "fix-duplex",
+  "connector": {
+    "fix": {
+      "host": "oms.venue.example.com", "port": 9881,
+      "senderCompId": "STREAMFORGE", "targetCompId": "VENUE",
+      "beginString": "FIX.4.4", "heartBtIntSeconds": 30,
+      "resetOnLogon": false, "storePath": "/var/lib/streamforge/fix/fixoe.store",
+      "generateClOrdId": false
+    },
+    "mapping": { "itemsPath": "$", "fields": [
+      { "field": { "name": "ClOrdID", "type": "String" } },
+      { "field": { "name": "ExecID", "type": "String" } },
+      { "field": { "name": "OrdStatus", "type": "String" } }
+    ] }
+  }
+}
+```
+```json
+// POST /api/tables — orders flow in from "new_orders" and out over fixoe's session
+{
+  "name": "orders_sent",
+  "sql": "SELECT * FROM new_orders",
+  "sinks": [ { "kind": "duplex", "duplex": { "sourceName": "fixoe" } } ]
+}
+```
+A row `{"MsgType": "D", "ClOrdID": "ORD-1", "Symbol": "EUR/USD", "Side": "1", "OrdType": "2", "OrderQty":
+1000000, "Price": 1.2345}` landing in `new_orders` sends a `NewOrderSingle` over `fixoe`; the venue's
+`ExecutionReport` arrives back on `fixoe`'s inbound half and can be joined to the order that caused it —
+by `ClOrdID` — in ordinary platform SQL: `SELECT o.ClOrdID FROM orders_sent o INNER JOIN execs e ON
+o.ClOrdID = e.ClOrdID` (`execs` being a table `SELECT * FROM fixoe`) is the whole of plan 019 D7's
+correlation table, verified live end-to-end in `plans/019-fix-order-entry.md`'s "What actually landed".
+
 ### `fix-duplex` — mandatory sequence-number persistence, and how to recover (plan 019 D5)
 
 `fix-duplex` (plan 019, [`shared/StreamForge.Connectors.Fix/FixDuplexTransport.cs`](shared/StreamForge.Connectors.Fix/FixDuplexTransport.cs))

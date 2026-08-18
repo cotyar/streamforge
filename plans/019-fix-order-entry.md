@@ -1,8 +1,65 @@
 # Plan 019 — FIX order entry: a first-class bidirectional connector
 
-**Status: PLANNED. The design fork is CLOSED — option (b), a first-class bidirectional connector, was
-chosen on 2026-08-18.** The plan below is written against that choice; options (a) and (c) are recorded at
-the bottom for the record, not as live alternatives.
+**Status: DONE.** The design fork was CLOSED on 2026-08-18 — option (b), a first-class bidirectional
+connector. The plan below is written against that choice; options (a) and (c) are recorded at the bottom
+for the record, not as live alternatives.
+
+**What actually landed (2026-08-18), and where it diverged from the plan as written:**
+
+- **Three claims in the design section above were corrected by the waves that measured them, in place
+  rather than in a changelog** — D1's throughput-bound claim ("bounded by one grain's turn rate", corrected
+  after waves C and D found the send path never actually passes through the driver's turn at all), D4's
+  "both registries flagged `Duplex = true`" (wave B's reading is the one that survived: the flag means "this
+  kind implements `IDuplexTransport`", true only for the inbound `fix` kind, never for the outbound `duplex`
+  sink), and the wave table's D-row parenthetical about the Dapr actor ("no generation counter needed, turns
+  run to completion" — true for the actor's own state transitions, not for its background subscribe loop's
+  async disposal, which is exactly the belated-dispose race `DuplexSessions.Withdraw`'s identity check
+  exists to close). All three are marked at their exact location above, not summarized away here.
+- **The counters gap, closed by wave 019-B2** rather than left in the original waves' output: D2 deliberately
+  keeps the connector driver off the send path (the proxy sink calls the session directly), which left
+  `ConnectorRuntimeStatus`'s `DuplexSentTotal`/`DuplexFailedTotal`/`LastDuplexFailure` pinned at zero — the
+  driver had nothing to read. Fixed at the one object both halves actually touch: `IDuplexSession` itself now
+  carries `SentTotal`/`FailedTotal`/`LastFailure`, scoped to the session INSTANCE (a reconnect starts them at
+  zero — "is the current session healthy", not a durable ledger), and both drivers read them off the live
+  session. The tests that had pinned the old (wrong) behavior were updated to assert the real one, not
+  deleted.
+- **The `TransactTime` hole, found in review, not by a wave.** Wave F's required-field table
+  (`FixRequiredFields`) deliberately left `TransactTime` (tag 60) out on the reasoning that it is "stamped
+  at send time, like `SendingTime`" — half right: QuickFIX/n's `Session` layer stamps `SendingTime` (tag 52)
+  on every outbound message, but it does **not** stamp tag 60, and FIX 4.4 requires it on
+  `NewOrderSingle`/`OrderCancelRequest`/`OrderCancelReplaceRequest`. Left as written, every order this
+  connector could send was invalid on the wire. `FixRowMapper.WithTransactTimeIfNeeded` now stamps it when
+  absent and never overwrites a caller-supplied value — the friendlier of the two fixes available, since a
+  row that already knows its own transaction time keeps it.
+- **The reserved-column gap, found by wave 019-I2's live drop-copy check — and it is the reason that check
+  is worth having at all.** Every row a `duplex` sink forwards in PRODUCTION has been through the platform's
+  own row pipeline first, which stamps `_ts`/`_source` on every row the engine produces and `_weight` on a
+  TABLE delta specifically (`SinkStepGuard.RowOf`, "so a retraction is not indistinguishable from an insert
+  downstream"). `FixRowMapper.TryBuildMessage` refuses the WHOLE row on any column with no known outbound
+  tag — so before this wave, **every single row a real duplex sink ever forwarded failed**, on `_ts` first
+  (a pipeline-sourced sink) or `_weight` (a table-sourced one, the shape D7's correlation table needs, after
+  `_ts`/`_source` were fixed). No prior wave's tests caught this because every one of them calls
+  `FixDuplexSession.SendAsync` directly with a hand-built `Dictionary` that never carries these keys — see
+  "Deliverable 1" below for why only a check driven through a real `TableDefinition`'s SQL output could have
+  found it. Fixed the same way `MsgType` is already handled: `FixRowMapper` now skips `_ts`/`_source`/
+  `_weight` rather than refusing the row. Documented in `TRANSPORTS.md`'s `fix-duplex` section — and
+  covered by two committed unit tests added afterwards by the orchestrator, because the live check that
+  found it is a throwaway fixture that does not run in CI: without them the same bug could be reintroduced
+  tomorrow against a green suite. The second of the two pins the other direction — an unknown BUSINESS
+  column is still refused, so the fix skips three specific reserved names rather than making the mapper
+  permissive.
+- **The drop-copy acceptance check (D7's headline artifact) runs fully through the platform, not against a
+  simulated middle.** A real QuickFIX/n acceptor (a throwaway fixture, not committed — see "Deliverable 1")
+  replies to every `NewOrderSingle` with an `ExecutionReport` carrying the same `ClOrdID`; a `fix-duplex`
+  source and a `duplex` sink on a real table route 6 live orders through a real socket; and the match is
+  proven by an actual platform SQL table (`SELECT o.ClOrdID FROM orders_sent o INNER JOIN execs e ON
+  o.ClOrdID = e.ClOrdID`), not by comparing two lists in test code. It found the reserved-column bug above,
+  which nothing else in this plan's test suite could have. The "one session, proven" and "loud failure"
+  claims were verified against the same live instance: exactly one logon reached the acceptor for the whole
+  run, including across a sink field edit that provably rebuilt the sink's client (`RequireSession`
+  toggled, then a 7th order still routed correctly); and killing the acceptor flipped
+  `ConnectorRuntimeStatus.DuplexReady` to `false` and named the in-flight order's `ClOrdID` in
+  `LastDuplexFailure` within seconds, with no silent counter.
 
 **Depends on**: 018 (the `fix` format, `shared/StreamForge.Connectors.Fix`, `QuickFIXn.Core` already
 carried), 010 (`IInboundTransport`), 014 (`IPolledTransport`, the out-of-core connector project precedent).

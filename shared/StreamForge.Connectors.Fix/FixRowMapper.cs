@@ -46,6 +46,41 @@ public static class FixRowMapper
     /// own doc comment names as "the part an operator can actually act on".</summary>
     private const string ClOrdIdColumn = "ClOrdID";
 
+    /// <summary>Plan 019 wave 019-I2 (found live, not by a unit test): the row keys the PLATFORM stamps
+    /// onto a row on its way to a sink, in addition to whatever columns the row's own SQL selected —
+    /// <c>StreamForge.Engine.PublicApi.EventRecord.TimestampField</c> ("_ts") and <c>.SourceField</c>
+    /// ("_source"), present on every row the engine produces, plus <c>SinkStepGuard.RowOf</c>'s own
+    /// "_weight" (`shared/StreamForge.AppCore/Sinks/SinkStepGuard.cs`), stamped ONLY for a TABLE delta —
+    /// "so a retraction is not indistinguishable from an insert downstream", that class's own doc comment
+    /// says. This project cannot reference <c>StreamForge.Engine</c> OR <c>StreamForge.AppCore.Sinks</c>
+    /// (see this file's own doc comment on why the tag table is typed out rather than shared across a
+    /// project boundary — the same reasoning applies here), so the three literals are duplicated rather
+    /// than imported.
+    ///
+    /// <para><b>Before this set existed, EVERY row reaching <see cref="TryBuildMessage"/> from a real
+    /// duplex sink send — as opposed to a hand-built <c>Dictionary</c> in a unit test, which never carries
+    /// these keys — failed, 100% of the time.</b> A PIPELINE-sourced duplex sink failed on "_ts" (the
+    /// first key <see cref="Dictionary{TKey,TValue}"/> happened to enumerate); a TABLE-sourced one (the
+    /// only shape wave 019-I2's drop-copy check exercises — a duplex sink is declared on a
+    /// <c>TableDefinition</c>, not a <c>PipelineDefinition</c>, because D7's correlation table needs a
+    /// materialized "orders sent" table to join against) additionally carries "_weight" and failed on
+    /// THAT instead, one send at a time, only after the first two were fixed — this class's own doc
+    /// comment's "minimum that works" undersold how far short of a real row shape wave E/F's own unit
+    /// tests stayed. Wave E/F's acceptance tests never caught any of this because they call
+    /// <c>IDuplexSession.SendAsync</c> (via <c>FixDuplexSession</c>) directly with rows they constructed
+    /// by hand; only a check driven through a real <c>TableDefinition</c>'s SQL output — a duplex sink's
+    /// actual, only calling convention in production — carries the platform's own stamped keys and
+    /// exposed the gap.</para>
+    ///
+    /// <para>Skipped here exactly like <see cref="MsgTypeColumn"/> already is: a reserved platform column
+    /// is not a business field with an opinion about FIX tags, and silently dropping it (rather than
+    /// refusing the whole message) is the same judgment call <see cref="MsgTypeColumn"/>'s existing skip
+    /// already makes. A row's own genuine business column that happens to collide with one of these three
+    /// names cannot occur — all three are names the SQL layer itself reserves (see
+    /// <c>StreamForge.Engine.PublicApi</c>'s own doc comment: "Reserved keys: '_ts' … '_source'"), so no
+    /// column with these names ever reaches a row for a reason this class would need to second-guess.</para></summary>
+    private static readonly HashSet<string> ReservedRowColumns = new(StringComparer.Ordinal) { "_ts", "_source", "_weight" };
+
     /// <summary>Tag → name is <c>FixParser.TagNames</c>; this is that table's mirror image, name → tag,
     /// for the fields an outbound row plausibly carries. See this class's doc comment for why it is typed
     /// out again rather than shared.</summary>
@@ -148,9 +183,12 @@ public static class FixRowMapper
 
         foreach (var (key, value) in row)
         {
-            if (string.Equals(key, MsgTypeColumn, StringComparison.Ordinal) || value is null)
+            if (string.Equals(key, MsgTypeColumn, StringComparison.Ordinal) || value is null
+                || ReservedRowColumns.Contains(key))
             {
-                continue; // MsgType already written above; a null value is "no value provided", not a failure.
+                continue; // MsgType already written above; a null value is "no value provided", not a
+                          // failure; a reserved platform column (see ReservedRowColumns) is not a business
+                          // field with an opinion about FIX tags.
             }
 
             if (!TagByName.TryGetValue(key, out var tag))
