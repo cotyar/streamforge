@@ -56,6 +56,15 @@ public sealed record TransportDescriptor
     /// than inferred client-side because the console has no way to type-test a server object — and a button
     /// rendered hopefully, which then 400s, is worse than no button.</summary>
     public bool CanProbe { get; init; }
+
+    /// <summary>Plan 019: this kind's source half and sink half are two views of one live session — it
+    /// implements <c>IDuplexTransport</c> and is registered through <c>DuplexTransports</c>, which also
+    /// co-registers it into <c>InboundTransports</c> (see that registry's doc). Defaults to false so every
+    /// pre-019 transport's descriptor is unchanged; a duplex kind's descriptor appears in the catalog's
+    /// <c>Inbound</c> list (via the co-registration) with this flag true, and NOT in <c>Outbound</c> — the
+    /// outbound half is a proxy sink kind of its own, added in wave 019-B, not this same descriptor
+    /// duplicated into the other list.</summary>
+    public bool Duplex { get; init; }
 }
 
 /// <summary>One editable property of a transport's config object.</summary>

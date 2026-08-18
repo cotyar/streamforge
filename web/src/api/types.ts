@@ -203,6 +203,9 @@ export interface TransportDescriptor {
   /** Plan 014: the transport also implements ISchemaProbe, so the console renders "Discover schema" and
    *  posts to POST /api/transports/{kind}/probe. */
   canProbe: boolean
+  /** Plan 019: this kind's source half and sink half are two views of one live session. Optional — absent
+   *  on a pre-019 backend and on every non-duplex descriptor's wire shape until it opts in. */
+  duplex?: boolean
 }
 
 export type TransportFieldType = 'string' | 'secret' | 'number' | 'bool' | 'select' | 'text'
