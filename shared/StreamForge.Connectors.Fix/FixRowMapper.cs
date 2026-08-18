@@ -81,6 +81,44 @@ public static class FixRowMapper
         ["SecondaryExecID"] = 527, ["MaturityDate"] = 541,
     };
 
+    /// <summary>The message types whose FIX definition REQUIRES <c>TransactTime</c> (tag 60) — the order
+    /// entry types wave F curated. Kept here beside the tag table rather than in
+    /// <see cref="FixRequiredFields"/> because this is a send-time stamping concern, not a validation
+    /// one.</summary>
+    private static readonly HashSet<string> StampTransactTimeFor = new(StringComparer.Ordinal) { "D", "F", "G" };
+
+    /// <summary>Stamps <c>TransactTime</c> (tag 60) when an order-entry row does not carry one, returning
+    /// the row unchanged in every other case. The caller's dictionary is never mutated.
+    ///
+    /// <para><b>Why this exists.</b> Wave F left <c>TransactTime</c> out of
+    /// <see cref="FixRequiredFields"/>'s table on the reasoning that it is "stamped at send time, like
+    /// <c>SendingTime</c>". Half of that is right and the half that is wrong is the dangerous half:
+    /// QuickFIX/n's <c>Session</c> layer does stamp <c>SendingTime</c> (tag 52) — it does NOT stamp tag 60.
+    /// FIX 4.4 requires 60 on <c>D</c>/<c>F</c>/<c>G</c>, so leaving it neither required of the row nor
+    /// stamped here sent an order the venue rejects — precisely the outcome plan 019 D6 calls worse than
+    /// refusing to send. Stamping is the friendlier of the two available fixes: a row carrying its own
+    /// value keeps it (the platform never overwrites a caller's timestamp), and a row without one still
+    /// produces a message a venue will accept.</para>
+    ///
+    /// <para>ponytail: UTC now, formatted as FIX's UTCTimestamp with milliseconds. The value is the moment
+    /// this platform handed the row to the session, which is the best answer available here — a row that
+    /// wants the time its ORIGINATING system considered the transaction to have occurred must carry that
+    /// itself, and can.</para></summary>
+    public static Dictionary<string, object?> WithTransactTimeIfNeeded(Dictionary<string, object?> row)
+    {
+        if (MsgTypeOf(row) is not { } msgType
+            || !StampTransactTimeFor.Contains(msgType)
+            || (row.TryGetValue("TransactTime", out var existing) && existing is not null && existing.ToString()?.Length > 0))
+        {
+            return row;
+        }
+
+        return new Dictionary<string, object?>(row, StringComparer.Ordinal)
+        {
+            ["TransactTime"] = DateTime.UtcNow.ToString("yyyyMMdd-HH:mm:ss.fff", CultureInfo.InvariantCulture),
+        };
+    }
+
     /// <summary>Builds a <see cref="Message"/> from one row, or reports why it could not. NEVER throws for
     /// an ordinary mapping problem — see <see cref="StreamForge.AppCore.Transports.IDuplexSession.SendAsync"/>'s
     /// own doc comment for why that contract starts here, one layer below it.

@@ -143,7 +143,7 @@ public sealed class FixDuplexSession : IDuplexSession
 
         foreach (var originalRow in rows)
         {
-            var row = WithGeneratedClOrdIdIfNeeded(originalRow);
+            var row = FixRowMapper.WithTransactTimeIfNeeded(WithGeneratedClOrdIdIfNeeded(originalRow));
 
             if (!FixRowMapper.TryBuildMessage(row, out var message, out var mappingFailure))
             {
