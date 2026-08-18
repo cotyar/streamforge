@@ -1,7 +1,10 @@
 # Plan 017 — Native .NET CDC
 
-**Status: IN PROGRESS** (waves A–F landed; wave G — live DB integration — runs concurrently against real
-Postgres/SQL Server instances and has not reported back at the time this document was written).
+**Status: DONE.** Waves A–G landed: `CdcStamp`/`CdcLsn`, `MsSqlCdcPlanner`/`MsSqlCdcSource`,
+`PgRelationCache`/`PgTupleDecoder`/`PgCdcSource`, `CdcPreflight` with real bodies, both kinds registered,
+`docs/cdc.md`, and wave G's live-DB suite in `Tests/Integration/**`. Suites green at `cbbe5b0`:
+Orleans 2424, Dapr 695, excluding the 52 `DockerGate` tests, which skip without a local `postgres:17` /
+`mcr.microsoft.com/mssql/server:2022-latest` image.
 
 ## Why
 

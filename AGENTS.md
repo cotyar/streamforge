@@ -56,13 +56,17 @@ queue, `storePath`'s in-memory-vs-file-backed choice, at-most-once delivery) are
 
 ```bash
 ~/.dotnet/dotnet build orleans/StreamForge.sln
-~/.dotnet/dotnet test  orleans/StreamForge.sln     # 1676 tests — the whole suite must be green
+~/.dotnet/dotnet test  orleans/StreamForge.sln     # 2424 tests — the whole suite must be green
 ~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln
-~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 313 tests — the whole suite must be green
+~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 695 tests — the whole suite must be green
 cd web && bun run build
 ~/.dotnet/dotnet run --project orleans/src/StreamForge.Host   # :5199 + :5299
 cd dapr && ./tools/run.sh                                      # :5399 (needs `dapr init` done once)
 ```
+Both counts EXCLUDE the 52 live-database tests (`StreamForge.Connectors.Database.Tests/Integration/**`,
+shared by both solutions), which `DockerGate` skips with a stated reason unless a Docker daemon answers
+and the backend's image (`postgres:17`, `mcr.microsoft.com/mssql/server:2022-latest`) is already local —
+"0 integration tests ran" must never read as "integration passed".
 Orleans stream-transport knobs (post-005 latency work): `--Streams:Transport push` swaps the
 pull-based memory streams for the in-process push bus (`Host/Streaming/PushStream*`, p50 1ms vs
 stock 115ms on tableDelta); default `pull` is byte-identical stock Orleans, tunable via

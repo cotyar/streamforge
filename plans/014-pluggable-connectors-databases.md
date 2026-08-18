@@ -1,6 +1,10 @@
 # Plan 014 — Pluggable connectors + database ingress/egress
 
-**Status: IN PROGRESS.**
+**Status: DONE.** All waves A–M plus L·Docs landed: `IPolledTransport`/`PolledTransports`/`PolledSourceCore`,
+`CdcEnvelope`, the polled branch in both `ConnectorGrain` and `ConnectorActor`, `SinkSugar`,
+`shared/StreamForge.Connectors.Database/**`, the console editors, and the live-DB suite under
+`Tests/Integration/**`. Suites green at `cbbe5b0`: Orleans 2424, Dapr 695, excluding the 52 `DockerGate`
+tests, which skip without a local `postgres:17` / `mcr.microsoft.com/mssql/server:2022-latest` image.
 
 ## Why
 
