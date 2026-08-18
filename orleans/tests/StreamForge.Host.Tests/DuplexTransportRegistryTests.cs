@@ -86,7 +86,19 @@ public class DuplexTransportRegistryTests
 
         private sealed class Session(FluxTransport owner) : IDuplexSession
         {
+            // Plan 019 wave B2: mechanical implementation of IDuplexSession's new counters — accumulated
+            // in SendAsync below, exactly the "cumulative for this instance" scope the interface documents.
+            private long _sent;
+            private long _failed;
+            private DuplexSendFailure? _lastFailure;
+
             public bool IsReady => owner.SessionReady;
+
+            public long SentTotal => Interlocked.Read(ref _sent);
+
+            public long FailedTotal => Interlocked.Read(ref _failed);
+
+            public DuplexSendFailure? LastFailure => Volatile.Read(ref _lastFailure);
 
             public async IAsyncEnumerable<InboundMessage> SubscribeAsync([EnumeratorCancellation] CancellationToken ct)
             {
@@ -113,8 +125,9 @@ public class DuplexTransportRegistryTests
             {
                 if (!owner.SessionReady)
                 {
-                    return Task.FromResult(new DuplexSendOutcome(0, rows.Count,
-                        [.. rows.Select(r => new DuplexSendFailure(r.GetValueOrDefault("id")?.ToString(), null, "session not ready"))]));
+                    var notReadyFailures = rows.Select(r => new DuplexSendFailure(r.GetValueOrDefault("id")?.ToString(), null, "session not ready")).ToList();
+                    Record(0, notReadyFailures);
+                    return Task.FromResult(new DuplexSendOutcome(0, rows.Count, notReadyFailures));
                 }
 
                 var failures = new List<DuplexSendFailure>();
@@ -131,7 +144,22 @@ public class DuplexTransportRegistryTests
                     }
                 }
 
+                Record(sent, failures);
                 return Task.FromResult(new DuplexSendOutcome(sent, failures.Count, failures));
+            }
+
+            private void Record(int sent, IReadOnlyList<DuplexSendFailure> failures)
+            {
+                if (sent > 0)
+                {
+                    Interlocked.Add(ref _sent, sent);
+                }
+
+                if (failures.Count > 0)
+                {
+                    Interlocked.Add(ref _failed, failures.Count);
+                    Volatile.Write(ref _lastFailure, failures[^1]);
+                }
             }
         }
     }

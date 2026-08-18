@@ -170,46 +170,57 @@ public sealed class ConnectorGrain(
 
     public Task PingAsync() => Task.CompletedTask;
 
-    public Task<ConnectorRuntimeStatus> GetStatusAsync() => Task.FromResult(new ConnectorRuntimeStatus
+    public Task<ConnectorRuntimeStatus> GetStatusAsync()
     {
-        SourceName = state.State.Def?.Name ?? this.GetPrimaryKeyString(),
-        NextRunMs = state.State.NextRunMs,
-        LastRunMs = state.State.LastRunMs,
-        LastStatus = state.State.LastStatus,
-        LastError = state.State.LastError,
-        ConsecutiveFailures = state.State.ConsecutiveFailures,
-        EventsEmittedTotal = state.State.EventsEmittedTotal,
-        CoercionFailuresTotal = state.State.CoercionFailuresTotal,
-        EnvelopeSkippedTotal = state.State.EnvelopeSkippedTotal,
-        LastBatchCount = state.State.LastBatchCount,
-        Cursor = state.State.Cursor,
-        DuplexReady = DuplexReadyForCurrentDef(),
-        // Plan 019 wave C: DuplexSentTotal/DuplexFailedTotal/LastDuplexFailure are NOT populated here.
-        // IDuplexSession (shared/StreamForge.AppCore/Transports/IDuplexTransport.cs, wave A, already
-        // landed) exposes only IsReady and SendAsync — no cumulative counters this grain could read "off
-        // the live session" the way this field's own doc comment describes. The counters that actually
-        // exist live on StreamForge.AppCore.Sinks.DuplexSinkClient (wave B, DuplexSinkClient.Counters) —
-        // the SINK layer this grain was explicitly told not to reach into. Left at the record's own
-        // zero-value defaults; see this wave's report for the gap this leaves open.
-    });
+        var (ready, session) = DuplexStateForCurrentDef();
+        return Task.FromResult(new ConnectorRuntimeStatus
+        {
+            SourceName = state.State.Def?.Name ?? this.GetPrimaryKeyString(),
+            NextRunMs = state.State.NextRunMs,
+            LastRunMs = state.State.LastRunMs,
+            LastStatus = state.State.LastStatus,
+            LastError = state.State.LastError,
+            ConsecutiveFailures = state.State.ConsecutiveFailures,
+            EventsEmittedTotal = state.State.EventsEmittedTotal,
+            CoercionFailuresTotal = state.State.CoercionFailuresTotal,
+            EnvelopeSkippedTotal = state.State.EnvelopeSkippedTotal,
+            LastBatchCount = state.State.LastBatchCount,
+            Cursor = state.State.Cursor,
+            DuplexReady = ready,
+            // Plan 019 wave B2: IDuplexSession now exposes SentTotal/FailedTotal/LastFailure (the seam
+            // both halves touch — see that interface's own doc for why the counters live there rather than
+            // in the sink layer's SinkPublishCounters, which answers a different question and stays
+            // unmodified). Read straight off the live session, same "no local accumulation" shape
+            // DuplexReady already used — null session (not started, not duplex, or another process holds
+            // it) reads as the record's own zero/null defaults, which is the correct reading for "nothing
+            // to report" exactly like DuplexReady's false does.
+            DuplexSentTotal = session?.SentTotal ?? 0,
+            DuplexFailedTotal = session?.FailedTotal ?? 0,
+            LastDuplexFailure = session?.LastFailure.Format(),
+        });
+    }
 
-    /// <summary>Plan 019 D3: true/false only for a duplex-KIND source (one <see cref="DuplexTransports"/>
-    /// has a transport for) — null for every other kind, per <c>ConnectorRuntimeStatus.DuplexReady</c>'s
-    /// own doc ("null and false mean genuinely different things"). Reads <see cref="DuplexSessions"/>
-    /// directly rather than tracking anything locally: the session is opened by
+    /// <summary>Plan 019 D3: resolves the live duplex session for the currently-armed definition ONCE, so
+    /// <see cref="GetStatusAsync"/> reads <c>IsReady</c> and the three counters off the SAME session object
+    /// rather than risking two independent <see cref="DuplexSessions.Find"/> calls racing a reconnect
+    /// between them. Returns <c>(null, null)</c> for every kind that is not a registered duplex kind at
+    /// all — <c>ConnectorRuntimeStatus.DuplexReady</c>'s own doc: null and false mean genuinely different
+    /// things — and <c>(false, null)</c> when the kind IS duplex but nothing is currently published (session
+    /// down, mid-reconnect, or never started). The session is opened by
     /// <see cref="IDuplexTransport.OpenDuplex"/>, called from inside <see cref="SubscriberCore"/>'s
     /// reconnect loop (via <c>IInboundTransport.Open</c> delegating to it), never by this grain — so this
     /// grain has no reference of its own to hold, and querying the process-local rendezvous map is the
     /// only way to answer "is it ready right now".</summary>
-    private bool? DuplexReadyForCurrentDef()
+    private (bool? Ready, IDuplexSession? Session) DuplexStateForCurrentDef()
     {
         var def = state.State.Def;
         if (def is null || DuplexTransports.Find(def.Kind) is null)
         {
-            return null;
+            return (null, null);
         }
 
-        return DuplexSessions.Find(def.Name)?.IsReady ?? false;
+        var session = DuplexSessions.Find(def.Name);
+        return (session?.IsReady ?? false, session);
     }
 
     /// <summary>gRPC onRows callback entry (reached via a captured self-reference — see

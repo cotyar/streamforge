@@ -13,24 +13,19 @@ namespace StreamForge.AppCore.Sinks;
 /// a client that owns no connection costs nothing, where tearing down a live FIX session on an unrelated
 /// sink field edit would re-logon an order session mid-flight (plan 019's own motivating example).
 ///
-/// <para><b>The validation question, answered as far as this wave can answer it without new plumbing.</b>
-/// Plan 019 D2 requires "a duplex sink whose named source does not exist, or is not a duplex kind" to be a
-/// validation-time error. <see cref="Validate"/> below covers everything that needs NO catalog: the config
-/// is present, <see cref="DuplexSinkConfig.SourceName"/> is non-blank. It CANNOT cover "does a source named
-/// that actually exist" or "is it a duplex kind" — <see cref="ISinkTransport.Validate"/>'s signature is
-/// <c>(SinkSpec, List&lt;string&gt;)</c>, with no catalog reference to ask, and <see cref="SinkTransports.Validate"/>
-/// (the orchestrator that calls every transport's <see cref="Validate"/>) has the identical shape for the
-/// identical reason — see that method's own doc comment. The catalog IS available, though, exactly where
-/// this needs it: <c>PipelinesEndpoints.cs</c> and <c>TablesEndpoints.cs</c> already hold an
-/// <c>ICatalogFacade registry</c> in scope at the call sites that invoke <see cref="SinkTransports.Validate"/>
-/// (<c>SinkTransports.Validate's own doc, "the missing call site"</c>). The one-line-per-file addition that
-/// belongs there, once a wave owns those files: for every sink whose <c>Kind == SinkKinds.Duplex</c>, resolve
-/// <c>await registry.GetSourceAsync(expandedSourceName)</c> and add an error unless it is non-null AND
-/// <c>DuplexTransports.Find(source.Kind)</c> is non-null. Neither file is in this wave's ownership (see the
-/// wave brief), so it is reported here rather than built — widening <see cref="ISinkTransport.Validate"/>'s
-/// signature, or <see cref="SinkTransports.Validate"/>'s, to thread a catalog reference through is a new seam
-/// on a shape every existing sink transport implements, which is exactly the kind of decision this wave was
-/// told to stop and report rather than make unilaterally.</para>
+/// <para><b>The validation question — closed by wave 019-B2, in <see cref="DuplexSinkCatalogValidation"/>
+/// below, without widening anything.</b> Plan 019 D2 requires "a duplex sink whose named source does not
+/// exist, or is not a duplex kind" to be a validation-time error. <see cref="Validate"/> below covers
+/// everything that needs NO catalog: the config is present, <see cref="DuplexSinkConfig.SourceName"/> is
+/// non-blank. It CANNOT cover "does a source named that actually exist" or "is it a duplex kind" —
+/// <see cref="ISinkTransport.Validate"/>'s signature is <c>(SinkSpec, List&lt;string&gt;)</c>, with no
+/// catalog reference to ask, and <see cref="SinkTransports.Validate"/> (the orchestrator that calls every
+/// transport's <see cref="Validate"/>) has the identical shape for the identical reason — see that method's
+/// own doc comment. <b>Neither signature was widened</b> — the check instead lives in
+/// <see cref="DuplexSinkCatalogValidation.ValidateAsync"/>, called directly by
+/// <c>PipelinesEndpoints.cs</c> and <c>TablesEndpoints.cs</c> (both already hold an
+/// <c>ICatalogFacade registry</c> in scope at the same call sites that invoke
+/// <see cref="SinkTransports.Validate"/>), right after that call, into the same error list.</para>
 /// </summary>
 public sealed class DuplexSinkTransport : ISinkTransport
 {
@@ -303,4 +298,70 @@ public sealed class DuplexSinkClient : ISinkClient, IBatchSinkClient
     /// by the connector driver (Orleans <c>ConnectorGrain</c> / Dapr <c>ConnectorActor</c>, wave 019-C/D),
     /// not by this proxy.</summary>
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+
+/// <summary>
+/// Plan 019 D2 (wave 019-B2): the catalog-aware half of duplex sink validation that
+/// <see cref="DuplexSinkTransport.Validate"/> cannot do itself — "a duplex sink whose named source does
+/// not exist, or is not a duplex kind" is a save-time error. Deliberately NOT a widened
+/// <see cref="ISinkTransport.Validate"/> or <see cref="SinkTransports.Validate"/> signature (both frozen —
+/// see this class's containing file's own doc comment): this is a free-standing helper the two endpoint
+/// call sites (<c>PipelinesEndpoints.cs</c>, <c>TablesEndpoints.cs</c>) invoke directly, right after
+/// <see cref="SinkTransports.Validate"/>, appending into the SAME error list.
+/// </summary>
+public static class DuplexSinkCatalogValidation
+{
+    /// <summary>Checks every <see cref="SinkKinds.Duplex"/> sink in <paramref name="sinks"/> against the
+    /// catalog, appending to <paramref name="errors"/> — two distinguishable messages, because "no such
+    /// source" and "source X is not a duplex kind" have different fixes.
+    ///
+    /// <para><b><paramref name="entityName"/> and the one case it cannot cover.</b> A duplex sink's
+    /// <see cref="DuplexSinkConfig.SourceName"/> may contain the SAME <c>{name}</c> template every other
+    /// sink kind supports (<see cref="DuplexSinkClient"/>'s own doc: "so one spec can serve a whole
+    /// catalog"), expanded here with <paramref name="entityName"/> exactly like the runtime client expands
+    /// it. For a TABLE, that name is <c>TableDefinition.Name</c> — always known already, it is user-supplied
+    /// and validated for uniqueness before this ever runs, so <paramref name="entityName"/> is never null
+    /// from <c>TablesEndpoints.cs</c>. For a PIPELINE it is <c>PipelineDefinition.Id</c> — minted by
+    /// <c>RegistryGrain.CreatePipelineAsync</c>/<c>RegistryActor</c> as a fresh <c>Guid</c> ONLY once the
+    /// entity is actually created, so on <c>POST /api/pipelines</c> (before creation) there is no id yet to
+    /// substitute. <paramref name="entityName"/> is null for exactly that one call site; a sink whose
+    /// <c>SourceName</c> still contains the literal <c>{name}</c> token after a null-entityName no-op
+    /// expansion is SKIPPED here rather than reported as "no such source '{name}'" — a false rejection of
+    /// what is genuinely a template, not a typo. A literal (non-templated) source name is checked exactly
+    /// the same at every call site regardless. The gap this leaves — a pipeline created with a templated
+    /// duplex source that will never resolve — surfaces at runtime instead, the same loud-failure path plan
+    /// 019 D3 built for every other unresolvable duplex send (<see cref="DuplexSinkClient"/>'s "missing
+    /// session" branch); it is also caught on the very next <c>PUT</c>, where the id is always
+    /// known.</para></summary>
+    public static async Task ValidateAsync(
+        IReadOnlyList<SinkSpec> sinks, string? entityName, ICatalogFacade registry, List<string> errors)
+    {
+        foreach (var sink in sinks)
+        {
+            if (sink.Kind != SinkKinds.Duplex || sink.Duplex is not { } cfg || string.IsNullOrWhiteSpace(cfg.SourceName))
+            {
+                // Missing/blank config is DuplexSinkTransport.Validate's job (it runs first at every call
+                // site) — nothing for a catalog lookup to add.
+                continue;
+            }
+
+            var resolved = entityName is null ? cfg.SourceName : cfg.SourceName.Replace("{name}", entityName, StringComparison.Ordinal);
+            if (resolved.Contains("{name}", StringComparison.Ordinal))
+            {
+                // entityName unavailable (pipeline create, pre-id) AND the source name is genuinely
+                // templated — see this method's own doc for why this is skipped rather than misreported.
+                continue;
+            }
+
+            var source = await registry.GetSourceAsync(resolved);
+            if (source is null)
+            {
+                errors.Add($"duplex sink source '{resolved}' does not exist");
+            }
+            else if (DuplexTransports.Find(source.Kind) is null)
+            {
+                errors.Add($"duplex sink source '{resolved}' (kind '{source.Kind}') is not a duplex kind");
+            }
+        }
+    }
 }

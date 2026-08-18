@@ -31,15 +31,11 @@ namespace StreamForge.Host.Tests;
 /// tracked locally — <see cref="DuplexReady_IsNullForNonDuplexKinds_FalseWhenDown_TrueWhenLive"/>.</item>
 /// </list>
 ///
-/// <para><b>DuplexSentTotal/DuplexFailedTotal/LastDuplexFailure are deliberately NOT exercised here as
-/// "populated" — see <see cref="Status_DuplexCountersStayAtTheirZeroValueDefaults_TheDocumentedGap"/> and
-/// this wave's report.</b> <see cref="IDuplexSession"/> (wave A) exposes only <c>IsReady</c> and
-/// <c>SendAsync</c> — no cumulative counters. The counters that DO exist live on
-/// <c>StreamForge.AppCore.Sinks.DuplexSinkClient.Counters</c> (wave B), the sink layer this grain was told
-/// not to reach into. So there is nothing on the live session for <c>GetStatusAsync</c> to read for those
-/// three fields, and this test pins that they stay at their record defaults rather than silently guessing
-/// a design (e.g. routing sends back through the grain, which <see cref="DuplexSessions"/>'s own doc
-/// comment says is explicitly NOT what this wave built).</para>
+/// <para><b>Wave B2 closed the gap this file used to pin as open.</b> <see cref="IDuplexSession"/> now
+/// exposes <c>SentTotal</c>/<c>FailedTotal</c>/<c>LastFailure</c>, and <c>ConnectorGrain.GetStatusAsync</c>
+/// reads them straight off the live session the same read-through way it already read
+/// <c>DuplexReady</c> — see <see cref="Status_DuplexCountersReflectTheLiveSessionsSendHistory"/>, which
+/// replaces the old "stays at zero" pin now that there is something for the grain to read.</para>
 ///
 /// <para>Named "duplexgrain" — distinct from <c>DuplexTransportRegistryTests</c>'s "flux"/"flux-collision"
 /// (wave A) and whatever wave B/D register — same static-registry discipline
@@ -154,6 +150,12 @@ public sealed class DuplexConnectorGrainTests : IAsyncLifetime
             public TaskCompletionSource<bool>? CleanCompleteFirstSession;
 
             public bool Ready { get; set; } = true;
+
+            /// <summary>Plan 019 wave B2: when set, every <c>SendAsync</c> call on a session for this
+            /// source reports every row as failed rather than accepted — the deterministic hook the
+            /// counters test uses to exercise <c>DuplexFailedTotal</c>/<c>LastDuplexFailure</c>, not just
+            /// the (already-covered-elsewhere) accepted path.</summary>
+            public bool FailSends { get; set; }
         }
 
         private static readonly ConcurrentDictionary<string, SessionControl> Controls = new(StringComparer.Ordinal);
@@ -171,7 +173,20 @@ public sealed class DuplexConnectorGrainTests : IAsyncLifetime
             TaskCompletionSource<bool>? cleanCompleteSignal)
             : IDuplexSession
         {
+            // Plan 019 wave B2: mechanical implementation of IDuplexSession's new counters. Accumulated per
+            // session INSTANCE (not per source) — see the interface's own doc for why a reconnect (a fresh
+            // Session object from OpenDuplex) is expected to start these back at zero.
+            private long _sent;
+            private long _failed;
+            private DuplexSendFailure? _lastFailure;
+
             public bool IsReady => control.Ready;
+
+            public long SentTotal => Interlocked.Read(ref _sent);
+
+            public long FailedTotal => Interlocked.Read(ref _failed);
+
+            public DuplexSendFailure? LastFailure => Volatile.Read(ref _lastFailure);
 
             public async IAsyncEnumerable<InboundMessage> SubscribeAsync([EnumeratorCancellation] CancellationToken ct)
             {
@@ -205,8 +220,21 @@ public sealed class DuplexConnectorGrainTests : IAsyncLifetime
                 DuplexSessions.Withdraw(sourceName, this);
             }
 
-            public Task<DuplexSendOutcome> SendAsync(IReadOnlyList<Dictionary<string, object?>> rows, CancellationToken ct) =>
-                Task.FromResult(new DuplexSendOutcome(rows.Count, 0, []));
+            public Task<DuplexSendOutcome> SendAsync(IReadOnlyList<Dictionary<string, object?>> rows, CancellationToken ct)
+            {
+                if (control.FailSends)
+                {
+                    var failures = rows
+                        .Select(r => new DuplexSendFailure(r.GetValueOrDefault("id")?.ToString(), null, "simulated rejection"))
+                        .ToList();
+                    Interlocked.Add(ref _failed, failures.Count);
+                    Volatile.Write(ref _lastFailure, failures[^1]);
+                    return Task.FromResult(new DuplexSendOutcome(0, failures.Count, failures));
+                }
+
+                Interlocked.Add(ref _sent, rows.Count);
+                return Task.FromResult(new DuplexSendOutcome(rows.Count, 0, []));
+            }
         }
     }
 
@@ -419,7 +447,7 @@ public sealed class DuplexConnectorGrainTests : IAsyncLifetime
     // ------------------------------------------------------------------
 
     [Fact]
-    public async Task Status_DuplexCountersStayAtTheirZeroValueDefaults_TheDocumentedGap()
+    public async Task Status_DuplexCountersReflectTheLiveSessionsSendHistory()
     {
         var name = FreshName("dg_counters");
         var grain = _cluster.GrainFactory.GetGrain<IConnectorGrain>(name);
@@ -430,23 +458,43 @@ public sealed class DuplexConnectorGrainTests : IAsyncLifetime
             var session = await PollUntilNotNullAsync(() => DuplexSessions.Find(name), deadlineSeconds: 20);
             Assert.NotNull(session);
 
+            // Before any send, a live-but-untouched session reads as zero/null — not "no data available".
+            var beforeSend = await grain.GetStatusAsync();
+            Assert.Equal(0, beforeSend.DuplexSentTotal);
+            Assert.Equal(0, beforeSend.DuplexFailedTotal);
+            Assert.Null(beforeSend.LastDuplexFailure);
+
             // Send directly against the live session, the same way the wave-B proxy sink does (DuplexSessions.Find
             // + SendAsync, bypassing the grain entirely — see DuplexSessions' own doc on why: "the upgrade path is
             // to route the send through the grain/actor by key ... which is why it is not the first thing built").
+            // Wave B2: IDuplexSession now carries its own cumulative counters, so GetStatusAsync CAN reflect a
+            // send it never touched — it reads them straight off the same live session object.
             var outcome = await session!.SendAsync(
                 [new Dictionary<string, object?> { ["id"] = "ord-1" }], CancellationToken.None);
             Assert.Equal(1, outcome.Sent);
 
-            // Because the send never touched the grain, GetStatusAsync's counters cannot reflect it —
-            // IDuplexSession (wave A) exposes no cumulative counters for the grain to read instead. This is
-            // this wave's reported gap, pinned as a test rather than left as an unverified claim.
-            var status = await grain.GetStatusAsync();
-            Assert.Equal(0, status.DuplexSentTotal);
-            Assert.Equal(0, status.DuplexFailedTotal);
-            Assert.Null(status.LastDuplexFailure);
+            var afterAccepted = await grain.GetStatusAsync();
+            Assert.Equal(1, afterAccepted.DuplexSentTotal);
+            Assert.Equal(0, afterAccepted.DuplexFailedTotal);
+            Assert.Null(afterAccepted.LastDuplexFailure);
+
+            // Now force a rejection and confirm it shows up identified, not just counted — plan 019 D3's
+            // whole point for a NewOrderSingle.
+            DuplexGrainFakeTransport.ControlFor(name).FailSends = true;
+            var failedOutcome = await session.SendAsync(
+                [new Dictionary<string, object?> { ["id"] = "ord-2" }], CancellationToken.None);
+            Assert.Equal(1, failedOutcome.Failed);
+
+            var afterFailure = await grain.GetStatusAsync();
+            Assert.Equal(1, afterFailure.DuplexSentTotal);     // the earlier accepted send still counts
+            Assert.Equal(1, afterFailure.DuplexFailedTotal);
+            Assert.NotNull(afterFailure.LastDuplexFailure);
+            Assert.Contains("ord-2", afterFailure.LastDuplexFailure);
+            Assert.Contains("simulated rejection", afterFailure.LastDuplexFailure);
         }
         finally
         {
+            DuplexGrainFakeTransport.ControlFor(name).FailSends = false;
             await grain.StopAsync();
         }
     }

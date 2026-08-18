@@ -682,33 +682,38 @@ public static class ConnectorBookkeeping
     /// session is published AND reports itself ready — the same "no session found" and "found but not
     /// ready" cases both collapse to false, which is the correct reading for either.</para>
     ///
-    /// <para><b>Deliberately NOT populated here: <see cref="ConnectorRuntimeStatus.DuplexSentTotal"/>/
+    /// <para><b>Plan 019 wave B2 — <see cref="ConnectorRuntimeStatus.DuplexSentTotal"/>/
     /// <see cref="ConnectorRuntimeStatus.DuplexFailedTotal"/>/<see cref="ConnectorRuntimeStatus.LastDuplexFailure"/>.</b>
-    /// <see cref="IDuplexSession"/> (wave 019-A's contract, frozen for this wave) exposes only
-    /// <c>IsReady</c> and <c>SendAsync</c> — no cumulative counters of its own — and nothing sends through
-    /// this actor: <c>SendAsync</c> is reached by the proxy sink (wave 019-B, not yet built) resolving the
-    /// session directly via <see cref="DuplexSessions.Find"/>, bypassing this actor entirely by design
-    /// (D2). So there is no data source these three fields could read from without either (a) widening
-    /// <see cref="IDuplexSession"/> with counters, or (b) a new callback from the sink layer into
-    /// <see cref="IConnectorActor"/> (the <c>RecordSubscriberBatchAsync</c> pattern) — both are contract
-    /// changes outside this file's ownership, so they are reported rather than invented and these three
-    /// fields stay at <see cref="ConnectorRuntimeStatus"/>'s own defaults (0 / 0 / null) until a later
-    /// wave adds the wiring.</para></summary>
-    public static ConnectorRuntimeStatus ToStatus(ConnectorActorState state, string sourceName) => new()
+    /// <see cref="IDuplexSession"/> now exposes <c>SentTotal</c>/<c>FailedTotal</c>/<c>LastFailure</c> —
+    /// the seam both halves touch, added precisely because nothing sends through this actor
+    /// (<c>SendAsync</c> is reached by the proxy sink resolving the session directly via
+    /// <see cref="DuplexSessions.Find"/>, bypassing this actor entirely by design, D2) so there was
+    /// otherwise no data source for these fields. Read straight off the SAME resolved session used for
+    /// <c>DuplexReady</c> below, not a second independent lookup, so a reconnect landing between two calls
+    /// cannot mix one session's readiness with another's counters.</para></summary>
+    public static ConnectorRuntimeStatus ToStatus(ConnectorActorState state, string sourceName)
     {
-        SourceName = sourceName,
-        NextRunMs = state.NextRunMs,
-        LastRunMs = state.LastRunMs,
-        LastStatus = state.LastStatus,
-        LastError = state.LastError,
-        ConsecutiveFailures = state.ConsecutiveFailures,
-        EventsEmittedTotal = state.EventsEmittedTotal,
-        CoercionFailuresTotal = state.CoercionFailuresTotal,
-        EnvelopeSkippedTotal = state.EnvelopeSkippedTotal,
-        LastBatchCount = state.LastBatchCount,
-        Cursor = state.Cursor,
-        DuplexReady = DuplexTransports.Find(state.Def?.Kind) is null ? null : DuplexSessions.Find(sourceName)?.IsReady ?? false,
-    };
+        var isDuplexKind = DuplexTransports.Find(state.Def?.Kind) is not null;
+        var session = isDuplexKind ? DuplexSessions.Find(sourceName) : null;
+        return new ConnectorRuntimeStatus
+        {
+            SourceName = sourceName,
+            NextRunMs = state.NextRunMs,
+            LastRunMs = state.LastRunMs,
+            LastStatus = state.LastStatus,
+            LastError = state.LastError,
+            ConsecutiveFailures = state.ConsecutiveFailures,
+            EventsEmittedTotal = state.EventsEmittedTotal,
+            CoercionFailuresTotal = state.CoercionFailuresTotal,
+            EnvelopeSkippedTotal = state.EnvelopeSkippedTotal,
+            LastBatchCount = state.LastBatchCount,
+            Cursor = state.Cursor,
+            DuplexReady = isDuplexKind ? session?.IsReady ?? false : null,
+            DuplexSentTotal = session?.SentTotal ?? 0,
+            DuplexFailedTotal = session?.FailedTotal ?? 0,
+            LastDuplexFailure = session?.LastFailure.Format(),
+        };
+    }
 
     /// <summary>Applies one poll cycle's outcome to <paramref name="state"/> in place (plan 006 D-E):
     /// a null <see cref="PollCycleResult.Error"/> is success — resets the failure streak, sets

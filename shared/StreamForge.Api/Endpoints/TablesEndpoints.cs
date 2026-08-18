@@ -57,6 +57,16 @@ public static class TablesEndpoints
                 return Results.BadRequest(new ErrorResponse(string.Join("; ", sinkErrors)));
             }
 
+            // Plan 019 D2 (wave 019-B2): the catalog-aware half — a duplex sink whose named source does
+            // not exist, or is not a duplex kind, is a validation error too. Unlike a pipeline's Id, a
+            // table's Name IS req.Name — known here, before CreateTableAsync — so {name} expansion is
+            // always fully resolvable on this call site (contrast PipelinesEndpoints' create handler).
+            await DuplexSinkCatalogValidation.ValidateAsync(sinks, req.Name, registry, sinkErrors);
+            if (sinkErrors.Count > 0)
+            {
+                return Results.BadRequest(new ErrorResponse(string.Join("; ", sinkErrors)));
+            }
+
             try
             {
                 var def = new TableDefinition
@@ -127,6 +137,15 @@ public static class TablesEndpoints
             {
                 var sinkErrors = new List<string>();
                 SinkTransports.Validate(sinks, sinkErrors);
+                if (sinkErrors.Count > 0)
+                {
+                    return Results.BadRequest(new ErrorResponse(string.Join("; ", sinkErrors)));
+                }
+
+                // Plan 019 D2 (wave 019-B2): the catalog-aware half. req.Name is the table's new name —
+                // the same value assigned to existing.Name just below — so {name} expansion uses the name
+                // this table will actually have once this PUT completes, not the pre-rename one.
+                await DuplexSinkCatalogValidation.ValidateAsync(sinks, req.Name, registry, sinkErrors);
                 if (sinkErrors.Count > 0)
                 {
                     return Results.BadRequest(new ErrorResponse(string.Join("; ", sinkErrors)));

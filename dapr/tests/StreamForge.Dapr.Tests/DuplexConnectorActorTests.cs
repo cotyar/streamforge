@@ -132,6 +132,22 @@ public class DuplexConnectorActorTests
 
         public bool Disposed { get; private set; }
 
+        // Plan 019 wave B2: mechanical implementation of IDuplexSession's new counters — accumulated per
+        // session INSTANCE, matching the interface's documented "fresh session per OpenDuplex call, counters
+        // reset on reconnect" scope. FailNextSends lets a test force SendAsync to report every offered row
+        // as failed instead of accepted, without a second fake class.
+        private long _sent;
+        private long _failed;
+        private DuplexSendFailure? _lastFailure;
+
+        public bool FailNextSends { get; set; }
+
+        public long SentTotal => Interlocked.Read(ref _sent);
+
+        public long FailedTotal => Interlocked.Read(ref _failed);
+
+        public DuplexSendFailure? LastFailure => Volatile.Read(ref _lastFailure);
+
         public async IAsyncEnumerable<InboundMessage> SubscribeAsync([EnumeratorCancellation] CancellationToken ct)
         {
             if (endImmediately)
@@ -155,8 +171,21 @@ public class DuplexConnectorActorTests
             DuplexSessions.Withdraw(sourceName, this);
         }
 
-        public Task<DuplexSendOutcome> SendAsync(IReadOnlyList<Dictionary<string, object?>> rows, CancellationToken ct) =>
-            Task.FromResult(new DuplexSendOutcome(rows.Count, 0, []));
+        public Task<DuplexSendOutcome> SendAsync(IReadOnlyList<Dictionary<string, object?>> rows, CancellationToken ct)
+        {
+            if (FailNextSends)
+            {
+                var failures = rows
+                    .Select(r => new DuplexSendFailure(r.GetValueOrDefault("id")?.ToString(), null, "simulated rejection"))
+                    .ToList();
+                Interlocked.Add(ref _failed, failures.Count);
+                Volatile.Write(ref _lastFailure, failures[^1]);
+                return Task.FromResult(new DuplexSendOutcome(0, failures.Count, failures));
+            }
+
+            Interlocked.Add(ref _sent, rows.Count);
+            return Task.FromResult(new DuplexSendOutcome(rows.Count, 0, []));
+        }
     }
 
     private static SourceDefinition DuplexSource(string name) => new()
@@ -434,12 +463,13 @@ public class DuplexConnectorActorTests
     }
 
     [Fact]
-    public void ToStatus_DuplexSentFailedAndLastFailure_StayAtContractDefaults()
+    public void ToStatus_DuplexSentFailedAndLastFailure_StayAtContractDefaults_ForANonDuplexKind()
     {
-        // No code path in this wave increments these — see ConnectorBookkeeping.ToStatus's own doc comment
-        // for why (SendAsync is reached by the not-yet-built proxy sink, IDuplexSession exposes no
-        // cumulative counters, and this actor must not reach into the sink layer to invent some). Pinned
-        // here so a future wave that DOES wire them up changes this assertion deliberately, not by accident.
+        // A non-duplex kind has no outbound half at all (DuplexTransports.Find(kind) is null), so
+        // ConnectorBookkeeping.ToStatus never resolves a session for it — these three fields stay at the
+        // record's own defaults regardless of what wave B2 wired up for genuine duplex kinds. See
+        // ToStatus_DuplexCounters_ReflectTheLiveSessionsSendHistory below for the duplex-kind case, where
+        // the same fields ARE populated.
         var state = new ConnectorActorState { Def = new SourceDefinition { Name = "s1", Kind = SourceKinds.Url }, EventsEmittedTotal = 5, LastStatus = "ok" };
 
         var status = ConnectorBookkeeping.ToStatus(state, "s1");
@@ -450,5 +480,50 @@ public class DuplexConnectorActorTests
         // And every pre-existing field this wave did not touch is unaffected.
         Assert.Equal(5, status.EventsEmittedTotal);
         Assert.Equal("ok", status.LastStatus);
+    }
+
+    [Fact]
+    public void ToStatus_DuplexCounters_ReflectTheLiveSessionsSendHistory()
+    {
+        // Plan 019 wave B2: IDuplexSession now carries its own cumulative counters (the seam both the
+        // driver and the proxy sink touch), so ToStatus CAN read a send it never routed itself — straight
+        // off the live session, same read-through shape DuplexReady already used.
+        var name = $"status-counters-{Guid.NewGuid():N}";
+        var session = new FakeSession(name, endImmediately: false, disposeDelay: TimeSpan.Zero) { IsReady = true };
+        try
+        {
+            DuplexSessions.Publish(name, session);
+            var state = new ConnectorActorState { Def = DuplexSource(name) };
+
+            var beforeSend = ConnectorBookkeeping.ToStatus(state, name);
+            Assert.Equal(0, beforeSend.DuplexSentTotal);
+            Assert.Equal(0, beforeSend.DuplexFailedTotal);
+            Assert.Null(beforeSend.LastDuplexFailure);
+
+            var sendOutcome = session.SendAsync(
+                [new Dictionary<string, object?> { ["id"] = "ord-1" }], CancellationToken.None).GetAwaiter().GetResult();
+            Assert.Equal(1, sendOutcome.Sent);
+
+            var afterAccepted = ConnectorBookkeeping.ToStatus(state, name);
+            Assert.Equal(1, afterAccepted.DuplexSentTotal);
+            Assert.Equal(0, afterAccepted.DuplexFailedTotal);
+            Assert.Null(afterAccepted.LastDuplexFailure);
+
+            session.FailNextSends = true;
+            var failOutcome = session.SendAsync(
+                [new Dictionary<string, object?> { ["id"] = "ord-2" }], CancellationToken.None).GetAwaiter().GetResult();
+            Assert.Equal(1, failOutcome.Failed);
+
+            var afterFailure = ConnectorBookkeeping.ToStatus(state, name);
+            Assert.Equal(1, afterFailure.DuplexSentTotal);
+            Assert.Equal(1, afterFailure.DuplexFailedTotal);
+            Assert.NotNull(afterFailure.LastDuplexFailure);
+            Assert.Contains("ord-2", afterFailure.LastDuplexFailure);
+            Assert.Contains("simulated rejection", afterFailure.LastDuplexFailure);
+        }
+        finally
+        {
+            DuplexSessions.Withdraw(name, session);
+        }
     }
 }

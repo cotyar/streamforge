@@ -57,6 +57,17 @@ public static class PipelinesEndpoints
                 return Results.BadRequest(new ErrorResponse(string.Join("; ", sinkErrors)));
             }
 
+            // Plan 019 D2 (wave 019-B2): the catalog-aware half — a duplex sink whose named source does
+            // not exist, or is not a duplex kind, is a validation error too. entityName is null here
+            // (pipeline Id does not exist until CreatePipelineAsync mints one below) — see
+            // DuplexSinkCatalogValidation.ValidateAsync's own doc for why that means a templated
+            // {name} source name is skipped rather than misreported on this specific call site.
+            await DuplexSinkCatalogValidation.ValidateAsync(sinks, entityName: null, registry, sinkErrors);
+            if (sinkErrors.Count > 0)
+            {
+                return Results.BadRequest(new ErrorResponse(string.Join("; ", sinkErrors)));
+            }
+
             // Compile-check for diagnostics; draft-friendly — never blocks creation beyond the empty check above.
             var schemas = await BuildSchemasAsync(registry);
             _ = SqlCompiler.Compile(sugar.Sql, schemas);
@@ -114,6 +125,15 @@ public static class PipelinesEndpoints
             {
                 var sinkErrors = new List<string>();
                 SinkTransports.Validate(sinks, sinkErrors);
+                if (sinkErrors.Count > 0)
+                {
+                    return Results.BadRequest(new ErrorResponse(string.Join("; ", sinkErrors)));
+                }
+
+                // Plan 019 D2 (wave 019-B2): the catalog-aware half. Unlike POST, the pipeline's id is
+                // already known here (it predates this PUT) so a templated {name} source name resolves
+                // fully — no skip case applies on this call site.
+                await DuplexSinkCatalogValidation.ValidateAsync(sinks, existing.Id, registry, sinkErrors);
                 if (sinkErrors.Count > 0)
                 {
                     return Results.BadRequest(new ErrorResponse(string.Join("; ", sinkErrors)));

@@ -34,6 +34,14 @@ public class DuplexSinkTests
         public List<IReadOnlyList<Dictionary<string, object?>>> Sends { get; } = [];
         public Func<IReadOnlyList<Dictionary<string, object?>>, CancellationToken, Task<DuplexSendOutcome>>? OnSend { get; set; }
 
+        // Plan 019 wave B2: mechanical implementation of IDuplexSession's new counters. This file's own
+        // subject is DuplexSinkClient/SinkPublishCounters (the sink layer's own, separate counters — see
+        // that class's doc for why the two are not the same thing), so these are not asserted on here;
+        // they exist because the interface now requires them of every IDuplexSession.
+        public long SentTotal { get; private set; }
+        public long FailedTotal { get; private set; }
+        public DuplexSendFailure? LastFailure { get; private set; }
+
         public async IAsyncEnumerable<InboundMessage> SubscribeAsync([EnumeratorCancellation] CancellationToken ct)
         {
             // Never yields, never completes cleanly — this fake's inbound half is not under test here;
@@ -48,9 +56,29 @@ public class DuplexSinkTests
         public Task<DuplexSendOutcome> SendAsync(IReadOnlyList<Dictionary<string, object?>> rows, CancellationToken ct)
         {
             Sends.Add(rows);
-            return OnSend is not null
+            // Deliberately NOT an `async` method: two tests below (SessionThrowsSynchronouslyBeforeReturningATask_IsAlsoCaught
+            // and its sibling) depend on OnSend's synchronous throw propagating synchronously out of THIS
+            // call, before any Task is returned — wrapping the body in `async` would instead capture that
+            // throw into a faulted Task, silently testing a different code path in DuplexSinkClient than the
+            // one these tests name. So OnSend is invoked directly here, and only a genuinely-returned Task is
+            // handed to RecordAsync below to update the new counters once it completes.
+            var task = OnSend is not null
                 ? OnSend(rows, ct)
                 : Task.FromResult(new DuplexSendOutcome(rows.Count, 0, []));
+            return RecordAsync(task);
+        }
+
+        private async Task<DuplexSendOutcome> RecordAsync(Task<DuplexSendOutcome> task)
+        {
+            var outcome = await task.ConfigureAwait(false);
+            SentTotal += outcome.Sent;
+            FailedTotal += outcome.Failed;
+            if (outcome.Failures.Count > 0)
+            {
+                LastFailure = outcome.Failures[^1];
+            }
+
+            return outcome;
         }
     }
 
