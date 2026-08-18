@@ -734,6 +734,28 @@ public sealed class ConnectorRuntimeStatus
     /// shape, as <see cref="CoercionFailuresTotal"/>: silence would be indistinguishable from a source
     /// that simply has no deletes.</summary>
     [Id(10)] public long EnvelopeSkippedTotal { get; set; }
+
+    /// <summary>Plan 019 D3: true when this source's duplex session is established and can accept a send
+    /// right now. Null for every kind that has no outbound half — which is all of them but a duplex kind,
+    /// so null and false mean genuinely different things here: "there is no session to be ready" versus
+    /// "there is one and it is down".</summary>
+    [Id(11)] public bool? DuplexReady { get; set; }
+
+    /// <summary>Plan 019 D3: rows this source's outbound half accepted, cumulative since activation. Same
+    /// shape and same reasoning as <see cref="EventsEmittedTotal"/>, for the other direction.</summary>
+    [Id(12)] public long DuplexSentTotal { get; set; }
+
+    /// <summary>Plan 019 D3: rows the outbound half could not deliver. A counter is NOT the whole story
+    /// for an order — see <see cref="LastDuplexFailure"/> — but it is what makes "some went out and some
+    /// did not" visible at a glance, and it must never be the only place a failure lands.</summary>
+    [Id(13)] public long DuplexFailedTotal { get; set; }
+
+    /// <summary>Plan 019 D3: the most recent outbound failure, identified rather than merely counted —
+    /// for a FIX session that means the order's <c>ClOrdID</c> and the reason. This field exists because
+    /// <c>ISinkClient.PublishAsync</c> may never throw, so an order that did not go out has no other way
+    /// to reach an operator; "counted in a failure counter" was explicitly rejected in plan 019 §2 as an
+    /// acceptable outcome for a <c>NewOrderSingle</c>.</summary>
+    [Id(14)] public string? LastDuplexFailure { get; set; }
 }
 
 // ---- REST helper DTOs (cross HTTP only, but follow house serialization style anyway) ----
