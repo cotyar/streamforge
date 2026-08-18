@@ -72,6 +72,35 @@ namespace StreamForge.Dapr.Host.Actors;
 /// is plain BCL file access via <see cref="ConnectorPollCycle.ExecuteFile"/>/
 /// <see cref="ConnectorPollCycle.ExecuteFolder"/> — no injected delegate needed on this side (those
 /// methods already take the concrete <see cref="FileLedger"/>/<see cref="DedupTracker"/> instances).</para>
+///
+/// <para><b>Plan 019 (wave D) — a duplex kind needs NO changes to <see cref="StartAsync"/>/
+/// <see cref="OnActivateAsync"/>'s message-transport arm.</b> A duplex transport (registered through
+/// <c>DuplexTransports.Register</c>, which co-registers into <see cref="InboundTransports"/> — see that
+/// class's doc) is found by the exact same <c>InboundTransports.Find(def.Kind)</c> line
+/// <see cref="StartTransportSubscriber"/> already had, and driven by the exact same
+/// <see cref="SubscriberCore"/>: <c>SubscriberCore.RunAsync</c> calls <c>IInboundTransport.Open</c>, and
+/// <c>IDuplexTransport.Open</c> is contractually required to delegate to <c>OpenDuplex</c> (see
+/// <see cref="IDuplexTransport"/>'s doc), which is where the session gets published into
+/// <see cref="DuplexSessions"/> — and the session's own <c>DisposeAsync</c> (called from
+/// <c>SubscriberCore</c>'s per-attempt <c>finally</c>) is where it gets withdrawn. Neither publish nor
+/// withdraw is this actor's job; see <see cref="ConnectorBookkeeping.ToStatus"/>'s doc for the one place
+/// this actor DOES touch the seam (reading <see cref="ConnectorRuntimeStatus.DuplexReady"/> back out).
+///
+/// <b>The one place turn-serialization does NOT reach:</b> the "no generation counter needed" reasoning
+/// (see <see cref="StartAsync"/>'s own comment) covers this actor's OWN state transitions
+/// (<c>_transportCts</c> cancel-and-replace happens inside a single turn, so two starts can never race
+/// each other) but does NOT cover the background <see cref="SubscriberCore.RunAsync"/> task's async
+/// unwind: cancelling <c>_transportCts</c> in <see cref="StopAsync"/> does not block until that task's
+/// <c>await subscription.DisposeAsync()</c> actually runs — it runs later, on the background task's own
+/// thread, outside any actor turn. If <see cref="StartAsync"/> is called again before that unwind
+/// completes (a rapid stop/start, or an ordinary config-edit upsert), the OLD session's belated
+/// <c>DisposeAsync</c>/withdraw can arrive strictly after the NEW session's publish. This is exactly the
+/// race <see cref="DuplexSessions.Withdraw"/>'s compare-and-remove (reference identity, not equality) is
+/// built to absorb: a stale withdraw that loses the race removes nothing, because the map no longer holds
+/// that exact session object. So the guarantee holds — not because this actor's turns are serialized (they
+/// are, but that is not what closes this particular gap) but because <see cref="DuplexSessions"/> was built
+/// assuming they cannot be relied on for a long-lived session's async teardown. Proven in
+/// dapr/tests/StreamForge.Dapr.Tests/DuplexConnectorActorTests.cs.</para>
 /// </summary>
 public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogger<ConnectorActor> logger)
     : Actor(host), IConnectorActor
@@ -643,7 +672,28 @@ public static class ConnectorBookkeeping
     /// straight copy — the projection exists as a method rather than an object initializer inside
     /// <see cref="ConnectorActor.GetStatusAsync"/> so that "the cursor actually reaches
     /// <see cref="ConnectorRuntimeStatus"/>" is a testable claim rather than a line nobody can execute
-    /// without an actor host.</summary>
+    /// without an actor host.
+    ///
+    /// <para><b>Plan 019 D3 — <see cref="ConnectorRuntimeStatus.DuplexReady"/>.</b> Read straight off
+    /// <see cref="DuplexSessions"/>, never off the sink layer (this actor has no business knowing a proxy
+    /// sink exists): null when <paramref name="state"/>'s kind is not a registered duplex kind at all
+    /// ("there is no outbound half"), false when the kind IS duplex but no session is currently published
+    /// for <paramref name="sourceName"/> (stopped, mid-reconnect, or never started), true only when a live
+    /// session is published AND reports itself ready — the same "no session found" and "found but not
+    /// ready" cases both collapse to false, which is the correct reading for either.</para>
+    ///
+    /// <para><b>Deliberately NOT populated here: <see cref="ConnectorRuntimeStatus.DuplexSentTotal"/>/
+    /// <see cref="ConnectorRuntimeStatus.DuplexFailedTotal"/>/<see cref="ConnectorRuntimeStatus.LastDuplexFailure"/>.</b>
+    /// <see cref="IDuplexSession"/> (wave 019-A's contract, frozen for this wave) exposes only
+    /// <c>IsReady</c> and <c>SendAsync</c> — no cumulative counters of its own — and nothing sends through
+    /// this actor: <c>SendAsync</c> is reached by the proxy sink (wave 019-B, not yet built) resolving the
+    /// session directly via <see cref="DuplexSessions.Find"/>, bypassing this actor entirely by design
+    /// (D2). So there is no data source these three fields could read from without either (a) widening
+    /// <see cref="IDuplexSession"/> with counters, or (b) a new callback from the sink layer into
+    /// <see cref="IConnectorActor"/> (the <c>RecordSubscriberBatchAsync</c> pattern) — both are contract
+    /// changes outside this file's ownership, so they are reported rather than invented and these three
+    /// fields stay at <see cref="ConnectorRuntimeStatus"/>'s own defaults (0 / 0 / null) until a later
+    /// wave adds the wiring.</para></summary>
     public static ConnectorRuntimeStatus ToStatus(ConnectorActorState state, string sourceName) => new()
     {
         SourceName = sourceName,
@@ -657,6 +707,7 @@ public static class ConnectorBookkeeping
         EnvelopeSkippedTotal = state.EnvelopeSkippedTotal,
         LastBatchCount = state.LastBatchCount,
         Cursor = state.Cursor,
+        DuplexReady = DuplexTransports.Find(state.Def?.Kind) is null ? null : DuplexSessions.Find(sourceName)?.IsReady ?? false,
     };
 
     /// <summary>Applies one poll cycle's outcome to <paramref name="state"/> in place (plan 006 D-E):
