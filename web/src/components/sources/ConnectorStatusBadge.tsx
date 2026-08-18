@@ -39,6 +39,11 @@ export function ConnectorStatusBadge({ name }: { name: string }) {
     status.lastStatus === 'ok' ? 'bg-primary' : status.lastStatus === 'error' ? 'bg-destructive' : 'bg-muted-foreground'
   const badgeVariant = status.lastStatus === 'ok' ? 'default' : status.lastStatus === 'error' ? 'destructive' : 'secondary'
 
+  // Plan 019 D3: `null`/undefined means this source has no outbound half at all (an ordinary source) —
+  // render nothing duplex-related. `false` vs `true` is a real session that is down vs ready; collapsing
+  // that distinction with "no session" would paint every ordinary source as a broken one.
+  const hasDuplex = status.duplexReady !== null && status.duplexReady !== undefined
+
   return (
     <div className="flex flex-col gap-1 text-[11px] text-muted-foreground">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
@@ -59,9 +64,33 @@ export function ConnectorStatusBadge({ name }: { name: string }) {
           </span>
         )}
       </div>
+      {hasDuplex && (
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+          <Badge variant={status.duplexReady ? 'default' : 'destructive'} className="gap-1.5">
+            <span className={cn('size-1.5 rounded-full', status.duplexReady ? 'bg-primary' : 'bg-destructive')} />
+            duplex session {status.duplexReady ? 'ready' : 'down'}
+          </Badge>
+          <span title="Counts for the CURRENT session only — they reset to 0 on every reconnect, not a lifetime total">
+            <span className="font-mono text-foreground">{status.duplexSentTotal ?? 0}</span> sent this session
+          </span>
+          {!!status.duplexFailedTotal && (
+            <span
+              className="text-destructive"
+              title="Counts for the CURRENT session only — they reset to 0 on every reconnect, not a lifetime total"
+            >
+              <span className="font-mono">{status.duplexFailedTotal}</span> failed this session
+            </span>
+          )}
+        </div>
+      )}
       {status.lastError && (
         <p className="truncate text-destructive" title={status.lastError}>
           {status.lastError}
+        </p>
+      )}
+      {status.lastDuplexFailure && (
+        <p className="break-words text-destructive" title={status.lastDuplexFailure}>
+          {status.lastDuplexFailure}
         </p>
       )}
     </div>

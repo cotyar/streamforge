@@ -258,6 +258,22 @@ export interface ConnectorRuntimeStatus {
    *  declared type. Under DropRow/RejectBatch these are rows that did not land, so the counter is the
    *  queryable half of "counted and surfaced". Absent from a pre-009 backend. */
   coercionFailuresTotal?: number
+  /** Plan 019 D3: `null` (or absent, from a pre-019 backend) means this source has no outbound half at
+   *  all — an ordinary source, nothing to show. `false` means it has one and it is down right now. `true`
+   *  means the session is up and can accept a send. Deliberately three-valued: collapsing null and false
+   *  would paint every non-duplex source as a broken session. See `ConnectorRuntimeStatus.DuplexReady`
+   *  (shared/StreamForge.Contracts/ConnectorModels.cs) for the server-side doc this mirrors. */
+  duplexReady?: boolean | null
+  /** Plan 019 D3: rows the outbound half accepted, scoped to the CURRENT session instance only — it
+   *  resets to 0 on every reconnect (see `IDuplexSession.SentTotal`'s own doc). Not a lifetime total. */
+  duplexSentTotal?: number
+  /** Plan 019 D3: rows the outbound half could not deliver, same per-session reset-on-reconnect scope as
+   *  `duplexSentTotal`. */
+  duplexFailedTotal?: number
+  /** Plan 019 D3: the most recent outbound failure, already formatted server-side with its correlation id
+   *  (a FIX order's `ClOrdID`) first — render verbatim, do not re-parse or truncate it away. `null`/absent
+   *  means this session (if any) has not failed a send. */
+  lastDuplexFailure?: string | null
 }
 
 /** POST /api/sources/schema/mapping-validate */
