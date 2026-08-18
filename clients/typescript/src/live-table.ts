@@ -18,12 +18,16 @@
 
 import { NotReady, StreamForgeError } from "./errors.js";
 import type { Transport } from "./transport.js";
-import { ZSet, type Delta, type Row } from "./zset.js";
+import { ZSet, type Delta, type Entry, type Row } from "./zset.js";
 
 const FLUSH_MS = 120; // coalesce window for onChange callbacks -- mirrors live.py's FLUSH_S
 const MAX_BACKOFF_MS = 15_000;
 
-export type ChangeListener = (rows: readonly Row[]) => void;
+/** `touched` is the set of canonical keys (zset.ts's `canonicalKey`) that changed in the batch(es)
+ * folded into this emit -- additive alongside `rows` so an existing one-arg listener keeps working
+ * unchanged (JS ignores the extra argument). Resolve a key to its row with `LiveTable.row()`; a
+ * key absent there was retracted, not upserted -- see that method's doc comment. */
+export type ChangeListener = (rows: readonly Row[], touched: ReadonlySet<string>) => void;
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -112,6 +116,20 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
   /** Current rows, frozen -- a fresh array each time state changes, never mutated in place. */
   get rows(): readonly Row[] {
     return this.rowsFrozen;
+  }
+
+  /** Current rows plus each one's canonical key and summed weight -- delegates to the underlying
+   * ZSet's own `.entries()` (see zset.ts). */
+  entries(): Entry[] {
+    return this.zset.entries();
+  }
+
+  /** The current row for one canonical key (e.g. one drawn from a `ChangeListener`'s `touched`
+   * set), or `undefined` if that key isn't present. A touched key absent here means the tuple was
+   * retracted, not upserted -- that absence IS the delete signal, since ZSet never keeps a
+   * tombstone around to say so explicitly. Delegates to ZSet.get(). */
+  row(key: string): Row | undefined {
+    return this.zset.get(key);
   }
 
   get ready(): boolean {
@@ -290,6 +308,24 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
     this.readyFlag = true;
     for (const w of this.readyWaiters.splice(0)) w.resolve();
 
+    // BUG FIX: on a RECONNECT (not the first attempt), the reseed above just silently changed
+    // `.rows` out from under every listener with no notification. `readyWaiters` is empty by now
+    // regardless -- it was already drained on the first successful attempt, so the resolve loop
+    // just above is a no-op here -- and nothing else calls emit() until the next LIVE delta
+    // arrives, which on a quiet table can be never (this method's own top comment: deltas emitted
+    // while the connection was down are gone, not buffered anywhere to replay later). So a
+    // listener would keep showing pre-drop state indefinitely even though the table has already
+    // silently moved on. Fix: emit right here, once, for every reconnect but the very first
+    // connection (where nobody could be listening yet -- LiveTable.connect() hasn't returned a
+    // handle to subscribe onChange() on, so emitting there would be a no-op at best and a
+    // misleading "changed" notification for the initial state at worst -- hence `_firstAttempt`
+    // gates it, guaranteeing exactly one emit per reconnect and none on first connect). `touched`
+    // is every current key rather than a guess at what moved: everything may have changed across
+    // the gap, and that is the honest signal to send.
+    if (!_firstAttempt) {
+      this.emit(new Set(this.zset.entries().map((e) => e.key)));
+    }
+
     // Live loop: continue from `pendingNext`, which is already in flight and represents
     // whatever arrives next after the snapshot race settled.
     while (!this.closed) {
@@ -311,6 +347,9 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
   }
 
   private scheduleEmit(touched: string[]): void {
+    // ZSet.apply() reports every key whose presence or content actually changed (asserts,
+    // retractions, and superseded stale keys alike -- see zset.ts's apply() doc comment), so an
+    // empty `touched` here genuinely means this batch changed nothing: safe to skip the flush.
     if (touched.length === 0) return;
     if (this.pendingTouched) {
       for (const k of touched) this.pendingTouched.add(k);
@@ -318,18 +357,19 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
     }
     this.pendingTouched = new Set(touched);
     this.flushTimer = setTimeout(() => {
+      const flushed = this.pendingTouched!;
       this.pendingTouched = null;
       this.flushTimer = null;
       this.flushRowsSnapshot();
-      this.emit();
+      this.emit(flushed);
     }, FLUSH_MS);
   }
 
-  private emit(): void {
+  private emit(touched: ReadonlySet<string>): void {
     const rows = this.rowsFrozen;
     for (const cb of this.listeners) {
       try {
-        cb(rows);
+        cb(rows, touched);
       } catch (err) {
         console.error(`streamforge: onChange callback for '${this.tableName}' raised`, err);
       }

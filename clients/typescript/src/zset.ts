@@ -149,32 +149,52 @@ export class ZSet {
   }
 
   /**
-   * Apply one batch of deltas in place. Returns the canonical keys newly asserted (weight summed
-   * > 0 after this batch) -- for onChange/flash-style change tracking.
+   * Apply one batch of deltas in place. Returns every canonical key whose PRESENCE OR CONTENT in
+   * `map` actually changed as a result of this batch:
+   *
+   *  - an ASSERT: weight summed > 0 after this delta, whether that's a brand-new key entering the
+   *    map or an existing key's weight being updated;
+   *  - a RETRACTION: weight summed <= 0 for a key that WAS present beforehand, so it is deleted
+   *    from the map -- this is the tuple leaving the live set, and is exactly as much a "change"
+   *    as an assert is (`ZSet.get()`'s doc comment already promises this: "a touched key that
+   *    resolves to undefined here means the tuple was retracted");
+   *  - a SUPERSESSION: asserting a new row for a group (`keyFields`) whose previous canonical row
+   *    is still resident deletes that OLD row from the map too, even though no explicit retraction
+   *    for it arrived on the wire -- the old key is reported alongside the new one.
+   *
+   * A retraction for a key that was never present (prevWeight already 0, so there is nothing to
+   * delete) changes nothing and is NOT reported -- there is no state transition to observe. A key
+   * touched more than once within the same batch (e.g. retracted then re-asserted, or asserted
+   * then immediately superseded by a later delta in the same batch) is reported exactly once.
    */
   apply(deltas: readonly Delta[]): string[] {
-    const touched: string[] = [];
+    const touched = new Set<string>();
     for (const [row, weight] of deltas) {
       const key = canonicalKey(row);
       const groupKey = this.groupKeyForRow(row);
       const prevWeight = this.map.get(key)?.[1] ?? 0;
       const nextWeight = prevWeight + weight;
       if (nextWeight <= 0) {
+        const existed = this.map.has(key);
         this.map.delete(key);
         if (groupKey !== null && this.groupIndex.get(groupKey) === key) {
           this.groupIndex.delete(groupKey);
         }
+        if (existed) touched.add(key);
       } else {
         if (groupKey !== null) {
           const staleKey = this.groupIndex.get(groupKey);
-          if (staleKey !== undefined && staleKey !== key) this.map.delete(staleKey);
+          if (staleKey !== undefined && staleKey !== key) {
+            this.map.delete(staleKey);
+            touched.add(staleKey);
+          }
           this.groupIndex.set(groupKey, key);
         }
         this.map.set(key, [row, nextWeight]);
-        touched.push(key);
+        touched.add(key);
       }
     }
-    return touched;
+    return Array.from(touched);
   }
 
   /**
