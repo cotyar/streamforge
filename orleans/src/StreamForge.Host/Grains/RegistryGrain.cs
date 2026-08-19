@@ -5,6 +5,7 @@ using Orleans.Serialization.Invocation;
 using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.AppCore;
+using StreamForge.AppCore.Config;
 using StreamForge.Engine;
 using StreamForge.Host.Grpc.Dynamic;
 
@@ -228,15 +229,36 @@ public sealed class RegistryGrain(
     public async Task UpsertSourceAsync(SourceDefinition def)
     {
         var idx = state.State.Sources.FindIndex(s => s.Name == def.Name);
+        bool schemaChanged;
         if (idx >= 0)
         {
+            // Plan 016 wave 2 — sources are the ONE entity with no CatalogRecordMerge overload (they are
+            // upserted whole, on both flavours), so their counter carry has to happen here, at the upsert
+            // site, on both flavours. Wave 0 left a note about exactly this on CatalogRecordMerge.
+            // CarryAndBumpSource does both halves in one call so the two flavours cannot drift.
+            var existing = state.State.Sources[idx];
+            CatalogRevisions.CarryAndBumpSource(existing, def);
+            schemaChanged = def.SchemaRevision != existing.SchemaRevision;
             state.State.Sources[idx] = def;
         }
         else
         {
+            // A brand-new source is revision 1, not 0: 0 is reserved for "written before plan 016" (and,
+            // on a pin, for "declared edge with no compatibility claim"), so a fresh entity that reported
+            // 0 would be indistinguishable from one whose revision was never assigned.
+            def.Revision = 1;
+            def.SchemaRevision = 1;
             state.State.Sources.Add(def);
+            // A source appearing can make a table that never compiled compile — same refresh, same reason.
+            schemaChanged = true;
         }
 
+        if (schemaChanged)
+        {
+            RefreshTableSchemas();
+        }
+
+        RecomputeStaleReasons();
         await state.WriteStateAsync();
 
         // Plan 006 D-C / plan 009 wave D: Kind dispatch via the shared SourceKindDispatch.Classify. On an
@@ -279,6 +301,7 @@ public sealed class RegistryGrain(
             return false;
         }
 
+        RecomputeStaleReasons(); // a deleted source breaks every pin that named it.
         await state.WriteStateAsync();
         // Stop both kinds unconditionally — see UpsertSourceAsync's dispatch comment (cheap/idempotent).
         await GrainFactory.GetGrain<IGeneratorGrain>(name).StopAsync();
@@ -301,10 +324,12 @@ public sealed class RegistryGrain(
         def.Error = null;
         def.CreatedAtMs = now;
         def.UpdatedAtMs = now;
+        def.Revision = 1; // see UpsertSourceAsync for why a fresh entity is 1 and not 0.
 
         ApplyPipelineCompileResult(def, SqlCompiler.Compile(def.Sql, BuildStreamSchemas()));
 
         state.State.Pipelines.Add(def);
+        RecomputeStaleReasons();
         await state.WriteStateAsync();
         await PublishLifecycleAsync(def.Id, "created", def.Status);
         return def;
@@ -338,9 +363,15 @@ public sealed class RegistryGrain(
         // the server-owned fields carried over from the stored one — rather than a hand-written list of
         // editable fields copied onto the stored record.
         CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        // Plan 016 wave 2: the carry put the STORED counter on `def`; this moves it, and only if the
+        // definition actually changed by the same canonical-JSON test ImportPlanner uses for
+        // "skipped" vs "updated". Before the restart block below, so a restart's Status change (which
+        // is not a definition change) cannot influence the comparison.
+        CatalogRevisions.BumpPipeline(existing, def);
         state.State.Pipelines[idx] = def;
 
         ApplyPipelineCompileResult(def, compileResult);
+        RecomputeStaleReasons();
 
         if (sqlChanged && wasRunning)
         {
@@ -457,6 +488,8 @@ public sealed class RegistryGrain(
         def.Error = null;
         def.CreatedAtMs = now;
         def.UpdatedAtMs = now;
+        def.Revision = 1;       // see UpsertSourceAsync for why a fresh entity is 1 and not 0.
+        def.SchemaRevision = 1;
 
         var compileResult = CompileTableSql(def.Sql, excludeTableId: def.Id);
         ValidateHistoryConfig(def, compileResult);
@@ -465,6 +498,7 @@ public sealed class RegistryGrain(
         ApplyCompileResult(def, compileResult);
 
         state.State.Tables.Add(def);
+        RecomputeStaleReasons();
         await state.WriteStateAsync();
         await PublishLifecycleAsync(def.Name, "table-created", def.Status);
 
@@ -565,10 +599,28 @@ public sealed class RegistryGrain(
 
         // See CarryServerOwnedFields' doc comment: the incoming definition IS the new record, with only
         // the server-owned fields carried over from the stored one.
+        // Plan 016 wave 2: captured BEFORE the merge, which aliases def.OutputFields to the stored list;
+        // ApplyCompileResult then hands `def` a fresh list, leaving this one holding the old shape. It is
+        // the comparand SchemaRevision is computed from.
+        var previousOutputFields = existing.OutputFields;
+
         CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         state.State.Tables[idx] = def;
 
         ApplyCompileResult(def, compileResult);
+
+        // Plan 016 wave 2: after ApplyCompileResult (which is what recomputes OutputFields) and before
+        // the restart block below (whose Status change is not a definition change).
+        CatalogRevisions.BumpTable(existing, def, previousOutputFields);
+        if (def.SchemaRevision != existing.SchemaRevision)
+        {
+            // This table's own /proto surface, refreshed at the write rather than at the next read.
+            ComputeFieldNumbers(EntitySchemas.TableKey(def.Id), def.OutputFields);
+            // …and every table downstream of it, which is the same job a source schema change does.
+            RefreshTableSchemas();
+        }
+
+        RecomputeStaleReasons();
 
         // A running table's grain only picks up SQL/search config/parallelism/persistence changes on
         // (re)StartAsync — mirror the SQL-changed restart below for search config, parallelism, and
@@ -670,6 +722,7 @@ public sealed class RegistryGrain(
         }
 
         state.State.Tables.Remove(existing);
+        RecomputeStaleReasons(); // a deleted table breaks every pin that named it.
         await state.WriteStateAsync();
         await PublishLifecycleAsync(existing.Name, "table-deleted", PipelineStatus.Stopped);
         return true;
@@ -1189,18 +1242,117 @@ public sealed class RegistryGrain(
 
     public async Task<string> EnsureFieldNumbersAsync(string entityKey, List<FieldDef> fields)
     {
+        var (json, changed) = ComputeFieldNumbers(entityKey, fields);
+        if (changed)
+        {
+            await state.WriteStateAsync();
+        }
+
+        return json;
+    }
+
+    /// <summary>Plan 016 wave 2 split the persist out of <see cref="EnsureFieldNumbersAsync"/> so the
+    /// write path can refresh several entities' numbers inside one turn and pay for one
+    /// <c>WriteStateAsync</c> at the end, instead of one per entity. Behaviour-identical for the public
+    /// method above — it still writes iff the serialized map changed.</summary>
+    private (string Json, bool Changed) ComputeFieldNumbers(string entityKey, List<FieldDef> fields)
+    {
         var existingJson = state.State.FieldNumberMaps.GetValueOrDefault(entityKey);
         var existing = existingJson is null
             ? null
             : System.Text.Json.JsonSerializer.Deserialize<FieldNumberMap>(existingJson);
         var updatedJson = System.Text.Json.JsonSerializer.Serialize(FieldNumberMap.Assign(fields, existing));
-        if (updatedJson != existingJson)
+        if (updatedJson == existingJson)
         {
-            state.State.FieldNumberMaps[entityKey] = updatedJson;
-            await state.WriteStateAsync();
+            return (updatedJson, false);
         }
 
-        return updatedJson;
+        state.State.FieldNumberMaps[entityKey] = updatedJson;
+        return (updatedJson, true);
+    }
+
+    /// <summary>
+    /// Plan 016 wave 2 — <b>the highest-value line in the wave</b>: when an upstream schema moves,
+    /// recompile the tables that read from it and REFRESH THEIR PERSISTED <c>OutputFields</c> and field
+    /// numbers, so <c>GET /api/tables/{id}/proto</c> and <c>/api/meta/grpc</c> stop handing generated
+    /// clients a schema the table no longer produces. Before this, editing a source's fields left every
+    /// dependent table's stored <c>OutputFields</c> frozen at whatever the last create/update compiled —
+    /// the table went on producing the NEW shape at runtime while its published contract described the
+    /// old one, which is the worst combination available (a typed client compiles, connects, and
+    /// misreads).
+    ///
+    /// <para><b>Pure Engine work, no grain calls, so no reentrancy hazard.</b> <c>RegistryGrain</c> is
+    /// non-reentrant with a <c>[MayInterleave]</c> allowlist and any orchestrator↔worker call cycle
+    /// deadlocks; this method calls <c>SqlCompiler</c> and touches this grain's own state, and nothing
+    /// else. That is a deliberate constraint on what it is allowed to do, not an accident of the current
+    /// implementation.</para>
+    ///
+    /// <para><b>Dependents are NOT restarted, and that is the decision, not an omission.</b> The
+    /// restart-on-change machinery in <c>UpdateTableAsync</c> is for SELF edits — the caller asked for
+    /// this table to change and is waiting for the answer. Cascading a restart down an upstream edit
+    /// would stop and start tables the caller never mentioned, on a request whose failure mode would then
+    /// be "my unrelated table went Failed because somebody added a column three hops upstream". A
+    /// dependent keeps running on its compiled plan (which is exactly what it does today) and, when it
+    /// carries a pin that no longer holds, gains a <c>StaleReason</c> — visible instead of silent.</para>
+    ///
+    /// <para><b>A table whose SQL no longer compiles is left completely alone</b> — persisted fields,
+    /// status and all. "Keep them running either way" means the refresh may only ever improve what is
+    /// stored; wiping <c>OutputFields</c> to empty because an unrelated edit made a query invalid would
+    /// take a live table's <c>/proto</c> from stale to absent.</para>
+    ///
+    /// <para>Topo order matters: a table's own compile reads its input tables' <c>OutputFields</c>
+    /// (<see cref="BuildTableSchemas"/>), so refreshing upstream first is what lets a two-hop chain
+    /// converge in one pass rather than one hop per source edit.</para>
+    ///
+    /// <para><b>ponytail: it sweeps every table, not the dependency closure of what changed.</b>
+    /// Ceiling: O(tables) compiles per source/table schema change — irrelevant at catalog scale (tens),
+    /// and it only runs when a schema ACTUALLY moved, not on every edit. Upgrade path: seed the sweep
+    /// from the changed name and walk <c>StreamInputs</c>/<c>TableInputs</c> forward. Not done because
+    /// the closure walk is more code than the thing it optimises and would need its own correctness
+    /// argument, while the sweep's is "recompiling a table that did not change produces the same
+    /// schema".</para>
+    /// </summary>
+    private void RefreshTableSchemas()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        foreach (var table in TopoSortByTableInputs([.. state.State.Tables], state.State.Tables))
+        {
+            var result = CompileTableSql(table.Sql, excludeTableId: table.Id);
+            if (!result.Ok || result.OutputSchema is null)
+            {
+                continue; // draft or broken: keep what is stored, keep it running.
+            }
+
+            var before = table.OutputFields;
+            ApplyCompileResult(table, result);
+            if (!SchemaCompatibility.ShapeChanged(before, table.OutputFields))
+            {
+                continue;
+            }
+
+            table.SchemaRevision++;
+            table.UpdatedAtMs = now;
+            ComputeFieldNumbers(EntitySchemas.TableKey(table.Id), table.OutputFields);
+        }
+    }
+
+    /// <summary>Plan 016 wave 2 — <see cref="PipelineDefinition.StaleReason"/>/
+    /// <see cref="TableDefinition.StaleReason"/> is set BY THE UPSTREAM CHANGE, at the moment the break
+    /// happens, and cleared the moment the pins are satisfied again. Recomputed wholesale rather than
+    /// incrementally because "which entities does this change affect" is exactly as expensive to answer
+    /// as re-evaluating every pin, and there is only ever a handful of pinned entities (the loop early-
+    /// outs on an empty <c>DependsOn</c>, which is the default).</summary>
+    private void RecomputeStaleReasons()
+    {
+        foreach (var t in state.State.Tables)
+        {
+            t.StaleReason = CatalogRevisions.EvaluatePins(t.DependsOn, state.State.Sources, state.State.Tables);
+        }
+
+        foreach (var p in state.State.Pipelines)
+        {
+            p.StaleReason = CatalogRevisions.EvaluatePins(p.DependsOn, state.State.Sources, state.State.Tables);
+        }
     }
 
     private async Task PublishLifecycleAsync(string pipelineId, string kind, PipelineStatus status)

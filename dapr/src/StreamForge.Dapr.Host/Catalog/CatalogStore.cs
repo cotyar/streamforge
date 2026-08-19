@@ -1,4 +1,5 @@
 using StreamForge.AppCore;
+using StreamForge.AppCore.Config;
 using StreamForge.Abstractions;
 using StreamForge.Dapr.Host.Lifecycle;
 using StreamForge.Engine;
@@ -126,15 +127,32 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
     public async Task UpsertSourceAsync(SourceDefinition def)
     {
         var idx = state.Sources.FindIndex(s => s.Name == def.Name);
+        bool schemaChanged;
         if (idx >= 0)
         {
+            // Plan 016 wave 2 — mirrors RegistryGrain.UpsertSourceAsync exactly. Sources are the one
+            // entity with no CatalogRecordMerge overload (they are upserted whole on both flavours), so
+            // the counter carry has to live at the upsert site; CarryAndBumpSource does carry AND bump in
+            // one shared call so the two flavours cannot drift.
+            var existing = state.Sources[idx];
+            CatalogRevisions.CarryAndBumpSource(existing, def);
+            schemaChanged = def.SchemaRevision != existing.SchemaRevision;
             state.Sources[idx] = def;
         }
         else
         {
+            def.Revision = 1;
+            def.SchemaRevision = 1;
             state.Sources.Add(def);
+            schemaChanged = true;
         }
 
+        if (schemaChanged)
+        {
+            RefreshTableSchemas();
+        }
+
+        RecomputeStaleReasons();
         await orchestrator.NotifySourceChangedAsync(def);
     }
 
@@ -146,6 +164,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             return false;
         }
 
+        RecomputeStaleReasons(); // a deleted source breaks every pin that named it.
         await orchestrator.NotifySourceRemovedAsync(name);
         return true;
     }
@@ -168,10 +187,12 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         def.Error = null;
         def.CreatedAtMs = now;
         def.UpdatedAtMs = now;
+        def.Revision = 1; // see UpsertSourceAsync for why a fresh entity is 1 and not 0.
 
         ApplyPipelineCompileResult(def, SqlCompiler.Compile(def.Sql, BuildStreamSchemas()));
 
         state.Pipelines.Add(def);
+        RecomputeStaleReasons();
         await orchestrator.PublishLifecycleAsync(def.Id, "created", def.Status);
         return def;
     }
@@ -202,9 +223,14 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         // Plan 009: the incoming definition IS the new record — see CatalogRecordMerge's doc comment for
         // why this is an inversion of the old field-by-field copy, and which three fields that shape lost.
         CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        // Plan 016 wave 2: mirrors RegistryGrain.UpdatePipelineAsync — the carry put the STORED counter
+        // on `def`, this moves it, and only if the definition really changed by the same canonical-JSON
+        // test ImportPlanner uses for "skipped" vs "updated". Before the restart block below.
+        CatalogRevisions.BumpPipeline(existing, def);
         state.Pipelines[idx] = def;
 
         ApplyPipelineCompileResult(def, compileResult);
+        RecomputeStaleReasons();
 
         if (sqlChanged && wasRunning)
         {
@@ -305,6 +331,8 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         def.Error = null;
         def.CreatedAtMs = now;
         def.UpdatedAtMs = now;
+        def.Revision = 1;       // see UpsertSourceAsync for why a fresh entity is 1 and not 0.
+        def.SchemaRevision = 1;
 
         var compileResult = CompileTableSql(def.Sql, excludeTableId: def.Id);
         ValidateHistoryConfig(def, compileResult);
@@ -312,6 +340,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         ApplyCompileResult(def, compileResult);
 
         state.Tables.Add(def);
+        RecomputeStaleReasons();
         await orchestrator.PublishLifecycleAsync(def.Name, "table-created", def.Status);
         await orchestrator.ResetTableHistoryAsync(def);
         return def;
@@ -378,11 +407,25 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             }
         }
 
+        // Plan 016 wave 2: captured BEFORE the merge, which aliases def.OutputFields to the stored list;
+        // ApplyCompileResult then hands `def` a fresh list, leaving this one holding the old shape. It is
+        // the comparand SchemaRevision is computed from. Mirrors RegistryGrain.UpdateTableAsync.
+        var previousOutputFields = existing.OutputFields;
+
         // Plan 009: see the note in UpdatePipelineAsync above and CatalogRecordMerge's own doc comment.
         CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         state.Tables[tableIdx] = def;
 
         ApplyCompileResult(def, compileResult);
+
+        CatalogRevisions.BumpTable(existing, def, previousOutputFields);
+        if (def.SchemaRevision != existing.SchemaRevision)
+        {
+            EnsureFieldNumbers(EntitySchemas.TableKey(def.Id), def.OutputFields);
+            RefreshTableSchemas();
+        }
+
+        RecomputeStaleReasons();
 
         if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged || retentionChanged) && wasRunning)
         {
@@ -430,6 +473,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         await orchestrator.DisableTableHistoryAsync(existing.Name);
 
         state.Tables.Remove(existing);
+        RecomputeStaleReasons(); // a deleted table breaks every pin that named it.
         await orchestrator.PublishLifecycleAsync(existing.Name, "table-deleted", PipelineStatus.Stopped);
         return true;
     }
@@ -504,6 +548,100 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         }
 
         return updatedJson;
+    }
+
+    // ------------------------------------------------------------------
+    // Plan 016 wave 2 — dependent-schema refresh and pin evaluation. Ported from RegistryGrain's
+    // RefreshTableSchemas/RecomputeStaleReasons; see those for the full rationale (why dependents are
+    // refreshed but NOT restarted, why a table that no longer compiles is left completely alone, and why
+    // the sweep is whole-catalog rather than closure-based).
+    // ------------------------------------------------------------------
+
+    /// <summary>On an upstream schema change, recompile the tables that read from it and refresh their
+    /// persisted <c>OutputFields</c> + field numbers, so <c>/proto</c> and <c>/api/meta/grpc</c> stop
+    /// serving a schema the table no longer produces. Dependents are never restarted here (the
+    /// restart-on-change machinery is for SELF edits) and a table whose SQL no longer compiles is left
+    /// untouched — the refresh may only ever improve what is stored.</summary>
+    private void RefreshTableSchemas()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        foreach (var table in TopoSortByTableInputs(state.Tables))
+        {
+            var result = CompileTableSql(table.Sql, excludeTableId: table.Id);
+            if (!result.Ok || result.OutputSchema is null)
+            {
+                continue;
+            }
+
+            var before = table.OutputFields;
+            ApplyCompileResult(table, result);
+            if (!SchemaCompatibility.ShapeChanged(before, table.OutputFields))
+            {
+                continue;
+            }
+
+            table.SchemaRevision++;
+            table.UpdatedAtMs = now;
+            EnsureFieldNumbers(EntitySchemas.TableKey(table.Id), table.OutputFields);
+        }
+    }
+
+    /// <summary>Inputs before dependents, so a two-hop chain converges in one pass — a table's own
+    /// compile reads its input tables' <c>OutputFields</c> (<see cref="BuildTableSchemas"/>). Same
+    /// post-order DFS as <c>RegistryGrain.TopoSortByTableInputs</c>, over every table rather than only
+    /// the running ones (this flavour has no equivalent resume path to share it with).</summary>
+    private static List<TableDefinition> TopoSortByTableInputs(IReadOnlyList<TableDefinition> all)
+    {
+        var byName = new Dictionary<string, TableDefinition>(StringComparer.Ordinal);
+        foreach (var t in all)
+        {
+            byName.TryAdd(t.Name, t);
+        }
+
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<TableDefinition>();
+
+        void Visit(TableDefinition t, HashSet<string> stack)
+        {
+            if (visited.Contains(t.Name) || !stack.Add(t.Name))
+            {
+                return;
+            }
+
+            foreach (var dep in t.TableInputs)
+            {
+                if (byName.TryGetValue(dep, out var depDef))
+                {
+                    Visit(depDef, stack);
+                }
+            }
+
+            visited.Add(t.Name);
+            result.Add(t);
+        }
+
+        foreach (var t in all)
+        {
+            Visit(t, new HashSet<string>(StringComparer.Ordinal));
+        }
+
+        return result;
+    }
+
+    /// <summary><c>StaleReason</c> is set by the upstream change, at the moment the break happens, and
+    /// cleared the moment the pins are satisfied again. Recomputed wholesale — the loop early-outs on an
+    /// empty <c>DependsOn</c>, which is the default.</summary>
+    private void RecomputeStaleReasons()
+    {
+        foreach (var t in state.Tables)
+        {
+            t.StaleReason = CatalogRevisions.EvaluatePins(t.DependsOn, state.Sources, state.Tables);
+        }
+
+        foreach (var p in state.Pipelines)
+        {
+            p.StaleReason = CatalogRevisions.EvaluatePins(p.DependsOn, state.Sources, state.Tables);
+        }
     }
 
     // ------------------------------------------------------------------
