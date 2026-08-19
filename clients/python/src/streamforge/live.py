@@ -1,11 +1,20 @@
 """LiveTable: one table's Z-set state, kept current by a single background reader thread.
 
 The reader thread runs subscribe -> buffer -> snapshot -> replay (_zset.py's module docstring
-explains why buffering is necessary), then keeps applying live deltas, coalescing on_change
-callbacks to roughly one per 120ms regardless of how fast deltas arrive -- the same window
-live-table.ts uses, and for the same reason: handing a consumer a fresh DataFrame per delta melts
-the callback under a Monte-Carlo firehose (tens of thousands of deltas/sec), while at most one
-frame of staleness is free.
+explains why buffering is necessary), then keeps applying live deltas as they arrive -- every
+batch is applied to the Z-set immediately, regardless of coalescing -- and notifies `on_change`
+callbacks with a leading-edge + trailing-coalesce window (`flush_ms`, default 16ms -- one frame at
+60Hz, the shortest interval a UI could even display): if at least `flush_ms` has elapsed since the
+last callback, the new state is published immediately (no wait); otherwise it is merged into
+whatever else lands before `last_publish + flush_ms` and published exactly once when that deadline
+is reached. This means a lone update on an otherwise-quiet table is delivered with no artificial
+delay -- exactly the case a pure trailing-edge window handles worst, since coalescing has nothing
+to save there. The window only matters once deltas start arriving faster than `flush_ms` apart: a
+Monte-Carlo-style firehose (tens of thousands of deltas/sec) would otherwise fire one callback per
+delta and melt the consumer, so batches inside one window still collapse into a single callback
+carrying the latest state. `flush_ms=0` disables coalescing entirely -- one callback per applied
+batch. The window changes WHEN a consumer is told, never WHAT: every callback (leading or
+trailing) is handed a full, current snapshot, not a diff.
 
 `.df` is a projection, not a mirror: it is built fresh from the current dict on every read/every
 on_change call. A "live DataFrame" that mutated in place would race the reader thread with no
@@ -27,12 +36,19 @@ from .errors import NotReady, StreamForgeError
 
 logger = logging.getLogger("streamforge")
 
-FLUSH_S = 0.12  # coalesce window for on_change callbacks
+DEFAULT_FLUSH_MS = 16  # one frame at 60Hz -- a UI cannot display more than one frame per 16ms
 _MAX_BACKOFF_S = 15.0
 
 
 class LiveTable:
-    def __init__(self, transport, table_name: str, key_fields: list[str] | None, timeout: float = 30) -> None:
+    def __init__(
+        self,
+        transport,
+        table_name: str,
+        key_fields: list[str] | None,
+        timeout: float = 30,
+        flush_ms: float = DEFAULT_FLUSH_MS,
+    ) -> None:
         self._transport = transport
         self._table_name = table_name
         self._key_fields = key_fields
@@ -43,6 +59,12 @@ class LiveTable:
         self._reconnects = 0
         self._seq = 0
         self._callbacks: list[Callable[[pd.DataFrame], None]] = []
+        # Leading-edge + trailing-coalesce on_change scheduling state -- touched only from the
+        # reader thread (_live_loop), so it needs none of _lock's protection.
+        self._flush_s = max(0.0, flush_ms) / 1000.0
+        self._last_publish: float | None = None
+        self._pending_deadline: float | None = None
+        self._pending_touched: set[str] = set()
         self._thread = threading.Thread(
             target=self._run, name=f"sf-live[{table_name}]", daemon=True
         )
@@ -152,6 +174,12 @@ class LiveTable:
         # emitted while it was down are gone), so every (re)connect starts from a clean reducer.
         with self._lock:
             self._zset = _zset.ZSet(self._key_fields)
+        # A fresh subscription is itself "a quiet table" from the on_change scheduler's point of
+        # view -- forget any publish/pending state from before the reconnect so the first delta
+        # after resuming gets the same leading-edge treatment as the very first delta ever.
+        self._last_publish = None
+        self._pending_deadline = None
+        self._pending_touched = set()
 
         q: "queue.Queue[tuple[list, int] | tuple[str, BaseException] | None]" = queue.Queue()
         gen = self._transport.subscribe(self._table_name)
@@ -207,47 +235,71 @@ class LiveTable:
         self._ready.set()
 
     def _live_loop(self, q: "queue.Queue") -> None:
+        # The reader must never stall draining the queue to wait out a coalescing window: every
+        # iteration first fires an already-due trailing publish (a cheap timestamp check, not a
+        # wait), THEN blocks on q.get() for at most whatever time is left until the next thing
+        # that needs attention -- a queued item, the 1s liveness poll, or the pending deadline,
+        # whichever is soonest. A burst of batches keeps flowing straight through q.get() without
+        # ever hitting that timeout, so the flush fires as soon as the loop next comes around
+        # after the deadline passes, not only when the queue happens to run dry.
         while not self._closed.is_set():
+            self._flush_if_due()
+
+            timeout = 1.0
+            if self._pending_deadline is not None:
+                timeout = max(0.0, min(timeout, self._pending_deadline - time.monotonic()))
             try:
-                item = q.get(timeout=1.0)
+                item = q.get(timeout=timeout)
             except queue.Empty:
                 continue
+
             if item is None:
                 raise StreamForgeError(f"'{self._table_name}' subscription stream ended")
             if isinstance(item, tuple) and item[0] == "__error__":
                 raise item[1]
 
-            touched: set[str] = set()
             deltas, seq = item
             with self._lock:
-                touched.update(self._zset.apply(deltas))
+                touched = self._zset.apply(deltas)
                 self._seq = seq
-
-            # Coalesce: drain whatever else is already queued (up to FLUSH_S worth) before
-            # calling back, so a burst of batches costs one callback, not one per batch.
-            deadline = time.monotonic() + FLUSH_S
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    item2 = q.get(timeout=remaining)
-                except queue.Empty:
-                    break
-                if item2 is None:
-                    raise StreamForgeError(f"'{self._table_name}' subscription stream ended")
-                if isinstance(item2, tuple) and item2[0] == "__error__":
-                    raise item2[1]
-                deltas2, seq2 = item2
-                with self._lock:
-                    touched.update(self._zset.apply(deltas2))
-                    self._seq = seq2
-
-            self._emit(touched)
+            self._schedule(touched)
 
         raise _Stopped()
 
-    def _emit(self, touched: set[str]) -> None:
+    def _schedule(self, touched: list[str]) -> None:
+        """Leading-edge + trailing-coalesce: publish immediately if the window has already
+        elapsed since the last publish (or there hasn't been one yet); otherwise merge into the
+        single pending publish, due at last_publish + flush_s regardless of how many further
+        batches land before then."""
+        if not touched:
+            return
+        if self._flush_s <= 0:
+            self._publish_now(touched)
+            return
+        now = time.monotonic()
+        if self._pending_deadline is None and (
+            self._last_publish is None or now - self._last_publish >= self._flush_s
+        ):
+            self._publish_now(touched)
+            return
+        self._pending_touched.update(touched)
+        if self._pending_deadline is None:
+            self._pending_deadline = (self._last_publish or now) + self._flush_s
+
+    def _flush_if_due(self) -> None:
+        if self._pending_deadline is not None and time.monotonic() >= self._pending_deadline:
+            touched, self._pending_touched = self._pending_touched, set()
+            self._pending_deadline = None
+            self._emit(touched)
+            self._last_publish = time.monotonic()
+
+    def _publish_now(self, touched: list[str]) -> None:
+        self._pending_deadline = None
+        self._pending_touched = set()
+        self._emit(touched)
+        self._last_publish = time.monotonic()
+
+    def _emit(self, touched: list[str]) -> None:
         if not touched:
             return
         with self._lock:

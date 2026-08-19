@@ -39,7 +39,7 @@ function diagnosticsError(sqlText: string, diagnostics: SqlDiagnostic[]): SqlErr
 
 export interface RunSqlDeps {
   http: RestClient;
-  table: (name: string, opts?: { key?: string[]; timeoutMs?: number }) => Promise<unknown>;
+  table: (name: string, opts?: { key?: string[]; timeoutMs?: number; flushMs?: number }) => Promise<unknown>;
 }
 
 export async function run(
@@ -48,6 +48,7 @@ export async function run(
   sqlText: string,
   key: string[] | undefined,
   timeoutMs: number,
+  flushMs?: number,
 ): Promise<unknown> {
   const tableName = adhocTableName(name);
   const validated = await validate(deps.http, sqlText);
@@ -79,7 +80,7 @@ export async function run(
     throw diagnosticsError(sqlText, diagnostics);
   }
 
-  return deps.table(tableName, { key, timeoutMs });
+  return deps.table(tableName, { key, timeoutMs, flushMs });
 }
 
 export async function listAdhoc(http: RestClient): Promise<TableDefinitionDto[]> {

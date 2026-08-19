@@ -24,13 +24,27 @@ import kotlin.time.TimeSource
  * One table's Z-set state, kept current by a coroutine (a child of the owning
  * [StreamForgeClient]'s scope) that runs subscribe -> buffer -> snapshot -> replay -- see
  * [ZSet]'s docstring for why buffering is necessary -- and then keeps applying live deltas,
- * coalescing publishes to roughly one per [FLUSH_WINDOW] regardless of how fast deltas arrive
- * (handing a consumer a fresh row list per delta melts a collector under a Monte-Carlo firehose).
+ * publishing through a LEADING edge + TRAILING coalesce window ([flushWindow], default 16ms --
+ * one frame at 60Hz, the natural ceiling for a UI consumer that cannot display more than one
+ * frame per 16ms anyway). If at least [flushWindow] has elapsed since the last publish, a batch
+ * is published immediately after it's applied -- no delay, no wait -- so a lone update on an
+ * otherwise-quiet table is never held back. Only a batch that lands INSIDE the window opened by
+ * the previous publish gets merged into a single pending publish, fired at `lastPublish +
+ * flushWindow`; further batches inside that same window merge into the same pending publish, so
+ * at most one publish is ever pending. `flushWindow = ZERO` disables coalescing entirely and
+ * publishes synchronously per applied batch. The window exists at all because a firehose of tens
+ * of thousands of deltas/sec would otherwise fire one [StateFlow] emission per delta and melt a
+ * collector, not because this repo's own hub-driven UI does anything similar --
+ * `web/src/hooks/useTableRows.ts` publishes on every batch with no coalescing window of its own
+ * (its 900ms timer is an unrelated flash-highlight effect).
  *
  * [rows] is an immutable snapshot, not a live view: built fresh from the reducer on every
  * publish, same reasoning as the Python client's `.df` -- a row list that mutated in place would
  * race the reducer with no change notification a consumer could rely on. [rowsFlow] is the same
- * thing as a [StateFlow] for consumers that want to react rather than poll.
+ * thing as a [StateFlow] for consumers that want to react rather than poll -- a [StateFlow]
+ * inherently conflates (only the latest value is ever delivered, assigning `.value` never
+ * suspends), which is exactly the "latest-wins, not a queue" semantics a state-snapshot stream
+ * needs: a slow collector never blocks the reader coroutine, and there is no backlog to grow.
  *
  * Closing a `LiveTable` cancels its own subscription only; closing the owning client cancels
  * every `LiveTable` it created (structured concurrency: this table's job is a child of the
@@ -41,6 +55,7 @@ class LiveTable internal constructor(
     private val tableName: String,
     private val keyFields: List<String>?,
     parentScope: CoroutineScope,
+    private val flushWindow: Duration = DEFAULT_FLUSH_WINDOW,
 ) : Closeable {
     private val job = SupervisorJob(parentScope.coroutineContext[Job])
     private val scope = CoroutineScope(parentScope.coroutineContext + job)
@@ -48,6 +63,13 @@ class LiveTable internal constructor(
     // Mutated only by the single reader coroutine below; external reads go through `_rows`
     // (StateFlow, safe to read cross-thread) rather than touching the reducer directly.
     private var zset = ZSet(keyFields)
+
+    // Also touched only by the reader coroutine -- when the most recent publish happened, so the
+    // leading-edge check in liveLoop() can tell whether the window has already elapsed. Null
+    // means "no publish yet this session", which the check below treats as elapsed (the snapshot
+    // fill in doSnapshotAndReplay sets this before liveLoop ever runs, so in practice this is only
+    // ever null for the instant between construction and the first snapshot).
+    private var lastPublish: TimeSource.Monotonic.ValueTimeMark? = null
 
     private val _rows = MutableStateFlow<List<Row>>(emptyList())
     val rowsFlow: StateFlow<List<Row>> = _rows.asStateFlow()
@@ -150,7 +172,7 @@ class LiveTable internal constructor(
                 seq = batch.seq
             }
         }
-        _rows.value = zset.rows()
+        publishNow()
         ready = true
         readyGate.complete(Unit) // no-op on reconnect; only the first fill unblocks awaitReady()
     }
@@ -161,9 +183,23 @@ class LiveTable internal constructor(
             zset.apply(first.deltas)
             seq = first.seq
 
-            // Coalesce whatever else is already queued (up to FLUSH_WINDOW) before publishing,
-            // so a burst of batches costs one StateFlow emission, not one per batch.
-            val deadline = TimeSource.Monotonic.markNow() + FLUSH_WINDOW
+            if (flushWindow == Duration.ZERO) {
+                publishNow() // coalescing disabled -- publish this batch on its own
+                continue
+            }
+
+            val last = lastPublish
+            if (last == null || last.elapsedNow() >= flushWindow) {
+                // LEADING EDGE: the window has already elapsed since the last publish (or there
+                // has never been one), so this batch -- lone or not -- goes out with no delay.
+                publishNow()
+                continue
+            }
+
+            // TRAILING COALESCE: still inside the window opened by the last publish. Keep
+            // draining the channel (never stalling it) until that window closes, folding
+            // whatever else arrives into the same reducer state, then publish exactly once.
+            val deadline = last + flushWindow
             while (true) {
                 val remaining = deadline - TimeSource.Monotonic.markNow()
                 if (remaining <= Duration.ZERO) break
@@ -171,8 +207,15 @@ class LiveTable internal constructor(
                 zset.apply(next.deltas)
                 seq = next.seq
             }
-            _rows.value = zset.rows()
+            publishNow()
         }
+    }
+
+    /** The only place `_rows` is assigned -- also stamps [lastPublish] so the leading-edge check
+     * above measures from the true last publish, not from whenever a batch happened to arrive. */
+    private fun publishNow() {
+        _rows.value = zset.rows()
+        lastPublish = TimeSource.Monotonic.markNow()
     }
 
     private fun drainNowait(channel: ReceiveChannel<DeltaBatch>): List<DeltaBatch> {
@@ -185,6 +228,8 @@ class LiveTable internal constructor(
     }
 
     companion object {
-        private val FLUSH_WINDOW = 120.milliseconds
+        /** One frame at 60Hz -- a UI cannot display more than one frame per 16ms, so it's the
+         * natural ceiling for a change-notification window rather than a compromise. */
+        val DEFAULT_FLUSH_WINDOW = 16.milliseconds
     }
 }

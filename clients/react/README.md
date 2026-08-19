@@ -173,11 +173,11 @@ three optional dependencies of this package, none of them shipping any CSS of th
 useStreamForge() -> Client | null                    // null until connected; throws outside a provider
 useStreamForgeStatus() -> { client, connecting, error }
 
-useLiveTable(name: string | undefined, opts?: { key?: string[]; timeoutMs?: number }) -> {
+useLiveTable(name: string | undefined, opts?: { key?: string[]; timeoutMs?: number; flushMs?: number }) -> {
   rows: readonly Row[]; loading: boolean; error: Error | null; table: LiveTable | null;
   flashKeys: ReadonlySet<string>;                    // canonical keys touched in the last ~900ms
 }
-useLiveSql(sql: string | undefined, opts: { name: string; key?: string[]; timeoutMs?: number }) -> same shape as useLiveTable
+useLiveSql(sql: string | undefined, opts: { name: string; key?: string[]; timeoutMs?: number; flushMs?: number }) -> same shape as useLiveTable
 useTables() -> { tables: TableDefinitionDto[]; loading: boolean; error: Error | null }
 
 <LiveTableView
@@ -186,7 +186,7 @@ useTables() -> { tables: TableDefinitionDto[]; loading: boolean; error: Error | 
   initialColumnOrder? initialHiddenColumns? onColumnStateChange?
   virtual? maxHeight? flashKeys?
 />
-<LiveTablePanel name tableKey? timeoutMs? {...LiveTableView props except rows/loading/error} />
+<LiveTablePanel name tableKey? timeoutMs? flushMs? {...LiveTableView props except rows/loading/error} />
 <Sparkline values width? height? className? stroke? />
 <StreamView maxHeight? follow? newest? className? children />
 ```
@@ -200,6 +200,15 @@ the same key replaces the old one rather than appearing twice) -- forwarded stra
 `client.table()`'s own `key` option; see `@streamforge/client`'s README and
 `clients/typescript/src/zset.ts`'s module doc comment for what "identity" means here and why no
 column is ever guessed when it's omitted.
+
+`flushMs` is the re-render budget, forwarded straight to `client.table()`/`client.sql()`. The client
+emits on the LEADING edge -- a lone update on an otherwise-quiet table reaches React immediately --
+and coalesces bursts into one emission per window, so this caps how often a component re-renders
+without adding latency when nothing is happening. Default 16ms (one frame at 60Hz: a browser cannot
+paint faster, so it is the natural ceiling); `0` re-renders per delta batch, which is only sane for a
+table nobody is hammering. See `@streamforge/client`'s README section on latency and backpressure for
+the mechanics -- notably that this replaced an unconditional 120ms window that used to hand back the
+whole benefit of the engine's push-stream transport (p50 1ms on `tableDelta`).
 
 `table` on the hook's return value is the underlying `LiveTable` once connected -- an escape hatch
 for `waitFor()`, `.seq`, `.reconnects`, or anything else the hook's own state doesn't surface.

@@ -10,17 +10,26 @@
  * stale reference never sees it change out from under it (same reasoning as the Python client's
  * ".df is a projection, not a mirror").
  *
- * onChange callbacks are coalesced to roughly one per 120ms regardless of how fast deltas arrive
- * -- the same window live.py (Python client) and this repo's own hub-driven UI use, and for the
- * same reason: firing one callback per delta melts the consumer under a Monte-Carlo firehose
- * (tens of thousands of deltas/sec), while at most one frame of staleness is free.
+ * onChange emissions are coalesced with a LEADING edge + TRAILING coalesce window (`flushMs`,
+ * default 16ms -- one frame at 60Hz, the natural ceiling for a UI consumer that cannot display
+ * more than one frame per 16ms anyway; `flushMs: 0` disables coalescing entirely and emits
+ * synchronously per applied batch). If at least `flushMs` has elapsed since the last emit, a batch
+ * is delivered immediately -- no timer, no wait -- so a lone update on an otherwise-quiet table is
+ * never held back. Only a batch that lands INSIDE the window opened by the previous emit gets
+ * merged into a single pending emit, fired at `lastEmit + flushMs`; further batches inside that
+ * same window merge into the same pending emit, so at most one emit is ever pending. The window
+ * exists at all because a firehose of tens of thousands of deltas/sec would otherwise fire one
+ * callback per delta and melt the consumer -- NOT, as an earlier version of this comment claimed,
+ * because this repo's own hub-driven UI does anything similar: `web/src/hooks/useTableRows.ts`
+ * calls its flush on every batch with no coalescing window of its own (its 900ms timer is the
+ * flash-highlight effect, an unrelated concern).
  */
 
 import { NotReady, StreamForgeError } from "./errors.js";
 import type { Transport } from "./transport.js";
 import { ZSet, type Delta, type Entry, type Row } from "./zset.js";
 
-const FLUSH_MS = 120; // coalesce window for onChange callbacks -- mirrors live.py's FLUSH_S
+const DEFAULT_FLUSH_MS = 16; // one frame at 60Hz -- see the module doc comment above
 const MAX_BACKOFF_MS = 15_000;
 
 /** `touched` is the set of canonical keys (zset.ts's `canonicalKey`) that changed in the batch(es)
@@ -45,7 +54,12 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
   private rowsFrozen: readonly Row[] = Object.freeze([]);
   private listeners = new Set<ChangeListener>();
   private iterWaiters: Array<(v: IteratorResult<readonly Row[]>) => void> = [];
-  private iterBuffer: Array<readonly Row[]> = [];
+  /** Latest-wins, capacity 1 -- NOT a queue. These are state snapshots (each carries the full
+   * current `rows`, not a delta), so a consumer that stops calling `next()` for a while must catch
+   * up to the LATEST state on its next call, not replay every intermediate one it missed -- an
+   * unbounded array here would just be a silent memory leak under a slow `for await` body. See the
+   * README's "change-notification latency and backpressure" section. */
+  private iterBuffer: readonly Row[] | null = null;
   private iterDone = false;
 
   private readyFlag = false;
@@ -56,6 +70,9 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
 
   private pendingTouched: Set<string> | null = null;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** -Infinity so the very first batch on a freshly-connected table always takes the leading-edge
+   * immediate path -- there has never been a prior emit to be "inside the window" of. */
+  private lastEmitAt = -Infinity;
 
   private readerAbort = new AbortController();
   private readonly readerLoopPromise: Promise<void>;
@@ -64,6 +81,7 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
     private readonly transport: Transport,
     private readonly tableName: string,
     private readonly keyFields: readonly string[] | null,
+    private readonly flushMs: number,
   ) {
     this.zset = new ZSet(keyFields);
     this.readerLoopPromise = this.runReaderLoop();
@@ -78,8 +96,9 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
     tableName: string,
     keyFields: readonly string[] | null,
     timeoutMs = 30_000,
+    flushMs = DEFAULT_FLUSH_MS,
   ): Promise<LiveTable> {
-    const table = new LiveTable(transport, tableName, keyFields);
+    const table = new LiveTable(transport, tableName, keyFields, flushMs);
     await table.waitUntilReady(timeoutMs);
     return table;
   }
@@ -159,8 +178,12 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
   }
 
   /** Poll `pred(rows)` until it's true, or throw NotReady past `timeoutMs`. Registered as an
-   * onChange listener internally (no polling loop) so it resolves the instant a matching batch
-   * lands rather than up to FLUSH_MS late. */
+   * onChange listener internally, so it costs no polling interval of its own (no periodic
+   * re-check, no lag or wasted work between checks) -- but it does NOT resolve any faster than
+   * `onChange` itself fires: `waitFor` only sees what `onChange` decides to deliver, so it
+   * inherits that emission's leading-edge/trailing-coalesce window (immediate if the table has
+   * been quiet for `flushMs`, otherwise merged into the next scheduled flush) just like any other
+   * listener. */
   waitFor(pred: (rows: readonly Row[]) => boolean, timeoutMs = 30_000): Promise<readonly Row[]> {
     if (pred(this.rowsFrozen)) return Promise.resolve(this.rowsFrozen);
     return new Promise((resolve, reject) => {
@@ -190,8 +213,10 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
   [Symbol.asyncIterator](): AsyncIterator<readonly Row[]> {
     return {
       next: (): Promise<IteratorResult<readonly Row[]>> => {
-        if (this.iterBuffer.length > 0) {
-          return Promise.resolve({ value: this.iterBuffer.shift()!, done: false });
+        if (this.iterBuffer !== null) {
+          const value = this.iterBuffer;
+          this.iterBuffer = null;
+          return Promise.resolve({ value, done: false });
         }
         if (this.iterDone) return Promise.resolve({ value: undefined, done: true });
         return new Promise((resolve) => this.iterWaiters.push(resolve));
@@ -203,6 +228,14 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
     if (this.closed) return;
     this.closed = true;
     this.readerAbort.abort();
+    // A pending trailing-coalesce timer must not fire after close (it would call listeners/touch
+    // iterBuffer on a table nobody can observe results from anymore), and the touched keys it was
+    // about to merge are not a resource that needs draining -- just discard both.
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.pendingTouched = null;
     this.iterDone = true;
     for (const w of this.iterWaiters.splice(0)) w({ value: undefined, done: true });
     for (const w of this.readyWaiters.splice(0)) {
@@ -323,7 +356,7 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
     // is every current key rather than a guess at what moved: everything may have changed across
     // the gap, and that is the honest signal to send.
     if (!_firstAttempt) {
-      this.emit(new Set(this.zset.entries().map((e) => e.key)));
+      this.doEmit(new Set(this.zset.entries().map((e) => e.key)));
     }
 
     // Live loop: continue from `pendingNext`, which is already in flight and represents
@@ -353,16 +386,40 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
     if (touched.length === 0) return;
     if (this.pendingTouched) {
       for (const k of touched) this.pendingTouched.add(k);
-      return; // a flush is already scheduled; it will pick up this batch too
+      return; // a trailing flush is already scheduled; it will pick up this batch too
     }
+    const now = Date.now();
+    const elapsed = now - this.lastEmitAt;
+    if (elapsed >= this.flushMs) {
+      // Leading edge: at least `flushMs` has passed since the last emit (or there has never been
+      // one), so tell the consumer right away -- no timer, no wait. This is exactly the case a
+      // pure trailing window always got wrong: a lone update on an otherwise-quiet table. Also
+      // covers `flushMs: 0` for free -- `elapsed >= 0` is always true, so every batch takes this
+      // branch and nothing is ever coalesced.
+      this.flushRowsSnapshot();
+      this.doEmit(new Set(touched));
+      return;
+    }
+    // Trailing coalesce: still inside the window opened by the last emit. Merge into ONE pending
+    // emit fired at `lastEmitAt + flushMs` (i.e. `elapsed` less than a full `flushMs` from now,
+    // not a fresh `flushMs` from now) -- a batch that lands late in the window must not push the
+    // deadline back out.
     this.pendingTouched = new Set(touched);
     this.flushTimer = setTimeout(() => {
       const flushed = this.pendingTouched!;
       this.pendingTouched = null;
       this.flushTimer = null;
       this.flushRowsSnapshot();
-      this.emit(flushed);
-    }, FLUSH_MS);
+      this.doEmit(flushed);
+    }, this.flushMs - elapsed);
+  }
+
+  /** Every actual emission -- leading-edge immediate, trailing-coalesce timer, or the reconnect
+   * fix's own emit -- funnels through here so `lastEmitAt` (what the leading-edge check measures
+   * against) is always up to date. */
+  private doEmit(touched: ReadonlySet<string>): void {
+    this.lastEmitAt = Date.now();
+    this.emit(touched);
   }
 
   private emit(touched: ReadonlySet<string>): void {
@@ -377,7 +434,7 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
     if (this.iterWaiters.length > 0) {
       for (const w of this.iterWaiters.splice(0)) w({ value: rows, done: false });
     } else {
-      this.iterBuffer.push(rows);
+      this.iterBuffer = rows; // latest-wins, capacity 1 -- see the field's own doc comment
     }
   }
 }

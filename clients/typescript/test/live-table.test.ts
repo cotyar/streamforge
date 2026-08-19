@@ -143,7 +143,7 @@ describe("LiveTable.onChange touched set", () => {
         2,
       );
 
-      await new Promise((r) => setTimeout(r, 250)); // past the 120ms coalesce window
+      await new Promise((r) => setTimeout(r, 250)); // generous settle margin, well past the default 16ms flushMs window
 
       expect(calls.length).toBe(1);
       const { rows, touched } = calls[0]!;
@@ -346,6 +346,114 @@ describe("LiveTable reconnect emit (bug fix)", () => {
       table.onChange(listener); // registered only after connect() resolves -- the realistic order
       await new Promise((r) => setTimeout(r, 200));
       expect(calls.length).toBe(0);
+    } finally {
+      await table.closeAndWait();
+    }
+  }, 10_000);
+});
+
+describe("LiveTable flushMs semantics (leading edge + trailing coalesce)", () => {
+  test("a lone batch on an otherwise-quiet table emits with no artificial delay", async () => {
+    // Default flushMs (16ms) applies -- no explicit 5th arg. A table fresh off connect() has never
+    // emitted (lastEmitAt starts at -Infinity), so this first live delta must take the
+    // leading-edge immediate path: no timer, no wait.
+    const iter = new PushableIter();
+    const transport = new FakeTransport([{ iter, snapshot: [[], 1] }]);
+    const table = await LiveTable.connect(transport, "t", ["id"], 5000);
+    try {
+      const emitted = new Promise<number>((resolve) => {
+        table.onChange(() => resolve(Date.now()));
+      });
+      const t0 = Date.now();
+      iter.push([[{ id: "x", val: 1 }, 1]], 2);
+      const t1 = await emitted;
+      // Well under the OLD unconditional 120ms trailing window -- this is the whole point of the
+      // change: a lone update is no longer held back by a timer at all.
+      expect(t1 - t0).toBeLessThan(100);
+    } finally {
+      await table.closeAndWait();
+    }
+  }, 10_000);
+
+  test("a burst inside one window produces exactly one emit carrying the merged touched keys", async () => {
+    const iter = new PushableIter();
+    const transport = new FakeTransport([{ iter, snapshot: [[], 1] }]);
+    const table = await LiveTable.connect(transport, "t", ["id"], 5000);
+    try {
+      // Prime one leading-edge emit first (lastEmitAt starts at -Infinity, so this lands
+      // immediately) so the burst below lands INSIDE the window it opens, not as its own
+      // leading-edge emits.
+      iter.push([[{ id: "prime", val: 0 }, 1]], 2);
+      await new Promise((r) => setTimeout(r, 5)); // stay well inside the 16ms default window
+
+      const { listener, calls } = collect();
+      table.onChange(listener);
+
+      iter.push([[{ id: "b", val: 1 }, 1]], 3);
+      iter.push([[{ id: "c", val: 1 }, 1]], 4);
+      iter.push([[{ id: "d", val: 1 }, 1]], 5);
+
+      await new Promise((r) => setTimeout(r, 100)); // past the trailing flush deadline
+
+      expect(calls.length).toBe(1); // three batches, ONE emit
+      const { touched } = calls[0]!;
+      expect(touched).toEqual(
+        new Set([canonicalKey({ id: "b", val: 1 }), canonicalKey({ id: "c", val: 1 }), canonicalKey({ id: "d", val: 1 })]),
+      );
+    } finally {
+      await table.closeAndWait();
+    }
+  }, 10_000);
+
+  test("flushMs: 0 emits synchronously per batch -- no coalescing at all", async () => {
+    const iter = new PushableIter();
+    const transport = new FakeTransport([{ iter, snapshot: [[], 1] }]);
+    const table = await LiveTable.connect(transport, "t", ["id"], 5000, 0);
+    try {
+      const { listener, calls } = collect();
+      table.onChange(listener);
+
+      iter.push([[{ id: "a", val: 1 }, 1]], 2);
+      iter.push([[{ id: "b", val: 1 }, 1]], 3);
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      expect(calls.length).toBe(2); // one emit per batch, never merged
+      expect(calls[0]!.touched).toEqual(new Set([canonicalKey({ id: "a", val: 1 })]));
+      expect(calls[1]!.touched).toEqual(new Set([canonicalKey({ id: "b", val: 1 })]));
+    } finally {
+      await table.closeAndWait();
+    }
+  }, 10_000);
+
+  test("the AsyncIterable buffer is latest-wins with capacity 1, not an unbounded queue", async () => {
+    // flushMs: 0 so both batches below emit distinctly (not merged into one), proving the
+    // SECOND emit's buffered snapshot overwrites the first rather than queuing behind it.
+    const iter = new PushableIter();
+    const transport = new FakeTransport([{ iter, snapshot: [[], 1] }]);
+    const table = await LiveTable.connect(transport, "t", ["id"], 5000, 0);
+    try {
+      // Nobody is draining the AsyncIterable yet, so both emits below land in `iterBuffer`.
+      iter.push([[{ id: "a", val: 1 }, 1]], 2);
+      await new Promise((r) => setTimeout(r, 20)); // let the first emit land and buffer
+      iter.push([[{ id: "b", val: 1 }, 1]], 3);
+      await new Promise((r) => setTimeout(r, 20)); // let the second emit land, overwriting the buffer
+
+      const it = table[Symbol.asyncIterator]();
+      const first = await it.next();
+      expect(first.done).toBe(false);
+      // Latest-wins: the one buffered snapshot reflects BOTH updates (a slow consumer sees current
+      // state), not the stale intermediate one from the first emit.
+      expect((first.value as Row[]).map((r) => r.id).sort()).toEqual(["a", "b"]);
+
+      // And there is nothing else queued behind it -- an unbounded buffer would have a second,
+      // stale entry waiting here; a capacity-1 buffer has none, so this next() call hangs until a
+      // THIRD batch arrives (which never comes), proven by racing it against a short timeout.
+      const secondOrTimeout = await Promise.race([
+        it.next().then(() => "resolved"),
+        new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 100)),
+      ]);
+      expect(secondOrTimeout).toBe("timed-out");
     } finally {
       await table.closeAndWait();
     }

@@ -165,12 +165,18 @@ public sealed class StreamForgeClient : IAsyncDisposable
     /// <see cref="RowIdentity.GroupKeyOf"/> already treats as whole-row identity -- this client
     /// never had a hand-maintained key map to fall back to, so that was always its behavior for an
     /// unknown table and stays exactly that. Pass <paramref name="keyFields"/> explicitly to
-    /// bypass resolution entirely and always win.</summary>
+    /// bypass resolution entirely and always win.
+    ///
+    /// <paramref name="flush"/> is the leading-edge/trailing-coalesce window applied to the
+    /// returned table's <see cref="LiveTable.Changed"/> (and <see cref="LiveTable.WatchAsync"/>)
+    /// notifications -- see <see cref="LiveTable"/>'s class doc. Omitted (null, the default) uses
+    /// <see cref="LiveTable.DefaultFlushWindow"/> (16ms); <see cref="TimeSpan.Zero"/> disables
+    /// coalescing entirely, emitting once per applied batch.</summary>
     public async Task<LiveTable> TableAsync(
-        string name, IReadOnlyList<string>? keyFields = null, TimeSpan? timeout = null, CancellationToken ct = default)
+        string name, IReadOnlyList<string>? keyFields = null, TimeSpan? timeout = null, TimeSpan? flush = null, CancellationToken ct = default)
     {
         var resolvedKeyFields = keyFields ?? await ResolveKeyFieldsAsync(name, ct).ConfigureAwait(false);
-        var table = new LiveTable(_liveTransport, name, resolvedKeyFields, _logger);
+        var table = new LiveTable(_liveTransport, name, resolvedKeyFields, _logger, flush);
         await table.StartAsync(timeout ?? TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
         return table;
     }
@@ -284,8 +290,10 @@ public sealed class StreamForgeClient : IAsyncDisposable
         return AdhocPrefix + (slug.Length == 0 ? "scratch_1" : slug);
     }
 
+    /// <summary><paramref name="flush"/> is forwarded to <see cref="TableAsync"/> unchanged -- see
+    /// its doc.</summary>
     public async Task<LiveTable> SqlAsync(
-        string sqlText, string name, IReadOnlyList<string>? keyFields = null, TimeSpan? timeout = null, CancellationToken ct = default)
+        string sqlText, string name, IReadOnlyList<string>? keyFields = null, TimeSpan? timeout = null, TimeSpan? flush = null, CancellationToken ct = default)
     {
         var tableName = AdhocTableName(name);
         var validated = await ValidateAsync(sqlText, ct).ConfigureAwait(false);
@@ -326,7 +334,7 @@ public sealed class StreamForgeClient : IAsyncDisposable
             throw DiagnosticsError(sqlText, diagnostics);
         }
 
-        return await TableAsync(tableName, keyFields, timeout, ct).ConfigureAwait(false);
+        return await TableAsync(tableName, keyFields, timeout, flush, ct).ConfigureAwait(false);
     }
 
     private static SqlException DiagnosticsError(string sqlText, IReadOnlyList<SqlDiagnostic> diagnostics)

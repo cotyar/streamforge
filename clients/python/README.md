@@ -24,7 +24,7 @@ t = sf.table("trigger_monitor")          # subscribes, snapshots, replays; block
 t.rows                                   # list[dict], thread-safe copy of the current state
 t.df                                     # pandas.DataFrame, built fresh on every read
 t.wait_for(lambda df: len(df) > 0, timeout=30)
-stop = t.on_change(lambda df: print(df.shape))   # called on the reader thread, coalesced ~120ms
+stop = t.on_change(lambda df: print(df.shape))   # called on the reader thread -- see Change notifications below
 t.close()
 
 with sf.table("desk_exposure") as d:
@@ -104,6 +104,51 @@ needs to hold an admin login.
 (wishlist #18): a non-empty list is the GROUP BY/LATEST BY key, `[]` means a global aggregate (one
 row), and `null` -- or an engine build old enough not to report the field at all, or a table this
 engine doesn't know about -- falls back to whole-row identity, never a guessed first column.
+
+## Change notifications and backpressure
+
+`on_change` is the only push-style observation API this client offers -- there is no async
+iterator over a `LiveTable`'s deltas (unlike the TypeScript client, which has both `onChange` and
+an async-iterable side). If you need a "read the next change" pull loop instead of a callback,
+poll `.df`/`.rows`/`.wait_for()` from your own loop; every read is a fresh, thread-safe projection
+of the reader thread's current state, so there is nothing to miss between polls.
+
+**The window, and why it changed.** Before this version, every `on_change` callback waited out a
+fixed 120ms trailing-edge window: the reader always let the window elapse before publishing,
+whether or not anything else was going to arrive in it. That is backwards for the common case -- a
+lone update on an otherwise-quiet table -- where coalescing has nothing to save and the wait is
+pure latency, handed straight back to the consumer for free. It matters now specifically because
+the engine's push-stream transport (`--Streams:Transport push`) takes delta delivery from p50
+~115ms down to p50 ~1ms; a client-side 120ms floor on top of that would have thrown the whole win
+away.
+
+The fix is a **leading-edge + trailing-coalesce** window, sized by `flush_ms` (default **16** --
+one frame at 60Hz, the shortest interval any UI could even display, so it's the natural ceiling
+rather than an arbitrary tuning knob):
+
+- If at least `flush_ms` has elapsed since the last `on_change` publish (including "there hasn't
+  been one yet"), the new state publishes **immediately** after the batch is applied -- no wait.
+- Otherwise, the batch is merged into a single pending publish due at `last_publish + flush_ms`;
+  any further batches that land before that deadline merge into the same pending publish rather
+  than each scheduling their own. At most one publish is ever pending.
+- `flush_ms=0` disables coalescing entirely: one `on_change` call per applied batch, whatever the
+  arrival rate.
+
+Either way, every publish -- leading or trailing -- carries the table's full current DataFrame,
+not a diff: the window changes **when** a consumer is told, never **what** they're told. Pass
+`flush_ms=` to `sf.table(...)` or `sf.sql(...)` to change it per table; this is a **behaviour
+change** from the previous version's unconditional 120ms trailing wait, not just a smaller number.
+
+**Why this can't be a back-pressured queue.** The reader thread's whole job is to keep draining
+the transport's delta stream into the Z-set, whatever `on_change` callbacks are doing -- it must
+never block waiting for a slow consumer, because the transport itself (gRPC/SignalR) has no way to
+tell the *server* "pause, my client is behind" without also stalling every other consumer of that
+stream. And even if it could block, a queue of pending *DataFrames* is the wrong thing to build:
+each snapshot supersedes the last one entirely, so a consumer that's behind by three snapshots
+wants the newest, not all three in order -- buffering the stale ones is pure memory growth for
+data nobody will read. That's why the coalescing window above holds at most one pending publish
+(latest-wins by construction, not by a queue that happens to be capped at one) rather than
+growing without bound the way a naive producer/consumer queue would under a slow callback.
 
 ## Protobuf stubs
 

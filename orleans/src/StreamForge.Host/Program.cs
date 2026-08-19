@@ -99,7 +99,21 @@ if (streamTransport is not ("pull" or "push"))
 
 builder.Host.UseOrleans(siloBuilder =>
 {
-    siloBuilder.UseLocalhostClustering();
+    // Silo/gateway ports are configurable so two hosts can run side by side on
+    // one machine — e.g. the OTC demo and the aqua-demo fish-farm demo, which
+    // must not share an engine (a materialized table's state is persisted by
+    // JsonFileGrainStorage under DataDir and survives dropping the table, its
+    // source, and re-provisioning, so one engine silently mixes both demos).
+    //
+    // The parameterless overload hardcodes 11111/30000, and a second host then
+    // collides on them: the symptom is not a clean bind error but Kestrel's
+    // listener dying later with "The connection listener failed to accept any
+    // new connections / SocketAddress is an invalid size for the IPEndPoint",
+    // taking the HTTP API down with it. Defaults below are Orleans' own, so a
+    // host started without these flags behaves exactly as before.
+    siloBuilder.UseLocalhostClustering(
+        builder.Configuration.GetValue("Silo:Port", 11111),
+        builder.Configuration.GetValue("Silo:GatewayPort", 30000));
     if (streamTransport == "push")
     {
         // PUSH: no pulling agents at all — publish is a non-blocking channel write, one pump task per

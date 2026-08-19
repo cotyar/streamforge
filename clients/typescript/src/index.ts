@@ -65,12 +65,18 @@ export interface ConnectOptions {
 export interface TableOptions {
   key?: string[];
   timeoutMs?: number;
+  /** Coalescing window (ms) for `onChange`/AsyncIterable emissions -- leading edge + trailing
+   * coalesce, see LiveTable's own doc comment. Default 16 (one frame at 60Hz); 0 disables
+   * coalescing and emits synchronously per applied batch. */
+  flushMs?: number;
 }
 
 export interface SqlOptions {
   name: string;
   key?: string[];
   timeoutMs?: number;
+  /** See TableOptions.flushMs -- same default (16ms), same meaning. */
+  flushMs?: number;
 }
 
 export interface PushOptions {
@@ -105,7 +111,7 @@ export class Client {
 
   async table(name: string, opts: TableOptions = {}): Promise<LiveTable> {
     const keyFields = opts.key ?? (await tablesModule.resolveKeyFields(this.http, name));
-    return LiveTable.connect(this.liveTransport, name, keyFields, opts.timeoutMs ?? 30_000);
+    return LiveTable.connect(this.liveTransport, name, keyFields, opts.timeoutMs ?? 30_000, opts.flushMs);
   }
 
   snapshot(name: string, limit = 500): Promise<Row[]> {
@@ -133,6 +139,7 @@ export class Client {
       sqlText,
       opts.key,
       opts.timeoutMs ?? 30_000,
+      opts.flushMs,
     ) as Promise<LiveTable>;
   }
 

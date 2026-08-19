@@ -57,6 +57,41 @@ would then wait forever. Making `subscribeTable` a suspend function that complet
 connection setup before returning closes that window; `LiveTable`'s existing buffer/replay logic
 still handles the case where a delta *does* arrive during the snapshot read.
 
+## Change-notification latency and backpressure
+
+`LiveTable` publishes through `rowsFlow`, a `StateFlow<List<Row>>`, under a LEADING edge +
+TRAILING coalesce window (`flushWindow`, a `Duration` parameter on `StreamForgeClient.table()` /
+`.sql()`, default **16ms** -- one frame at 60Hz, the natural ceiling for a UI consumer that cannot
+display more than one frame per 16ms anyway). This is a **behavior change** from an earlier
+version of this client, which coalesced with an unconditional TRAILING-only 120ms window: every
+delta batch, however isolated, waited out the full 120ms before publishing. The engine's
+push-stream transport takes `tableDelta` from p50 115ms to p50 1ms (`--Streams:Transport push`;
+Dapr ~7ms) -- a flat 120ms hold-back after every batch handed that entire win straight back to a
+lone, quiet-table update, exactly the case where coalescing buys nothing.
+
+Under the current window: if at least `flushWindow` has elapsed since the last publish, the next
+applied batch publishes immediately -- no delay, no wait. Only a batch that lands *inside* the
+window opened by the previous publish gets merged into a single pending publish, fired at
+`lastPublish + flushWindow`; further batches inside that same window merge into the same pending
+publish, so at most one publish is ever pending. `flushWindow = Duration.ZERO` turns coalescing off
+entirely and publishes every applied batch on its own. The window exists at all because a firehose
+of tens of thousands of deltas/sec would otherwise fire one `StateFlow` emission per delta and melt
+a collector -- not because this repo's own hub-driven UI does anything similar:
+`web/src/hooks/useTableRows.ts` publishes on every batch with no coalescing window of its own (its
+900ms timer is an unrelated flash-highlight effect, not a change-notification delay).
+
+`rowsFlow` is a `StateFlow`, which conflates by construction: assigning `.value` never suspends,
+and a collector that falls behind only ever sees the *latest* value on its next resumption, not a
+backlog of every intermediate one. That is exactly the right contract here, and requires no code
+change to get -- `rowsFlow` is state snapshots (each publish carries the full current `rows`, not a
+delta), not an audit log of every batch, so a slow collector skipping intermediate snapshots is by
+design, not data loss. This is why a stream of state snapshots must never be modeled as a
+back-pressured queue: blocking the reader coroutine on a slow collector would stall it from
+draining the transport (and therefore from ever catching up), and buffering snapshots a collector
+no longer wants to see is pure waste -- only the latest one is ever going to be read. The reader
+coroutine's own trailing-coalesce wait (above) keeps draining the transport the whole time a
+publish is pending, for the same reason: it never stalls to wait out a window in isolation.
+
 ## Reducer (`ZSet.kt`)
 
 A literal port of the Python client's `_zset.py` (whose module docstring is the fullest account of
@@ -68,11 +103,13 @@ verbatim. **All 14 cases pass.**
 ## Public surface
 
 `StreamForge.connect(url, grpcTarget?, user?, password?, token?, ingestKey?, transport = AUTO):
-StreamForgeClient`, then on the client: `table(name, keyFields?, timeout)`, `snapshot(name,
-limit)`, `tables()`, `search(name, query, limit)`, `validate(sql)`, `sql(sql, name, keyFields?,
-timeout)` (validate -> `POST /api/config/import?mode=merge` -> `table()`), `adhocTables()` /
-`dropAdhoc(name)` (refuses any name outside the `adhoc_` prefix), `push(source, rows,
-idempotencyKey?, partial)` (gRPC bidi when the live transport is gRPC, REST otherwise).
+StreamForgeClient`, then on the client: `table(name, keyFields?, timeout, flushWindow = 16ms)`,
+`snapshot(name, limit)`, `tables()`, `search(name, query, limit)`, `validate(sql)`, `sql(sql, name,
+keyFields?, timeout, flushWindow = 16ms)` (validate -> `POST /api/config/import?mode=merge` ->
+`table()`), `adhocTables()` / `dropAdhoc(name)` (refuses any name outside the `adhoc_` prefix),
+`push(source, rows, idempotencyKey?, partial)` (gRPC bidi when the live transport is gRPC, REST
+otherwise). `flushWindow` governs the returned `LiveTable`'s change-notification coalescing -- see
+"Change-notification latency and backpressure" below.
 
 Errors are a sealed hierarchy (`Errors.kt`): `StreamForgeException` (sealed base) ->
 `AuthException`, `NotReadyException`, `IngestRejectedException` (carries `rowErrors`),
@@ -90,6 +127,7 @@ guess a key.
 ```bash
 gradle build                                  # compiles proto, main, tests; assembles the jar
 gradle test --tests "streamforge.ZSetConformanceTest"   # offline, no engine needed
+gradle test --tests "streamforge.LiveTableFlushTest"     # offline, no engine -- flushWindow behavior against a fake transport
 gradle test --tests "streamforge.ContractTest"           # boots an isolated engine on 9199/9299
 gradle test --tests "streamforge.LiveSmokeTest"           # read-only against localhost:6199
 ```

@@ -1,6 +1,6 @@
 [project]
 name = "streamforge-client"
-version = "0.1.0"
+version = "0.2.0"
 description = "Sync-first Python client for StreamForge live tables (gRPC + SignalR)."
 readme = "README.md"
 requires-python = ">=3.11"

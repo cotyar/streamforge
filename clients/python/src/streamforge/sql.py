@@ -38,7 +38,7 @@ def _diagnostics_error(sql_text: str, diagnostics: list[dict]) -> SqlError:
     return SqlError(message, diagnostics, sql=sql_text)
 
 
-def run(client, name: str, sql_text: str, key: list[str] | None, timeout: float):
+def run(client, name: str, sql_text: str, key: list[str] | None, timeout: float, flush_ms: float):
     table_name = adhoc_table_name(name)
     validated = validate(client._http, sql_text)
     if not validated.get("ok"):
@@ -71,7 +71,7 @@ def run(client, name: str, sql_text: str, key: list[str] | None, timeout: float)
             diagnostics.extend({"message": m, "line": 0, "column": 0, "severity": "Error"} for m in messages)
         raise _diagnostics_error(sql_text, diagnostics)
 
-    return client.table(table_name, key=key, timeout=timeout)
+    return client.table(table_name, key=key, timeout=timeout, flush_ms=flush_ms)
 
 
 def list_adhoc(http) -> pd.DataFrame:

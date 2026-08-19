@@ -6,6 +6,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <RootNamespace>StreamForge.Client</RootNamespace>
+    <!-- Kept in step with the sibling clients (they are deliberately symmetric): 0.2.0 is the
+         leading-edge change-notification window plus WatchAsync. Without this the assembly would
+         claim 1.0.0 by SDK default, overstating its stability. -->
+    <Version>0.2.0</Version>
     <!-- Client library only: not coupled to any StreamForge.Host/StreamForge.Contracts project
          reference. Its gRPC types are compiled fresh from the .proto below, in this assembly. -->
     <NoWarn>$(NoWarn);CS1591</NoWarn>

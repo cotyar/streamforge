@@ -1,6 +1,6 @@
 {
   "name": "@streamforge/react",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "React bindings for @streamforge/client: a provider, live-table hooks and drop-in unstyled components.",
   "type": "module",
   "license": "MIT",

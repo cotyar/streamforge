@@ -14,12 +14,14 @@ export interface LiveTablePanelProps extends Omit<LiveTableViewProps, "rows" | "
   /** Forwarded as useLiveTable's opts.key -- the row-identity columns for supersession. */
   tableKey?: string[];
   timeoutMs?: number;
+  /** Coalescing window in ms -- see useLiveTable's own flushMs. Default 16 (one frame). */
+  flushMs?: number;
 }
 
 export function LiveTablePanel(props: LiveTablePanelProps): ReactElement {
-  const { name, tableKey, timeoutMs, ...viewProps } = props;
+  const { name, tableKey, timeoutMs, flushMs, ...viewProps } = props;
   // flashKeys comes from the hook, not from the caller (hence its Omit above): the keys are the
   // Z-set's own, and only this hook's LiveTable knows which ones its last batch touched.
-  const { rows, loading, error, flashKeys } = useLiveTable(name, { key: tableKey, timeoutMs });
+  const { rows, loading, error, flashKeys } = useLiveTable(name, { key: tableKey, timeoutMs, flushMs });
   return <LiveTableView {...viewProps} rows={rows} loading={loading} error={error} flashKeys={flashKeys} />;
 }

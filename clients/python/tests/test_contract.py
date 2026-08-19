@@ -99,9 +99,11 @@ def test_on_change_callback_fires(sf, engine):
     try:
         _push(sf, engine, [{"trade_id": trade_id, "desk": "FX", "notional": 5.0}])
         t.wait_for(lambda d: trade_id in set(d.get("trade_id", [])), timeout=20)
-        # wait_for can return as soon as the delta is applied, up to FLUSH_S (~120ms) before the
-        # coalesced on_change callback actually fires -- give it a short grace window rather than
-        # asserting the instant wait_for returns.
+        # wait_for can return the instant the delta is applied to the Z-set, which happens
+        # slightly before the on_change callback fires (a separate step in _live_loop) -- give it
+        # a short grace window rather than asserting the instant wait_for returns. This is a lone
+        # update on an otherwise-quiet table, so the new leading-edge scheduling (live.py) should
+        # fire it almost immediately; the old code waited out the full ~120ms trailing window here.
         deadline = time.monotonic() + 5
         while not seen and time.monotonic() < deadline:
             time.sleep(0.05)

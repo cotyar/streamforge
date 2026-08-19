@@ -25,7 +25,7 @@ from ._grpc import GrpcTransport
 from ._hub import HubTransport
 from ._http import AuthClient
 from .errors import AuthError, IngestRejected, NotReady, SqlError, StreamForgeError
-from .live import LiveTable
+from .live import DEFAULT_FLUSH_MS, LiveTable
 
 __all__ = [
     "connect",
@@ -64,9 +64,15 @@ class Client:
 
     # ---- tables / live ----
 
-    def table(self, name: str, key: list[str] | None = None, timeout: float = 30) -> LiveTable:
+    def table(
+        self,
+        name: str,
+        key: list[str] | None = None,
+        timeout: float = 30,
+        flush_ms: float = DEFAULT_FLUSH_MS,
+    ) -> LiveTable:
         key_fields = key if key is not None else _tables.resolve_key_fields(self._http, name)
-        return LiveTable(self._live_transport, name, key_fields, timeout=timeout)
+        return LiveTable(self._live_transport, name, key_fields, timeout=timeout, flush_ms=flush_ms)
 
     def snapshot(self, name: str, limit: int = 500):
         return _tables.snapshot(self._http, name, limit)
@@ -82,8 +88,15 @@ class Client:
 
     # ---- ad-hoc SQL ----
 
-    def sql(self, sql_text: str, name: str, key: list[str] | None = None, timeout: float = 30) -> LiveTable:
-        return _sql.run(self, name, sql_text, key, timeout)
+    def sql(
+        self,
+        sql_text: str,
+        name: str,
+        key: list[str] | None = None,
+        timeout: float = 30,
+        flush_ms: float = DEFAULT_FLUSH_MS,
+    ) -> LiveTable:
+        return _sql.run(self, name, sql_text, key, timeout, flush_ms)
 
     def validate(self, sql_text: str) -> dict:
         return _sql.validate(self._http, sql_text)

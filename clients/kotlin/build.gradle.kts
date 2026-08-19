@@ -11,6 +11,12 @@ plugins {
     id("com.google.protobuf") version "0.9.4"
 }
 
+// No version property existed here before -- the sibling TS/Python clients both start at 0.1.0
+// (see ../typescript/package.json, ../python/pyproject.toml), so this is that same implicit
+// baseline made explicit, then bumped a pre-1.0 minor: LiveTable's change-notification latency
+// (the flushWindow leading-edge/trailing-coalesce behavior) is an observable behavior change.
+version = "0.2.0"
+
 repositories {
     mavenCentral()
 }

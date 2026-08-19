@@ -110,10 +110,18 @@ class StreamForgeClient internal constructor(
     /** Subscribes, snapshots, and replays -- suspends until ready or [timeout] elapses.
      * [keyFields] omitted (null, the default) resolves the table's row-identity key from its own
      * definition instead (wishlist #18 -- see [RestCatalog.resolveKeyFields]); pass it explicitly
-     * to bypass resolution and always win. */
-    suspend fun table(name: String, keyFields: List<String>? = null, timeout: Duration = 30.seconds): LiveTable {
+     * to bypass resolution and always win. [flushWindow] governs how the returned [LiveTable]
+     * coalesces change notifications -- see its class doc -- and defaults to
+     * [LiveTable.DEFAULT_FLUSH_WINDOW] (16ms, one frame at 60Hz); pass [Duration.ZERO] to publish
+     * every applied batch with no coalescing. */
+    suspend fun table(
+        name: String,
+        keyFields: List<String>? = null,
+        timeout: Duration = 30.seconds,
+        flushWindow: Duration = LiveTable.DEFAULT_FLUSH_WINDOW,
+    ): LiveTable {
         val resolvedKeyFields = keyFields ?: RestCatalog.resolveKeyFields(http, name)
-        val liveTable = LiveTable(liveTransport, name, resolvedKeyFields, scope)
+        val liveTable = LiveTable(liveTransport, name, resolvedKeyFields, scope, flushWindow)
         liveTable.awaitReady(timeout)
         return liveTable
     }
@@ -135,10 +143,17 @@ class StreamForgeClient internal constructor(
     suspend fun validate(sqlText: String): ValidateResult = RestCatalog.validate(http, sqlText)
 
     /** validate -> `POST /api/config/import?mode=merge` -> subscribe. Namespace stays `adhoc_`
-     * (see [dropAdhoc]); a re-run of an edited query updates the same table in place. */
-    suspend fun sql(sqlText: String, name: String, keyFields: List<String>? = null, timeout: Duration = 30.seconds): LiveTable {
+     * (see [dropAdhoc]); a re-run of an edited query updates the same table in place. [flushWindow]
+     * is forwarded to [table] -- see its doc. */
+    suspend fun sql(
+        sqlText: String,
+        name: String,
+        keyFields: List<String>? = null,
+        timeout: Duration = 30.seconds,
+        flushWindow: Duration = LiveTable.DEFAULT_FLUSH_WINDOW,
+    ): LiveTable {
         val tableName = RestCatalog.runAdhocSql(http, name, sqlText)
-        return table(tableName, keyFields, timeout)
+        return table(tableName, keyFields, timeout, flushWindow)
     }
 
     suspend fun adhocTables(): List<Map<String, Any?>> = RestCatalog.listAdhoc(http)

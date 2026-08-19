@@ -49,12 +49,22 @@ export interface LiveTableState {
 export interface UseLiveTableOptions {
   key?: string[];
   timeoutMs?: number;
+  /** Coalescing window for change notifications, in ms -- forwarded to client.table()/client.sql().
+   * The client emits on the LEADING edge (a lone update on a quiet table is delivered immediately)
+   * and coalesces bursts into one emission per window, so this caps re-render rate without adding
+   * latency when nothing is happening. Default 16 (one frame at 60Hz); 0 re-renders per batch. */
+  flushMs?: number;
 }
 
 export interface UseLiveSqlOptions {
   name: string;
   key?: string[];
   timeoutMs?: number;
+  /** Coalescing window for change notifications, in ms -- forwarded to client.table()/client.sql().
+   * The client emits on the LEADING edge (a lone update on a quiet table is delivered immediately)
+   * and coalesces bursts into one emission per window, so this caps re-render rate without adding
+   * latency when nothing is happening. Default 16 (one frame at 60Hz); 0 re-renders per batch. */
+  flushMs?: number;
 }
 
 export interface TablesState {
@@ -115,7 +125,7 @@ export function useLiveTable(name: string | undefined, opts: UseLiveTableOptions
       }, FLASH_WINDOW_MS);
     }
 
-    client.table(name, { key: opts.key, timeoutMs: opts.timeoutMs }).then(
+    client.table(name, { key: opts.key, timeoutMs: opts.timeoutMs, flushMs: opts.flushMs }).then(
       (t) => {
         if (cancelled) {
           t.close(); // effect was superseded (name/key/client changed, or unmount) before this landed
@@ -146,7 +156,7 @@ export function useLiveTable(name: string | undefined, opts: UseLiveTableOptions
       if (connected) connected.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyDep stands in for opts.key
-  }, [name, client, keyDep, opts.timeoutMs]);
+  }, [name, client, keyDep, opts.timeoutMs, opts.flushMs]);
 
   return state;
 }
@@ -155,7 +165,7 @@ export function useLiveTable(name: string | undefined, opts: UseLiveTableOptions
 export function useLiveSql(sql: string | undefined, opts: UseLiveSqlOptions): LiveTableState {
   const client = useStreamForge();
   const [state, setState] = useState<LiveTableState>(IDLE_STATE);
-  const { name, timeoutMs } = opts;
+  const { name, timeoutMs, flushMs } = opts;
   // Same reasoning as useLiveTable's keyDep -- see the comment there.
   const keyDep = JSON.stringify(opts.key ?? null);
 
@@ -188,7 +198,7 @@ export function useLiveSql(sql: string | undefined, opts: UseLiveSqlOptions): Li
       }, FLASH_WINDOW_MS);
     }
 
-    client.sql(sql, { name, key: opts.key, timeoutMs }).then(
+    client.sql(sql, { name, key: opts.key, timeoutMs, flushMs }).then(
       (t) => {
         if (cancelled) {
           t.close();
@@ -217,7 +227,7 @@ export function useLiveSql(sql: string | undefined, opts: UseLiveSqlOptions): Li
       if (connected) connected.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyDep stands in for opts.key
-  }, [sql, client, name, keyDep, timeoutMs]);
+  }, [sql, client, name, keyDep, timeoutMs, flushMs]);
 
   return state;
 }

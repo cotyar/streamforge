@@ -69,12 +69,12 @@ which trips `Program.cs`'s guard so **no gRPC port is bound at all** -- start it
 
 ```ts
 connect({ url, grpc, user, password, token, ingestKey, transport, verify }) -> Promise<Client>
-client.table(name, { key, timeoutMs }) -> Promise<LiveTable>
+client.table(name, { key, timeoutMs, flushMs }) -> Promise<LiveTable>
 client.snapshot(name, limit) -> Promise<Row[]>           // one-shot REST/gRPC read, no subscription
 client.tables() -> Promise<TableDefinitionDto[]>
 client.search(name, query, limit) -> Promise<Row[]>
 client.history(name, row, limit) -> Promise<unknown[]>
-client.sql(sqlText, { name, key, timeoutMs }) -> Promise<LiveTable>   // validate -> import -> LiveTable
+client.sql(sqlText, { name, key, timeoutMs, flushMs }) -> Promise<LiveTable>   // validate -> import -> LiveTable
 client.validate(sqlText) -> Promise<TableValidateResponse>
 client.adhoc() -> Promise<TableDefinitionDto[]>           // tables under the adhoc_ namespace
 client.dropAdhoc(name) -> Promise<boolean>                // refuses any name outside adhoc_
@@ -82,11 +82,11 @@ client.push(source, rows, { idempotencyKey, partial }) -> Promise<unknown>
 client.close() / await using / client[Symbol.asyncDispose]()
 
 table.rows -> readonly Row[]           // frozen; a fresh array on every change, never mutated in place
-table.onChange(cb) -> () => void       // unsubscribe; coalesced to ~1 callback per 120ms
+table.onChange(cb) -> () => void       // unsubscribe; leading-edge + trailing-coalesce, see below
 table.waitFor(pred, timeoutMs) -> Promise<readonly Row[]>
 table.value(col, keys) -> unknown
 table.ready / table.seq / table.reconnects
-for await (const rows of table) { ... }  // AsyncIterable<readonly Row[]>
+for await (const rows of table) { ... }  // AsyncIterable<readonly Row[]>, latest-wins buffer -- see below
 table.close() / await using / table[Symbol.asyncDispose]()
 ```
 
@@ -95,6 +95,47 @@ Auth: `POST /api/auth/login`, token cached ~11h, re-minted **once** on a 401 the
 line/column, `.message` renders a caret against the offending SQL line), `IngestRejected`
 (`.rowErrors`), `NotReady` (a `LiveTable` never filled, or `waitFor`'s predicate never matched --
 the common cause is a brand-new table with no backfill).
+
+## Change-notification latency and backpressure
+
+**The coalescing window.** Every applied delta batch could, in principle, fire its own
+notification -- but a firehose of tens of thousands of deltas/sec would then fire one callback per
+delta and melt the consumer. So `LiveTable` coalesces with a `flushMs` window (`TableOptions.flushMs`
+/ `SqlOptions.flushMs`, **default 16ms** -- one frame at 60Hz, the natural ceiling for a UI consumer
+that cannot display more than one frame per 16ms anyway): if at least `flushMs` has elapsed since the
+last emit, a batch is delivered **immediately** (leading edge -- no timer, no wait); otherwise it's
+merged into a single pending emit fired at `lastEmit + flushMs` (trailing coalesce), and any further
+batches arriving before that instant merge into the same pending emit. `flushMs: 0` disables
+coalescing entirely and emits synchronously per applied batch.
+
+This **replaces** an earlier unconditional 120ms trailing-only window (every version before 0.2.0):
+that older scheme scheduled a timer on the FIRST touched batch and only ever emitted when it fired,
+which meant a lone update on an otherwise-quiet table -- precisely the case where coalescing buys
+nothing -- was always delivered up to 120ms late. The leading-edge/trailing-coalesce scheme fixes
+exactly that case while still protecting against a firehose. **This is a behaviour change**: code
+that happened to rely on updates always landing in >=1 batch-sized clumps, or on a fixed ~120ms
+delivery latency, will now see updates land sooner and more often as individual emits.
+
+**`onChange` vs the AsyncIterable -- two different consumption models, on purpose.** `onChange`
+supports many independent listeners; each handler runs synchronously on the reader loop that also
+drains the transport, so **a handler must not block** (no synchronous heavy work, no unresolved
+promise it awaits inline) -- the loop cannot pull the next delta batch off the wire until every
+listener for the current emit has returned. A handler that throws is caught and logged
+(`console.error`), not left to crash the reader loop or take down other listeners. The
+`AsyncIterable` is the other shape: **one owner**, pulling via `for await`, and as of 0.2.0 its
+internal buffer is **latest-wins with capacity 1** rather than an unbounded array -- a consumer that
+stops calling `next()` for a while (a slow loop body) now sees the LATEST `rows` snapshot on its next
+`next()` call, not a replay of every intermediate one it missed.
+
+**Why a stream of state snapshots must not be treated as a back-pressured queue.** Each emission
+carries the table's full current `rows`, not a delta -- so a snapshot a consumer hasn't gotten to yet
+is not lost work, it's just stale. Two things follow: blocking the reader loop until a slow consumer
+catches up is not an option, because the loop's other job is draining the transport, and falling
+behind there risks the transport's own buffers or connection; and buffering every snapshot a slow
+consumer hasn't drained yet is pointless work for a result nobody will read once a newer one exists.
+Capacity-1 latest-wins is the only sane middle ground: the consumer always gets the truth as of "now"
+whenever it next asks, and memory use for the buffer is O(1) regardless of how fast deltas arrive or
+how slow the consumer is.
 
 ## The Z-set reducer
 
