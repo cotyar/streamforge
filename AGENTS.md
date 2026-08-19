@@ -100,6 +100,18 @@ Both counts EXCLUDE the 52 live-database tests (`StreamForge.Connectors.Database
 shared by both solutions), which `DockerGate` skips with a stated reason unless a Docker daemon answers
 and the backend's image (`postgres:17`, `mcr.microsoft.com/mssql/server:2022-latest`) is already local —
 "0 integration tests ran" must never read as "integration passed".
+
+**Known time-bounded flakes** (they assert progress within a deadline, so they lose races under
+whole-solution parallel load — never under `--filter` on their own): `LoopbackCycleTests`,
+`TableRetentionClusterTests`, `TablePersistenceModeClusterTests`, `TableSnapshotMirrorClusterTests`,
+`BackfillOnAttachClusterTests`, `ShardedTableClusterTests.RetentionEviction_*`, `ApprovalSweeperTests`,
+`ConnectorGrainClusterTests.GetStatusAsync_reflects_a_successful_run` (waits for a connector run's
+status to propagate before a deadline).
+Re-run a failure in isolation before calling it a regression — and report BOTH results, never just the
+green one. Nothing else on this list is allowed to grow without a paragraph saying why the test is
+time-bounded; a genuinely broken test hiding among "known flakes" is the failure mode this list can cause.
+Also: do not pipe a test run through `tail` — it truncates the per-project `Passed!`/`Failed!` lines and
+you will not know whether a project ran at all. Grep `^(Passed!|Failed!)` on the full log instead.
 Orleans stream-transport knobs (post-005 latency work): `--Streams:Transport push` swaps the
 pull-based memory streams for the in-process push bus (`Host/Streaming/PushStream*`, p50 1ms vs
 stock 115ms on tableDelta); default `pull` is byte-identical stock Orleans, tunable via
