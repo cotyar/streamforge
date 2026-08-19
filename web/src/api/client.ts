@@ -29,6 +29,9 @@ export function getStoredToken(): string | null {
 
 let onUnauthorized: (() => void) | null = null
 
+/** The one route where a 403 is a session kill rather than a refusal — see `request`. */
+const IDENTITY_PATH = '/api/auth/me'
+
 /** Registered once by the auth module so 401s clear session state and redirect. */
 export function setUnauthorizedHandler(handler: () => void) {
   onUnauthorized = handler
@@ -70,6 +73,18 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (res.status === 401) {
     onUnauthorized?.()
     throw new ApiError(401, 'Session expired — please sign in again.')
+  }
+
+  // A 403 anywhere else means "this account may not do that", and the screen says so. On /api/auth/me
+  // it cannot mean that: the route asks only who the caller is, and the sole thing that refuses it is
+  // Auth:StrictViewer deciding the account is disabled or its every role has been deleted. Plan 015
+  // wave 6 found the consequence of treating it like any other refusal — a disabled user keeps the last
+  // permission snapshot they successfully fetched and goes on seeing a working console until they click
+  // something. Nothing is over-granted (the server refuses every request), but the session has to end
+  // where it actually ended.
+  if (res.status === 403 && path === IDENTITY_PATH) {
+    onUnauthorized?.()
+    throw new ApiError(403, 'This account is no longer permitted to sign in.')
   }
 
   if (!res.ok) {

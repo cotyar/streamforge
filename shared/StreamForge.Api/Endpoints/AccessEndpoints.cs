@@ -214,7 +214,7 @@ public static class AccessEndpoints
         // grants it did not know about. This one reads, flips, writes — nothing else on the entry moves.
         // It is also why UpdateUserRequest's shape is untouched: "disabled" is policy, and policy lives
         // in the access document, not on the credential record (AccessModels.cs's file header).
-        group.MapPut("/users/{username}/disabled", async (string username, SetAccessDisabledRequest req, ClaimsPrincipal principal, AccessGuard guard, IAccessPolicyFacade policy, PermissionResolver resolver) =>
+        group.MapPut("/users/{username}/disabled", async (string username, SetAccessDisabledRequest req, ClaimsPrincipal principal, AccessGuard guard, IAccessPolicyFacade policy, IUserStoreFacade userStore, PermissionResolver resolver) =>
         {
             if (await RefuseAsync(guard, principal, Actions.AccessWrite, username) is { } refusal)
             {
@@ -228,10 +228,29 @@ public static class AccessEndpoints
             {
                 Username = username,
                 Disabled = req.Disabled,
-                // Everything else survives verbatim. An entry may not exist at all — disabling a user
-                // whose role was never mirrored still has to work, and an entry carrying only Disabled
-                // is a state LegacyRoleMigration already knows how to fill in later.
-                Roles = existing is null ? [] : [.. existing.Roles],
+                // Everything on an EXISTING entry survives verbatim.
+                //
+                // When there is no entry, the roles are seeded from the credential record instead of
+                // left empty, and that is not tidiness — it is the difference between disabling a login
+                // and demoting it permanently. EffectivePermissionsBuilder consults the JWT's role claim
+                // ONLY while the document has no entry for the user (`entry is not null` suppresses the
+                // fallback, whatever Roles holds), so an entry carrying nothing but Disabled=true is not
+                // a neutral placeholder: it is an entry that says "this user has no roles". Re-enabling
+                // then returns a user with zero grants who can sign in and do nothing. Wave 6's console
+                // reproduced it end to end on a seeded `editor` — disable, enable, 403 on
+                // POST /api/pipelines.
+                //
+                // The original comment here reasoned that LegacyRoleMigration would fill the gap in
+                // later, and it does — at the NEXT HOST START. Between the write and that restart the
+                // demotion is live and silent, which is the whole window an administrator disabling an
+                // account during an incident is operating in.
+                //
+                // Seeded exactly the way UsersEndpoints.MirrorUserRoleAsync seeds it, from the stored
+                // record rather than from anything the caller sent. A user store that cannot answer
+                // leaves the list empty, which is the pre-existing behaviour and no worse than it.
+                Roles = existing is not null
+                    ? [.. existing.Roles]
+                    : await SeedRolesFromCredentialAsync(userStore, username),
                 Grants = existing is null ? [] : [.. existing.Grants],
             };
 
@@ -322,5 +341,23 @@ public static class AccessEndpoints
     /// <summary>Who the store records as having made the change. The authenticated caller and never
     /// anything from the request body — the models carry an <c>UpdatedBy</c> field, and a caller that
     /// could set it could write somebody else's name into the record of their own edit.</summary>
+    /// <summary>The one role the credential record carries, or nothing when there is no such record or
+    /// the store cannot be read. Never throws: this runs on the disable path, and failing to disable a
+    /// login because a lookup that only improves the entry's completeness went wrong would be strictly
+    /// worse than an incomplete entry.</summary>
+    public static async Task<List<string>> SeedRolesFromCredentialAsync(IUserStoreFacade userStore, string username)
+    {
+        try
+        {
+            var user = (await userStore.GetUsersAsync())
+                .FirstOrDefault(u => string.Equals(u.Username, username, StringComparison.Ordinal));
+            return user is null || string.IsNullOrWhiteSpace(user.Role) ? [] : [user.Role];
+        }
+        catch (Exception)
+        {
+            return [];
+        }
+    }
+
     private static string ActorOf(ClaimsPrincipal principal) => principal.Identity?.Name ?? "";
 }

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using StreamForge.Abstractions;
 using StreamForge.Api;
 using StreamForge.Api.Auth;
+using StreamForge.AppCore.Access;
 using Xunit;
 
 namespace StreamForge.Host.Tests;
@@ -204,6 +205,69 @@ public class UserRoleMirrorTests
         Assert.Equal(
             ["username", "displayName", "role", "createdAtMs", "permissions", "roles", "groups", "disabled", "policyVersion"],
             root.EnumerateObject().Select(p => p.Name).ToArray());
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Plan 015 wave 6: the OTHER direction the two stores can drift — disabling a login.
+    //
+    // Tested against the statics rather than over HTTP for the reason this file's remarks already give.
+    // Two facts, and the bug lived in the gap between them: the builder suppresses the role-claim
+    // fallback the moment an entry EXISTS, and the disable route used to create one carrying nothing.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void AnEntryWithNoRolesIsNotTheSameAsNoEntryAtAll()
+    {
+        var document = new AccessPolicyDocument { Roles = BuiltInRoleCatalog.Create(), Version = 1 };
+
+        // No entry: the token's role claim is consulted, which is what carries a pre-migration user.
+        var withoutEntry = EffectivePermissionsBuilder.Build(document, "alice", roleClaim: "Editor");
+        Assert.Equal(["Editor"], withoutEntry.Roles);
+        Assert.NotEmpty(withoutEntry.Grants);
+
+        // An entry that exists and names no role: the fallback is gone and so is everything else. This
+        // is the state a disable/enable round trip used to leave behind — a login that works and can do
+        // nothing, which is a demotion nobody asked for and nothing announces.
+        document.Users.Add(new UserAccessEntry { Username = "alice" });
+        var withEmptyEntry = EffectivePermissionsBuilder.Build(document, "alice", roleClaim: "Editor");
+        Assert.Empty(withEmptyEntry.Roles);
+        Assert.Empty(withEmptyEntry.Grants);
+    }
+
+    [Fact]
+    public async Task DisablingAUserWithNoEntrySeedsTheRoleFromTheCredentialRecord()
+    {
+        var store = new SeedUserStore(new UserRecord { Username = "alice", Role = "Editor" });
+
+        Assert.Equal(["Editor"], await AccessEndpoints.SeedRolesFromCredentialAsync(store, "alice"));
+    }
+
+    [Fact]
+    public async Task SeedingNeverThrowsAndNeverInventsARole()
+    {
+        // No such account, and a store that is down. Both leave the entry incomplete rather than
+        // failing the disable: refusing to disable a login because a completeness lookup broke would be
+        // strictly worse than the incomplete entry it was trying to avoid.
+        Assert.Empty(await AccessEndpoints.SeedRolesFromCredentialAsync(new SeedUserStore(), "nobody"));
+        Assert.Empty(await AccessEndpoints.SeedRolesFromCredentialAsync(new BrokenUserStore(), "alice"));
+    }
+
+    private sealed class SeedUserStore(params UserRecord[] users) : IUserStoreFacade
+    {
+        public Task<UserRecord?> ValidateCredentialsAsync(string username, string password) => throw new NotSupportedException();
+        public Task<List<UserRecord>> GetUsersAsync() => Task.FromResult(users.ToList());
+        public Task<bool> CreateUserAsync(string username, string displayName, string role, string password) => throw new NotSupportedException();
+        public Task<bool> UpdateUserAsync(string username, string? displayName, string? role, string? password) => throw new NotSupportedException();
+        public Task<bool> DeleteUserAsync(string username) => throw new NotSupportedException();
+    }
+
+    private sealed class BrokenUserStore : IUserStoreFacade
+    {
+        public Task<UserRecord?> ValidateCredentialsAsync(string username, string password) => throw new NotSupportedException();
+        public Task<List<UserRecord>> GetUsersAsync() => throw new InvalidOperationException("store unreachable");
+        public Task<bool> CreateUserAsync(string username, string displayName, string role, string password) => throw new NotSupportedException();
+        public Task<bool> UpdateUserAsync(string username, string? displayName, string? role, string? password) => throw new NotSupportedException();
+        public Task<bool> DeleteUserAsync(string username) => throw new NotSupportedException();
     }
 }
 

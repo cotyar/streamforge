@@ -337,6 +337,78 @@ seam `CatalogChangeAudit` already documented, so the row keeps the model as `Act
 cut-over.** That is the whole no-flag-day answer. The SPA treats a missing `permissions[]` as an old server
 and falls back to today's ordinal semantics, so a rolling deploy is safe.
 
+### Wave 6 — the console, and the two server bugs only a console could find
+
+Three agents inside one `web/` tree, so the router, the sidebar and the `can(action, scope?)` signature
+were pre-committed as a seam (`8f47e27`). The seam's `can` body was today's ordinal role answer — not
+scaffolding, but the **else-branch written first**: 6-A had to keep exactly that as the fallback for a
+server sending no `permissions[]`, so nothing was thrown away.
+
+**`hasRole` survived, and zero of the 57 `RoleGate` call sites changed.** `RoleGate` gained optional
+`action`/`scope`; supplying both `min` and `action` requires BOTH to pass, because adding a condition to
+a gate must never widen it.
+
+**The client evaluator is a third implementation of the scope grammar, and that is the risk it carries.**
+`permissions.ts` mirrors `PermissionEvaluator.cs` — same ordering, same ordinal comparisons, same
+iterative glob. 20 `bun test` assertions pin it, including a parity block asserting the snapshot and the
+role fallback answer identically for all 26 actions. It lives in `web/test/` because `tsconfig.json`
+includes only `src`, so the file is neither typechecked nor bundled and needs no new dependency.
+
+**Two server bugs, both found by writing the UI, neither visible to any suite:**
+
+1. **`PUT /api/access/users/{u}/disabled` silently demoted anyone with no entry yet.** The route created
+   an entry carrying only `Disabled`, with empty `Roles` — and `EffectivePermissionsBuilder` consults the
+   token's role claim ONLY while no entry exists (`entry is not null` suppresses the fallback whatever
+   `Roles` holds). So disable+enable returned a login that worked and could do nothing. Reproduced end to
+   end on the seeded `editor`: 201 → disable → enable → **403 on `POST /api/pipelines`**. The old comment
+   reasoned `LegacyRoleMigration` fills the gap in later, and it does — at the *next host start*, which is
+   not the window an administrator disabling an account during an incident is operating in. Fixed by
+   seeding `Roles` from the credential record, the same way `MirrorUserRoleAsync` seeds it. 6-B had
+   worked around it client-side; that workaround was deleted once the server was right, because every
+   other caller (curl, the admin CLI, wave 7's `admin/ access`) was still exposed.
+2. **`/api/users` wrote no audit row at all** — not the guard's decision, not the mutation. Creating an
+   account and changing a role were the only privileged mutations invisible in the log. It was also the
+   per-action migration wave 2 promised and wave 3 missed: `user.write` was declared, matrix-tested in
+   AppCore, and enforced nowhere. Fixed in the same commit (`687cb84`).
+
+The credential hazard on that second fix is sharper than a source's: the secret is not a config field the
+masker walks, it **is** the record. So the redactor is a projection and `PasswordHash`/`PasswordSalt` are
+MASKED rather than dropped — load-bearing, because the diff is computed on the unmasked pair, so a reset
+moves those keys and the row reads `passwordHash: "***" → "***"`. Dropping them would render a password
+reset as an empty diff, i.e. as nothing having happened. Verified live: the plaintext appears in no row.
+
+**A 403 from `/api/auth/me` now ends the session.** Everywhere else a 403 means "you may not do that" and
+the screen says so; on that route it can only mean the account was disabled or its every role deleted, and
+treating it as an ordinary refusal left a disabled user looking at a working console until their next
+click. Nothing was over-granted — the server refused everything — but the session has to end where it
+actually ended.
+
+**Re-poll cadence:** on mount, on login, on `visibilitychange`, and a 60s interval **only while the tab is
+visible**. The server caches the same snapshot for `Auth:PolicyCacheSeconds` (default 10), so it cannot
+answer fresher than that; a background tab polls not at all, so a reopened laptop resolves on the first
+glance rather than the first click.
+
+**Known gaps, recorded rather than fixed:**
+
+- `RequiresApproval` currently *hides* a control, so such a grant is strictly worse for the user than no
+  grant. `decide` is on the context specifically so the wave that renders "Request approval…" needs no
+  change here.
+- `tag:`-scoped grants cannot match at most client call sites, because `can(action, scope?)` passes no
+  tags. Errs toward hiding a control the server would allow.
+- The client is **stricter than the server on the coarse policy ask**: server-side `Editor` is satisfied
+  by `catalog.write` OR the legacy role claim, and the client has no token-claim axis. Identical on wave
+  3's per-action guards, and it self-corrects as the OR retires.
+- `GET /api/access/effective/{u}` short-circuits on a disabled user, so an admin cannot see what that
+  account *would* hold without re-enabling it first. Observed again while verifying bug 1 above — the
+  first probe read `roles: []` and proved nothing.
+- `GET /api/approvals?state=Bogus` → 400 with an **empty body**, unlike every other refusal on those
+  routes.
+- The inbox applies `limit` *before* visibility filtering, so it is "your requests among the most recent
+  N", not "your N most recent". The approvals page therefore does not paginate at all.
+- No route lists the action vocabulary; the picker's list is hand-copied from `Actions`.
+- `origin` is `"rest"` on every row a REST caller can produce, and `chat`/`onBehalfOf` rendering is
+  verified against the type only — producing a real chat-origin row needs `GEMINI_API_KEY`.
+
 ## OIDC — deferred to its own plan; the seams land here
 
 The `.AddJwtBearer("Oidc", …)` + issuer-selecting `PolicyScheme` is ~80 lines. These five are the real work:
