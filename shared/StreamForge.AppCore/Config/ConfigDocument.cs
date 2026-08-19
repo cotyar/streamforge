@@ -26,6 +26,17 @@ public sealed class ConfigDocument
     public List<SourceDefinition> Sources { get; set; } = [];
     public List<ConfigPipeline> Pipelines { get; set; } = [];
     public List<ConfigTable> Tables { get; set; } = [];
+
+    /// <summary>Plan 016 wave 3 — the promotion-side half of the permissiveness split. Interactive
+    /// editing is permissive by default (<c>PUT /api/sources/{name}</c> allows a breaking field change
+    /// unless the caller opts into <c>?allowBreaking=false</c>); IMPORT is the opposite, because
+    /// promoting a document into an environment is not the moment to discover that a generated client
+    /// three deployments away stopped decoding. Null or absent means <c>"compatible"</c> — the gate is
+    /// ON — so a document written before this field, or by a tool that never heard of it, is gated. Only
+    /// the explicit string <c>"any"</c> turns it off, which is the one direction a typo must not take:
+    /// <c>schemaPolicy: "compatable"</c> leaves enforcement on rather than silently disabling it, the
+    /// same rule <c>Auth:Mode</c> follows.</summary>
+    public string? SchemaPolicy { get; set; }
 }
 
 /// <summary>
@@ -50,6 +61,12 @@ public sealed class ConfigPipeline
     /// for <c>includeSecrets</c> — see <see cref="ConfigSerializer.FromCatalog"/> — following the exact
     /// convention Sources' secrets already use in this document.</summary>
     public List<SinkSpec> Sinks { get; set; } = [];
+
+    /// <summary>Plan 016 wave 3: mirrors <see cref="PipelineDefinition"/>.DependsOn — what this entity was
+    /// authored against, as {kind, name, schemaRevision} pins. Empty (the default) is pruned from an
+    /// export exactly like every other empty list here, so a document that declares no pins is byte-
+    /// identical to one written before this field existed.</summary>
+    public List<EntityPin> DependsOn { get; set; } = [];
 }
 
 /// <summary>
@@ -97,4 +114,10 @@ public sealed class ConfigTable
     /// configured with. A round-trip that dropped it would promote a table whose per-key lookups silently
     /// stopped existing. Empty = not sharded, so an older document imports unchanged.</summary>
     public List<string> ShardBy { get; set; } = [];
+
+    /// <summary>Plan 016 wave 3: mirrors <see cref="TableDefinition"/>.DependsOn — what this entity was
+    /// authored against, as {kind, name, schemaRevision} pins. Empty (the default) is pruned from an
+    /// export exactly like every other empty list here, so a document that declares no pins is byte-
+    /// identical to one written before this field existed.</summary>
+    public List<EntityPin> DependsOn { get; set; } = [];
 }

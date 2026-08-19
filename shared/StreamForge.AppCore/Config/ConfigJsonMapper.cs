@@ -313,6 +313,14 @@ internal static class ConfigJsonMapper
             root["include"] = new JsonArray([.. doc.Include.Select(s => (JsonNode?)JsonValue.Create(s))]);
         }
 
+        // Plan 016 wave 3: emitted ONLY when the document actually declares one, so every export
+        // written before this field is still byte-identical — absent already means "compatible", which
+        // is the gated default. See ConfigDocument.SchemaPolicy for why the default is the strict one.
+        if (!string.IsNullOrWhiteSpace(doc.SchemaPolicy))
+        {
+            root["schemaPolicy"] = doc.SchemaPolicy;
+        }
+
         var sources = doc.Sources.OrderBy(s => s.Name, StringComparer.Ordinal).Select(SourceNode).ToArray();
         if (sources.Length > 0)
         {
