@@ -1,5 +1,5 @@
 import { NavLink, Navigate, Outlet } from 'react-router-dom'
-import { ArrowLeftRight, Bot, BookOpen, Braces, LayoutDashboard, LogOut, Moon, Sun, Users as UsersIconLucide, Workflow, Database, Table2, Waypoints } from 'lucide-react'
+import { ArrowLeftRight, Bot, BookOpen, Braces, ClipboardCheck, LayoutDashboard, LogOut, Moon, ScrollText, ShieldCheck, Sun, Users as UsersIconLucide, Workflow, Database, Table2, Waypoints } from 'lucide-react'
 import { useAuth } from '../api/auth'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/lib/theme'
@@ -51,7 +51,7 @@ function ThemeToggle() {
 }
 
 function Layout() {
-  const { user, hasRole, logout } = useAuth()
+  const { user, hasRole, can, logout } = useAuth()
 
   return (
     <div className="flex h-full min-h-screen bg-background">
@@ -95,6 +95,55 @@ function Layout() {
             >
               <Bot className="size-5" />
               AI Control
+            </NavLink>
+          )}
+          {/* Plan 015 wave 6. Approvals is ungated on purpose: /api/approvals is a Viewer route and the
+              inbox is where a requester watches their OWN request — gating it on approval.decide would
+              hide the page from exactly the person who filed the thing. */}
+          <NavLink
+            to="/approvals"
+            className={({ isActive }) =>
+              cn(
+                'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+                isActive
+                  ? 'bg-sidebar-accent text-sidebar-primary'
+                  : 'text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground',
+              )
+            }
+          >
+            <ClipboardCheck className="size-5" />
+            Approvals
+          </NavLink>
+          {can('access.read') && (
+            <NavLink
+              to="/access"
+              className={({ isActive }) =>
+                cn(
+                  'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+                  isActive
+                    ? 'bg-sidebar-accent text-sidebar-primary'
+                    : 'text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground',
+                )
+              }
+            >
+              <ShieldCheck className="size-5" />
+              Access
+            </NavLink>
+          )}
+          {can('audit.read') && (
+            <NavLink
+              to="/audit"
+              className={({ isActive }) =>
+                cn(
+                  'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+                  isActive
+                    ? 'bg-sidebar-accent text-sidebar-primary'
+                    : 'text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground',
+                )
+              }
+            >
+              <ScrollText className="size-5" />
+              Audit
             </NavLink>
           )}
           {hasRole('Admin') && (

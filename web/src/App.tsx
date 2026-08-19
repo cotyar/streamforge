@@ -14,10 +14,22 @@ import { UsersPage } from './pages/UsersPage'
 import { ApiExplorerPage } from './pages/ApiExplorerPage'
 import { ConfigPage } from './pages/ConfigPage'
 import { ChatPage } from './pages/ChatPage'
+import { AccessPage } from './pages/AccessPage'
+import { ApprovalsPage } from './pages/ApprovalsPage'
+import { AuditPage } from './pages/AuditPage'
 
 function AdminRoute({ children }: { children: ReactNode }) {
   const { hasRole } = useAuth()
   if (!hasRole('Admin')) return <Navigate to="/" replace />
+  return <>{children}</>
+}
+
+/** Plan 015 wave 6: a route gate keyed on an ACTION rather than a role. `AdminRoute`/`EditorRoute`
+ *  stay exactly as they are — `can` answers ordinally until wave 6-A gives it real grants, so this is
+ *  a strictly additive gate, not a migration of the two above. */
+function CanRoute({ action, children }: { action: string; children: ReactNode }) {
+  const { can } = useAuth()
+  if (!can(action)) return <Navigate to="/" replace />
   return <>{children}</>
 }
 
@@ -49,6 +61,23 @@ export default function App() {
                 <EditorRoute>
                   <ChatPage />
                 </EditorRoute>
+              }
+            />
+            <Route path="/approvals" element={<ApprovalsPage />} />
+            <Route
+              path="/access"
+              element={
+                <CanRoute action="access.read">
+                  <AccessPage />
+                </CanRoute>
+              }
+            />
+            <Route
+              path="/audit"
+              element={
+                <CanRoute action="audit.read">
+                  <AuditPage />
+                </CanRoute>
               }
             />
             <Route

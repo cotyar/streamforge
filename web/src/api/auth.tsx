@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { LoginResponse, Role } from './types'
+import type { LoginResponse, PermissionGrant, Role } from './types'
 import { api, AUTH_STORAGE_KEY, setUnauthorizedHandler } from './client'
 import { disconnectHub } from '../realtime/hub'
 
@@ -33,6 +33,30 @@ export interface AuthContextValue {
   login: (username: string, password: string) => Promise<void>
   logout: () => void
   hasRole: (min: Role) => boolean
+  /** The caller's own entitlements as `/api/auth/me` reported them, or null against a pre-015 server
+   *  (see the `permissions?` note in types.ts) — which is exactly what makes `can` fall back. */
+  permissions: PermissionGrant[] | null
+  /** May this principal do `action` to `scope`? Scope defaults to `*`. */
+  can: (action: string, scope?: string) => boolean
+}
+
+// SEAM — plan 015 wave 6. The SIGNATURE of `can` above is final and is what the access, approvals and
+// audit surfaces are written against; the BODY below is not. Wave 6-A replaces it with the client-side
+// twin of PermissionEvaluator fed by `/api/auth/me`'s `permissions[]`, and keeps this ordinal answer as
+// the fallback for a server that sends no `permissions[]` at all. Until then every caller gets today's
+// role semantics — which is the correct answer for every surface this wave adds, and a safe one for the
+// rest.
+const ACTION_ROLE_FLOOR: ReadonlyArray<readonly [string, Role]> = [
+  ['approval.request', 'Viewer'],
+  ['approval.', 'Admin'],
+  ['access.', 'Admin'],
+  ['audit.', 'Admin'],
+  ['user.', 'Admin'],
+  ['config.replace', 'Admin'],
+] as const
+
+function minRoleFor(action: string): Role {
+  return ACTION_ROLE_FLOOR.find(([prefix]) => action.startsWith(prefix))?.[1] ?? 'Editor'
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -91,6 +115,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [auth],
   )
 
+  const can = useCallback(
+    (action: string, _scope?: string) => hasRole(minRoleFor(action)),
+    [hasRole],
+  )
+
   const value = useMemo<AuthContextValue>(
     () => ({
       user: auth ? { username: auth.username, displayName: auth.displayName, role: auth.role } : null,
@@ -99,8 +128,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       login,
       logout,
       hasRole,
+      permissions: null,
+      can,
     }),
-    [auth, login, logout, hasRole],
+    [auth, login, logout, hasRole, can],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
