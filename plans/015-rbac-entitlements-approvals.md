@@ -167,6 +167,61 @@ store's mirror of `UserRecord.Role` into `UserAccessEntry.Roles` to wave 1, and 
 runtime has no entry until the next restart and falls back to the token's role claim — safe, but it
 means "revocation lands in ~10s" is only half true. Wave 2-C owns closing it at the REST layer.
 
+### Wave 3 — entitlements actually enforced, and the divergence three agents produced
+
+Every coarse `RequireAuthorization` stayed exactly where it was, on every route, method and hub, and each
+handler additionally asks `AccessGuard` for its own action at its own scope. So the 99-row coverage table
+and the live 51-cell matrix both stayed green, which is the point: this wave adds enforcement without
+moving a single piece of route metadata.
+
+**The scope has to be the entity's NAME, and three agents independently disagreed about it.** The REST
+agent scoped pipelines and tables on the stored `Name`; the gRPC agent and the chat agent scoped them on
+the `{id}` their surface addresses by. Both readings are defensible in isolation and together they are a
+bug: `RegistryGrain.Create*Async` mints `Guid.NewGuid().ToString("n")`, so a `prod-*` scope written by an
+operator matches **nothing at all** on an id — the same grant would work in the console and silently fail
+over gRPC and through the chat. Reconciled to the name on all three surfaces (falling back to the raw
+identifier when the definition cannot be loaded, which only ever narrows). Sources were never affected:
+their route segment IS the name. If a GUID-scoped grant is ever wanted, OR in a second check on the id —
+strictly additive.
+
+**The guard runs before the 404.** Otherwise an authenticated but unentitled caller enumerates which
+names exist by reading 404 against 403. This cost one extra catalog read on delete, start/stop, and a few
+data routes: without the definition there is no name and no tags, so a scoped entitlement could not match
+and those routes would be the holes in the fence.
+
+**Lists filter; they do not refuse.** A caller entitled to three of ten pipelines gets three, and a
+caller entitled to none gets `200 []`, not a 403 — a list is not an entity.
+
+**Two places deliberately keep a weaker rule, both marked `ponytail:`.** The ingest paths (REST and gRPC)
+pass no resource tags, because reading the source definition per push would put a catalog round trip on
+the platform's hottest route; a `tag:`-scoped `source.ingest` grant therefore does not admit a push. And
+on the ingest JWT branch an entitlement refusal **falls through** to the ingest-key branch rather than
+short-circuiting, so every message the old code admitted is still admitted — the key path is consulted in
+strictly more cases than before and never fewer.
+
+**SignalR was the quiet hole:** the hub was gated once at `Viewer` and its per-subscription methods
+checked nothing, so any authenticated user could subscribe to any stream. Each subscribe now checks the
+entity's read action; unsubscribe is deliberately ungated, because a caller whose grant was just revoked
+must still be able to detach. Refusal is a `HubException` — the only type SignalR relays verbatim without
+`EnableDetailedErrors`, so the SPA gets the same sentence the REST 403 carries. Checked at subscribe time
+only: a revoked grant keeps delivering until the connection drops, and the upgrade path (re-run each
+connection's remembered subscriptions when the policy version moves) is written down rather than built.
+
+**The chat stops being the way around everything.** All sixteen tools check the same action their REST
+equivalent checks, at the same scope, from one table that is the source of truth — and a tool missing
+from that table is denied, not defaulted, so a seventeenth tool added without a permission is a dead tool
+with a legible reason. `Chat:MayExecutePrivileged=false` turns a `RequiresApproval` into a filed request;
+until wave 4 wires the store, the model is handed the **correlation id the refusal was logged under,
+labelled as a correlation id** — there is no approval yet, and telling a model otherwise sends a user
+hunting for a request that does not exist. Attribution is built once and carried everywhere: actor is the
+model, `OnBehalfOf` is the human, origin is `chat`, and they never collapse into one field.
+
+**Config import refuses whole rather than applying in part.** A config document's parts reference each
+other, so applying the entitled half applies a document nobody wrote; in `replace` mode a partial apply
+would delete the entities the caller IS entitled to and leave the ones they are not, converging on
+neither the old state nor the document. Refusing is recoverable, partial application is not. `validate`
+gets the same check — a dry run that says yes where the real run 403s is worse than no dry run.
+
 `hasRole` survives, implemented on top of `can()` — **zero of the 57 `RoleGate` references changes at
 cut-over.** That is the whole no-flag-day answer. The SPA treats a missing `permissions[]` as an old server
 and falls back to today's ordinal semantics, so a rolling deploy is safe.

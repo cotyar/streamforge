@@ -1,7 +1,9 @@
+using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using StreamForge.Abstractions;
+using StreamForge.Api.Auth;
 using StreamForge.AppCore.Sinks;
 using StreamForge.AppCore.Transports;
 
@@ -19,6 +21,13 @@ namespace StreamForge.Api;
 /// <para>Viewer, like every other read: a descriptor is field metadata, never a value. Secrets never appear
 /// here — the SPA learns that a field IS a secret (so it renders masked and honors the "*** keeps the stored
 /// value" rule), not what it contains.</para>
+///
+/// <para>Plan 015 wave 3-A: both routes keep their policy as the compatibility floor and additionally
+/// ask <see cref="AccessGuard"/> — the listing for <see cref="Actions.CatalogRead"/>, the probe for
+/// <see cref="Actions.CatalogWrite"/>, both at <c>*</c>. A transport DESCRIPTOR belongs to the build,
+/// not to any entity, so there is no narrower scope to ask at; the probe is <c>catalog.write</c> and
+/// not a read because of the security note below — it makes the server dial a host the caller named,
+/// which is a write-shaped capability however the response reads.</para>
 /// </summary>
 public static class TransportsEndpoints
 {
@@ -38,13 +47,22 @@ public static class TransportsEndpoints
         // one list can carry both and the form decides per entry whether to render a schedule editor.
         // Without this the database kinds would validate, start and run while being invisible to the only
         // UI that can configure them.
-        app.MapGet("/api/transports", () => Results.Ok(new TransportCatalog(
-                Inbound:
-                [
-                    .. InboundTransports.Kinds.Select(k => InboundTransports.Find(k)!.Describe()),
-                    .. PolledTransports.Kinds.Select(k => PolledTransports.Find(k)!.Describe()),
-                ],
-                Outbound: [.. SinkTransports.Kinds.Select(k => SinkTransports.Find(k)!.Describe())])))
+        app.MapGet("/api/transports", async (ClaimsPrincipal principal, AccessGuard guard) =>
+            {
+                var decision = await guard.CheckAsync(principal, Actions.CatalogRead, "*");
+                if (!decision.IsAllowed)
+                {
+                    return AccessGuard.Deny(decision);
+                }
+
+                return Results.Ok(new TransportCatalog(
+                    Inbound:
+                    [
+                        .. InboundTransports.Kinds.Select(k => InboundTransports.Find(k)!.Describe()),
+                        .. PolledTransports.Kinds.Select(k => PolledTransports.Find(k)!.Describe()),
+                    ],
+                    Outbound: [.. SinkTransports.Kinds.Select(k => SinkTransports.Find(k)!.Describe())]));
+            })
             .RequireAuthorization("Viewer");
 
         // Plan 014: generic schema discovery for any registered POLLED kind that also implements
@@ -60,8 +78,19 @@ public static class TransportsEndpoints
         // caller-supplied address the server reaches out to) — this endpoint raises no new ceiling, but the
         // trust boundary is worth stating rather than leaving implicit.
         app.MapPost("/api/transports/{kind}/probe", async (
-            string kind, SourceDefinition def, IConfiguration config, CancellationToken ct) =>
+            string kind, SourceDefinition def, ClaimsPrincipal principal, AccessGuard guard,
+            IConfiguration config, CancellationToken ct) =>
         {
+            // Asked at `*`, and with the body's own Tags deliberately NOT passed: a probe has no stored
+            // entity behind it, so the only tags available are the ones the caller just typed — an
+            // entitlement that a caller could satisfy by writing the right tag into their own request
+            // would not be an entitlement.
+            var decision = await guard.CheckAsync(principal, Actions.CatalogWrite, "*");
+            if (!decision.IsAllowed)
+            {
+                return AccessGuard.Deny(decision);
+            }
+
             var timeoutSeconds = config.GetValue("Transports:ProbeTimeoutSeconds", DefaultProbeTimeoutSeconds);
             var outcome = await SourceSchemaService.ProbeAsync(kind, def, TimeSpan.FromSeconds(timeoutSeconds), ct)
                 .ConfigureAwait(false);

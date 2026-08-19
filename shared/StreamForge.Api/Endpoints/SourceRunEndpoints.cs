@@ -1,6 +1,8 @@
+using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
+using StreamForge.Api.Auth;
 using StreamForge.Host.Generators;
 
 namespace StreamForge.Api;
@@ -39,9 +41,24 @@ public static class SourceRunEndpoints
         // Editor-gated: like POST /api/sources itself, running a generator on demand is an operator
         // action, not a machine-push credential path (contrast with POST /{name}/events' per-source-key
         // AllowAnonymous dual-auth in SourcesEndpoints.cs — that's for telemetry producers, this isn't).
-        group.MapPost("/{name}/run", async (string name, ScenarioRunRequest request, ICatalogFacade registry) =>
+        //
+        // Plan 015 wave 3-A: the Editor policy above stays as the compatibility floor and the handler
+        // additionally asks AccessGuard for source.run AT THIS SOURCE, with the definition's Tags, so a
+        // `tag:demo`-scoped or `dev-*`-scoped entitlement to run generators is expressible. The guard
+        // runs BEFORE the 404/409 answers below for the reason it does everywhere in this wave: an
+        // unentitled caller must not be able to use the status code to enumerate what exists. `src` is
+        // looked up first only because the check needs its Tags — the null case falls back to the route
+        // segment, which is the source's name anyway.
+        group.MapPost("/{name}/run", async (string name, ScenarioRunRequest request, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var src = await registry.GetSourceAsync(name);
+
+            var decision = await guard.CheckAsync(principal, Actions.SourceRun, src?.Name ?? name, src?.Tags);
+            if (!decision.IsAllowed)
+            {
+                return AccessGuard.Deny(decision);
+            }
+
             if (src is null)
             {
                 return Results.NotFound();

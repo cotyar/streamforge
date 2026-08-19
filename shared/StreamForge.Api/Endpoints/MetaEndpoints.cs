@@ -1,6 +1,8 @@
+using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
+using StreamForge.Api.Auth;
 using StreamForge.Host.Grpc.Dynamic;
 
 namespace StreamForge.Api;
@@ -37,6 +39,15 @@ public sealed record GrpcMetaResponse(int GrpcPort, IReadOnlyList<string> Servic
 /// service list are host-specific facts carried by <see cref="StreamForgeApiOptions"/> rather than
 /// resolved from IWebHostEnvironment/IConfiguration/IClusterClient directly, so this file is
 /// identical on both runtimes.
+///
+/// <para>Plan 015 wave 3-A. Two gates on every route, the pattern <c>AccessEndpoints</c> established:
+/// the <c>Viewer</c> policy stays as the compatibility floor, and each handler additionally asks
+/// <see cref="AccessGuard"/> for <see cref="Actions.CatalogRead"/> at <c>*</c>. These three routes are
+/// PLATFORM metadata — the .proto text this build ships, the gRPC surface, the live arrangement set —
+/// so they fold onto <c>catalog.read</c> rather than getting an invented <c>meta.read</c> (wave 1 made
+/// that call; see <c>BuiltInRoleCatalog</c>'s class doc). <c>*</c> is the right scope for the same
+/// reason: none of the three is about one entity. <c>/grpc</c> does enumerate the catalog, and its
+/// entity list is deliberately NOT filtered per entitlement — see the note on that handler.</para>
 /// </summary>
 public static class MetaEndpoints
 {
@@ -49,8 +60,13 @@ public static class MetaEndpoints
         // Raw text of the two static .proto files, resolved from options.ProtosDir (host-specific —
         // Protos/ lives directly under the Orleans host project; a future Dapr host can point
         // elsewhere or supply an empty directory).
-        group.MapGet("/protos/static", () =>
+        group.MapGet("/protos/static", async (ClaimsPrincipal principal, AccessGuard guard) =>
         {
+            if (await RefuseAsync(guard, principal) is { } refusal)
+            {
+                return refusal;
+            }
+
             var result = new List<StaticProtoDto>(StaticProtoFileNames.Length);
             foreach (var name in StaticProtoFileNames)
             {
@@ -69,8 +85,21 @@ public static class MetaEndpoints
         // schema; pipelines whose SQL currently compiles) — built via the SAME DynamicDescriptorSet
         // reflection/.proto-download endpoints use, so this list can never disagree with what a real
         // grpcurl/reflection client sees.
-        group.MapGet("/grpc", async (ICatalogFacade registry) =>
+        //
+        // Plan 015 wave 3-A: the entity list here is NOT filtered per-entitlement, unlike the three
+        // catalog LIST routes. Deliberate, and the reason is what this list is for: it is the API
+        // Explorer's map of the gRPC surface, whose entries are the reflectable message names a
+        // grpcurl client already sees — a caller who reaches the gRPC port learns them from reflection
+        // whether or not this REST route repeated them. Filtering here would cost a per-entity guard
+        // call on a page-load route and hide nothing that is actually hidden. The per-entity DATA
+        // behind each entry is guarded where it is served, which is the /api/{kind}/{id}/... routes.
+        group.MapGet("/grpc", async (ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
+            if (await RefuseAsync(guard, principal) is { } refusal)
+            {
+                return refusal;
+            }
+
             var sources = await registry.GetSourcesAsync();
             var tables = await registry.GetTablesAsync();
             var pipelines = await registry.GetPipelinesAsync();
@@ -126,8 +155,26 @@ public static class MetaEndpoints
         // Parallelism>=2 table's dataflow, walk ArrangeableExternalEdges, query the live
         // IArrangementGrain set each one resolves to) now lives entirely behind IArrangementMetaFacade
         // (Host-side: Facades/OrleansFacades.cs); a future Dapr facade always returns an empty list.
-        group.MapGet("/arrangements", async (IArrangementMetaFacade arrangements) =>
-            Results.Ok(await arrangements.GetArrangementsAsync())
-        ).RequireAuthorization("Viewer");
+        group.MapGet("/arrangements", async (ClaimsPrincipal principal, AccessGuard guard, IArrangementMetaFacade arrangements) =>
+        {
+            if (await RefuseAsync(guard, principal) is { } refusal)
+            {
+                return refusal;
+            }
+
+            return Results.Ok(await arrangements.GetArrangementsAsync());
+        }).RequireAuthorization("Viewer");
+    }
+
+    /// <summary>Null when the caller may proceed; the ready-made 403 when they may not. Same shape as
+    /// <c>AccessEndpoints.RefuseAsync</c>, and — like it — a
+    /// <see cref="AccessDecision.RequiresApproval"/> answer is refused here too rather than being
+    /// treated as a yes: filing the request is waves 4-5' job and the machinery does not exist yet.
+    /// Nothing under <c>/api/meta</c> is a plausible approval subject anyway; the action and the scope
+    /// are fixed, so this helper takes neither.</summary>
+    private static async Task<IResult?> RefuseAsync(AccessGuard guard, ClaimsPrincipal principal)
+    {
+        var result = await guard.CheckAsync(principal, Actions.CatalogRead, "*");
+        return result.IsAllowed ? null : AccessGuard.Deny(result);
     }
 }

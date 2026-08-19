@@ -54,7 +54,13 @@ public sealed class GeminiChatService(
 
     public string Model => model;
 
-    public async Task<ChatResponse> HandleAsync(ChatRequest request, ClaimsPrincipal principal, CancellationToken ct)
+    /// <param name="gate">Plan 015 wave 3-C: the per-request entitlement gate every tool asks before it
+    /// does anything. <b>Optional only so that the pre-existing unit tests that drive this loop against
+    /// a stub Gemini server keep compiling</b> — a pre-existing test expectation is a finding, not
+    /// something to edit — and they get <see cref="ChatToolGate.Unguarded"/>. The production path never
+    /// takes that default: <c>ChatEndpoints</c> is the only caller a request can reach and it always
+    /// passes a gate built from the DI <c>AccessGuard</c>.</param>
+    public async Task<ChatResponse> HandleAsync(ChatRequest request, ClaimsPrincipal principal, CancellationToken ct, ChatToolGate? gate = null)
     {
         var contents = request.Messages.Select(m => new GeminiContent
         {
@@ -62,7 +68,7 @@ public sealed class GeminiChatService(
             Parts = [new GeminiPart { Text = m.Content }],
         }).ToList();
 
-        var toolContext = new ChatToolContext(catalog, tables, history, principal);
+        var toolContext = new ChatToolContext(catalog, tables, history, principal, gate ?? ChatToolGate.Unguarded);
         var toolCalls = new List<ChatToolCallDto>();
         var thoughts = new List<string>();
 

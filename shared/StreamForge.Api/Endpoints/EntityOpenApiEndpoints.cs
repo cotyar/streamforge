@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -5,6 +6,7 @@ using Microsoft.AspNetCore.OpenApi;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.OpenApi;
 using StreamForge.Abstractions;
+using StreamForge.Api.Auth;
 using StreamForge.Engine;
 using StreamForge.Host.Grpc.Dynamic;
 
@@ -36,6 +38,14 @@ namespace StreamForge.Api;
 /// paths and on the Scalar pages, and on nothing else — so a signed-in browser renders the page, an
 /// anonymous caller gets 401, and no state-changing endpoint has become cookie-reachable. Every
 /// operation inside the document still carries the Bearer requirement, which is what "try it" uses.</para>
+///
+/// <para>Plan 015 wave 3-A: each route keeps its <c>Viewer</c> policy as the compatibility floor and
+/// additionally asks <see cref="AccessGuard"/> for the READ action of the entity it describes, at that
+/// entity's own name and with its tags — the same question the catalog route next to it asks. A document
+/// that named a table's output fields to somebody entitled to read nothing of that table would be the
+/// obvious way around the whole wave, and it is reachable from a browser with only the docs cookie, so
+/// it is the last route where the gate should be coarse. Note the cookie is a JWT: the principal
+/// resolved here is the signed-in user, not an anonymous docs reader.</para>
 /// </summary>
 public static class EntityOpenApiEndpoints
 {
@@ -45,10 +55,16 @@ public static class EntityOpenApiEndpoints
     public static void MapEntityOpenApiEndpoints(this WebApplication app)
     {
         app.MapGet($"/api/tables/{{id}}/{RouteSuffix}", async (
-            string id, ICatalogFacade registry, IServiceProvider services, CancellationToken ct) =>
+            string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry,
+            IServiceProvider services, CancellationToken ct) =>
         {
             var def = await registry.GetTableAsync(id)
                 ?? (await registry.GetTablesAsync()).FirstOrDefault(t => t.Name == id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -68,7 +84,8 @@ public static class EntityOpenApiEndpoints
         }).RequireAuthorization("Viewer");
 
         app.MapGet($"/api/pipelines/{{id}}/{RouteSuffix}", async (
-            string id, ICatalogFacade registry, IServiceProvider services, CancellationToken ct) =>
+            string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry,
+            IServiceProvider services, CancellationToken ct) =>
         {
             var def = await registry.GetPipelineAsync(id);
             if (def is null)
@@ -78,6 +95,11 @@ public static class EntityOpenApiEndpoints
                 {
                     def = byName[0];
                 }
+            }
+
+            if (await RefuseAsync(guard, principal, Actions.PipelineRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
             }
 
             if (def is null)
@@ -109,9 +131,15 @@ public static class EntityOpenApiEndpoints
         }).RequireAuthorization("Viewer");
 
         app.MapGet($"/api/sources/{{name}}/{RouteSuffix}", async (
-            string name, ICatalogFacade registry, IServiceProvider services, CancellationToken ct) =>
+            string name, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry,
+            IServiceProvider services, CancellationToken ct) =>
         {
             var src = await registry.GetSourceAsync(name);
+            if (await RefuseAsync(guard, principal, Actions.SourceRead, src?.Name ?? name, src?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (src is null)
             {
                 return Results.NotFound();
@@ -129,6 +157,17 @@ public static class EntityOpenApiEndpoints
                 EntityOpenApiLogic.RowSchemaFromFields(src.Fields, $"One event of source \"{src.Name}\"."),
                 ct);
         }).RequireAuthorization("Viewer");
+    }
+
+    /// <summary>Null when the caller may proceed; the ready-made 403 when they may not — the same helper
+    /// <c>AccessEndpoints.RefuseAsync</c> is, with the resource's tags threaded through. A
+    /// <see cref="AccessDecision.RequiresApproval"/> answer is refused rather than treated as a yes;
+    /// filing the request is waves 4-5's job.</summary>
+    private static async Task<IResult?> RefuseAsync(
+        AccessGuard guard, ClaimsPrincipal principal, string action, string scope, IReadOnlyCollection<string>? tags = null)
+    {
+        var result = await guard.CheckAsync(principal, action, scope, tags);
+        return result.IsAllowed ? null : AccessGuard.Deny(result);
     }
 
     private static async Task<IResult> DocumentAsync(

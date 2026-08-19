@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using StreamForge.Abstractions;
+using StreamForge.Api.Auth;
 using StreamForge.AppCore.Config;
 using StreamForge.AppCore.Sinks;
 using StreamForge.AppCore.Sql;
@@ -13,24 +14,69 @@ using StreamForge.Host.Grpc.Dynamic;
 
 namespace StreamForge.Api;
 
+/// <summary>
+/// Plan 015 wave 3-A — two gates on every route, the pattern <c>AccessEndpoints</c> established in wave
+/// 2-C. Every <c>RequireAuthorization("Viewer"/"Editor")</c> stays exactly where it is (the compatibility
+/// floor, pinned by <c>AuthorizationCoverageTests</c>), and each handler additionally asks
+/// <see cref="AccessGuard"/> for its own action at its own scope, passing the table's <c>Tags</c> so
+/// <c>tag:finance</c> scopes match.
+///
+/// <para><b>The scope is the table's NAME, not the <c>{id}</c> in the route</b> — the same decision, for
+/// the same reason, as in <c>PipelinesEndpoints</c>: a table id is
+/// <c>Guid.NewGuid().ToString("n")</c>, and an entitlement grammar built around <c>prod-*</c> is a
+/// grammar about names. Where the table cannot be loaded the route segment is used verbatim, which only
+/// ever narrows the answer.</para>
+///
+/// <para><b>The three sharded-table routes are <c>table.read</c>, including the fenced scan.</b> A fence
+/// pauses the tier's ingest for the duration of the scan, which is a real operational cost — but it is a
+/// cost of READING consistently, it changes no state, and giving it its own action would mean an
+/// operator who granted <c>table.read</c> discovered a second switch they had never heard of the first
+/// time somebody asked for a consistent cut. The cost is documented on the endpoint itself, where it is
+/// actionable.</para>
+/// </summary>
 public static class TablesEndpoints
 {
     public static void MapTablesEndpoints(this WebApplication app, StreamForgeApiOptions options)
     {
         var group = app.MapGroup("/api/tables");
 
-        group.MapGet("/", async (ICatalogFacade registry) =>
-            Results.Ok((await registry.GetTablesAsync()).Select(SecretsMasker.MaskTable).ToList())
-        ).RequireAuthorization("Viewer");
+        // Plan 015 wave 3-A: FILTERED rather than gated at `*` — see the identical note in
+        // SourcesEndpoints' list handler. Three of ten, not a 403.
+        group.MapGet("/", async (ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
+        {
+            var all = await registry.GetTablesAsync();
+            var visible = new List<TableDefinition>(all.Count);
+            foreach (var t in all)
+            {
+                if (await guard.CheckAsync(principal, Actions.TableRead, t.Name, t.Tags) is { IsAllowed: true })
+                {
+                    visible.Add(SecretsMasker.MaskTable(t));
+                }
+            }
 
-        group.MapGet("/{id}", async (string id, ICatalogFacade registry) =>
+            return Results.Ok(visible);
+        }).RequireAuthorization("Viewer");
+
+        group.MapGet("/{id}", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var t = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, t?.Name ?? id, t?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             return t is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskTable(t));
         }).RequireAuthorization("Viewer");
 
-        group.MapPost("/", async (CreateTableRequest req, ClaimsPrincipal principal, ICatalogFacade registry, ILoggerFactory loggers) =>
+        // Create asks at the NAME BEING CREATED with the request's own Tags — see the same note in
+        // SourcesEndpoints' create handler.
+        group.MapPost("/", async (CreateTableRequest req, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ILoggerFactory loggers) =>
         {
+            if (await RefuseAsync(guard, principal, Actions.TableWrite, req.Name ?? "", req.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Sql))
             {
                 return Results.BadRequest(new ErrorResponse("name and sql are required"));
@@ -107,9 +153,16 @@ public static class TablesEndpoints
             }
         }).RequireAuthorization("Editor");
 
-        group.MapPut("/{id}", async (string id, CreateTableRequest req, ICatalogFacade registry, ILoggerFactory loggers) =>
+        // The STORED table's name and tags decide, never the incoming body's: a caller who could rename
+        // or re-tag their way into an entitlement would not be under one.
+        group.MapPut("/{id}", async (string id, CreateTableRequest req, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ILoggerFactory loggers) =>
         {
             var existing = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableWrite, existing?.Name ?? id, existing?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (existing is null)
             {
                 return Results.NotFound();
@@ -190,8 +243,16 @@ public static class TablesEndpoints
             }
         }).RequireAuthorization("Editor");
 
-        group.MapDelete("/{id}", async (string id, ICatalogFacade registry) =>
+        // One extra catalog read this handler did not do before: without the definition there is no name
+        // and no tag list, and delete is the action an operator most wants to scope.
+        group.MapDelete("/{id}", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
+            var existing = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableDelete, existing?.Name ?? id, existing?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             try
             {
                 var removed = await registry.DeleteTableAsync(id);
@@ -203,8 +264,14 @@ public static class TablesEndpoints
             }
         }).RequireAuthorization("Editor");
 
-        group.MapPost("/{id}/start", async (string id, ICatalogFacade registry) =>
+        group.MapPost("/{id}/start", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
+            var existing = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableControl, existing?.Name ?? id, existing?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             try
             {
                 var updated = await registry.SetTableStatusAsync(id, PipelineStatus.Running);
@@ -217,8 +284,14 @@ public static class TablesEndpoints
             }
         }).RequireAuthorization("Editor");
 
-        group.MapPost("/{id}/stop", async (string id, ICatalogFacade registry) =>
+        group.MapPost("/{id}/stop", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
+            var existing = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableControl, existing?.Name ?? id, existing?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             try
             {
                 var updated = await registry.SetTableStatusAsync(id, PipelineStatus.Stopped);
@@ -230,8 +303,15 @@ public static class TablesEndpoints
             }
         }).RequireAuthorization("Editor");
 
-        group.MapPost("/validate", async (ValidateRequest req, ICatalogFacade registry) =>
+        // `table.write` at `*`: /validate names no table, and `*` is answered only by a `*`-scoped
+        // grant. Same reasoning, and the same accepted cost, as PipelinesEndpoints' /validate.
+        group.MapPost("/validate", async (ValidateRequest req, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
+            if (await RefuseAsync(guard, principal, Actions.TableWrite, "*") is { } refusal)
+            {
+                return refusal;
+            }
+
             // Plan 014 K: the sugar is stripped before compiling, and the named sink's existence is NOT
             // checked here — see the fuller note on PipelinesEndpoints' /validate for why a ValidateRequest
             // deliberately stays "SQL and nothing else".
@@ -264,9 +344,14 @@ public static class TablesEndpoints
         // (see PlanEndpointsLogic's class doc for the full degradation matrix) — otherwise the logical
         // view (planSummary + inputs) with an explanatory UnavailableReason. Recompiled fresh every call
         // (following OrleansArrangementMetaFacade.GetArrangementsAsync's precedent); never persisted.
-        group.MapGet("/{id}/plan", async (string id, ICatalogFacade registry) =>
+        group.MapGet("/{id}/plan", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var def = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -282,9 +367,14 @@ public static class TablesEndpoints
         // per-entity document (EntityOpenApiEndpoints) replace the free-form TableRowDto.row with this
         // table's real output schema, which is most of the point of a per-entity spec. Same for /search
         // and for PipelinesEndpoints' /results.
-        group.MapGet("/{id}/rows", async (string id, int? limit, int? offset, ICatalogFacade registry, ITableReadFacade tables) =>
+        group.MapGet("/{id}/rows", async (string id, int? limit, int? offset, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableReadFacade tables) =>
         {
             var def = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -314,9 +404,14 @@ public static class TablesEndpoints
         // /rows: that one is .Produces<TableRowsResponse>(), and the per-entity OpenAPI document
         // (EntityOpenApiEndpoints) rewrites its row shape into this table's real output schema — a second
         // content type on the same operation would have made that document describe two things at once.
-        group.MapGet("/{id}/rows.csv", async (string id, int? limit, int? offset, ICatalogFacade registry, ITableReadFacade tables) =>
+        group.MapGet("/{id}/rows.csv", async (string id, int? limit, int? offset, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableReadFacade tables) =>
         {
             var def = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -329,9 +424,14 @@ public static class TablesEndpoints
             return Results.File(Encoding.UTF8.GetBytes(csv), "text/csv; charset=utf-8", $"{def.Name}.csv");
         }).RequireAuthorization("Viewer");
 
-        group.MapGet("/{id}/metrics", async (string id, ICatalogFacade registry, ITableReadFacade tables) =>
+        group.MapGet("/{id}/metrics", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableReadFacade tables) =>
         {
             var def = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -359,10 +459,15 @@ public static class TablesEndpoints
         // the already-compiled TableDefinition.OutputFields, no recompilation needed) plus the
         // DynamicStreamService streaming contract. 409 if the table has never successfully compiled
         // (no OutputFields to describe), mirroring the pipeline endpoint's compile-failure behavior.
-        group.MapGet("/{id}/proto", async (string id, ICatalogFacade registry) =>
+        group.MapGet("/{id}/proto", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var def = await registry.GetTableAsync(id)
                 ?? (await registry.GetTablesAsync()).FirstOrDefault(t => t.Name == id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -382,9 +487,14 @@ public static class TablesEndpoints
             return Results.File(Encoding.UTF8.GetBytes(protoText), "text/plain; charset=utf-8", schema.FileProto.Name);
         }).RequireAuthorization("Viewer");
 
-        group.MapGet("/{id}/search", async (string id, string? q, int? limit, ICatalogFacade registry, ITableReadFacade tables) =>
+        group.MapGet("/{id}/search", async (string id, string? q, int? limit, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableReadFacade tables) =>
         {
             var def = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -408,9 +518,14 @@ public static class TablesEndpoints
         // The server derives the row-identity key from req.Row via TableGroupKeyExtractor/RowKeyCodec, the
         // same way TableHistoryGrain derives it from live deltas, so the client never needs to know the
         // table's GROUP BY identity columns or the key encoding.
-        group.MapPost("/{id}/history/lookup", async (string id, HistoryLookupRequest req, int? limit, ICatalogFacade registry, ITableHistoryFacade history) =>
+        group.MapPost("/{id}/history/lookup", async (string id, HistoryLookupRequest req, int? limit, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableHistoryFacade history) =>
         {
             var def = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -437,9 +552,14 @@ public static class TablesEndpoints
             return Results.Ok(result);
         }).RequireAuthorization("Viewer");
 
-        group.MapGet("/{id}/history/stats", async (string id, ICatalogFacade registry, ITableHistoryFacade history) =>
+        group.MapGet("/{id}/history/stats", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableHistoryFacade history) =>
         {
             var def = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -474,9 +594,14 @@ public static class TablesEndpoints
 
         // "Give me everything for this key" — the query the whole tier exists for. One grain, one ordered
         // delta stream, Orleans serializing its turns: strictly consistent by construction, no fence.
-        group.MapPost("/{id}/shard/lookup", async (string id, ShardLookupRequest req, int? historyLimit, ICatalogFacade registry, ITableShardFacade shards) =>
+        group.MapPost("/{id}/shard/lookup", async (string id, ShardLookupRequest req, int? historyLimit, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableShardFacade shards) =>
         {
             var def = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -502,9 +627,14 @@ public static class TablesEndpoints
         }).RequireAuthorization("Viewer");
 
         // Shard metrics + the live key set. Wakes NOTHING — router and directory only.
-        group.MapGet("/{id}/shards", async (string id, int? limit, int? offset, ICatalogFacade registry, ITableShardFacade shards) =>
+        group.MapGet("/{id}/shards", async (string id, int? limit, int? offset, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableShardFacade shards) =>
         {
             var def = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -541,9 +671,14 @@ public static class TablesEndpoints
         //
         // Per-key reads need none of this and get none of it: one key is one grain, already strictly
         // consistent by construction.
-        group.MapGet("/{id}/shards/scan", async (string id, int? limit, int? offset, bool? fenced, ICatalogFacade registry, ITableShardFacade shards) =>
+        group.MapGet("/{id}/shards/scan", async (string id, int? limit, int? offset, bool? fenced, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableShardFacade shards) =>
         {
             var def = await registry.GetTableAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -569,6 +704,18 @@ public static class TablesEndpoints
             var stats = await shards.ScanAsync(def.Name, take, skip);
             return Results.Ok(new TableShardScanResponse(stats, stats.Count, skip, take));
         }).RequireAuthorization("Viewer");
+    }
+
+    /// <summary>Null when the caller may proceed; the ready-made 403 when they may not — the same helper
+    /// <c>AccessEndpoints.RefuseAsync</c> is, with the resource's tags threaded through. A
+    /// <see cref="AccessDecision.RequiresApproval"/> answer is refused here too, carrying its own reason:
+    /// filing the request is waves 4-5's job and that machinery does not exist yet, so refusing is the
+    /// only answer that cannot be wrong in the meantime.</summary>
+    private static async Task<IResult?> RefuseAsync(
+        AccessGuard guard, ClaimsPrincipal principal, string action, string scope, IReadOnlyCollection<string>? tags = null)
+    {
+        var result = await guard.CheckAsync(principal, action, scope, tags);
+        return result.IsAllowed ? null : AccessGuard.Deny(result);
     }
 
     private static async Task<Dictionary<string, SourceSchema>> BuildStreamSchemasAsync(ICatalogFacade registry)

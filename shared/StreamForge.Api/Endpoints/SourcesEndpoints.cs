@@ -1,10 +1,12 @@
 using System.Globalization;
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
+using StreamForge.Api.Auth;
 using StreamForge.AppCore.Config;
 using StreamForge.AppCore.Ingest;
 using StreamForge.AppCore.Json;
@@ -13,6 +15,22 @@ using StreamForge.Host.Grpc.Dynamic;
 
 namespace StreamForge.Api;
 
+/// <summary>
+/// Plan 015 wave 3-A — two gates on every route, the pattern <c>AccessEndpoints</c> established in wave
+/// 2-C. The <c>RequireAuthorization("Viewer"/"Editor")</c> at each map site stays exactly as it was (it
+/// is the compatibility floor, and <c>AuthorizationCoverageTests</c> pins it), and each handler
+/// additionally asks <see cref="AccessGuard"/> for its own action AT THIS SOURCE, passing the stored
+/// definition's <c>Tags</c> so <c>tag:finance</c>-scoped entitlements match.
+///
+/// <para><b>The scope is the source's name</b>, which is also the route segment — sources are addressed
+/// by name everywhere, so unlike pipelines and tables there is no id/name choice to make here.</para>
+///
+/// <para><b>Why the guard runs before the 404.</b> Every handler that needs Tags looks the source up
+/// first and then guards on <c>src?.Name ?? name</c>, refusing before it answers 404. Ordering it the
+/// other way would let an unentitled-but-authenticated caller enumerate which source names exist by
+/// reading 404 against 403. The cost is that a caller who holds the entitlement gets the same 404 they
+/// got before, and a caller who does not gets 403 whether or not the name is real.</para>
+/// </summary>
 public static class SourcesEndpoints
 {
     public static void MapSourcesEndpoints(this WebApplication app)
@@ -20,13 +38,36 @@ public static class SourcesEndpoints
         var group = app.MapGroup("/api/sources");
 
         // D-H: every read path masks secrets (URL header values; gRPC password/token) as "***".
-        group.MapGet("/", async (ICatalogFacade registry) =>
-            Results.Ok((await registry.GetSourcesAsync()).Select(SecretsMasker.Mask).ToList())
-        ).RequireAuthorization("Viewer");
+        //
+        // Plan 015 wave 3-A: FILTERED, not gated at `*`. A caller entitled to `source.read` on `prod-*`
+        // asking at `*` would be refused the whole listing, which is the wrong answer to "show me what I
+        // can see" — they should see their three of ten. So the coarse Viewer policy stays and each
+        // entry is then dropped unless the caller has a read entitlement for it. A caller entitled to
+        // nothing gets an empty list rather than a 403: that is the same statement, and it is the one a
+        // console can render.
+        group.MapGet("/", async (ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
+        {
+            var all = await registry.GetSourcesAsync();
+            var visible = new List<SourceDefinition>(all.Count);
+            foreach (var src in all)
+            {
+                if (await guard.CheckAsync(principal, Actions.SourceRead, src.Name, src.Tags) is { IsAllowed: true })
+                {
+                    visible.Add(SecretsMasker.Mask(src));
+                }
+            }
 
-        group.MapGet("/{name}", async (string name, ICatalogFacade registry) =>
+            return Results.Ok(visible);
+        }).RequireAuthorization("Viewer");
+
+        group.MapGet("/{name}", async (string name, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var src = await registry.GetSourceAsync(name);
+            if (await RefuseAsync(guard, principal, Actions.SourceRead, src?.Name ?? name, src?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             return src is null ? Results.NotFound() : Results.Ok(SecretsMasker.Mask(src));
         }).RequireAuthorization("Viewer");
 
@@ -34,9 +75,14 @@ public static class SourcesEndpoints
         // DynamicStreamService streaming contract, ready for a client to compile standalone (see
         // tools/generate-client.sh). Field numbers always come from ICatalogFacade.EnsureFieldNumbersAsync
         // so they stay identical to what the dynamic gRPC reflection surface uses.
-        group.MapGet("/{name}/proto", async (string name, ICatalogFacade registry) =>
+        group.MapGet("/{name}/proto", async (string name, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var src = await registry.GetSourceAsync(name);
+            if (await RefuseAsync(guard, principal, Actions.SourceRead, src?.Name ?? name, src?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (src is null)
             {
                 return Results.NotFound();
@@ -50,8 +96,18 @@ public static class SourcesEndpoints
             return Results.File(Encoding.UTF8.GetBytes(protoText), "text/plain; charset=utf-8", schema.FileProto.Name);
         }).RequireAuthorization("Viewer");
 
-        group.MapPost("/", async (SourceDefinition def, ICatalogFacade registry) =>
+        // Create asks at the NAME BEING CREATED, with the body's own Tags: on a create there is no
+        // stored object to read them from, and a tag the caller invents on a source they are creating is
+        // a tag they could equally have added a second later with a PUT — so honouring it costs nothing
+        // that PUT does not already cost. (Contrast the transport probe, which passes no tags at all:
+        // there, nothing is ever stored, so the tag would be pure self-assertion.)
+        group.MapPost("/", async (SourceDefinition def, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
+            if (await RefuseAsync(guard, principal, Actions.SourceWrite, def.Name, def.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             var errors = SourceValidation.Validate(def);
             if (errors.Count > 0)
             {
@@ -72,9 +128,18 @@ public static class SourcesEndpoints
             return Results.Created($"/api/sources/{effective.Name}", SecretsMasker.Mask(effective));
         }).RequireAuthorization("Editor");
 
-        group.MapPut("/{name}", async (string name, SourceDefinition def, ICatalogFacade registry) =>
+        // The STORED definition's Tags decide, not the incoming body's: the caller is asking to change
+        // an object that already exists, and letting the request's own tag list widen the entitlement
+        // that authorizes the request would make every tag scope self-service. A caller who legitimately
+        // holds the write may of course then re-tag it, which is the same authority they already had.
+        group.MapPut("/{name}", async (string name, SourceDefinition def, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var existing = await registry.GetSourceAsync(name);
+            if (await RefuseAsync(guard, principal, Actions.SourceWrite, existing?.Name ?? name, existing?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (existing is null)
             {
                 return Results.NotFound();
@@ -95,17 +160,32 @@ public static class SourcesEndpoints
             return Results.Ok(SecretsMasker.Mask(effective));
         }).RequireAuthorization("Editor");
 
-        group.MapDelete("/{name}", async (string name, ICatalogFacade registry) =>
+        // One extra catalog read that this handler did not do before, and it is worth it: without the
+        // definition there are no Tags, so a `tag:sandbox` entitlement to delete could never match — and
+        // delete is precisely the action an operator most wants to scope. The read is the same
+        // GetSourceAsync every other route in this file already does.
+        group.MapDelete("/{name}", async (string name, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
+            var existing = await registry.GetSourceAsync(name);
+            if (await RefuseAsync(guard, principal, Actions.SourceDelete, existing?.Name ?? name, existing?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             var removed = await registry.DeleteSourceAsync(name);
             return removed ? Results.NoContent() : Results.NotFound();
         }).RequireAuthorization("Editor");
 
         // GET /{name}/status — connector runtime status (D-C). null (no connector status tracked,
         // e.g. generator-kind sources) -> 204; missing source -> 404.
-        group.MapGet("/{name}/status", async (string name, ICatalogFacade registry, IConnectorStatusFacade statusFacade) =>
+        group.MapGet("/{name}/status", async (string name, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, IConnectorStatusFacade statusFacade) =>
         {
             var src = await registry.GetSourceAsync(name);
+            if (await RefuseAsync(guard, principal, Actions.SourceRead, src?.Name ?? name, src?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             var status = src is null ? null : await statusFacade.GetStatusAsync(name);
             return SourceSchemaService.DecideStatusOutcome(src is not null, status) switch
             {
@@ -124,11 +204,14 @@ public static class SourcesEndpoints
         // JWT (AllowAnonymous below, then a manual dual check: Editor JWT OR a valid X-SF-Ingest-Key
         // for THIS source). An ingest source with zero configured keys is JWT-only, not open — see
         // IsAuthorizedToPushAsync/IIngressFacade.ValidateKeyAsync's own doc comment.
+        // Plan 015 wave 3-A: the entitlement check added here sits on the JWT BRANCH ONLY (see
+        // IsAuthorizedToPushAsync) — the ingest-key branch is a machine credential scoped to one source
+        // by construction and has no principal to resolve entitlements for.
         group.MapPost("/{name}/events", async (
             string name, IngestEventsRequest req, IIngressFacade ingress, ICatalogFacade registry,
-            IAuthorizationService authz, HttpContext http) =>
+            IAuthorizationService authz, AccessGuard guard, HttpContext http) =>
         {
-            if (!await IsAuthorizedToPushAsync(name, http, authz, ingress))
+            if (!await IsAuthorizedToPushAsync(name, http, authz, guard, ingress))
             {
                 return Results.Unauthorized();
             }
@@ -207,9 +290,14 @@ public static class SourcesEndpoints
         // POST generates a fresh secret, stores only its salted hash (AppCore/Auth/PasswordHasher —
         // the same primitive user passwords use), and returns the plaintext secret EXACTLY ONCE. There
         // is no other way to ever read it back — GET below only ever returns identity + usage.
-        group.MapPost("/{name}/ingest/keys", async (string name, CreateIngestKeyRequest req, ICatalogFacade registry) =>
+        group.MapPost("/{name}/ingest/keys", async (string name, CreateIngestKeyRequest req, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var src = await registry.GetSourceAsync(name);
+            if (await RefuseAsync(guard, principal, Actions.SourceWrite, src?.Name ?? name, src?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (src is null)
             {
                 return Results.NotFound();
@@ -243,9 +331,17 @@ public static class SourcesEndpoints
         // this replica's own in-memory view on top of whatever was last durably stored — see that
         // class's doc comment for why LastUsedMs isn't round-tripped through UpsertSourceAsync on
         // every push).
-        group.MapGet("/{name}/ingest/keys", async (string name, ICatalogFacade registry, IngestKeyUsageTracker usage) =>
+        // source.write, not source.read — the LegacyEquivalenceMatrix row says so, and the reason is
+        // that this route is Editor-gated today: it lists credential identities, which is a
+        // key-management surface even though it returns no secret material.
+        group.MapGet("/{name}/ingest/keys", async (string name, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, IngestKeyUsageTracker usage) =>
         {
             var src = await registry.GetSourceAsync(name);
+            if (await RefuseAsync(guard, principal, Actions.SourceWrite, src?.Name ?? name, src?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (src is null)
             {
                 return Results.NotFound();
@@ -259,9 +355,14 @@ public static class SourcesEndpoints
 
         // DELETE revokes — the key immediately stops authorizing pushes to this source (ValidateKeyAsync
         // only ever checks IngestConfig.Keys as currently stored).
-        group.MapDelete("/{name}/ingest/keys/{id}", async (string name, string id, ICatalogFacade registry) =>
+        group.MapDelete("/{name}/ingest/keys/{id}", async (string name, string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var src = await registry.GetSourceAsync(name);
+            if (await RefuseAsync(guard, principal, Actions.SourceWrite, src?.Name ?? name, src?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (src is null)
             {
                 return Results.NotFound();
@@ -281,18 +382,55 @@ public static class SourcesEndpoints
         // which don't themselves dial out, since they're part of the connector-authoring flow that
         // from-remote (which DOES dial out) also belongs to; keeps all three under one auth policy). ----
 
-        group.MapPost("/schema/mapping-validate", (MappingValidateRequest request) =>
-            Results.Ok(SourceSchemaService.ValidateMappingDocument(request))
-        ).RequireAuthorization("Editor");
+        // All three ask source.write at `*`, not at a source: they belong to the connector-AUTHORING
+        // flow, so at the moment they run there is no source yet to name. `*` is answered only by a
+        // `*`-scoped grant (PermissionEvaluator's own doc), which means a caller entitled solely to
+        // `dev-*` cannot use the schema helpers — the honest reading, and the alternative (widening `*`
+        // to be satisfied by any scope) would defeat every Deny written at `*`.
+        group.MapPost("/schema/mapping-validate", async (MappingValidateRequest request, ClaimsPrincipal principal, AccessGuard guard) =>
+        {
+            if (await RefuseAsync(guard, principal, Actions.SourceWrite, "*") is { } refusal)
+            {
+                return refusal;
+            }
 
-        group.MapPost("/schema/derive-openapi", async (SchemaDeriveRequest request, CancellationToken ct) =>
-            Results.Ok(await SourceSchemaService.DeriveOpenApiAsync(request, ct))
-        ).RequireAuthorization("Editor");
+            return Results.Ok(SourceSchemaService.ValidateMappingDocument(request));
+        }).RequireAuthorization("Editor");
+
+        group.MapPost("/schema/derive-openapi", async (SchemaDeriveRequest request, ClaimsPrincipal principal, AccessGuard guard, CancellationToken ct) =>
+        {
+            if (await RefuseAsync(guard, principal, Actions.SourceWrite, "*") is { } refusal)
+            {
+                return refusal;
+            }
+
+            return Results.Ok(await SourceSchemaService.DeriveOpenApiAsync(request, ct));
+        }).RequireAuthorization("Editor");
 
         // Dials out to a remote gRPC endpoint per the request body — Editor-only (D-G).
-        group.MapPost("/schema/from-remote", async (RemoteSchemaRequest request, CancellationToken ct) =>
-            Results.Ok(await SourceSchemaService.FromRemoteAsync(request, ct))
-        ).RequireAuthorization("Editor");
+        group.MapPost("/schema/from-remote", async (RemoteSchemaRequest request, ClaimsPrincipal principal, AccessGuard guard, CancellationToken ct) =>
+        {
+            if (await RefuseAsync(guard, principal, Actions.SourceWrite, "*") is { } refusal)
+            {
+                return refusal;
+            }
+
+            return Results.Ok(await SourceSchemaService.FromRemoteAsync(request, ct));
+        }).RequireAuthorization("Editor");
+    }
+
+    /// <summary>Null when the caller may proceed; the ready-made 403 when they may not — the same helper
+    /// <c>AccessEndpoints.RefuseAsync</c> is, with the resource's tags threaded through.
+    ///
+    /// <para>A <see cref="AccessDecision.RequiresApproval"/> answer is refused here too, carrying its own
+    /// reason ("grant … requires approval"). Filing the request instead is waves 4-5's job and that
+    /// machinery does not exist yet; refusing is the only answer that cannot be wrong in the meantime,
+    /// and it fails closed rather than reading "needs a second pair of eyes" as yes.</para></summary>
+    private static async Task<IResult?> RefuseAsync(
+        AccessGuard guard, ClaimsPrincipal principal, string action, string scope, IReadOnlyCollection<string>? tags = null)
+    {
+        var result = await guard.CheckAsync(principal, action, scope, tags);
+        return result.IsAllowed ? null : AccessGuard.Deny(result);
     }
 
     private static IngestStatusResponse ToIngestStatusResponse(IngestStatus s) => new(
@@ -317,11 +455,28 @@ public static class SourcesEndpoints
     /// satisfies it exactly like every other Editor-gated endpoint) always suffices; otherwise the
     /// <c>X-SF-Ingest-Key</c> header is validated against THIS source's configured keys. An ingest
     /// source with zero configured keys is JWT-only, not open — that rule lives in
-    /// <see cref="IIngressFacade.ValidateKeyAsync"/>, not here, so REST and gRPC can't drift.</summary>
-    private static async Task<bool> IsAuthorizedToPushAsync(string sourceName, HttpContext http, IAuthorizationService authz, IIngressFacade ingress)
+    /// <see cref="IIngressFacade.ValidateKeyAsync"/>, not here, so REST and gRPC can't drift.
+    ///
+    /// <para>Plan 015 wave 3-A added the entitlement check, and it sits on the JWT BRANCH ONLY: a JWT
+    /// holder must satisfy the Editor policy AND hold <see cref="Actions.SourceIngest"/> for this
+    /// source, while a key holder is unaffected — an ingest key already names exactly one source, which
+    /// is a narrower scope than any entitlement could express. A JWT that fails the entitlement falls
+    /// THROUGH to the key branch rather than short-circuiting, so a caller who presents both a
+    /// weakly-scoped token and a valid key still pushes.</para>
+    ///
+    /// <para>ponytail: the check passes NO tags, so a <c>tag:…</c>-scoped <c>source.ingest</c>
+    /// entitlement will not match on this route. Ceiling stated plainly: tag-scoped ingest is the one
+    /// scope form this route cannot express. The reason is that tags live on the stored
+    /// <see cref="SourceDefinition"/> and reading it would add a catalog round trip to the hottest route
+    /// in the platform — one per push batch, on the path whose whole design (IngressRowAcceptance,
+    /// the drop-oldest buffer) exists to avoid exactly that. Upgrade path: carry the tags on whatever
+    /// <see cref="IIngressFacade"/> already resolves per source, and pass them here.</para></summary>
+    private static async Task<bool> IsAuthorizedToPushAsync(
+        string sourceName, HttpContext http, IAuthorizationService authz, AccessGuard guard, IIngressFacade ingress)
     {
         var editorResult = await authz.AuthorizeAsync(http.User, "Editor");
-        if (editorResult.Succeeded)
+        if (editorResult.Succeeded
+            && (await guard.CheckAsync(http.User, Actions.SourceIngest, sourceName)).IsAllowed)
         {
             return true;
         }

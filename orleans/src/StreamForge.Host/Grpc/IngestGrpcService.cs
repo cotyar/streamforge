@@ -1,7 +1,9 @@
+using System.Security.Claims;
 using Grpc.Core;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
+using StreamForge.Api.Auth;
+using StreamForge.AppCore.Access;
 using StreamForge.AppCore.Ingest;
 using V1 = StreamForge.Host.Grpc.V1;
 
@@ -35,8 +37,16 @@ namespace StreamForge.Host.Grpc;
 /// before admission. Fixed by running the exact same check here, against the exact same method (not a
 /// second copy of "is this table LATEST BY" that could quietly drift from the REST one) — see
 /// <see cref="Ingest"/>'s body.</para>
+///
+/// <para>Plan 015 wave 3-B: the JWT branch of that per-message check now also asks
+/// <see cref="AccessGuard"/> for <see cref="Actions.SourceIngest"/> at the message's source. <b>The
+/// ingest-key branch is untouched, on purpose</b> — a key is not a user, has no entry in the access
+/// document and therefore no entitlements; running it through the guard would deny every key-holding
+/// producer in existence. It is still consulted whenever the JWT branch does not admit, so every message
+/// the old code let through still gets through. This service carries NO <c>[Authorize]</c> attribute, which
+/// <c>AuthorizationCoverageTests.DualAuthPathsAreAnonymousAtTheMetadataLayer</c> pins by reflection.</para>
 /// </summary>
-public sealed class IngestGrpcService(IIngressFacade ingress, IAuthorizationService authz, ICatalogFacade registry) : V1.IngestService.IngestServiceBase
+public sealed class IngestGrpcService(IIngressFacade ingress, IAuthorizationService authz, ICatalogFacade registry, AccessGuard guard) : V1.IngestService.IngestServiceBase
 {
     public override async Task Ingest(
         IAsyncStreamReader<V1.IngestRequest> requestStream,
@@ -47,9 +57,14 @@ public sealed class IngestGrpcService(IIngressFacade ingress, IAuthorizationServ
 
         await foreach (var request in requestStream.ReadAllAsync(context.CancellationToken).ConfigureAwait(false))
         {
-            if (!await IsAuthorizedAsync(httpContext, context, request.SourceName).ConfigureAwait(false))
+            // Metadata lookup is case-insensitive (Metadata.GetValue).
+            var refusal = await AuthorizeMessageAsync(
+                httpContext.User,
+                context.RequestHeaders.GetValue("x-sf-ingest-key"),
+                request.SourceName).ConfigureAwait(false);
+            if (refusal is { } status)
             {
-                throw new RpcException(new Status(StatusCode.Unauthenticated, "an Editor JWT or a valid X-SF-Ingest-Key for this source is required"));
+                throw new RpcException(status);
             }
 
             var rows = request.Rows.Select(GrpcValueConverter.FromStruct).ToList();
@@ -99,20 +114,70 @@ public sealed class IngestGrpcService(IIngressFacade ingress, IAuthorizationServ
         }
     }
 
-    /// <summary>Same two-step check as SourcesEndpoints.IsAuthorizedToPushAsync — resolved through
-    /// the real "Editor" policy first (so Admin still counts, and role-claim shape can't drift between
-    /// REST and gRPC), then a per-source key. Metadata lookup is case-insensitive
-    /// (<see cref="Metadata.GetValue"/>).</summary>
-    private async Task<bool> IsAuthorizedAsync(HttpContext httpContext, ServerCallContext context, string sourceName)
+    /// <summary>The per-message dual auth decision: <c>null</c> to admit, or the <see cref="Status"/> to
+    /// refuse the whole call with. Same two-step shape as SourcesEndpoints.IsAuthorizedToPushAsync —
+    /// resolved through the real "Editor" policy first (so Admin still counts, and role-claim shape can't
+    /// drift between REST and gRPC), then a per-source key.
+    ///
+    /// <para><b>Public, and taking values rather than contexts, so it can be tested.</b> This class has
+    /// no HTTP/gRPC harness (the same reason <see cref="BuildRetractErrors"/> and
+    /// <see cref="RejectedResult"/> are public statics), and "an ingest key still works for a principal
+    /// with no entitlements at all" is exactly the assertion that must not be left to a live smoke
+    /// test.</para>
+    ///
+    /// <para><b>Two branches, one of which is deliberately entitlement-free.</b> The JWT branch asks the
+    /// guard for <see cref="Actions.SourceIngest"/> at this message's source — the same action REST's
+    /// <c>POST /api/sources/{name}/events</c> is pinned to in the wave-1 equivalence matrix. The KEY
+    /// branch does not, and must not: an ingest key authenticates a machine, not a user; there is no
+    /// username to resolve, no access-document entry to find, and
+    /// <see cref="IIngressFacade.ValidateKeyAsync"/> already answers "may this key push to this source"
+    /// — which is the whole of the question. Plan 009 A1.2's contract is unchanged for every key holder.</para>
+    ///
+    /// <para>ponytail: the JWT branch passes NO resource tags. Ceiling: a <c>tag:finance</c>-scoped
+    /// <c>source.ingest</c> grant does not admit a push. Fetching the source definition would be a
+    /// catalog round trip <i>per message</i> on the hottest path in the platform, which is not a price
+    /// worth paying for a scope form nobody has asked for on ingest. Upgrade path when somebody does: a
+    /// tiny per-call (not per-message) tag cache keyed by source name, since a bidi stream's source set
+    /// is small and its tags change rarely.</para></summary>
+    public async Task<Status?> AuthorizeMessageAsync(ClaimsPrincipal user, string? presentedKey, string sourceName)
     {
-        var editorResult = await authz.AuthorizeAsync(httpContext.User, "Editor").ConfigureAwait(false);
-        if (editorResult.Succeeded)
+        AccessResult? access = null;
+
+        if ((await authz.AuthorizeAsync(user, "Editor").ConfigureAwait(false)).Succeeded)
         {
-            return true;
+            access = await guard.CheckAsync(user, Actions.SourceIngest, sourceName).ConfigureAwait(false);
+            if (access.IsAllowed)
+            {
+                return null;
+            }
         }
 
-        var presentedKey = context.RequestHeaders.GetValue("x-sf-ingest-key");
-        return await ingress.ValidateKeyAsync(sourceName, presentedKey).ConfigureAwait(false);
+        // FALLS THROUGH to the key on an entitlement refusal, and that is the deliberate part. Before
+        // this wave, a message carrying BOTH an Editor JWT and a valid key was admitted; short-circuiting
+        // the refusal here would have made the key stop working for exactly those producers, which is the
+        // one thing this change was not allowed to do. The key path is therefore consulted in strictly
+        // MORE cases than before and never in fewer — every request the old code admitted, this admits.
+        if (await ingress.ValidateKeyAsync(sourceName, presentedKey).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        if (access is not null)
+        {
+            // The entitlement's own reason, not the generic sentence: this caller authenticated fine and
+            // their problem is a missing (or denied) grant, which is the sentence that helps. A
+            // RequiresApproval push is refused DISTINCTLY (FailedPrecondition, not PermissionDenied) —
+            // waves 4-5 own filing the request, and "approve a telemetry message" is a shape nobody
+            // should build by accident in the meantime. Same mapping <see cref="GrpcAccess"/> uses,
+            // spelled out here because this path builds its own status rather than going through it.
+            return new Status(
+                access.Decision == AccessDecision.RequiresApproval
+                    ? StatusCode.FailedPrecondition
+                    : StatusCode.PermissionDenied,
+                access.Reason);
+        }
+
+        return new Status(StatusCode.Unauthenticated, "an Editor JWT or a valid X-SF-Ingest-Key for this source is required");
     }
 
     /// <summary>The exact per-row message SourcesEndpoints.cs's REST handler builds for the identical

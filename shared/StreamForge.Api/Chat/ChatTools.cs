@@ -8,15 +8,33 @@ using StreamForge.Host.Grains;
 
 namespace StreamForge.Api;
 
-/// <summary>
-/// Plan 007 W1C, decision D-D: everything POST /api/chat's tool loop needs to execute one Gemini
-/// functionCall against the EXISTING facades — mirrors SourcesEndpoints/PipelinesEndpoints/
-/// TablesEndpoints semantics exactly (validation, secrets masking, id-or-name resolution) rather than
-/// inventing new behavior. Only "generator"-kind sources are creatable/editable through chat
-/// (connector-kind sources — url/file/folder/grpc — stay a Sources-UI-only concern; the chat surface
-/// never touches ConnectorConfig).
-/// </summary>
-internal sealed record ChatToolContext(ICatalogFacade Catalog, ITableReadFacade Tables, ITableHistoryFacade History, ClaimsPrincipal Principal);
+// Plan 007 W1C, decision D-D: everything POST /api/chat's tool loop needs to execute one Gemini
+// functionCall against the EXISTING facades — mirrors SourcesEndpoints/PipelinesEndpoints/
+// TablesEndpoints semantics exactly (validation, secrets masking, id-or-name resolution) rather than
+// inventing new behavior. Only "generator"-kind sources are creatable/editable through chat
+// (connector-kind sources — url/file/folder/grpc — stay a Sources-UI-only concern; the chat surface
+// never touches ConnectorConfig).
+//
+// Plan 015 wave 3-C added the authorization half: see ChatAccess.cs.
+
+/// <summary>Everything one tool call needs. <see cref="Gate"/> was added by plan 015 wave 3-C: before
+/// it, POST /api/chat was gated once at the door and the tools re-checked nothing, which made the chat
+/// the way around every entitlement the plan adds. Every mutating tool now asks the gate the same
+/// question its REST equivalent asks — see <see cref="ChatToolPermissions"/> for the table and the
+/// reason it, rather than the handlers, is the source of truth.
+///
+/// <para><see cref="Principal"/> survives alongside the gate because it answers a different question:
+/// the gate decides what may happen, the principal is whose name goes in <c>CreatedBy</c>. Note that
+/// <c>CreatedBy</c> stays the HUMAN even though the model made the call — it is a single field on a
+/// frozen contract and it already means "the account this exists under" everywhere in the SPA. The
+/// model-versus-human split is carried where there is room for it: <see cref="AuditEntry.Actor"/> and
+/// <see cref="AuditEntry.OnBehalfOf"/>, built by <see cref="ChatAttribution.Row"/>.</para></summary>
+internal sealed record ChatToolContext(
+    ICatalogFacade Catalog,
+    ITableReadFacade Tables,
+    ITableHistoryFacade History,
+    ClaimsPrincipal Principal,
+    ChatToolGate Gate);
 
 internal static class ChatToolCatalog
 {
@@ -187,18 +205,18 @@ internal static class ChatToolExecutor
         {
             return name switch
             {
-                "list_sources" => await ListSourcesAsync(ctx),
+                "list_sources" => await ListSourcesAsync(args, ctx),
                 "get_source" => await GetSourceAsync(args, ctx),
                 "create_source" => await CreateSourceAsync(args, ctx),
                 "update_source" => await UpdateSourceAsync(args, ctx),
                 "pause_source" => await SetSourceEnabledAsync(args, ctx, enabled: false),
                 "resume_source" => await SetSourceEnabledAsync(args, ctx, enabled: true),
                 "delete_source" => await DeleteSourceAsync(args, ctx),
-                "list_pipelines" => await ListPipelinesAsync(ctx),
+                "list_pipelines" => await ListPipelinesAsync(args, ctx),
                 "get_pipeline" => await GetPipelineAsync(args, ctx),
                 "create_pipeline" => await CreatePipelineAsync(args, ctx),
                 "validate_sql" => await ValidateSqlAsync(args, ctx),
-                "list_tables" => await ListTablesAsync(ctx),
+                "list_tables" => await ListTablesAsync(args, ctx),
                 "get_table" => await GetTableAsync(args, ctx),
                 "table_rows" => await TableRowsAsync(args, ctx),
                 "search_table" => await SearchTableAsync(args, ctx),
@@ -244,8 +262,19 @@ internal static class ChatToolExecutor
     // Sources — mirrors SourcesEndpoints.cs (SourceValidation + SecretsMasker, generator-kind only).
     // ------------------------------------------------------------------
 
-    private static async Task<object> ListSourcesAsync(ChatToolContext ctx)
+    private static async Task<object> ListSourcesAsync(JsonElement args, ChatToolContext ctx)
     {
+        // Scope "*", exactly like GET /api/sources: the list route is group-gated and returns the whole
+        // catalog, so an entitlement narrower than * does not satisfy it. ponytail: no per-row
+        // filtering here. Ceiling: a caller entitled only to source.read on prod-* is refused the list
+        // rather than shown the prod-* half. Upgrade path is one Where() over the same guard, and it
+        // belongs on the REST list route first — the moment chat filters and REST does not, the two
+        // surfaces mean different things, which is the exact bug this wave exists to remove.
+        if (await ctx.Gate.AuthorizeAsync("list_sources", "*", null, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         var sources = await ctx.Catalog.GetSourcesAsync();
         return sources.Select(s => new
         {
@@ -269,6 +298,16 @@ internal static class ChatToolExecutor
         }
 
         var src = await ctx.Catalog.GetSourceAsync(name);
+
+        // Authorized AFTER the lookup and BEFORE the answer, because the resource's Tags are half the
+        // scope grammar (tag:finance) and they cannot be known without reading it. A miss is checked
+        // with no tags, which can only narrow the decision — so an unentitled caller is told "denied",
+        // never "not found", and the existence of a source they may not read stays hidden.
+        if (await ctx.Gate.AuthorizeAsync("get_source", name, src?.Tags, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         return src is null ? new { error = $"source '{name}' not found" } : SecretsMasker.Mask(src);
     }
 
@@ -278,6 +317,14 @@ internal static class ChatToolExecutor
         if (string.IsNullOrWhiteSpace(name))
         {
             return new { error = "name is required" };
+        }
+
+        // A creation has no stored entity and no id, so the proposed NAME is the only scope that
+        // exists at decision time — the same thing POST /api/sources is scoped by in the wave 2-B
+        // matrix. The tags checked are the ones the document is asking for.
+        if (await ctx.Gate.AuthorizeAsync("create_source", name, GetStringArray(args, "tags"), args) is { } refusal)
+        {
+            return refusal;
         }
 
         var (fields, fieldsError) = TryParseFields(args);
@@ -324,6 +371,17 @@ internal static class ChatToolExecutor
         }
 
         var existing = await ctx.Catalog.GetSourceAsync(name);
+
+        // ponytail: checked against the STORED tags, which is the resource being changed. Ceiling: a
+        // caller entitled via tag:dev can retag a dev source to prod in the same call. That hole is
+        // PUT /api/sources/{name}'s hole too, and closing it here alone would make chat stricter than
+        // the console — the one asymmetry this wave exists to prevent. Upgrade path: require the
+        // decision to hold for the union of old and new tags, on both surfaces at once.
+        if (await ctx.Gate.AuthorizeAsync("update_source", name, existing?.Tags, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         if (existing is null)
         {
             return new { error = $"source '{name}' not found" };
@@ -370,6 +428,14 @@ internal static class ChatToolExecutor
         }
 
         var existing = await ctx.Catalog.GetSourceAsync(name);
+
+        // source.write, not a control action: there is no REST route that pauses a source — the SPA
+        // flips Enabled through PUT /api/sources/{name} — so this must cost what that costs.
+        if (await ctx.Gate.AuthorizeAsync(enabled ? "resume_source" : "pause_source", name, existing?.Tags, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         if (existing is null)
         {
             return new { error = $"source '{name}' not found" };
@@ -388,6 +454,14 @@ internal static class ChatToolExecutor
             return new { error = "name is required" };
         }
 
+        // Authorization before the confirmation prompt, deliberately: a caller who may not delete this
+        // source should be told so, not invited to confirm a deletion that will be refused anyway.
+        var existing = await ctx.Catalog.GetSourceAsync(name);
+        if (await ctx.Gate.AuthorizeAsync("delete_source", name, existing?.Tags, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         if (!GetBool(args, "confirmed", false))
         {
             return new { error = "This deletes the source permanently. Ask the user to explicitly confirm deleting it, then call delete_source again with confirmed=true." };
@@ -401,8 +475,13 @@ internal static class ChatToolExecutor
     // Pipelines — mirrors PipelinesEndpoints.cs.
     // ------------------------------------------------------------------
 
-    private static async Task<object> ListPipelinesAsync(ChatToolContext ctx)
+    private static async Task<object> ListPipelinesAsync(JsonElement args, ChatToolContext ctx)
     {
+        if (await ctx.Gate.AuthorizeAsync("list_pipelines", "*", null, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         var pipelines = await ctx.Catalog.GetPipelinesAsync();
         return pipelines.Select(p => new
         {
@@ -424,6 +503,16 @@ internal static class ChatToolExecutor
         }
 
         var def = await ResolvePipelineAsync(ctx.Catalog, idOrName);
+
+        // Scoped by ID, not by the string the model happened to type: /api/pipelines/{id} is what the
+        // wave 2-B matrix scopes pipeline.read by, and a grant must mean the same thing whichever
+        // surface asks. When the pipeline does not resolve there is no id, and the unresolved string is
+        // the honest scope for a decision that is about to be "not found" anyway.
+        if (await ctx.Gate.AuthorizeAsync("get_pipeline", def?.Name ?? idOrName, def?.Tags, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         return def is null ? new { error = $"pipeline '{idOrName}' not found" } : def;
     }
 
@@ -434,6 +523,12 @@ internal static class ChatToolExecutor
         if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(sql))
         {
             return new { error = "name and sql are required" };
+        }
+
+        // No id yet — the proposed name is the scope, as it is for POST /api/pipelines in the matrix.
+        if (await ctx.Gate.AuthorizeAsync("create_pipeline", name, GetStringArray(args, "tags"), args) is { } refusal)
+        {
+            return refusal;
         }
 
         // Draft-friendly, exactly like POST /api/pipelines: compile-check for diagnostics only —
@@ -467,6 +562,13 @@ internal static class ChatToolExecutor
             return new { error = "sql is required" };
         }
 
+        // pipeline.write at *, which is what POST /api/pipelines/validate costs. It reads no entity but
+        // it compiles against every source's schema, and the platform already priced that as a write.
+        if (await ctx.Gate.AuthorizeAsync("validate_sql", "*", null, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         var schemas = await BuildPipelineSchemasAsync(ctx.Catalog);
         var result = SqlCompiler.Compile(sql, schemas);
         return new
@@ -482,8 +584,13 @@ internal static class ChatToolExecutor
     // Tables — mirrors TablesEndpoints.cs.
     // ------------------------------------------------------------------
 
-    private static async Task<object> ListTablesAsync(ChatToolContext ctx)
+    private static async Task<object> ListTablesAsync(JsonElement args, ChatToolContext ctx)
     {
+        if (await ctx.Gate.AuthorizeAsync("list_tables", "*", null, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         var tables = await ctx.Catalog.GetTablesAsync();
         return tables.Select(t => new
         {
@@ -507,6 +614,11 @@ internal static class ChatToolExecutor
         }
 
         var def = await ResolveTableAsync(ctx.Catalog, idOrName);
+        if (await ctx.Gate.AuthorizeAsync("get_table", def?.Name ?? idOrName, def?.Tags, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         return def is null ? new { error = $"table '{idOrName}' not found" } : def;
     }
 
@@ -519,6 +631,11 @@ internal static class ChatToolExecutor
         }
 
         var def = await ResolveTableAsync(ctx.Catalog, idOrName);
+        if (await ctx.Gate.AuthorizeAsync("table_rows", def?.Name ?? idOrName, def?.Tags, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         if (def is null)
         {
             return new { error = $"table '{idOrName}' not found" };
@@ -539,6 +656,11 @@ internal static class ChatToolExecutor
         }
 
         var def = await ResolveTableAsync(ctx.Catalog, idOrName);
+        if (await ctx.Gate.AuthorizeAsync("search_table", def?.Name ?? idOrName, def?.Tags, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         if (def is null)
         {
             return new { error = $"table '{idOrName}' not found" };
@@ -569,6 +691,11 @@ internal static class ChatToolExecutor
         }
 
         var def = await ResolveTableAsync(ctx.Catalog, idOrName);
+        if (await ctx.Gate.AuthorizeAsync("table_history", def?.Name ?? idOrName, def?.Tags, args) is { } refusal)
+        {
+            return refusal;
+        }
+
         if (def is null)
         {
             return new { error = $"table '{idOrName}' not found" };

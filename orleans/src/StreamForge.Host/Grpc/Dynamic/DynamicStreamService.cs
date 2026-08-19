@@ -5,6 +5,7 @@ using Orleans;
 using Orleans.Runtime;
 using Orleans.Streams;
 using StreamForge.Abstractions;
+using StreamForge.Api.Auth;
 using StreamForge.Engine;
 using V1 = StreamForge.Host.Grpc.Dynamic.V1;
 
@@ -25,8 +26,16 @@ namespace StreamForge.Host.Grpc.Dynamic;
 /// the field numbers it captured at subscribe time; a client that wants the new shape must re-subscribe
 /// (which fetches the updated schema/reflection descriptor fresh). This mirrors typed-client reality:
 /// the client already generated code against a single descriptor version before starting the call.</para>
+///
+/// <para>Plan 015 wave 3-B: <see cref="SubscribeEntity"/> keeps its <c>[Authorize(Policy = "Viewer")]</c>
+/// floor and additionally asks <see cref="AccessGuard"/> for the READ action of whichever entity kind the
+/// key resolved to — <c>source.read</c>, <c>table.read</c> or <c>pipeline.read</c>, at the entity, with
+/// its <c>Tags</c>. The check deliberately lives inside each of the three Stream*Async methods rather
+/// than in the dispatch above, because the entity (and therefore the action, its scope and its tags) is
+/// only known once it has been resolved: a table subscribed by ID is checked at its NAME, because a name
+/// is what an entitlement would actually be written against — see the note at the check itself.</para>
 /// </summary>
-public sealed class DynamicStreamService(IClusterClient client) : V1.DynamicStreamService.DynamicStreamServiceBase
+public sealed class DynamicStreamService(IClusterClient client, AccessGuard guard) : V1.DynamicStreamService.DynamicStreamServiceBase
 {
     private IRegistryGrain Registry => client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
 
@@ -64,6 +73,8 @@ public sealed class DynamicStreamService(IClusterClient client) : V1.DynamicStre
             throw new RpcException(new Status(StatusCode.NotFound, $"source '{name}' not found"));
         }
 
+        await GrpcAccess.EnsureAsync(guard, context, Actions.SourceRead, name, src.Tags);
+
         var fields = src.Fields;
         var numbers = await FetchNumbersAsync(registry, entityKey, fields);
 
@@ -99,6 +110,12 @@ public sealed class DynamicStreamService(IClusterClient client) : V1.DynamicStre
         // Canonicalize: the field-number map must live under one key regardless of whether the
         // caller subscribed by id or by name.
         entityKey = EntitySchemas.TableKey(table.Id);
+
+        // At the entity's NAME, not at whatever the caller typed and not at its id: the same
+        // subscription reached by name and by id must be ONE entitlement decision, and it has to be the
+        // same decision REST and the chat make. An id is a Guid("n") the registry minted, so a scope an
+        // operator would actually write (`prod-*`, an exact name) can only match the name.
+        await GrpcAccess.EnsureAsync(guard, context, Actions.TableRead, table.Name, table.Tags);
 
         if (table.OutputFields.Count == 0)
         {
@@ -151,6 +168,8 @@ public sealed class DynamicStreamService(IClusterClient client) : V1.DynamicStre
         // pipeline id — the output stream below is keyed by id, not name.
         entityKey = EntitySchemas.PipelineKey(pipeline.Id);
         id = pipeline.Id;
+
+        await GrpcAccess.EnsureAsync(guard, context, Actions.PipelineRead, pipeline.Name, pipeline.Tags);
 
         var streamSchemas = await SchemaBuilder.BuildStreamSchemasAsync(registry);
         var compiled = SqlCompiler.Compile(pipeline.Sql, streamSchemas);

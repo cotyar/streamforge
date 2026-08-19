@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
+using StreamForge.Api.Auth;
 using StreamForge.AppCore.Config;
 using StreamForge.AppCore.Sinks;
 using StreamForge.AppCore.Sql;
@@ -11,24 +12,70 @@ using StreamForge.Host.Grpc.Dynamic;
 
 namespace StreamForge.Api;
 
+/// <summary>
+/// Plan 015 wave 3-A — two gates on every route, the pattern <c>AccessEndpoints</c> established in wave
+/// 2-C. Each <c>RequireAuthorization("Viewer"/"Editor")</c> stays exactly where it is (the compatibility
+/// floor, pinned by <c>AuthorizationCoverageTests</c>), and each handler additionally asks
+/// <see cref="AccessGuard"/> for its own action at its own scope, with the pipeline's <c>Tags</c> so
+/// <c>tag:finance</c> scopes match.
+///
+/// <para><b>The scope is the pipeline's NAME, not the <c>{id}</c> in the route.</b> That is a real
+/// decision and it deserves its reason: <c>RegistryGrain.CreatePipelineAsync</c> mints
+/// <c>Guid.NewGuid().ToString("n")</c>, so an id is opaque. An entitlement grammar whose whole point is
+/// <c>prod-*</c> versus <c>dev-trades</c> is a grammar about names — scoping on the id would leave
+/// prefix scopes matching nothing at all on this entity type, i.e. the feature would be present and
+/// useless. Where the pipeline cannot be loaded the route segment is used verbatim as the scope, which
+/// only ever narrows the answer (the caller is about to get a 404 anyway).
+/// Upgrade path if a GUID-scoped grant is ever wanted (an admin UI generating them, say): check the id
+/// as a second scope and OR the two, which is strictly additive to every decision made here.</para>
+///
+/// <para><b>Why the guard runs before the 404.</b> Same reason as in <c>SourcesEndpoints</c>: ordering
+/// it the other way lets an unentitled caller enumerate which ids exist by reading 404 against 403.</para>
+/// </summary>
 public static class PipelinesEndpoints
 {
     public static void MapPipelinesEndpoints(this WebApplication app)
     {
         var group = app.MapGroup("/api/pipelines");
 
-        group.MapGet("/", async (ICatalogFacade registry) =>
-            Results.Ok((await registry.GetPipelinesAsync()).Select(SecretsMasker.MaskPipeline).ToList())
-        ).RequireAuthorization("Viewer");
+        // Plan 015 wave 3-A: FILTERED rather than gated at `*` — a caller entitled to `pipeline.read`
+        // on `prod-*` should get their three of ten, not a 403 for the whole listing. See the identical
+        // note in SourcesEndpoints' list handler.
+        group.MapGet("/", async (ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
+        {
+            var all = await registry.GetPipelinesAsync();
+            var visible = new List<PipelineDefinition>(all.Count);
+            foreach (var p in all)
+            {
+                if (await guard.CheckAsync(principal, Actions.PipelineRead, p.Name, p.Tags) is { IsAllowed: true })
+                {
+                    visible.Add(SecretsMasker.MaskPipeline(p));
+                }
+            }
 
-        group.MapGet("/{id}", async (string id, ICatalogFacade registry) =>
+            return Results.Ok(visible);
+        }).RequireAuthorization("Viewer");
+
+        group.MapGet("/{id}", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var p = await registry.GetPipelineAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineRead, p?.Name ?? id, p?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             return p is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskPipeline(p));
         }).RequireAuthorization("Viewer");
 
-        group.MapPost("/", async (CreatePipelineRequest req, ClaimsPrincipal principal, ICatalogFacade registry) =>
+        // Create asks at the NAME BEING CREATED (the id does not exist until CreatePipelineAsync mints
+        // one) with the request's own Tags — see the same note in SourcesEndpoints' create handler.
+        group.MapPost("/", async (CreatePipelineRequest req, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
+            if (await RefuseAsync(guard, principal, Actions.PipelineWrite, req.Name ?? "", req.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Sql))
             {
                 return Results.BadRequest(new ErrorResponse("name and sql are required"));
@@ -92,9 +139,16 @@ public static class PipelinesEndpoints
             return Results.Created($"/api/pipelines/{created.Id}", SecretsMasker.MaskPipeline(created));
         }).RequireAuthorization("Editor");
 
-        group.MapPut("/{id}", async (string id, CreatePipelineRequest req, ICatalogFacade registry) =>
+        // The STORED pipeline's name and tags decide, never the incoming body's: a caller who could
+        // rename or re-tag their way into an entitlement would not be under one.
+        group.MapPut("/{id}", async (string id, CreatePipelineRequest req, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var existing = await registry.GetPipelineAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineWrite, existing?.Name ?? id, existing?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (existing is null)
             {
                 return Results.NotFound();
@@ -150,14 +204,28 @@ public static class PipelinesEndpoints
             return updated is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskPipeline(updated));
         }).RequireAuthorization("Editor");
 
-        group.MapDelete("/{id}", async (string id, ICatalogFacade registry) =>
+        // One extra catalog read this handler did not do before: without the definition there is no name
+        // and no tag list, and delete is the action an operator most wants to scope.
+        group.MapDelete("/{id}", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
+            var existing = await registry.GetPipelineAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineDelete, existing?.Name ?? id, existing?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             var removed = await registry.DeletePipelineAsync(id);
             return removed ? Results.NoContent() : Results.NotFound();
         }).RequireAuthorization("Editor");
 
-        group.MapPost("/{id}/start", async (string id, ICatalogFacade registry) =>
+        group.MapPost("/{id}/start", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
+            var existing = await registry.GetPipelineAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineControl, existing?.Name ?? id, existing?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             var updated = await registry.SetPipelineStatusAsync(id, PipelineStatus.Running);
             // Plan 009 B2: this handler returns the entity too — same secrets-lite masking as every
             // other read path (found live: this endpoint was leaking an unmasked Sinks credential
@@ -165,14 +233,30 @@ public static class PipelinesEndpoints
             return updated is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskPipeline(updated));
         }).RequireAuthorization("Editor");
 
-        group.MapPost("/{id}/stop", async (string id, ICatalogFacade registry) =>
+        group.MapPost("/{id}/stop", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
+            var existing = await registry.GetPipelineAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineControl, existing?.Name ?? id, existing?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             var updated = await registry.SetPipelineStatusAsync(id, PipelineStatus.Stopped);
             return updated is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskPipeline(updated));
         }).RequireAuthorization("Editor");
 
-        group.MapPost("/validate", async (ValidateRequest req, ICatalogFacade registry) =>
+        // `pipeline.write` at `*`: /validate names no pipeline (a ValidateRequest carries SQL and
+        // nothing else — see the note below), and `*` is answered only by a `*`-scoped grant. A caller
+        // entitled solely to `dev-*` therefore cannot use the SQL editor's validate button; widening `*`
+        // to be satisfied by any scope would defeat every Deny written at `*`, which is the one
+        // direction not worth going.
+        group.MapPost("/validate", async (ValidateRequest req, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
+            if (await RefuseAsync(guard, principal, Actions.PipelineWrite, "*") is { } refusal)
+            {
+                return refusal;
+            }
+
             // Plan 014 K: the editor validates the same text the save path would store, so the sugar is
             // stripped here too. What this endpoint canNOT check is whether the named sink exists — a
             // ValidateRequest carries SQL and nothing else, and inventing a sinks field on it to make the
@@ -202,7 +286,7 @@ public static class PipelinesEndpoints
         // Downloadable, self-contained .proto for this pipeline: PipelineDefinition doesn't persist an
         // output schema (unlike TableDefinition), so its SQL is recompiled here to get one. 409 with
         // compile diagnostics if the SQL doesn't currently compile.
-        group.MapGet("/{id}/proto", async (string id, ICatalogFacade registry) =>
+        group.MapGet("/{id}/proto", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var def = await registry.GetPipelineAsync(id);
             if (def is null)
@@ -211,6 +295,12 @@ public static class PipelinesEndpoints
                 var byName = (await registry.GetPipelinesAsync()).Where(p => p.Name == id).ToList();
                 if (byName.Count == 1) def = byName[0];
             }
+
+            if (await RefuseAsync(guard, principal, Actions.PipelineRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -237,9 +327,14 @@ public static class PipelinesEndpoints
         // Plan 008 W5: lineage + execution-plan view for the console's React Flow page. Always the
         // logical view (Physical: false) — pipelines have no partitioned stage/edge dataflow graph, see
         // PlanEndpointsLogic's class doc. Recompiled fresh every call; never persisted.
-        group.MapGet("/{id}/plan", async (string id, ICatalogFacade registry) =>
+        group.MapGet("/{id}/plan", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var def = await registry.GetPipelineAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -250,14 +345,32 @@ public static class PipelinesEndpoints
         }).RequireAuthorization("Viewer");
 
         // .Produces<>() for the same reason as TablesEndpoints' /rows — see the note there.
-        group.MapGet("/{id}/results", async (string id, int? limit, IPipelineReadFacade pipelines) =>
-            Results.Ok(await pipelines.GetRecentResultsAsync(id, limit ?? 100))
-        ).Produces<List<ResultEnvelope>>().RequireAuthorization("Viewer");
-
-        // Plan 012: the recent-results buffer as a file — the pipeline twin of /api/tables/{id}/rows.csv.
-        group.MapGet("/{id}/results.csv", async (string id, int? limit, ICatalogFacade registry, IPipelineReadFacade pipelines) =>
+        //
+        // Plan 015 wave 3-A: this handler and /metrics below gained a catalog read they did not have.
+        // It buys the name and the tags, without which a scoped entitlement could not match here at all
+        // and this route would be the hole in the fence — readable by anyone the coarse Viewer policy
+        // admits while /{id} next to it is scoped. It is also the read every neighbouring route in this
+        // file already does, and it keeps the pre-existing behaviour on an unknown id (no 404 added).
+        group.MapGet("/{id}/results", async (string id, int? limit, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, IPipelineReadFacade pipelines) =>
         {
             var def = await registry.GetPipelineAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
+            return Results.Ok(await pipelines.GetRecentResultsAsync(id, limit ?? 100));
+        }).Produces<List<ResultEnvelope>>().RequireAuthorization("Viewer");
+
+        // Plan 012: the recent-results buffer as a file — the pipeline twin of /api/tables/{id}/rows.csv.
+        group.MapGet("/{id}/results.csv", async (string id, int? limit, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, IPipelineReadFacade pipelines) =>
+        {
+            var def = await registry.GetPipelineAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (def is null)
             {
                 return Results.NotFound();
@@ -268,9 +381,28 @@ public static class PipelinesEndpoints
             return Results.File(Encoding.UTF8.GetBytes(csv), "text/csv; charset=utf-8", $"{def.Name}.csv");
         }).RequireAuthorization("Viewer");
 
-        group.MapGet("/{id}/metrics", async (string id, IPipelineReadFacade pipelines) =>
-            Results.Ok(await pipelines.GetMetricsAsync(id))
-        ).RequireAuthorization("Viewer");
+        group.MapGet("/{id}/metrics", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, IPipelineReadFacade pipelines) =>
+        {
+            var def = await registry.GetPipelineAsync(id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
+            return Results.Ok(await pipelines.GetMetricsAsync(id));
+        }).RequireAuthorization("Viewer");
+    }
+
+    /// <summary>Null when the caller may proceed; the ready-made 403 when they may not — the same helper
+    /// <c>AccessEndpoints.RefuseAsync</c> is, with the resource's tags threaded through. A
+    /// <see cref="AccessDecision.RequiresApproval"/> answer is refused here too, carrying its own reason:
+    /// filing the request is waves 4-5's job and that machinery does not exist yet, so refusing is the
+    /// only answer that cannot be wrong in the meantime.</summary>
+    private static async Task<IResult?> RefuseAsync(
+        AccessGuard guard, ClaimsPrincipal principal, string action, string scope, IReadOnlyCollection<string>? tags = null)
+    {
+        var result = await guard.CheckAsync(principal, action, scope, tags);
+        return result.IsAllowed ? null : AccessGuard.Deny(result);
     }
 
     internal static async Task<Dictionary<string, SourceSchema>> BuildSchemasAsync(ICatalogFacade registry)

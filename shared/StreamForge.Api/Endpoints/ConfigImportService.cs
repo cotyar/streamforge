@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Config;
+using StreamForge.AppCore.Access;
 using StreamForge.AppCore.Sql;
 using StreamForge.Engine;
 
@@ -201,6 +202,155 @@ public static class ConfigImportService
 
     private static List<string> FormatDiagnostics(IEnumerable<SqlDiagnostic> diagnostics) =>
         [.. diagnostics.Select(d => $"{d.Line}:{d.Column} {d.Message}")];
+
+    // ------------------------------------------------------------------
+    // Entitlement pre-check (plan 015 wave 3-C) — impure only in that it reads the catalog to plan.
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Which of the changes this document would make the caller is <b>not</b> entitled to, one legible
+    /// line each. Empty means the whole document may be applied.
+    ///
+    /// <para><b>The rule: refuse the whole import, naming the entities. Never apply the entitled
+    /// subset.</b> Three reasons, in the order they convinced me.</para>
+    ///
+    /// <para>First, a config document is a description of a desired end state whose parts reference
+    /// each other. A pipeline's SQL names sources; a table's SQL names tables the planner ordered
+    /// ahead of it. Drop the un-entitled half and what gets applied is a document nobody wrote and
+    /// nobody reviewed — a pipeline created against a source whose update was skipped compiles against
+    /// the old schema, or stops compiling at all. The failure is not "less happened than I asked for",
+    /// it is "something different happened".</para>
+    ///
+    /// <para>Second, <c>replace</c> mode makes partial application actively destructive: it deletes
+    /// what the document omits. A partial replace would delete the entities the caller <i>is</i>
+    /// entitled to while leaving the ones they are not, converging the catalog on neither the old state
+    /// nor the document. There is no ordering of that operation which is safe to half-do.</para>
+    ///
+    /// <para>Third, refusing is recoverable and partial application is not. A caller told "you may not
+    /// touch prod-feed and prod-book" edits the document or asks for a grant and runs it again; a
+    /// caller handed a 200 with a report of skips has already had half a catalog rewritten, and putting
+    /// it back requires the export they did not take. Between an error the caller can act on and a
+    /// success they cannot undo, the error is the cheaper mistake.</para>
+    ///
+    /// <para><b>Why <c>validate</c> is checked too.</b> Validate is the dry run of exactly this import,
+    /// and a dry run that says yes to something the real run will refuse is worse than no dry run. It
+    /// writes nothing either way, so the only thing the check costs a caller is being told sooner.</para>
+    ///
+    /// <para><b>What is NOT checked: <c>skipped</c> actions.</b> The planner marks an entity skipped
+    /// when the document restates it byte-identically, and a change that is not a change needs no
+    /// entitlement. That is what makes the obvious workflow work: export the whole catalog, edit one
+    /// pipeline, import it back, and be judged on the one pipeline you actually changed.</para>
+    /// </summary>
+    /// <param name="check">(action, scope, resourceTags) -> decision. The endpoint passes
+    /// <c>AccessGuard.CheckAsync</c> bound to the caller; a test passes a stub. Anything other than
+    /// <see cref="AccessDecision.Allowed"/> — including <see cref="AccessDecision.RequiresApproval"/> —
+    /// counts as a refusal: parking a whole catalog rewrite behind one approval is wave 4's design
+    /// question, and until it has an answer, failing closed is the only option that cannot be
+    /// wrong.</param>
+    public static async Task<IReadOnlyList<string>> FindUnentitledChangesAsync(
+        ConfigDocument doc,
+        string mode,
+        ICatalogFacade registry,
+        Func<string, string, IReadOnlyCollection<string>?, Task<AccessResult>> check)
+    {
+        var currentSources = await registry.GetSourcesAsync();
+        var currentPipelines = await registry.GetPipelinesAsync();
+        var currentTables = await registry.GetTablesAsync();
+
+        // ponytail: plans a second time (RunImportAsync plans its own). Ceiling: three extra catalog
+        // reads per import and a TOCTOU window in which the catalog could change between the check and
+        // the apply. Both are acceptable because an import is a rare, heavyweight, human-initiated
+        // operation and the window is the same one every read-then-write endpoint in the platform
+        // already has. Upgrade path, if it ever matters: hand RunImportAsync the plan instead of
+        // letting it build one.
+        var plan = ImportPlanner.Plan(doc, currentSources, currentPipelines, currentTables, mode);
+
+        var storedSources = currentSources.ToDictionary(s => s.Name, StringComparer.Ordinal);
+        var storedPipelines = FirstByName(currentPipelines, p => p.Name);
+        var storedTables = FirstByName(currentTables, t => t.Name);
+        var docSources = doc.Sources.ToDictionary(s => s.Name, StringComparer.Ordinal);
+        var docPipelines = doc.Pipelines.ToDictionary(p => p.Name, StringComparer.Ordinal);
+        var docTables = doc.Tables.ToDictionary(t => t.Name, StringComparer.Ordinal);
+
+        var refusals = new List<string>();
+        foreach (var action in plan)
+        {
+            if (action.Action == "skipped")
+            {
+                continue;
+            }
+
+            var deleting = action.Action == "deleted";
+            string permission;
+            string scope;
+            IReadOnlyCollection<string>? tags;
+
+            switch (action.Kind)
+            {
+                case "source":
+                    permission = deleting ? Actions.SourceDelete : Actions.SourceWrite;
+                    // Sources are addressed by NAME everywhere (/api/sources/{name}), so that is the
+                    // scope. Pipelines and tables are addressed by id, below.
+                    scope = action.Name;
+                    tags = TagsFor(storedSources, docSources, action.Name, s => s.Tags, s => s.Tags);
+                    break;
+
+                case "pipeline":
+                    permission = deleting ? Actions.PipelineDelete : Actions.PipelineWrite;
+                    scope = storedPipelines.TryGetValue(action.Name, out var sp) ? sp.Id : action.Name;
+                    tags = TagsFor(storedPipelines, docPipelines, action.Name, p => p.Tags, p => p.Tags);
+                    break;
+
+                case "table":
+                    permission = deleting ? Actions.TableDelete : Actions.TableWrite;
+                    scope = storedTables.TryGetValue(action.Name, out var st) ? st.Id : action.Name;
+                    tags = TagsFor(storedTables, docTables, action.Name, t => t.Tags, t => t.Tags);
+                    break;
+
+                default:
+                    throw new InvalidOperationException($"unknown planned-action kind: {action.Kind}");
+            }
+
+            var decision = await check(permission, scope, tags);
+            if (decision.Decision != AccessDecision.Allowed)
+            {
+                refusals.Add($"{action.Kind} '{action.Name}' ({action.Action}, needs {permission} on {scope}): {decision.Reason}");
+            }
+        }
+
+        return refusals;
+    }
+
+    /// <summary>The 403 body for a refused import: every entity the caller may not touch, and an
+    /// explicit statement that nothing was applied. One <c>ErrorResponse</c> string rather than a new
+    /// DTO, because that is the refusal shape this endpoint already uses ("replace mode requires the
+    /// Admin role") and every client in <c>clients/**</c> already reads it.</summary>
+    public static string UnentitledImportMessage(IReadOnlyList<string> refusals) =>
+        $"import refused — nothing was applied. You are not entitled to {refusals.Count} of the changes this document makes: " +
+        string.Join("; ", refusals);
+
+    /// <summary>The tags a decision about this entity is made against: the STORED entity's when it
+    /// exists, the document's when it is being created.
+    ///
+    /// <para>ponytail: the stored tags win for an update. Ceiling: a caller entitled via
+    /// <c>tag:dev</c> can retag a dev entity to <c>prod</c> in the same import. That is exactly the
+    /// hole <c>PUT /api/sources/{name}</c> has, and closing it only here would make importing stricter
+    /// than editing — a difference nobody could explain. Upgrade path: require the decision to hold for
+    /// both the old and the new tag set, on every mutation surface at once.</para></summary>
+    private static IReadOnlyCollection<string>? TagsFor<TStored, TDoc>(
+        Dictionary<string, TStored> stored,
+        Dictionary<string, TDoc> fromDoc,
+        string name,
+        Func<TStored, List<string>> storedTags,
+        Func<TDoc, List<string>> docTags)
+    {
+        if (stored.TryGetValue(name, out var existing))
+        {
+            return storedTags(existing);
+        }
+
+        return fromDoc.TryGetValue(name, out var proposed) ? docTags(proposed) : null;
+    }
 
     // ------------------------------------------------------------------
     // Apply pipeline (impure — reads/writes through ICatalogFacade).
