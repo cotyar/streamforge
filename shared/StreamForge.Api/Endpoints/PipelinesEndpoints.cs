@@ -116,6 +116,13 @@ public static class PipelinesEndpoints
                 return Results.BadRequest(new ErrorResponse(string.Join("; ", sinkErrors)));
             }
 
+            // Plan 016 wave 2-B: a pin's kind must be "source" or "table" — see EntityPinValidation's
+            // own doc for why that is refused here rather than stored and left permanently unresolvable.
+            if (EntityPinValidation.Validate(req.DependsOn) is { } pinError)
+            {
+                return Results.BadRequest(new ErrorResponse(pinError));
+            }
+
             // Compile-check for diagnostics; draft-friendly — never blocks creation beyond the empty check above.
             var schemas = await BuildSchemasAsync(registry);
             _ = SqlCompiler.Compile(sugar.Sql, schemas);
@@ -135,6 +142,9 @@ public static class PipelinesEndpoints
                 // from a prior GET) would just... be a literal wrong credential. Not worth guarding —
                 // mirrors sources' own CreateSourceAsync, which does the identical un-merged pass-through.
                 Sinks = sinks,
+                // Plan 016 wave 2-B: the dependsOn gap — this field never reached the registry over REST
+                // before this wave (see EntityPinValidation for the validation just above).
+                DependsOn = EntityPinValidation.Normalize(req.DependsOn),
             };
             // Plan 016 wave 1: the registry now refuses a duplicate pipeline name, and it refuses the way
             // every other catalog refusal here works — by throwing. TablesEndpoints has always caught
@@ -223,12 +233,21 @@ public static class PipelinesEndpoints
                 }
             }
 
+            // Plan 016 wave 2-B: only when the request actually touches DependsOn (null means "leave
+            // unchanged") — same reasoning as the Sinks gate just above.
+            if (req.DependsOn is not null && EntityPinValidation.Validate(req.DependsOn) is { } pinError)
+            {
+                return Results.BadRequest(new ErrorResponse(pinError));
+            }
+
             existing.Name = req.Name;
             existing.Description = req.Description;
             existing.Sql = sugar.Sql;
             existing.Tags = req.Tags ?? existing.Tags;
             existing.Metadata = req.Metadata ?? existing.Metadata;
             existing.Sinks = sinks;
+            // Plan 016 wave 2-B: null-means-unchanged, same convention as Tags/Metadata/Sinks above.
+            existing.DependsOn = req.DependsOn is null ? existing.DependsOn : EntityPinValidation.Normalize(req.DependsOn);
             // Same reason as the create above: an update that renames a pipeline onto a taken name is
             // refused by the registry, and a refusal is a 409, not a 500.
             PipelineDefinition? updated;

@@ -8,6 +8,8 @@ import { Topbar } from '../components/Topbar'
 import { StatusBadge } from '../components/StatusBadge'
 import { RoleGate } from '../components/RoleGate'
 import { TagList } from '../components/TagList'
+import { RevisionBadge } from '../components/RevisionBadge'
+import { StaleReasonNote } from '../components/StaleReasonNote'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -232,9 +234,11 @@ export function TablesPage() {
                               </Tooltip>
                             </TooltipProvider>
                           )}
+                          <RevisionBadge revision={t.revision} schemaRevision={t.schemaRevision} />
                         </div>
                         <TagList tags={t.tags} className="mt-1" />
                         {t.error && <p className="mt-0.5 max-w-xs truncate text-xs text-destructive">{t.error}</p>}
+                        <StaleReasonNote reason={t.staleReason} />
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1.5">

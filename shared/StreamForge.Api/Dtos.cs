@@ -92,7 +92,12 @@ public sealed record CreatePipelineRequest(
     // create) or unchanged (on update, mirroring how Tags/Metadata's null-means-unchanged works below).
     // NatsPubConfig credential fields follow the secrets-lite convention (SourceKinds.SecretMask on read;
     // a written mask means "keep the stored value") — see PipelinesEndpoints' PUT handler.
-    List<SinkSpec>? Sinks = null);
+    List<SinkSpec>? Sinks = null,
+    // Plan 016 wave 2-B: what this pipeline was authored against. Null/omitted = leave unset (create) or
+    // unchanged (update), the same convention as Tags/Metadata/Sinks above. Validated by
+    // EntityPinValidation before it ever reaches the registry — a pin's kind must be "source" or "table",
+    // never "pipeline" (EntityPin's own doc comment: nothing reads a pipeline's output by name).
+    List<EntityPin>? DependsOn = null);
 
 public sealed record ValidateRequest(string Sql);
 
@@ -101,6 +106,12 @@ public sealed record SqlDiagnosticDto(string Message, int Line, int Column, stri
 public sealed record ValidateResponse(bool Ok, IReadOnlyList<SqlDiagnosticDto> Diagnostics, string? PlanSummary, IReadOnlyList<string> SourceNames);
 
 public sealed record ErrorResponse(string Error);
+
+/// <summary>Plan 016 wave 2-B: the 409 body for <c>PUT /api/sources/{name}?allowBreaking=false</c> when
+/// the field change IS breaking. <paramref name="BreakingReasons"/> is
+/// <c>SchemaCompatibility.Compare(...).BreakingReasons</c> verbatim — one human-readable line per removed
+/// or re-typed field, so the operator learns WHICH field, not just "incompatible".</summary>
+public sealed record SchemaBreakingChangeResponse(string Error, IReadOnlyList<string> BreakingReasons);
 
 public sealed record CreateTableRequest(
     string Name,
@@ -134,7 +145,12 @@ public sealed record CreateTableRequest(
     // Plan 011 D1: opt-in key sharding. Null/empty (the default) = not sharded, i.e. today's behavior
     // byte for byte. See TableDefinition.ShardBy; RegistryGrain validates the columns against the
     // compiled output schema and refuses the searchEnabled combination.
-    List<string>? ShardBy = null);
+    List<string>? ShardBy = null,
+    // Plan 016 wave 2-B: what this table was authored against. Null/omitted = leave unset (create) or
+    // unchanged (update), the same null-means-unchanged convention as Tags/Metadata/Sinks/ShardBy above.
+    // Validated by EntityPinValidation before it ever reaches the registry — see CreatePipelineRequest's
+    // identical field for why "pipeline" is not a legal kind.
+    List<EntityPin>? DependsOn = null);
 
 public sealed record TableSearchResponse(IReadOnlyList<TableRowDto> Rows, string Mode, bool Enabled, int Total);
 

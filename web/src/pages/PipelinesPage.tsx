@@ -9,6 +9,8 @@ import { Topbar } from '../components/Topbar'
 import { StatusBadge } from '../components/StatusBadge'
 import { RoleGate } from '../components/RoleGate'
 import { TagList } from '../components/TagList'
+import { RevisionBadge } from '../components/RevisionBadge'
+import { StaleReasonNote } from '../components/StaleReasonNote'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -191,11 +193,15 @@ export function PipelinesPage() {
                   return (
                     <TableRow key={p.id}>
                       <TableCell>
-                        <Link to={`/pipelines/${p.id}`} className="font-medium text-foreground hover:text-primary">
-                          {p.name}
-                        </Link>
+                        <div className="flex items-center gap-1.5">
+                          <Link to={`/pipelines/${p.id}`} className="font-medium text-foreground hover:text-primary">
+                            {p.name}
+                          </Link>
+                          <RevisionBadge revision={p.revision} />
+                        </div>
                         <TagList tags={p.tags} className="mt-1" />
                         {p.error && <p className="mt-0.5 max-w-xs truncate text-xs text-destructive">{p.error}</p>}
+                        <StaleReasonNote reason={p.staleReason} />
                       </TableCell>
                       <TableCell>
                         <StatusBadge status={p.status} />

@@ -114,6 +114,13 @@ public static class TablesEndpoints
                 return Results.BadRequest(new ErrorResponse(string.Join("; ", sinkErrors)));
             }
 
+            // Plan 016 wave 2-B: a pin's kind must be "source" or "table" — see EntityPinValidation's
+            // own doc for why that is refused here rather than stored and left permanently unresolvable.
+            if (EntityPinValidation.Validate(req.DependsOn) is { } pinError)
+            {
+                return Results.BadRequest(new ErrorResponse(pinError));
+            }
+
             try
             {
                 var def = new TableDefinition
@@ -143,6 +150,9 @@ public static class TablesEndpoints
                     // freshly-created table has no stored secrets to merge against.
                     // Plan 014 K: 'sinks' is that same list, after the sugar enabled a member of it.
                     Sinks = sinks,
+                    // Plan 016 wave 2-B: the dependsOn gap — this field never reached the registry over
+                    // REST before this wave (see EntityPinValidation for the validation just above).
+                    DependsOn = EntityPinValidation.Normalize(req.DependsOn),
                 };
                 var created = await registry.CreateTableAsync(def);
                 WarnOnDegradedRowIdentity(loggers, created);
@@ -218,6 +228,15 @@ public static class TablesEndpoints
                 }
             }
 
+            // Plan 016 wave 2-B: only when the request actually touches DependsOn (null means "leave
+            // unchanged" — see the field's own doc on CreateTableRequest), same reasoning as the Sinks
+            // gate just above — a PUT that edits something unrelated on a table whose pins predate this
+            // validation can never be blocked by a pin nobody asked to change.
+            if (req.DependsOn is not null && EntityPinValidation.Validate(req.DependsOn) is { } pinError)
+            {
+                return Results.BadRequest(new ErrorResponse(pinError));
+            }
+
             existing.Name = req.Name;
             existing.Description = req.Description;
             existing.Sql = sugar.Sql;
@@ -240,6 +259,9 @@ public static class TablesEndpoints
             // client that predates the field cannot silently un-shard a table by omitting it.
             existing.ShardBy = req.ShardBy ?? existing.ShardBy;
             existing.Sinks = sinks;
+            // Plan 016 wave 2-B: null-means-unchanged, same convention as every other optional list field
+            // above — validated just above, before any field of `existing` was touched.
+            existing.DependsOn = req.DependsOn is null ? existing.DependsOn : EntityPinValidation.Normalize(req.DependsOn);
 
             try
             {

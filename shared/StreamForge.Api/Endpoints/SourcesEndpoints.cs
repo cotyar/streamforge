@@ -126,19 +126,34 @@ public static class SourcesEndpoints
             var effective = SecretsMasker.MergeSecrets(def, existing);
             await registry.UpsertSourceAsync(effective);
 
+            // Plan 016 wave 2-B: re-read rather than return `effective` — Revision/SchemaRevision are
+            // assigned INSIDE the registry (RegistryGrain.UpsertSourceAsync / CatalogStore.UpsertSourceAsync),
+            // past Orleans' by-value grain-call boundary, so `effective` here is stuck at whatever the
+            // caller sent (0 on a fresh source) even though the stored record is now Revision 1. Re-reading
+            // is what makes the two flavours agree too — Dapr's CatalogStore is called in-process and
+            // mutates `def`/`effective` in place, so it would otherwise report the right number by
+            // accident while Orleans reported 0 for the identical request.
+            var stored = await registry.GetSourceAsync(effective.Name) ?? effective;
+
             // Plan 015 wave 5-B: BeforeJson is null on a create, and the whole (masked) document is the
-            // after. Written only here, after the store said yes — the guard's "allowed" row was written
-            // before the validation above could still have answered 400.
+            // after — the STORED definition, not the pre-write input, so a masked audit row shows the
+            // revision that was actually assigned. Written only here, after the store said yes — the
+            // guard's "allowed" row was written before the validation above could still have answered 400.
             CatalogChangeAudit.RecordSource(
-                http, principal, Actions.SourceWrite, effective.Name, before: null, after: effective);
-            return Results.Created($"/api/sources/{effective.Name}", SecretsMasker.Mask(effective));
+                http, principal, Actions.SourceWrite, stored.Name, before: null, after: stored);
+            return Results.Created($"/api/sources/{stored.Name}", SecretsMasker.Mask(stored));
         }).RequireAuthorization("Editor");
 
         // The STORED definition's Tags decide, not the incoming body's: the caller is asking to change
         // an object that already exists, and letting the request's own tag list widen the entitlement
         // that authorizes the request would make every tag scope self-service. A caller who legitimately
         // holds the write may of course then re-tag it, which is the same authority they already had.
-        group.MapPut("/{name}", async (string name, SourceDefinition def, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
+        // Plan 016 wave 2-B: `?allowBreaking` — interactive editing stays PERMISSIVE by default (a
+        // breaking field change is allowed exactly as it always was), and `?allowBreaking=false` is how a
+        // caller OPTS INTO the gate. Note the polarity: the query parameter is how a caller asks to be
+        // protected, not how they ask to be allowed to break something. Promotion (config import) is the
+        // one that defaults to gated — see ConfigImportService, a distinct code path from this one.
+        group.MapPut("/{name}", async (string name, SourceDefinition def, bool? allowBreaking, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var existing = await registry.GetSourceAsync(name);
             if (await RefuseAsync(guard, principal, Actions.SourceWrite, existing?.Name ?? name, existing?.Tags) is { } refusal)
@@ -158,20 +173,41 @@ public static class SourcesEndpoints
                 return Results.BadRequest(new ErrorResponse(string.Join("; ", errors)));
             }
 
+            // `allowBreaking == false` is the only value that turns the gate on — missing, true, or any
+            // other value stays permissive. SchemaCompatibility.Compare is the same removal/type-change
+            // walk the catalog-import gate (wave 3) will reuse, so "compatible" means one thing everywhere.
+            if (allowBreaking == false)
+            {
+                var compat = SchemaCompatibility.Compare(existing.Fields, def.Fields);
+                if (!compat.IsCompatible)
+                {
+                    return Results.Json(
+                        new SchemaBreakingChangeResponse(
+                            $"source '{name}': schema change is breaking", compat.BreakingReasons),
+                        statusCode: StatusCodes.Status409Conflict);
+                }
+            }
+
             // D-H CRITICAL invariant: an incoming "***" (the SPA's GET-then-edit-then-PUT-whole-
             // object cycle round-tripping a masked value verbatim) is replaced with the STORED real
             // secret before it ever reaches UpsertSourceAsync — never persist the literal mask.
             var effective = SecretsMasker.MergeSecrets(def, existing);
             await registry.UpsertSourceAsync(effective);
 
+            // Plan 016 wave 2-B: re-read rather than return `effective` — see the identical note on the
+            // POST handler above for why (the counters are assigned past Orleans' by-value boundary, and
+            // re-reading is also what makes Orleans and Dapr agree on what this response reports).
+            var stored = await registry.GetSourceAsync(effective.Name) ?? effective;
+
             // Plan 015 wave 5-B: an update records only the top-level properties that MOVED, on both
             // sides — see CatalogChangeAudit for why that beats two near-identical whole documents, and
             // for why the diff is decided on the unmasked pair so a rotated credential is not reported
-            // as no change. 'existing' is untouched by this handler (unlike the pipeline/table PUTs),
-            // so it is still the pre-write state here and needs no snapshot.
+            // as no change. 'existing' is untouched by this handler (unlike the pipeline/table PUTs), so
+            // it is still the pre-write state here. 'after' is the STORED definition, not the pre-write
+            // input, so the audit row records what was actually persisted (revision included).
             CatalogChangeAudit.RecordSource(
-                http, principal, Actions.SourceWrite, existing.Name, before: existing, after: effective);
-            return Results.Ok(SecretsMasker.Mask(effective));
+                http, principal, Actions.SourceWrite, existing.Name, before: existing, after: stored);
+            return Results.Ok(SecretsMasker.Mask(stored));
         }).RequireAuthorization("Editor");
 
         // One extra catalog read that this handler did not do before, and it is worth it: without the

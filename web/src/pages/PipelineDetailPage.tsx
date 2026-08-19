@@ -11,6 +11,8 @@ import { usePipelineResults } from '../hooks/usePipelineResults'
 import { useMetricsStream } from '../hooks/useMetricsStream'
 import { Topbar } from '../components/Topbar'
 import { StatusBadge } from '../components/StatusBadge'
+import { RevisionBadge } from '../components/RevisionBadge'
+import { StaleReasonBanner } from '../components/StaleReasonNote'
 import { SqlEditor } from '../components/SqlEditor'
 import { PipelineBuilder } from '../components/PipelineBuilder'
 import { ResultsTable } from '../components/ResultsTable'
@@ -237,8 +239,17 @@ export function PipelineDetailPage() {
       <Topbar
         title={isNew ? 'New pipeline' : name || 'Pipeline'}
         subtitle={isNew ? 'Define a streaming SQL job' : pipeline?.id}
-        action={!isNew && <StatusBadge status={currentStatus} />}
+        action={
+          !isNew && (
+            <div className="flex items-center gap-1.5">
+              <StatusBadge status={currentStatus} />
+              <RevisionBadge revision={pipeline?.revision} />
+            </div>
+          )
+        }
       />
+
+      {!isNew && pipeline?.staleReason && <div className="px-8 pt-6"><StaleReasonBanner reason={pipeline.staleReason} /></div>}
 
       <div className="grid grid-cols-1 gap-6 p-8 xl:grid-cols-2">
         {/* LEFT */}

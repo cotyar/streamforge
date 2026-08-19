@@ -30,6 +30,8 @@ import { formatSql } from '../lib/sqlFormat'
 import { useTableMetrics } from '../hooks/useTableMetrics'
 import { Topbar } from '../components/Topbar'
 import { StatusBadge } from '../components/StatusBadge'
+import { RevisionBadge } from '../components/RevisionBadge'
+import { StaleReasonBanner } from '../components/StaleReasonNote'
 import { SqlEditor } from '../components/SqlEditor'
 import { RoleGate } from '../components/RoleGate'
 import { MetadataEditor } from '../components/MetadataEditor'
@@ -1419,8 +1421,17 @@ export function TableDetailPage() {
       <Topbar
         title={isNew ? 'New table' : name || 'Table'}
         subtitle={isNew ? 'Define a windowless materialized view' : table?.id}
-        action={!isNew && <StatusBadge status={currentStatus} />}
+        action={
+          !isNew && (
+            <div className="flex items-center gap-1.5">
+              <StatusBadge status={currentStatus} />
+              <RevisionBadge revision={table?.revision} schemaRevision={table?.schemaRevision} />
+            </div>
+          )
+        }
       />
+
+      {!isNew && table?.staleReason && <div className="px-8 pt-6"><StaleReasonBanner reason={table.staleReason} /></div>}
 
       <div className="grid grid-cols-1 gap-6 p-8 xl:grid-cols-2">
         {/* LEFT */}
