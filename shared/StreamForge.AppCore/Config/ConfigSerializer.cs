@@ -72,7 +72,17 @@ public static class ConfigSerializer
     /// (which needs the same mapping to compare a doc entity against the stored catalog entity on
     /// equal footing — always called with the default <paramref name="includeSecrets"/> = true there,
     /// since ImportPlanner compares real Contracts objects, not an exported document; masking only
-    /// matters at the <see cref="FromCatalog"/> export boundary).</summary>
+    /// matters at the <see cref="FromCatalog"/> export boundary).
+    ///
+    /// <para><b>Plan 016 wave 3-B: carries <see cref="PipelineDefinition.DependsOn"/>.</b> This feeds
+    /// <c>CatalogRevisions.PipelineCanonicalText</c> (this exact projection is what that method
+    /// canonicalizes), which is the predicate <see cref="ImportPlanner"/> uses for "skipped" vs
+    /// "updated" AND the one that decides whether the registry bumps <c>Revision</c>. So as of this
+    /// change, editing a pin — adding, removing, or changing an <c>EntityPin</c>'s
+    /// <c>schemaRevision</c> — is a DEFINITION change that bumps <c>Revision</c>. Deliberate: a pin is
+    /// part of what the entity IS, the same way its SQL or its sinks are. Verified not to disturb the
+    /// "an identical round-trip plans as skipped" property, because an unchanged pin list still
+    /// canonicalizes identically.</para></summary>
     internal static ConfigPipeline ToConfigPipeline(PipelineDefinition p, bool includeSecrets = true) => new()
     {
         Name = p.Name,
@@ -82,11 +92,16 @@ public static class ConfigSerializer
         Tags = [.. p.Tags],
         Metadata = new Dictionary<string, string>(p.Metadata),
         Sinks = includeSecrets ? [.. p.Sinks] : SecretsMasker.MaskSinks(p.Sinks),
+        DependsOn = [.. p.DependsOn],
     };
 
     /// <summary>Catalog TableDefinition -&gt; ConfigTable mapping — same Running rule as
     /// <see cref="ToConfigPipeline"/> plus the table-only knobs, runtime/derived fields (id, Status,
-    /// Error, CreatedBy/timestamps, OutputFields, StreamInputs/TableInputs) dropped.</summary>
+    /// Error, CreatedBy/timestamps, OutputFields, StreamInputs/TableInputs) dropped.
+    ///
+    /// <para>Plan 016 wave 3-B: carries <see cref="TableDefinition.DependsOn"/> — see the identical
+    /// Revision-bump note on <see cref="ToConfigPipeline"/>, which applies here via
+    /// <c>CatalogRevisions.TableCanonicalText</c> the same way.</para></summary>
     internal static ConfigTable ToConfigTable(TableDefinition t, bool includeSecrets = true) => new()
     {
         Name = t.Name,
@@ -107,5 +122,6 @@ public static class ConfigSerializer
         ShardBy = [.. t.ShardBy],
         Parallelism = t.Parallelism,
         Sinks = includeSecrets ? [.. t.Sinks] : SecretsMasker.MaskSinks(t.Sinks),
+        DependsOn = [.. t.DependsOn],
     };
 }

@@ -2,6 +2,7 @@ using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Sql;
+using StreamForge.Engine;
 using StreamForge.Host.Grpc.Dynamic;
 
 namespace StreamForge.AppCore.Config;
@@ -56,24 +57,43 @@ public static class ImportPlanner
             result.Add(PlanSource(s, sourceCatalog.GetValueOrDefault(s.Name)));
         }
 
-        // ---- Tables: topo-sorted by TableInputs (existing tables) / best-effort SQL scan (new). ----
+        // ---- Tables: topo-sorted by TableInputs (existing tables) / compiler reference scan (new). ----
         var plannedTableNames = doc.Tables.Select(t => t.Name).ToList();
         var plannedTableSet = new HashSet<string>(plannedTableNames, StringComparer.Ordinal);
         var docTablesByName = doc.Tables.ToDictionary(t => t.Name, StringComparer.Ordinal);
+
+        // Plan 016 wave 3-B: what "exists" means for the missing-dependency diagnostic below — the
+        // document's own sources/tables plus whatever the CURRENT (pre-import) catalog already holds.
+        // Ordinal, deliberately: every name-keyed lookup in this codebase (RegistryGrain's SQL
+        // namespace, EntityRef resolution) is ordinal/case-sensitive, so a name that resolves here only
+        // case-insensitively would still fail to compile — reporting it as "exists" would be a false
+        // negative on exactly the diagnostic this exists to give.
+        var knownRelationNames = new HashSet<string>(StringComparer.Ordinal);
+        knownRelationNames.UnionWith(sourceCatalog.Keys);
+        knownRelationNames.UnionWith(tableCatalog.Keys);
+        knownRelationNames.UnionWith(doc.Sources.Select(s => s.Name));
+        knownRelationNames.UnionWith(plannedTableSet);
 
         var tableDeps = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         foreach (var name in plannedTableNames)
         {
             tableDeps[name] = tableCatalog.TryGetValue(name, out var existingTable)
                 ? [.. existingTable.TableInputs.Where(plannedTableSet.Contains)]
-                : [.. ScanFromReferences(docTablesByName[name].Sql).Where(plannedTableSet.Contains)];
+                : [.. ScanNewEntityReferences(docTablesByName[name].Sql).Where(plannedTableSet.Contains)];
         }
 
         var (tableOrder, tableCycleDiagnostics) = TopoSortTables(plannedTableNames, tableDeps);
         foreach (var name in tableOrder)
         {
             var action = PlanTable(docTablesByName[name], tableCatalog.GetValueOrDefault(name));
-            if (tableCycleDiagnostics.TryGetValue(name, out var extra))
+            var extra = new List<string>();
+            if (tableCycleDiagnostics.TryGetValue(name, out var cycleNotes))
+            {
+                extra.AddRange(cycleNotes);
+            }
+
+            extra.AddRange(MissingDependencyDiagnostics(docTablesByName[name].Sql, knownRelationNames));
+            if (extra.Count > 0)
             {
                 action = action with { Diagnostics = [.. action.Diagnostics, .. extra] };
             }
@@ -84,7 +104,14 @@ public static class ImportPlanner
         // ---- Pipelines (no interdependencies; alphabetical for determinism). ----
         foreach (var p in doc.Pipelines.OrderBy(p => p.Name, StringComparer.Ordinal))
         {
-            result.Add(WithDuplicateDiagnostic(PlanPipeline(p, pipelineCatalog.GetValueOrDefault(p.Name)), duplicatePipelineDiagnostics));
+            var action = WithDuplicateDiagnostic(PlanPipeline(p, pipelineCatalog.GetValueOrDefault(p.Name)), duplicatePipelineDiagnostics);
+            var missing = MissingDependencyDiagnostics(p.Sql, knownRelationNames);
+            if (missing.Count > 0)
+            {
+                action = action with { Diagnostics = [.. action.Diagnostics, .. missing] };
+            }
+
+            result.Add(action);
         }
 
         // ---- Deletions (replace mode only): pipelines, tables (reverse-topo), sources — LAST. ----
@@ -296,12 +323,62 @@ public static class ImportPlanner
         return new PlannedAction("table", docTable.Name, same ? "skipped" : "updated", diagnostics);
     }
 
-    /// <summary>Best-effort dependency scan for a NEW table's SQL: every <c>FROM &lt;identifier&gt;</c>
-    /// reference (case-insensitive), regardless of whether it turns out to name a stream source, a
-    /// table, or nothing at all — callers filter the result down to names that are actually other
-    /// planned tables. Deliberately narrow (FROM only, no JOIN, no subquery awareness) — it only
-    /// needs to be good enough to order two NEW tables relative to each other; anything sturdier
-    /// would require the real SQL parser, which ImportPlanner explicitly does not use.</summary>
+    /// <summary>
+    /// Plan 016 wave 3-B: every relation a NEW (not-yet-in-the-catalog) entity's SQL reads — FROM, every
+    /// JOIN, every derived-table/subquery source, at any depth — via the real compiler
+    /// (<see cref="SqlCompiler.ExtractReferences"/>) instead of the old FROM-only regex. Two things this
+    /// buys over the regex it replaces: JOINs and subqueries are seen at all, and a CTE no longer invents
+    /// a phantom dependency on its own name (<c>WITH recent AS (…) SELECT * FROM recent</c> used to make
+    /// the regex emit <c>recent</c>, a name no catalog will ever hold — the compiler resolves CTE
+    /// references away, so it reports the CTE body's real relations instead).
+    ///
+    /// <para>Desugars <c>INSERT INTO &lt;sink&gt;</c> first — the Engine has no INSERT production, so a
+    /// still-sugared statement is a parse error to <c>ExtractReferences</c> and would otherwise lose
+    /// every dependency of the commonest authored form.</para>
+    ///
+    /// <para><b>ponytail: falls back to the old FROM-only regex ONLY when the compiler could not parse
+    /// the statement at all.</b> Found live while wiring this up, not guessed: <c>ImportPlannerTests</c>,
+    /// <c>ImportPlannerDuplicateNameTests</c>, <c>ImportPlannerSinksTests</c> and <c>ConfigSerializerTests</c>
+    /// — none of them mine to edit — author every table's SQL as <c>"TABLE AS SELECT …"</c>, a prefix this
+    /// dialect's grammar has never accepted (real <c>TableDefinition.Sql</c> text is a bare
+    /// <c>SELECT</c>/<c>WITH</c>, confirmed against <c>CatalogRevisionsTests</c> and every live compile
+    /// call site). <c>ExtractReferences</c> therefore returns <c>[]</c> for every one of those fixtures —
+    /// not because they reference nothing, but because "TABLE AS" fails to parse — and
+    /// <c>ExtractReferences</c>' contract makes those two cases deliberately indistinguishable. Trusting
+    /// the compiler unconditionally would silently drop the dependency those tests assert on
+    /// (<c>New_table_dependency_is_inferred_from_sql_from_reference</c>,
+    /// <c>Table_dependency_cycle_is_diagnosed_not_crashed</c>) and reorder every table apply in this repo's
+    /// own test suite. The regex fallback only ever fires on a genuine parse failure — a CTE, a JOIN, a
+    /// subquery all parse fine and never reach it — so it costs nothing on well-formed SQL and exists
+    /// purely as the safety net documented above. Ceiling: a table whose SQL is BOTH invalid AND written
+    /// with an unsupported prefix like "TABLE AS" gets the pre-016 FROM-only answer instead of one derived
+    /// from a real parse — no worse than today, since today IS that answer for everything. Upgrade path:
+    /// none needed unless a future SQL-authoring convention reintroduces a non-parsing prefix on purpose,
+    /// at which point desugar it the way <see cref="SinkSugar"/> already handles INSERT INTO.</para>
+    /// </summary>
+    internal static List<string> ScanNewEntityReferences(string sql)
+    {
+        var desugared = SinkSugar.Desugar(sql ?? "").Sql;
+        var compiled = SqlCompiler.ExtractReferences(desugared);
+        return compiled.Count > 0 ? [.. compiled] : ScanFromReferences(desugared);
+    }
+
+    /// <summary>Plan 016 wave 3-B: the diagnostic half of <see cref="ScanNewEntityReferences"/> — every
+    /// relation NAME a document entity's SQL reads that resolves to nothing in <paramref name="known"/>
+    /// (the document's own sources/tables plus the current catalog's). Changes no PLANNED OUTCOME
+    /// ("created"/"updated"/"skipped" is unaffected) — the downstream compile already errors on a
+    /// genuinely missing relation — this only says WHY at plan time, which is what makes
+    /// <c>mode=validate</c> useful instead of merely accurate. Run on every document table/pipeline
+    /// regardless of created/updated/skipped, because it is about what the DOCUMENT says, not about
+    /// whether the stored definition changed.</summary>
+    private static List<string> MissingDependencyDiagnostics(string sql, HashSet<string> known)
+    {
+        var missing = ScanNewEntityReferences(sql).Where(n => !known.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
+        return [.. missing.Select(n => $"references '{n}', which does not exist in this document or the current catalog")];
+    }
+
+    /// <summary>ponytail: the FROM-only regex <see cref="ScanNewEntityReferences"/> now falls back to —
+    /// see its doc comment for exactly when and why. No longer the primary dependency scan.</summary>
     private static List<string> ScanFromReferences(string sql)
     {
         var names = new List<string>();

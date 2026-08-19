@@ -273,6 +273,7 @@ internal static class ConfigJsonMapper
             p.Tags ??= [];
             p.Metadata ??= [];
             p.Sinks ??= [];
+            p.DependsOn ??= []; // Plan 016 wave 3-B — same "explicit null -> empty default" rule as Sinks.
         }
 
         foreach (var t in doc.Tables)
@@ -280,6 +281,7 @@ internal static class ConfigJsonMapper
             t.Tags ??= [];
             t.Metadata ??= [];
             t.Sinks ??= [];
+            t.DependsOn ??= []; // Plan 016 wave 3-B — same "explicit null -> empty default" rule as Sinks.
         }
     }
 
