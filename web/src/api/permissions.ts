@@ -17,10 +17,10 @@
 //
 // THE THREE RULES, IN THE ORDER THEY APPLY (PermissionEvaluator.Evaluate):
 //   1. a disabled user is denied everything, before a single grant is read;
-//   2. deny overrides — any matching Deny wins outright, flat, with no specificity ladder;
-//   3. among matching Allows the most permissive wins on the approval axis: one unconditional Allow
-//      answers 'Allowed', and only when EVERY matching Allow requires approval is the answer
-//      'RequiresApproval'.
+//   2. deny overrides — any matching Deny wins outright, flat, ABSOLUTE, and deliberately outside the
+//      specificity ladder in rule 3;
+//   3. among matching Allows the MOST SPECIFIC one decides the approval axis (see `specificity`), and
+//      on a tie 'RequiresApproval' wins.
 
 import type { AccessDecision, PermissionGrant } from './types'
 
@@ -112,6 +112,44 @@ export function grantMatches(
   return globMatch(grant.action, action) && scopeMatches(grant.scope, scope, resourceTags)
 }
 
+/** One tier outranks any literal count, so tiers dominate and literals only break ties inside one. */
+const TIER_STEP = 1000
+
+function axisScore(pattern: string, tagsAllowed: boolean): number {
+  let literals = 0
+  for (const c of pattern) if (c !== '*') literals++
+  // `*`, `**` or "" — nothing was named at all. Tier 0, no tiebreak.
+  if (literals === 0) return 0
+
+  const tier =
+    tagsAllowed && pattern.startsWith(TAG_PREFIX) ? 1 : pattern.includes('*') ? 2 : 3
+
+  return tier * TIER_STEP + Math.min(literals, TIER_STEP - 1)
+}
+
+/**
+ * How specific a grant is — transliterated from `PermissionEvaluator.Specificity`, and the reason the
+ * whole doc comment there matters here too: this is the score that decides, among grants that ALL
+ * match, which one says whether the action needs an approval. Higher is more specific.
+ *
+ * Each axis is scored `tier * 1000 + literalCount` and the two are summed:
+ *   tier 0 — no literals at all (`*`, or ""): the grant names nothing;
+ *   tier 1 — a `tag:` scope (scope axis only; there is no tag form on the action axis);
+ *   tier 2 — a literal part plus a `*` (`prod-*`, `pipeline.*`);
+ *   tier 3 — an exact literal, no wildcard.
+ * Within a tier the longer literal wins, so `prod-eu-*` beats `prod-*` — nested prefixes are the
+ * commonest way an operator carves a narrower area out of a broader one.
+ *
+ * `tag:` sits BELOW both name forms and above `*`: a tag scope matches a set its author neither
+ * enumerated nor can see the boundary of (anyone with catalog write can add the tag later), so it must
+ * not outrank the forms whose membership the grant's author wrote down. The axes are summed rather
+ * than ranked because neither is obviously senior — a tie is a defined answer, and `RequiresApproval`
+ * wins it.
+ */
+export function specificity(grant: PermissionGrant): number {
+  return axisScore(grant.action, false) + axisScore(grant.scope, true)
+}
+
 /**
  * Evaluate one action against one resource, and answer the tri-state.
  *
@@ -150,8 +188,12 @@ export function decide(
 
   // Rules 2 and 3. The whole list is walked even after an Allow matches, because a Deny later in the
   // list still overrides it. Grant lists are tens of entries at most.
-  let unconditionalAllow = false
-  let approvalAllow = false
+  //
+  // Deny is ABSOLUTE and stays outside the specificity ladder, exactly as on the server: a specific
+  // Allow must not be able to punch a hole in a guardrail `Deny pipeline.* on prod-*`. The cost is that
+  // an Allow cannot be carved out of a broad Deny — narrow the Deny's scope instead.
+  let best: PermissionGrant | null = null
+  let bestScore = -1
 
   for (const grant of grants) {
     if (!grantMatches(grant, action, scope, resourceTags)) continue
@@ -160,12 +202,17 @@ export function decide(
     // state — AccessModels.cs says so on the field itself.
     if (grant.effect === 'Deny') return 'Denied'
 
-    if (grant.requiresApproval) approvalAllow = true
-    else unconditionalAllow = true
+    const score = specificity(grant)
+    // Strictly greater wins; on an exact tie the approval-gated grant does, which is the safer answer
+    // and the one an operator adding a grant is likelier to have meant. The tie-break also takes
+    // document order out of the decision entirely.
+    if (score > bestScore || (score === bestScore && grant.requiresApproval && best !== null && !best.requiresApproval)) {
+      best = grant
+      bestScore = score
+    }
   }
 
-  if (unconditionalAllow) return 'Allowed'
-  if (approvalAllow) return 'RequiresApproval'
+  if (best) return best.requiresApproval ? 'RequiresApproval' : 'Allowed'
   return 'Denied'
 }
 

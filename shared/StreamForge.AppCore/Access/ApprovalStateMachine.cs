@@ -387,7 +387,21 @@ public static class ApprovalStateMachine
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        if (request.State != ApprovalState.Approved)
+        // Plan 015 wave 8: one more transition than "out of Approved", and exactly one.
+        //
+        // The executor has to CLAIM a request before it can know how the run went — the claim is what
+        // makes execution at-most-once when two approvers vote at the same moment — so it records
+        // `executed: true` first and only then finds out whether the action threw. Without the second
+        // clause below, a run that threw left the request reading Executed forever: the audit row was
+        // correct and the request's own state over-read it. A wave about the record being true cannot
+        // ship a record that says an action succeeded because it was attempted.
+        //
+        // Narrow on purpose — Executed may be corrected to Failed and nothing else. A general
+        // re-statement would let any terminal state be rewritten, which is how an append-only-ish record
+        // stops being one; and correcting a Failed to Executed would let a retry launder a failure.
+        var correctingAnOverclaim = request.State == ApprovalState.Executed && !executed;
+
+        if (request.State != ApprovalState.Approved && !correctingAnOverclaim)
         {
             return new ApprovalVoteResult(
                 false,

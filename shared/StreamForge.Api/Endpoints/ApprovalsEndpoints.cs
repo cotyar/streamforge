@@ -1,6 +1,8 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using StreamForge.Abstractions;
 using StreamForge.Api.Auth;
 using StreamForge.AppCore.Access;
@@ -49,6 +51,15 @@ namespace StreamForge.Api;
 /// <para><b>Who sees which approvals</b> — <see cref="Visibility"/>, and the one interesting design
 /// question in this file. <b>When approvals are disabled</b> — the shipped default — every route
 /// answers 503 with a sentence; see <see cref="Disabled"/> for why that and not an empty list.</para>
+///
+/// <para><b>Plan 015 wave 8-B — approving now EXECUTES.</b> Until this wave the file ended at the
+/// decision: <see cref="IApprovalFacade.RecordOutcomeAsync"/> was called from nowhere, so
+/// <see cref="ApprovalState.Executed"/> and <see cref="ApprovalState.Failed"/> were unreachable and an
+/// approved requester still had to retry the action that was refused in the first place.
+/// <see cref="VoteAsync"/> is the one place in the platform that observes a request reaching
+/// <see cref="ApprovalState.Approved"/>, so it is where <see cref="ApprovalExecutor"/> is called — with
+/// every rule about WHAT may then run (the payload cannot widen the approved (Action, Scope) pair;
+/// at most once; the audit row carries the approval id) living in that class and none of it here.</para>
 /// </summary>
 public static class ApprovalsEndpoints
 {
@@ -69,11 +80,11 @@ public static class ApprovalsEndpoints
 
         // The two halves of one transition. Two routes rather than one with a boolean because a UI
         // button maps onto a URL, and "POST /reject" is a thing you can find in an access log.
-        group.MapPost("/{id}/approve", (string id, ApprovalDecisionRequest? body, ClaimsPrincipal principal, AccessGuard guard, IApprovalFacade approvals, ApprovalOptions options) =>
-            VoteAsync(id, approve: true, body, principal, guard, approvals, options));
+        group.MapPost("/{id}/approve", (string id, ApprovalDecisionRequest? body, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, IApprovalFacade approvals, ICatalogFacade catalog, ApprovalOptions options) =>
+            VoteAsync(id, approve: true, body, http, principal, guard, approvals, catalog, options));
 
-        group.MapPost("/{id}/reject", (string id, ApprovalDecisionRequest? body, ClaimsPrincipal principal, AccessGuard guard, IApprovalFacade approvals, ApprovalOptions options) =>
-            VoteAsync(id, approve: false, body, principal, guard, approvals, options));
+        group.MapPost("/{id}/reject", (string id, ApprovalDecisionRequest? body, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, IApprovalFacade approvals, ICatalogFacade catalog, ApprovalOptions options) =>
+            VoteAsync(id, approve: false, body, http, principal, guard, approvals, catalog, options));
 
         // POST /api/approvals/{id}/cancel — withdrawing your own request. NO approval.decide check: a
         // cancel is not a vote, it is the requester taking back what they asked for, and requiring the
@@ -265,9 +276,11 @@ public static class ApprovalsEndpoints
         string id,
         bool approve,
         ApprovalDecisionRequest? body,
+        HttpContext http,
         ClaimsPrincipal principal,
         AccessGuard guard,
         IApprovalFacade approvals,
+        ICatalogFacade catalog,
         ApprovalOptions options)
     {
         if (Disabled(options) is { } off)
@@ -302,9 +315,27 @@ public static class ApprovalsEndpoints
         // human clicking a button, not a hot path) makes both flavours answer identically.
         var after = await approvals.GetAsync(id) ?? before;
 
-        return VoteLanded(after, actor, approve)
-            ? Results.Ok(after)
-            : ExplainRefusedVote(after, actor);
+        if (!VoteLanded(after, actor, approve))
+        {
+            return ExplainRefusedVote(after, actor);
+        }
+
+        // Plan 015 wave 8-B — the moment the wave table promised and no code reached: the last vote has
+        // landed and the request is Approved, so the approved action RUNS. Only here, because this is
+        // the only place in the platform that observes the transition into Approved.
+        //
+        // ApprovalExecutor is the arbiter of whether it actually runs, not this line: it claims the
+        // request through the store before doing anything (see its remarks on at-most-once), so a
+        // double-clicked approve and a second concurrent approver both arrive here and exactly one of
+        // them executes. What comes back is the request as it now stands — Executed, Failed, or
+        // untouched — which is what the approver gets as the body of the click that approved it.
+        if (after.State == ApprovalState.Approved)
+        {
+            after = await ApprovalExecutor.ExecuteAsync(
+                after, actor, catalog, approvals, ServiceOf<IAuditSink>(http), ServiceOf<ILogger<AccessGuard>>(http));
+        }
+
+        return Results.Ok(after);
     }
 
     /// <summary>Withdraw your own request. No entitlement check — see the map site.</summary>
@@ -497,4 +528,20 @@ public static class ApprovalsEndpoints
 
     /// <summary>The authenticated caller, and nothing from the request body.</summary>
     private static string ActorOf(ClaimsPrincipal principal) => principal.Identity?.Name ?? "";
+
+    /// <summary>An optional service off the request. Wrapped for the same reason
+    /// <c>CatalogChangeAudit.SinkOf</c> is: neither the audit sink nor a logger is allowed to be the
+    /// thing that fails a vote, and on a host (or a test) where the factory throws, the right answer is
+    /// "no sink" rather than a 500 on the route that decides privileged actions.</summary>
+    private static T? ServiceOf<T>(HttpContext http) where T : class
+    {
+        try
+        {
+            return http.RequestServices.GetService<T>();
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
 }

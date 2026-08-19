@@ -461,6 +461,86 @@ seeder** — the log reads "seeded 3 built-in role(s) and mirrored **0** user ro
 shows `users: []`, and `effective/{u}` reads empty for a login that works fine by token-claim fallback,
 until the next host start or the next user PUT.
 
+### Wave 8 — the two wave-7 findings, closed
+
+Both were decisions rather than bugs, so both were put to the user before being built.
+
+#### Grant specificity, on the approval axis only
+
+`PermissionEvaluator` now scores every matching Allow and lets **the most specific one** decide whether
+approval is required. Per axis: `*` (nothing named) < `tag:` < prefix < exact, tier dominating, literal
+count breaking ties inside a tier so `prod-eu-*` beats `prod-*` — nested prefixes are the commonest way an
+operator carves a narrower area out of a broader one, and without the tiebreak they would tie and gate the
+narrower one too. The two axes are **summed, not ranked**: neither "this action anywhere" nor "any action
+on this resource" is obviously the senior kind of specific, and inventing a priority would decide cases
+nobody asked about. A tie resolves to `RequiresApproval` — the safer answer, and it removes document order
+from the decision entirely.
+
+**Deny stays absolute — a deliberate narrowing of the upgrade path the evaluator's own note proposed.**
+That note said "…with Deny breaking ties", i.e. most-specific-wins across all grants, which would let a
+guardrail `Deny pipeline.* on prod-*` be defeated by any forgotten `Allow pipeline.delete on prod-orders`.
+The reported bug does not need it, so it does not get it. The cost is unchanged and still documented: you
+cannot carve an Allow out of a broad Deny; narrow the Deny's scope instead.
+
+`tag:` ranks below both name forms, and that is the residual footgun, pinned by a test so it is a decision
+rather than a surprise: an approval-gated `tag:finance` grant loses to a plain `prod-*` Allow on a resource
+that is both. A `prod-*` grant at least bounds the names it will ever cover; `tag:finance` covers whatever
+anyone holding catalog write has tagged since — a set the grant's author neither enumerated nor can see the
+edge of. Gate by name, or use a Deny.
+
+**No pre-existing expectation changed.** Two tests were renamed with an in-place comment because their
+NAMES asserted the old rule while their assertions still hold under the new one. `web/src/api/permissions.ts`
+was changed in the same wave; the parity block covers all 26 actions.
+
+Verified live: an editor holding the Editor role plus a narrow `{pipeline.delete, w8-*, requiresApproval}`
+grant now gets **403** on a direct delete. Before this wave the same configuration returned 204.
+
+#### An approval now executes
+
+`ApprovalExecutor` runs when the post-vote re-read shows `Approved`. What was approved is the `(Action,
+Scope)` pair the approver saw, and three rules keep it that way: the operation comes from `Action` alone
+(closed switch, no default); the target comes from `Scope` alone and the scope must name **exactly one**
+entity (`*`, `prod-*`, `tag:` are refused — an approval given for a set is never cashed against a member the
+approver never looked at); and `PayloadJson`, which the *requester* wrote, may only supply a body that
+cannot move either, with any name or id in it checked against the entity already resolved from the scope.
+`source.write` payloads additionally run the PUT handler's own validation and secret merge, so an approval
+cannot become the way to store a definition REST would have rejected.
+
+Executors exist for `source.write`, `source.delete`, `pipeline.delete`, `table.delete`, `pipeline.control`,
+`table.control`. `pipeline.write`/`table.write` deliberately have none: their REST handlers are ~70 lines
+each of DTO→definition translation, and a second implementation of that is exactly the divergence this plan
+produced three times already. An action with no executor records `Failed` with a sentence — never
+`Executed`, never a silent success.
+
+**Claim before plan, and that order IS the correctness argument.** The executor claims the request with an
+atomic transition out of `Approved` carrying a unique token, and only the caller that reads its own token
+back may do anything. It was written plan-first, which reads better — the knowable failures would reach
+`Failed` without passing through the claim's optimistic `Executed`. Testing it against two concurrent
+callers showed why that is wrong: **a plan is computed against live catalog state, so the caller that LOST
+the race plans against a world the winner has already changed, concludes "the entity is gone", and records
+that failure over the winner's success.** The loser must write nothing at all, and the only thing that can
+tell it it lost is the claim. Pinned by an assertion on the STORED request, not just on what each caller
+returned.
+
+`ApprovalStateMachine.RecordOutcome` gained exactly one transition — `Executed → Failed`, and only when
+`executed` is false. Without it a run that threw left the request reading `Executed` forever while its audit
+row said otherwise, and a wave about the record being true cannot ship a record that says an action
+succeeded because it was attempted. Narrow on purpose: a general re-statement would let any terminal state
+be rewritten, and correcting a `Failed` to `Executed` would let a retry launder a failure. It is safe only
+because the executor claims before it plans, so the caller making the correction is always the claim holder
+describing its own attempt.
+
+**`approval.bypass` was left untouched and still referenced nowhere.** It names a grant a *human* holds to
+skip the second pair of eyes; the executor holds no grant and skips nothing — it cashes in an approval that
+was actually given. Wiring it here would mean anyone later granted break-glass silently inherits the
+executor's authority. The executor uses no action constant at all: its authority is the approval, bounded
+by `(Action, Scope)`, and `AuditEntry.ApprovalId` is what makes it accountable.
+
+Live round trip: file → approve → `state: Executed` → the pipeline is actually gone (404) → a second
+approve is 409. The audit log carries both halves of the story — a `requires-approval` row from the refusal
+that sent the requester to file, and an `executed` row with `origin: approval`, the approval id, and the
+**requester** as actor, because the change is theirs.
+
 ## OIDC — deferred to its own plan; the seams land here
 
 The `.AddJwtBearer("Oidc", …)` + issuer-selecting `PolicyScheme` is ~80 lines. These five are the real work:

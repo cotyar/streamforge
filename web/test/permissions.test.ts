@@ -9,13 +9,13 @@
 // grammar (PermissionEvaluator.cs is the first, and ApprovalStateMachine shares its ScopeMatches since
 // wave 4). Neither .NET suite can see a divergence in this one, so the cases below are deliberately
 // the same cases the C# tests pin: deny-overrides beating a broader allow, a disabled user denied even
-// `*`, prefix and `tag:` scopes, the most-permissive-Allow rule on the approval axis, and the
+// `*`, prefix and `tag:` scopes, the most-SPECIFIC-Allow rule on the approval axis (wave 8), and the
 // dot-crossing `*`. The last block pins the OTHER half — the ordinal fallback for a server that sends
 // no permissions[] at all, which must reproduce today's Viewer/Editor/Admin answer exactly or a
 // rolling deploy locks people out of buttons that still work.
 
 import { describe, expect, test } from 'bun:test'
-import { can, decide, globMatch, scopeMatches } from '../src/api/permissions'
+import { can, decide, globMatch, scopeMatches, specificity } from '../src/api/permissions'
 import { __testing } from '../src/api/auth'
 import type { PermissionGrant } from '../src/api/types'
 
@@ -115,7 +115,11 @@ describe('decide', () => {
     expect(decide({ grants: [allow('*', '*')] }, 'pipeline.write', 'orders')).toBe('Allowed')
   })
 
-  test('the approval axis takes the MOST permissive matching Allow', () => {
+  test('alice: her narrow prod-* Allow beats her broad approval-gated one', () => {
+    // Renamed in wave 8 (was "the approval axis takes the MOST permissive matching Allow"); every
+    // assertion is UNCHANGED. The answer is the same, but the reason is now that `prod-*` is MORE
+    // SPECIFIC than `*`, not that it is unconditional.
+    //
     // "alice may deploy to prod-*, and separately alice may deploy anywhere with an approval" must not
     // force alice through an approval for prod.
     const grants = [allow('pipeline.control', '*', true), allow('pipeline.control', 'prod-*')]
@@ -127,6 +131,71 @@ describe('decide', () => {
 
     // A Deny still beats both.
     expect(decide([...grants, deny('pipeline.control', 'prod-*')], 'pipeline.control', 'prod-orders')).toBe('Denied')
+  })
+
+  // ---------------------------------------------------------- specificity on the approval axis (wave 8)
+  //
+  // These are the same cases shared/StreamForge.AppCore.Tests/Access/PermissionEvaluatorTests.cs pins
+  // for PermissionEvaluator.Specificity. A divergence here is a security bug no .NET suite can see —
+  // the SPA would offer a plain "Delete" button for an action the server will answer with
+  // "requires approval", or hide one the operator is entitled to use outright.
+
+  test('operator: a narrow approval grant beats a role blanket Allow (015 finding 1)', () => {
+    const grants = [allow('pipeline.delete', '*'), allow('pipeline.delete', 'dev-*', true)]
+    expect(decide(grants, 'pipeline.delete', 'dev-thing')).toBe('RequiresApproval')
+    expect(decide(grants, 'pipeline.delete', 'prod-thing')).toBe('Allowed')
+    // Order-independent: the score decides, not the position in the list.
+    expect(decide([...grants].reverse(), 'pipeline.delete', 'dev-thing')).toBe('RequiresApproval')
+  })
+
+  test('a narrower prefix beats a broader one, and an exact name beats both', () => {
+    const nested = [allow('table.delete', 'prod-*', true), allow('table.delete', 'prod-sandbox-*')]
+    expect(decide(nested, 'table.delete', 'prod-sandbox-1')).toBe('Allowed')
+    expect(decide(nested, 'table.delete', 'prod-orders')).toBe('RequiresApproval')
+
+    expect(decide([allow('table.delete', 'prod-*'), allow('table.delete', 'prod-orders', true)], 'table.delete', 'prod-orders')).toBe('RequiresApproval')
+    expect(decide([allow('table.delete', 'prod-*', true), allow('table.delete', 'prod-orders')], 'table.delete', 'prod-orders')).toBe('Allowed')
+  })
+
+  test('tag: outranks * and loses to a name scope', () => {
+    const tagged = allow('table.write', 'tag:finance', true)
+    expect(decide([allow('table.write', '*'), tagged], 'table.write', 'ledger', ['finance'])).toBe('RequiresApproval')
+    // The documented cost of that placement: a name-scoped Allow beats the tag gate.
+    expect(decide([allow('table.write', 'prod-*'), tagged], 'table.write', 'prod-ledger', ['finance'])).toBe('Allowed')
+  })
+
+  test('a more specific action beats a broader one on the same scope', () => {
+    const grants = [allow('table.*', '*'), allow('table.delete', '*', true)]
+    expect(decide(grants, 'table.delete', 't1')).toBe('RequiresApproval')
+    expect(decide(grants, 'table.write', 't1')).toBe('Allowed')
+  })
+
+  test('an equal-specificity tie goes to RequiresApproval, either order', () => {
+    // `table.*` (6 literals) on the exact `prod-orders` (11) scores exactly what `table.delete` (12)
+    // on the prefix `prod-*` (5) does.
+    const gated = allow('table.*', 'prod-orders', true)
+    const plain = allow('table.delete', 'prod-*')
+    expect(specificity(gated)).toBe(specificity(plain))
+    expect(decide([gated, plain], 'table.delete', 'prod-orders')).toBe('RequiresApproval')
+    expect(decide([plain, gated], 'table.delete', 'prod-orders')).toBe('RequiresApproval')
+  })
+
+  test('specificity never outranks a Deny, however specific the Allow is', () => {
+    // The deliberate narrowing: the ladder applies ONLY to the approval axis, so an exact-scope Allow
+    // cannot punch a hole in a guardrail Deny.
+    const grants = [allow('pipeline.delete', 'prod-orders'), deny('pipeline.*', 'prod-*')]
+    expect(decide(grants, 'pipeline.delete', 'prod-orders')).toBe('Denied')
+  })
+
+  test('specificity is the documented ladder: * < tag: < prefix < exact, on both axes', () => {
+    const score = (action: string, scope: string) => specificity(allow(action, scope))
+    expect(score('*', '*')).toBe(0)
+    expect(score('*', 'tag:finance')).toBeLessThan(score('*', 'prod-*'))
+    expect(score('*', 'prod-*')).toBeLessThan(score('*', 'prod-orders'))
+    expect(score('*', 'prod-*')).toBeLessThan(score('*', 'prod-eu-*'))
+    expect(score('table.*', '*')).toBeLessThan(score('table.delete', '*'))
+    // `**` names nothing either, so it scores as the bare wildcard rather than as a prefix.
+    expect(score('**', '**')).toBe(0)
   })
 
   test('can() is Allowed only — RequiresApproval is not permission', () => {
