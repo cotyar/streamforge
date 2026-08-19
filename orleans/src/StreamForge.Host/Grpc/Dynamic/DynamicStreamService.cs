@@ -100,12 +100,11 @@ public sealed class DynamicStreamService(IClusterClient client, AccessGuard guar
     private async Task StreamTableAsync(
         IRegistryGrain registry, string entityKey, string id, IServerStreamWriter<V1.DynamicFrame> responseStream, ServerCallContext context)
     {
-        var table = await registry.GetTableAsync(id)
-            ?? (await registry.GetTablesAsync()).FirstOrDefault(t => t.Name == id); // names are unique across sources+tables
-        if (table is null)
-        {
-            throw new RpcException(new Status(StatusCode.NotFound, $"table '{id}' not found"));
-        }
+        // Plan 016 wave 1: id-or-name through the one resolver. Two tables sharing the queried NAME
+        // used to serve the FIRST silently; it is now FailedPrecondition naming both ids — entitlement
+        // checked first on that branch, see GrpcEntityRef.
+        var table = await GrpcEntityRef.RequireAsync(
+            await GrpcEntityRef.TableAsync(registry, id), guard, context, Actions.TableRead);
 
         // Canonicalize: the field-number map must live under one key regardless of whether the
         // caller subscribed by id or by name.
@@ -152,17 +151,10 @@ public sealed class DynamicStreamService(IClusterClient client, AccessGuard guar
     private async Task StreamPipelineAsync(
         IRegistryGrain registry, string entityKey, string id, IServerStreamWriter<V1.DynamicFrame> responseStream, ServerCallContext context)
     {
-        var pipeline = await registry.GetPipelineAsync(id);
-        if (pipeline is null)
-        {
-            // Name fallback (pipeline names aren't enforced unique — only resolve an unambiguous match).
-            var byName = (await registry.GetPipelinesAsync()).Where(p => p.Name == id).ToList();
-            if (byName.Count == 1) pipeline = byName[0];
-        }
-        if (pipeline is null)
-        {
-            throw new RpcException(new Status(StatusCode.NotFound, $"pipeline '{id}' not found"));
-        }
+        // Plan 016 wave 1: id-or-name through the one resolver. A duplicate pipeline name used to come
+        // back as NotFound here; it is now FailedPrecondition naming both candidate ids.
+        var pipeline = await GrpcEntityRef.RequireAsync(
+            await GrpcEntityRef.PipelineAsync(registry, id), guard, context, Actions.PipelineRead);
 
         // Canonicalize the field-number-map key (see StreamTableAsync) and re-point id at the real
         // pipeline id — the output stream below is keyed by id, not name.

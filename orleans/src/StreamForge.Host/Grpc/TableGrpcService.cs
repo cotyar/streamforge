@@ -41,11 +41,9 @@ public sealed class TableGrpcService(IClusterClient client, AccessGuard guard) :
     [Authorize(Policy = "Viewer")]
     public override async Task<V1.TableDefinition> Get(V1.GetTableRequest request, ServerCallContext context)
     {
-        var t = await Registry.GetTableAsync(request.Id);
-        if (t is null)
-        {
-            throw new RpcException(new Status(StatusCode.NotFound, $"table '{request.Id}' not found"));
-        }
+        // Plan 016 wave 1: read RPCs take an id OR a name, through the one resolver.
+        var t = await GrpcEntityRef.RequireAsync(
+            await GrpcEntityRef.TableAsync(Registry, request.Id), guard, context, Actions.TableRead);
 
         await GrpcAccess.EnsureAsync(guard, context, Actions.TableRead, t.Name, t.Tags);
 
@@ -170,11 +168,9 @@ public sealed class TableGrpcService(IClusterClient client, AccessGuard guard) :
     [Authorize(Policy = "Viewer")]
     public override async Task<V1.TableRowsResponse> Rows(V1.GetTableRowsRequest request, ServerCallContext context)
     {
-        var def = await Registry.GetTableAsync(request.Id);
-        if (def is null)
-        {
-            throw new RpcException(new Status(StatusCode.NotFound, $"table '{request.Id}' not found"));
-        }
+        // Plan 016 wave 1: read RPCs take an id OR a name, through the one resolver.
+        var def = await GrpcEntityRef.RequireAsync(
+            await GrpcEntityRef.TableAsync(Registry, request.Id), guard, context, Actions.TableRead);
 
         await GrpcAccess.EnsureAsync(guard, context, Actions.TableRead, def.Name, def.Tags);
 
@@ -192,11 +188,9 @@ public sealed class TableGrpcService(IClusterClient client, AccessGuard guard) :
     [Authorize(Policy = "Viewer")]
     public override async Task<V1.SearchTableResponse> Search(V1.SearchTableRequest request, ServerCallContext context)
     {
-        var def = await Registry.GetTableAsync(request.Id);
-        if (def is null)
-        {
-            throw new RpcException(new Status(StatusCode.NotFound, $"table '{request.Id}' not found"));
-        }
+        // Plan 016 wave 1: read RPCs take an id OR a name, through the one resolver.
+        var def = await GrpcEntityRef.RequireAsync(
+            await GrpcEntityRef.TableAsync(Registry, request.Id), guard, context, Actions.TableRead);
 
         // Search returns table ROWS, so it is table.read at the table — the same action GET
         // /api/tables/{id}/search asks for. The "search is not enabled" answer below stays a 400-style

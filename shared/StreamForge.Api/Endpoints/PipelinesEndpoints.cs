@@ -58,13 +58,14 @@ public static class PipelinesEndpoints
 
         group.MapGet("/{id}", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
-            var p = await registry.GetPipelineAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.PipelineRead, p?.Name ?? id, p?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name (guard first — see EntityLookup's class remarks).
+            var hit = await EntityLookup.PipelineAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            return p is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskPipeline(p));
+            return EntityLookup.Reject(hit) ?? Results.Ok(SecretsMasker.MaskPipeline(hit.Value!));
         }).RequireAuthorization("Viewer");
 
         // Create asks at the NAME BEING CREATED (the id does not exist until CreatePipelineAsync mints
@@ -135,11 +136,28 @@ public static class PipelinesEndpoints
                 // mirrors sources' own CreateSourceAsync, which does the identical un-merged pass-through.
                 Sinks = sinks,
             };
-            var created = await registry.CreatePipelineAsync(def);
+            // Plan 016 wave 1: the registry now refuses a duplicate pipeline name, and it refuses the way
+            // every other catalog refusal here works — by throwing. TablesEndpoints has always caught
+            // that into a 409; this handler never had to, because nothing it called could refuse. Without
+            // the catch the new rule is correct and reaches the caller as a 500, which reads as "the
+            // server broke" rather than "you already have one of those". No global exception handler
+            // exists in this repo, so the catch has to be here.
+            PipelineDefinition created;
+            try
+            {
+                created = await registry.CreatePipelineAsync(def);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.Conflict(new ErrorResponse(ex.Message));
+            }
 
             // Plan 015 wave 5-B: BeforeJson null, AfterJson the whole masked document. Scoped on the
             // NAME, like the guard above and like every other 015 call site — the id was minted a line
             // ago and a prod-* scope written by an operator matches nothing at all on a GUID.
+            //
+            // Written only after the create returned: a refusal above created nothing, and an audit row
+            // claiming otherwise would be a lie in the one log that must not contain any.
             CatalogChangeAudit.RecordPipeline(
                 http, principal, Actions.PipelineWrite, created.Name, before: null, after: created);
             return Results.Created($"/api/pipelines/{created.Id}", SecretsMasker.MaskPipeline(created));
@@ -211,7 +229,18 @@ public static class PipelinesEndpoints
             existing.Tags = req.Tags ?? existing.Tags;
             existing.Metadata = req.Metadata ?? existing.Metadata;
             existing.Sinks = sinks;
-            var updated = await registry.UpdatePipelineAsync(existing);
+            // Same reason as the create above: an update that renames a pipeline onto a taken name is
+            // refused by the registry, and a refusal is a 409, not a 500.
+            PipelineDefinition? updated;
+            try
+            {
+                updated = await registry.UpdatePipelineAsync(existing);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.Conflict(new ErrorResponse(ex.Message));
+            }
+
             if (updated is not null)
             {
                 CatalogChangeAudit.RecordPipeline(
@@ -311,23 +340,22 @@ public static class PipelinesEndpoints
         // compile diagnostics if the SQL doesn't currently compile.
         group.MapGet("/{id}/proto", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
-            var def = await registry.GetPipelineAsync(id);
-            if (def is null)
-            {
-                // Name fallback (pipeline names aren't enforced unique — only resolve an unambiguous match).
-                var byName = (await registry.GetPipelinesAsync()).Where(p => p.Name == id).ToList();
-                if (byName.Count == 1) def = byName[0];
-            }
-
-            if (await RefuseAsync(guard, principal, Actions.PipelineRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver. This site used to answer 404 when two
+            // pipelines shared the queried name; it now answers 409 naming both ids. Guard FIRST,
+            // against the raw route segment — see EntityLookup's class remarks for why that order is
+            // the security-relevant part.
+            var hit = await EntityLookup.PipelineAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             var schemas = await BuildSchemasAsync(registry);
             var result = SqlCompiler.Compile(def.Sql, schemas);
@@ -352,16 +380,19 @@ public static class PipelinesEndpoints
         // PlanEndpointsLogic's class doc. Recompiled fresh every call; never persisted.
         group.MapGet("/{id}/plan", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
-            var def = await registry.GetPipelineAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.PipelineRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name (guard first — see EntityLookup's class remarks).
+            var hit = await EntityLookup.PipelineAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             var schemas = await BuildSchemasAsync(registry);
             return Results.Ok(PlanEndpointsLogic.BuildPipelinePlan(def, schemas));
@@ -376,11 +407,23 @@ public static class PipelinesEndpoints
         // file already does, and it keeps the pre-existing behaviour on an unknown id (no 404 added).
         group.MapGet("/{id}/results", async (string id, int? limit, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, IPipelineReadFacade pipelines) =>
         {
-            var def = await registry.GetPipelineAsync(id);
+            // Plan 016 wave 1: id-or-name. This route deliberately does NOT 404 on an unknown id (see
+            // the note above), so an unresolved query falls through to the facade with the raw segment,
+            // exactly as before — only an AMBIGUOUS name is answered, and it gets the 409 every other
+            // route gives it. Guard first, as everywhere.
+            var hit = await EntityLookup.PipelineAsync(registry, id);
+            var def = hit.Value;
             if (await RefuseAsync(guard, principal, Actions.PipelineRead, def?.Name ?? id, def?.Tags) is { } refusal)
             {
                 return refusal;
             }
+
+            if (hit.Outcome == StreamForge.AppCore.EntityRefOutcome.Ambiguous)
+            {
+                return EntityLookup.Reject(hit)!;
+            }
+
+            id = def?.Id ?? id;
 
             return Results.Ok(await pipelines.GetRecentResultsAsync(id, limit ?? 100));
         }).Produces<List<ResultEnvelope>>().RequireAuthorization("Viewer");
@@ -388,31 +431,43 @@ public static class PipelinesEndpoints
         // Plan 012: the recent-results buffer as a file — the pipeline twin of /api/tables/{id}/rows.csv.
         group.MapGet("/{id}/results.csv", async (string id, int? limit, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, IPipelineReadFacade pipelines) =>
         {
-            var def = await registry.GetPipelineAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.PipelineRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name (guard first — see EntityLookup's class remarks).
+            var hit = await EntityLookup.PipelineAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
 
-            var results = await pipelines.GetRecentResultsAsync(id, Math.Clamp(limit ?? 10_000, 1, 100_000));
+            var def = hit.Value!;
+
+            var results = await pipelines.GetRecentResultsAsync(def.Id, Math.Clamp(limit ?? 10_000, 1, 100_000));
             var csv = CsvExport.Rows(results.Select(r => r.Row));
             return Results.File(Encoding.UTF8.GetBytes(csv), "text/csv; charset=utf-8", $"{def.Name}.csv");
         }).RequireAuthorization("Viewer");
 
         group.MapGet("/{id}/metrics", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, IPipelineReadFacade pipelines) =>
         {
-            var def = await registry.GetPipelineAsync(id);
+            // Plan 016 wave 1: id-or-name, on the same terms as /results above — this route deliberately
+            // does NOT 404 on an unknown id, so an unresolved query still falls through to the facade
+            // with the raw segment; only an AMBIGUOUS name is answered, and only after the guard.
+            var hit = await EntityLookup.PipelineAsync(registry, id);
+            var def = hit.Value;
             if (await RefuseAsync(guard, principal, Actions.PipelineRead, def?.Name ?? id, def?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            return Results.Ok(await pipelines.GetMetricsAsync(id));
+            if (hit.Outcome == StreamForge.AppCore.EntityRefOutcome.Ambiguous)
+            {
+                return EntityLookup.Reject(hit)!;
+            }
+
+            return Results.Ok(await pipelines.GetMetricsAsync(def?.Id ?? id));
         }).RequireAuthorization("Viewer");
     }
 

@@ -34,11 +34,9 @@ public sealed class PipelineGrpcService(IClusterClient client, AccessGuard guard
     [Authorize(Policy = "Viewer")]
     public override async Task<V1.PipelineDefinition> Get(V1.GetPipelineRequest request, ServerCallContext context)
     {
-        var p = await Registry.GetPipelineAsync(request.Id);
-        if (p is null)
-        {
-            throw new RpcException(new Status(StatusCode.NotFound, $"pipeline '{request.Id}' not found"));
-        }
+        // Plan 016 wave 1: read RPCs take an id OR a name, through the one resolver.
+        var p = await GrpcEntityRef.RequireAsync(
+            await GrpcEntityRef.PipelineAsync(Registry, request.Id), guard, context, Actions.PipelineRead);
 
         await GrpcAccess.EnsureAsync(guard, context, Actions.PipelineRead, p.Name, p.Tags);
 

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 using StreamForge.Abstractions;
+using StreamForge.AppCore;
 using StreamForge.Api.Auth;
 
 namespace StreamForge.Api.Hubs;
@@ -77,14 +78,35 @@ public sealed class StreamHub(AccessGuard guard, ICatalogFacade catalog) : Hub
         await Groups.AddToGroupAsync(Context.ConnectionId, "metrics");
     }
 
-    /// <summary>Table deltas are grouped by NAME (the delta stream's key), and
-    /// <see cref="ICatalogFacade.GetTableAsync"/> takes an id — hence the list scan for the tags. The
-    /// entitlement is checked at the NAME the caller asked for, which is the string an operator would
-    /// have written into a scope.</summary>
-    public async Task SubscribeTable(string name)
+    /// <summary>Table deltas are grouped by NAME (the delta stream's key), so whatever the caller passed
+    /// has to become a name before it can name a group.
+    ///
+    /// <para>Plan 016 wave 1: this accepts an id or a name, like every read surface now does. It was
+    /// left name-only when the REST and gRPC sites were migrated because this file belonged to no agent
+    /// that wave — and the result was that gRPC's <c>SubscribeTable</c> took an id while this one did
+    /// not, for the same subscription. Two transports disagreeing about what addresses an entity is the
+    /// exact divergence the shared resolver exists to prevent, so it is closed here rather than
+    /// recorded.</para>
+    ///
+    /// <para><b>The group is keyed on the RESOLVED name, never on what was passed</b> — an id-addressed
+    /// subscriber has to land in the same group as a name-addressed one, or it silently receives
+    /// nothing. Unresolvable input keeps its pre-existing behaviour: the entitlement is checked at the
+    /// raw string and the caller joins a group nothing publishes to, which is what subscribing to a
+    /// table that does not exist has always done here. An AMBIGUOUS name is refused, because there is no
+    /// honest group to join — but only after the guard has run, so an unentitled caller learns
+    /// nothing about which entities exist.</para></summary>
+    public async Task SubscribeTable(string idOrName)
     {
-        var table = (await catalog.GetTablesAsync()).FirstOrDefault(t => t.Name == name);
-        await EnsureAsync(Actions.TableRead, name, table?.Tags);
+        var hit = EntityRef.Resolve(await catalog.GetTablesAsync(), idOrName);
+        var name = hit.Value?.Name ?? idOrName;
+
+        await EnsureAsync(Actions.TableRead, name, hit.Value?.Tags);
+
+        if (hit.Outcome == EntityRefOutcome.Ambiguous)
+        {
+            throw new HubException(hit.Message);
+        }
+
         await Groups.AddToGroupAsync(Context.ConnectionId, $"table:{name}");
     }
 

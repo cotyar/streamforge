@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using StreamForge.Abstractions;
 using StreamForge.Api.Auth;
+using StreamForge.AppCore;
 using StreamForge.AppCore.Config;
 using StreamForge.Engine;
 using StreamForge.Host.Grains;
@@ -517,7 +518,8 @@ internal static class ChatToolExecutor
             return new { error = "id is required" };
         }
 
-        var def = await ResolvePipelineAsync(ctx.Catalog, idOrName);
+        var hit = await ResolvePipelineAsync(ctx.Catalog, idOrName);
+        var def = hit.Value;
 
         // Scoped by ID, not by the string the model happened to type: /api/pipelines/{id} is what the
         // wave 2-B matrix scopes pipeline.read by, and a grant must mean the same thing whichever
@@ -528,7 +530,7 @@ internal static class ChatToolExecutor
             return refusal;
         }
 
-        return def is null ? new { error = $"pipeline '{idOrName}' not found" } : def;
+        return def is null ? new { error = hit.Message } : def;
     }
 
     private static async Task<object> CreatePipelineAsync(JsonElement args, ChatToolContext ctx)
@@ -629,13 +631,14 @@ internal static class ChatToolExecutor
             return new { error = "table is required" };
         }
 
-        var def = await ResolveTableAsync(ctx.Catalog, idOrName);
+        var hit = await ResolveTableAsync(ctx.Catalog, idOrName);
+        var def = hit.Value;
         if (await ctx.Gate.AuthorizeAsync("get_table", def?.Name ?? idOrName, def?.Tags, args) is { } refusal)
         {
             return refusal;
         }
 
-        return def is null ? new { error = $"table '{idOrName}' not found" } : def;
+        return def is null ? new { error = hit.Message } : def;
     }
 
     private static async Task<object> TableRowsAsync(JsonElement args, ChatToolContext ctx)
@@ -646,7 +649,8 @@ internal static class ChatToolExecutor
             return new { error = "table is required" };
         }
 
-        var def = await ResolveTableAsync(ctx.Catalog, idOrName);
+        var hit = await ResolveTableAsync(ctx.Catalog, idOrName);
+        var def = hit.Value;
         if (await ctx.Gate.AuthorizeAsync("table_rows", def?.Name ?? idOrName, def?.Tags, args) is { } refusal)
         {
             return refusal;
@@ -654,7 +658,7 @@ internal static class ChatToolExecutor
 
         if (def is null)
         {
-            return new { error = $"table '{idOrName}' not found" };
+            return new { error = hit.Message };
         }
 
         var limit = Math.Clamp((int)GetDouble(args, "limit", 20), 1, 100);
@@ -671,7 +675,8 @@ internal static class ChatToolExecutor
             return new { error = "table is required" };
         }
 
-        var def = await ResolveTableAsync(ctx.Catalog, idOrName);
+        var hit = await ResolveTableAsync(ctx.Catalog, idOrName);
+        var def = hit.Value;
         if (await ctx.Gate.AuthorizeAsync("search_table", def?.Name ?? idOrName, def?.Tags, args) is { } refusal)
         {
             return refusal;
@@ -679,7 +684,7 @@ internal static class ChatToolExecutor
 
         if (def is null)
         {
-            return new { error = $"table '{idOrName}' not found" };
+            return new { error = hit.Message };
         }
 
         if (!def.SearchEnabled)
@@ -706,7 +711,8 @@ internal static class ChatToolExecutor
             return new { error = "table is required" };
         }
 
-        var def = await ResolveTableAsync(ctx.Catalog, idOrName);
+        var hit = await ResolveTableAsync(ctx.Catalog, idOrName);
+        var def = hit.Value;
         if (await ctx.Gate.AuthorizeAsync("table_history", def?.Name ?? idOrName, def?.Tags, args) is { } refusal)
         {
             return refusal;
@@ -714,7 +720,7 @@ internal static class ChatToolExecutor
 
         if (def is null)
         {
-            return new { error = $"table '{idOrName}' not found" };
+            return new { error = hit.Message };
         }
 
         if (!def.HistoryEnabled)
@@ -738,28 +744,28 @@ internal static class ChatToolExecutor
     // Shared helpers.
     // ------------------------------------------------------------------
 
-    private static async Task<PipelineDefinition?> ResolvePipelineAsync(ICatalogFacade catalog, string idOrName)
+    // Plan 016 wave 1: both of these used to collapse "two entities share this name" into null, which
+    // every caller then rendered as "not found" — the model was told the table did not exist while two
+    // of them did, so it could only retry the same string. EntityRef's Ambiguous branch instead renders
+    // a message naming the candidate IDS, which the model can put to the user or address directly. No
+    // HTTP surface changes here; the transcript does.
+    //
+    // The id fast path is kept: an id wins outright under the pinned rule, so an id hit can
+    // short-circuit before the whole catalog is fetched.
+    private static async Task<EntityRefResult<PipelineDefinition>> ResolvePipelineAsync(ICatalogFacade catalog, string idOrName)
     {
         var byId = await catalog.GetPipelineAsync(idOrName);
-        if (byId is not null)
-        {
-            return byId;
-        }
-
-        var matches = (await catalog.GetPipelinesAsync()).Where(p => p.Name == idOrName).ToList();
-        return matches.Count == 1 ? matches[0] : null;
+        return byId is not null
+            ? new EntityRefResult<PipelineDefinition>(EntityRefOutcome.Found, byId, EntityRef.PipelineKind, idOrName, [])
+            : EntityRef.Resolve(await catalog.GetPipelinesAsync(), idOrName);
     }
 
-    private static async Task<TableDefinition?> ResolveTableAsync(ICatalogFacade catalog, string idOrName)
+    private static async Task<EntityRefResult<TableDefinition>> ResolveTableAsync(ICatalogFacade catalog, string idOrName)
     {
         var byId = await catalog.GetTableAsync(idOrName);
-        if (byId is not null)
-        {
-            return byId;
-        }
-
-        var matches = (await catalog.GetTablesAsync()).Where(t => t.Name == idOrName).ToList();
-        return matches.Count == 1 ? matches[0] : null;
+        return byId is not null
+            ? new EntityRefResult<TableDefinition>(EntityRefOutcome.Found, byId, EntityRef.TableKind, idOrName, [])
+            : EntityRef.Resolve(await catalog.GetTablesAsync(), idOrName);
     }
 
     private static async Task<Dictionary<string, SourceSchema>> BuildPipelineSchemasAsync(ICatalogFacade catalog)

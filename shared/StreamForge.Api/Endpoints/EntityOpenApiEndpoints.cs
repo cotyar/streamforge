@@ -58,17 +58,23 @@ public static class EntityOpenApiEndpoints
             string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry,
             IServiceProvider services, CancellationToken ct) =>
         {
-            var def = await registry.GetTableAsync(id)
-                ?? (await registry.GetTablesAsync()).FirstOrDefault(t => t.Name == id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver — a duplicate table name used to serve
+            // the FIRST match silently here and now answers 409. Guard FIRST, against the raw route
+            // segment: an ambiguous result has no single name/tags, and a 409 emitted before the guard
+            // would tell a caller entitled to read neither candidate that both exist. This document
+            // names an entity's output fields, so it is the last route where that should leak.
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             return await DocumentAsync(
                 services,
@@ -87,25 +93,21 @@ public static class EntityOpenApiEndpoints
             string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry,
             IServiceProvider services, CancellationToken ct) =>
         {
-            var def = await registry.GetPipelineAsync(id);
-            if (def is null)
-            {
-                var byName = (await registry.GetPipelinesAsync()).Where(p => p.Name == id).ToList();
-                if (byName.Count == 1)
-                {
-                    def = byName[0];
-                }
-            }
-
-            if (await RefuseAsync(guard, principal, Actions.PipelineRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver — a duplicate pipeline name used to be
+            // reported as 404 here and now answers 409 naming both ids. Guard first; see the table
+            // route above for why that order matters.
+            var hit = await EntityLookup.PipelineAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.PipelineRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             // PipelineDefinition doesn't persist an output schema, so recompile for one — but unlike the
             // .proto download, a pipeline whose SQL no longer compiles still gets its document (minus the

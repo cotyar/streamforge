@@ -5,6 +5,7 @@ using Orleans.Runtime;
 using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.Api.Auth;
+using StreamForge.AppCore;
 using StreamForge.Engine;
 using V1 = StreamForge.Host.Grpc.V1;
 
@@ -73,13 +74,26 @@ public sealed class StreamGrpcService(IClusterClient client, AccessGuard guard) 
         // Scope is the pipeline's NAME, not the id in the request: an id is a Guid("n") the registry
         // minted, so a `prod-*` scope written by an operator would match nothing at all. Same rule as
         // the REST routes and the chat tools — a grant has to mean one thing on every transport.
-        var subscribed = await Registry.GetPipelineAsync(request.Id);
+        //
+        // Plan 016 wave 1: the request field takes an id OR a name. This RPC deliberately does NOT fail
+        // on an unknown id (an unknown key just yields a silent stream), so that stays — only an
+        // AMBIGUOUS name is answered, and only after the guard, so the candidate ids are not an
+        // enumeration oracle for a caller entitled to read neither.
+        var hit = await GrpcEntityRef.PipelineAsync(Registry, request.Id);
+        var subscribed = hit.Value;
         await GrpcAccess.EnsureAsync(
             guard, context, Actions.PipelineRead, subscribed?.Name ?? request.Id, subscribed?.Tags);
+        if (hit.Outcome == EntityRefOutcome.Ambiguous)
+        {
+            throw new RpcException(new Status(StatusCode.FailedPrecondition, hit.Message));
+        }
+
+        // The output stream is keyed by pipeline ID, so a name-addressed subscription resolves to one.
+        var pipelineId = subscribed?.Id ?? request.Id;
 
         var streamProvider = client.GetStreamProvider(StreamConstants.ProviderName);
         var stream = streamProvider.GetStream<List<ResultEnvelope>>(
-            StreamId.Create(StreamConstants.OutputNamespace, request.Id));
+            StreamId.Create(StreamConstants.OutputNamespace, pipelineId));
 
         var handle = await stream.SubscribeAsync(async (rows, _) =>
         {
@@ -104,22 +118,31 @@ public sealed class StreamGrpcService(IClusterClient client, AccessGuard guard) 
         IServerStreamWriter<V1.TableDeltaBatch> responseStream,
         ServerCallContext context)
     {
-        // Delta streams are keyed by table NAME (see TableGrain), and IRegistryGrain.GetTableAsync takes
-        // an id — hence the list scan, the same one DynamicStreamService does for the same reason. The
-        // entitlement is checked against the NAME the caller asked for, because that is the string an
-        // operator would have written into a scope.
-        var table = (await Registry.GetTablesAsync()).FirstOrDefault(t => t.Name == request.Name);
-        await GrpcAccess.EnsureAsync(guard, context, Actions.TableRead, request.Name, table?.Tags);
+        // Delta streams are keyed by table NAME (see TableGrain). Plan 016 wave 1: the request field
+        // now takes an id OR a name through the one resolver, and the delta-stream key is the RESOLVED
+        // name — so a caller holding only the id (what the console and the config export carry) can
+        // subscribe without a round trip to translate it. The entitlement is checked against that same
+        // resolved name, because that is the string an operator would have written into a scope, and
+        // against the raw request when nothing resolved. Like SubscribePipeline above, an unknown key
+        // is NOT an error here (it yields a silent stream); only an ambiguous name is, after the guard.
+        var hit = await GrpcEntityRef.TableAsync(Registry, request.Name);
+        var table = hit.Value;
+        var tableName = table?.Name ?? request.Name;
+        await GrpcAccess.EnsureAsync(guard, context, Actions.TableRead, tableName, table?.Tags);
+        if (hit.Outcome == EntityRefOutcome.Ambiguous)
+        {
+            throw new RpcException(new Status(StatusCode.FailedPrecondition, hit.Message));
+        }
 
         var streamProvider = client.GetStreamProvider(StreamConstants.ProviderName);
         var stream = streamProvider.GetStream<List<TableDeltaDto>>(
-            StreamId.Create(StreamConstants.TableDeltaNamespace, request.Name));
+            StreamId.Create(StreamConstants.TableDeltaNamespace, tableName));
 
         long seq = 0;
         var handle = await stream.SubscribeAsync(async (deltas, _) =>
         {
             seq++;
-            var batch = new V1.TableDeltaBatch { TableName = request.Name, Seq = seq };
+            var batch = new V1.TableDeltaBatch { TableName = tableName, Seq = seq };
             batch.Deltas.AddRange(deltas.Select(d => new V1.TableDelta
             {
                 Row = GrpcValueConverter.ToStruct(d.Row),

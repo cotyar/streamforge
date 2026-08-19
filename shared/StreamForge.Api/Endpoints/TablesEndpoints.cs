@@ -59,13 +59,14 @@ public static class TablesEndpoints
 
         group.MapGet("/{id}", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
-            var t = await registry.GetTableAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, t?.Name ?? id, t?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name (guard first — see EntityLookup's class remarks).
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            return t is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskTable(t));
+            return EntityLookup.Reject(hit) ?? Results.Ok(SecretsMasker.MaskTable(hit.Value!));
         }).RequireAuthorization("Viewer");
 
         // Create asks at the NAME BEING CREATED with the request's own Tags — see the same note in
@@ -366,16 +367,21 @@ public static class TablesEndpoints
         // (following OrleansArrangementMetaFacade.GetArrangementsAsync's precedent); never persisted.
         group.MapGet("/{id}/plan", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
-            var def = await registry.GetTableAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver. Guard FIRST, against the raw route
+            // segment when nothing resolved — an ambiguous name has no single name/tags to authorize
+            // against, and answering 409 before the guard would hand an unentitled caller both ids.
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             var streamSchemas = await BuildStreamSchemasAsync(registry);
             var tableSchemas = await BuildTableSchemasAsync(registry, excludeTableId: def.Id);
@@ -389,16 +395,21 @@ public static class TablesEndpoints
         // and for PipelinesEndpoints' /results.
         group.MapGet("/{id}/rows", async (string id, int? limit, int? offset, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableReadFacade tables) =>
         {
-            var def = await registry.GetTableAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver. Guard FIRST, against the raw route
+            // segment when nothing resolved — an ambiguous name has no single name/tags to authorize
+            // against, and answering 409 before the guard would hand an unentitled caller both ids.
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             var rows = await tables.GetRowsAsync(def.Name, limit ?? 100, offset ?? 0);
             var total = await tables.GetRowCountAsync(def.Name);
@@ -426,16 +437,21 @@ public static class TablesEndpoints
         // content type on the same operation would have made that document describe two things at once.
         group.MapGet("/{id}/rows.csv", async (string id, int? limit, int? offset, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableReadFacade tables) =>
         {
-            var def = await registry.GetTableAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver. Guard FIRST, against the raw route
+            // segment when nothing resolved — an ambiguous name has no single name/tags to authorize
+            // against, and answering 409 before the guard would hand an unentitled caller both ids.
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             // Cap higher than /rows' 100 (this is an export, not a console poll) but still capped: an
             // unbounded default on a million-row table would render the whole thing into one string.
@@ -446,16 +462,21 @@ public static class TablesEndpoints
 
         group.MapGet("/{id}/metrics", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableReadFacade tables) =>
         {
-            var def = await registry.GetTableAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver. Guard FIRST, against the raw route
+            // segment when nothing resolved — an ambiguous name has no single name/tags to authorize
+            // against, and answering 409 before the guard would hand an unentitled caller both ids.
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             var metrics = await tables.GetMetricsAsync(def.Name);
             // The row-identity warning (see TableRowIdentityWarning). DERIVED from the definition, not
@@ -481,17 +502,21 @@ public static class TablesEndpoints
         // (no OutputFields to describe), mirroring the pipeline endpoint's compile-failure behavior.
         group.MapGet("/{id}/proto", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
-            var def = await registry.GetTableAsync(id)
-                ?? (await registry.GetTablesAsync()).FirstOrDefault(t => t.Name == id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver. Guard FIRST, against the raw route
+            // segment when nothing resolved — an ambiguous name has no single name/tags to authorize
+            // against, and answering 409 before the guard would hand an unentitled caller both ids.
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             if (def.OutputFields.Count == 0)
             {
@@ -509,16 +534,21 @@ public static class TablesEndpoints
 
         group.MapGet("/{id}/search", async (string id, string? q, int? limit, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableReadFacade tables) =>
         {
-            var def = await registry.GetTableAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver. Guard FIRST, against the raw route
+            // segment when nothing resolved — an ambiguous name has no single name/tags to authorize
+            // against, and answering 409 before the guard would hand an unentitled caller both ids.
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             if (!def.SearchEnabled)
             {
@@ -540,16 +570,21 @@ public static class TablesEndpoints
         // table's GROUP BY identity columns or the key encoding.
         group.MapPost("/{id}/history/lookup", async (string id, HistoryLookupRequest req, int? limit, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableHistoryFacade history) =>
         {
-            var def = await registry.GetTableAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver. Guard FIRST, against the raw route
+            // segment when nothing resolved — an ambiguous name has no single name/tags to authorize
+            // against, and answering 409 before the guard would hand an unentitled caller both ids.
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             // Plan 011 D1: on a SHARDED table the per-key shards hold the version trails and the
             // table-wide history grain is deliberately disabled, so this endpoint would answer 200 with a
@@ -574,16 +609,21 @@ public static class TablesEndpoints
 
         group.MapGet("/{id}/history/stats", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableHistoryFacade history) =>
         {
-            var def = await registry.GetTableAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver. Guard FIRST, against the raw route
+            // segment when nothing resolved — an ambiguous name has no single name/tags to authorize
+            // against, and answering 409 before the guard would hand an unentitled caller both ids.
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             // Plan 011 D1: on a SHARDED table the per-key shards hold the version trails and the
             // table-wide history grain is deliberately disabled, so this endpoint would answer 200 with a
@@ -616,16 +656,21 @@ public static class TablesEndpoints
         // delta stream, Orleans serializing its turns: strictly consistent by construction, no fence.
         group.MapPost("/{id}/shard/lookup", async (string id, ShardLookupRequest req, int? historyLimit, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableShardFacade shards) =>
         {
-            var def = await registry.GetTableAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver. Guard FIRST, against the raw route
+            // segment when nothing resolved — an ambiguous name has no single name/tags to authorize
+            // against, and answering 409 before the guard would hand an unentitled caller both ids.
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             if (def.ShardBy.Count == 0)
             {
@@ -649,16 +694,21 @@ public static class TablesEndpoints
         // Shard metrics + the live key set. Wakes NOTHING — router and directory only.
         group.MapGet("/{id}/shards", async (string id, int? limit, int? offset, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableShardFacade shards) =>
         {
-            var def = await registry.GetTableAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver. Guard FIRST, against the raw route
+            // segment when nothing resolved — an ambiguous name has no single name/tags to authorize
+            // against, and answering 409 before the guard would hand an unentitled caller both ids.
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             if (def.ShardBy.Count == 0)
             {
@@ -693,16 +743,21 @@ public static class TablesEndpoints
         // consistent by construction.
         group.MapGet("/{id}/shards/scan", async (string id, int? limit, int? offset, bool? fenced, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ITableShardFacade shards) =>
         {
-            var def = await registry.GetTableAsync(id);
-            if (await RefuseAsync(guard, principal, Actions.TableRead, def?.Name ?? id, def?.Tags) is { } refusal)
+            // Plan 016 wave 1: id-or-name, via the one resolver. Guard FIRST, against the raw route
+            // segment when nothing resolved — an ambiguous name has no single name/tags to authorize
+            // against, and answering 409 before the guard would hand an unentitled caller both ids.
+            var hit = await EntityLookup.TableAsync(registry, id);
+            if (await RefuseAsync(guard, principal, Actions.TableRead, hit.Value?.Name ?? id, hit.Value?.Tags) is { } refusal)
             {
                 return refusal;
             }
 
-            if (def is null)
+            if (EntityLookup.Reject(hit) is { } miss)
             {
-                return Results.NotFound();
+                return miss;
             }
+
+            var def = hit.Value!;
 
             if (def.ShardBy.Count == 0)
             {

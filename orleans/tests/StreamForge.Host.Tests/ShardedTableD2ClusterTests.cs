@@ -488,6 +488,15 @@ public sealed class ShardedTableD2ClusterTests : IAsyncLifetime
         unsharded.ShardBy = [];
         await Registry.UpdateTableAsync(unsharded);
 
+        // PLAN 016 WAVE 1-C: …after stopping it. The rename policy grew two conditions beyond D2's
+        // ShardBy one — Stopped, and no other table listing it in TableInputs — because a rename is
+        // just as unsafe against a LIVE table grain, history grain and delta stream, all also keyed by
+        // name (D2's own closing note said as much and left it out of scope). The un-shard update above
+        // restarts a Running table, so it has to be stopped again here. What this test is about is
+        // unchanged: clearing ShardBy genuinely unlocks the rename rather than pinning the table to its
+        // first name forever.
+        await Registry.SetTableStatusAsync(sharded.Id, PipelineStatus.Stopped);
+
         var nowRenamed = CloneWithName(unsharded, sharded.Name + "_renamed");
         var saved = await Registry.UpdateTableAsync(nowRenamed);
         Assert.NotNull(saved);
@@ -499,6 +508,11 @@ public sealed class ShardedTableD2ClusterTests : IAsyncLifetime
     {
         var sourceName = await SeedSourceAsync();
         var plain = await CreateTableAsync(sourceName, "d2_plain_rename", []);
+
+        // PLAN 016 WAVE 1-C: CreateTableAsync above starts the table, and a Running table is no longer
+        // renameable on ANY flavour — see the note in RenamingAShardedTable_IsRefused. The assertion this
+        // test exists to make is untouched: the SHARDED refusal does not leak onto an unsharded table.
+        await Registry.SetTableStatusAsync(plain.Id, PipelineStatus.Stopped);
 
         var saved = await Registry.UpdateTableAsync(CloneWithName(plain, plain.Name + "_renamed"));
 

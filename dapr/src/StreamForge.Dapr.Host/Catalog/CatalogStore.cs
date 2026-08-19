@@ -160,6 +160,8 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
     public async Task<PipelineDefinition> CreatePipelineAsync(PipelineDefinition def)
     {
+        ValidateUniquePipelineName(def.Name, excludePipelineId: null);
+
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         def.Id = Guid.NewGuid().ToString("n");
         def.Status = PipelineStatus.Stopped;
@@ -183,6 +185,12 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         }
 
         var existing = state.Pipelines[idx];
+
+        // Plan 016 wave 1-C: mirrors RegistryGrain.UpdatePipelineAsync — checked on EVERY update, not
+        // only when the name changes, so a catalog that already holds two pipelines with one name keeps
+        // serving both until somebody edits one.
+        ValidateUniquePipelineName(def.Name, excludePipelineId: existing.Id);
+
         var sqlChanged = existing.Sql != def.Sql;
         var wasRunning = existing.Status == PipelineStatus.Running;
 
@@ -318,9 +326,11 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         }
 
         var existing = state.Tables[tableIdx];
-        if (!string.Equals(existing.Name, def.Name, StringComparison.Ordinal))
+        var renamed = !string.Equals(existing.Name, def.Name, StringComparison.Ordinal);
+        if (renamed)
         {
             ValidateUniqueTableName(def.Name, excludeTableId: existing.Id);
+            ValidateTableRenameAllowed(existing);
         }
         ValidateParallelism(def.Parallelism);
         ValidateFlushMs(def.FlushMs);
@@ -353,6 +363,21 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             existing.HistoryWindowMs != def.HistoryWindowMs;
         var wasRunning = existing.Status == PipelineStatus.Running;
 
+        // Plan 016 wave 1-C: BEFORE the store, so a rename never leaves the old name's history tier
+        // addressable — the Dapr twin of RegistryGrain.ReleaseRenamedTiersAsync (there is no shard router
+        // on this flavor; see ValidateShardBy's own note for why ShardBy is Orleans-only here).
+        if (renamed)
+        {
+            try
+            {
+                await orchestrator.DisableTableHistoryAsync(existing.Name);
+            }
+            catch
+            {
+                // best-effort: a tier that fails to tear down must not roll back a legal rename.
+            }
+        }
+
         // Plan 009: see the note in UpdatePipelineAsync above and CatalogRecordMerge's own doc comment.
         CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         state.Tables[tableIdx] = def;
@@ -375,7 +400,10 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             }
         }
 
-        if (sqlChanged || historyConfigChanged)
+        // Plan 016 wave 1-C: `renamed` belongs here for the same reason it does in RegistryGrain — the
+        // history tier is keyed by NAME, the old one was just disabled, and without this the renamed table
+        // would carry no tier at all under its new name.
+        if (renamed || sqlChanged || historyConfigChanged)
         {
             await orchestrator.ResetTableHistoryAsync(def);
         }
@@ -492,6 +520,55 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         if (state.Tables.Any(t => t.Id != excludeTableId && string.Equals(t.Name, name, StringComparison.Ordinal)))
         {
             throw new InvalidOperationException($"Name '{name}' is already used by another table");
+        }
+    }
+
+    /// <summary>Plan 016 wave 1-C — pipeline names unique among PIPELINES only (not against sources and
+    /// tables: pipelines are not in the SQL namespace, so a pipeline named <c>trades</c> reading
+    /// <c>FROM trades</c> is legal and stays legal). Ported from
+    /// <c>RegistryGrain.ValidateUniquePipelineName</c> — see that method for the full rationale, including
+    /// why there is no migration and no boot check.</summary>
+    private void ValidateUniquePipelineName(string name, string? excludePipelineId)
+    {
+        if (state.Pipelines.Any(p => p.Id != excludePipelineId && string.Equals(p.Name, name, StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException($"Name '{name}' is already used by another pipeline");
+        }
+    }
+
+    /// <summary>Plan 016 wave 1-C — the table rename policy, ported from
+    /// <c>RegistryGrain.ValidateTableRenameAllowed</c>: allowed IFF Stopped, IFF <c>ShardBy</c> is empty,
+    /// IFF no other table lists it in <c>TableInputs</c>. <b>This flavor had NO rename guard at all</b> —
+    /// not even the sharded one Orleans has carried since plan 011 D2 — so a running table could be
+    /// renamed out from under its own actor, whose id is the table NAME, leaving the old actor running and
+    /// the new name pointing at nothing until somebody restarted it.
+    ///
+    /// <para><c>ShardBy</c> is checked even though this flavor refuses to START a sharded table (see
+    /// <see cref="ValidateParallelism"/>'s "WHERE KEY SHARDING IS REFUSED ON THIS FLAVOR" note): the field is stored here, so a definition can carry it, and
+    /// a guard that silently means something different per flavor is worse than one redundant
+    /// check.</para></summary>
+    private void ValidateTableRenameAllowed(TableDefinition existing)
+    {
+        if (existing.Status != PipelineStatus.Stopped)
+        {
+            throw new InvalidOperationException(
+                $"'{existing.Name}' is {existing.Status} and cannot be renamed: its actor, history and delta topic are all keyed by the table name, so the rename would leave the running copy addressed under the old one. Stop it first, rename, then start it again.");
+        }
+
+        if (existing.ShardBy.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"'{existing.Name}' is sharded by {string.Join(", ", existing.ShardBy)} and cannot be renamed: the shard tier is keyed by the table name, so a rename would strand every shard's rows and version trails under a key nothing looks up again. Clear shardBy first, rename, then shard again.");
+        }
+
+        var dependents = state.Tables
+            .Where(t => t.Id != existing.Id && t.TableInputs.Contains(existing.Name, StringComparer.Ordinal))
+            .Select(t => t.Name)
+            .ToList();
+        if (dependents.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"'{existing.Name}' cannot be renamed: table(s) {string.Join(", ", dependents)} read from it by name and nothing rewrites their SQL. Update them first, or rename this table before anything depends on it.");
         }
     }
 

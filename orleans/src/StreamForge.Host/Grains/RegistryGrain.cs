@@ -293,6 +293,8 @@ public sealed class RegistryGrain(
 
     public async Task<PipelineDefinition> CreatePipelineAsync(PipelineDefinition def)
     {
+        ValidateUniquePipelineName(def.Name, excludePipelineId: null);
+
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         def.Id = Guid.NewGuid().ToString("n");
         def.Status = PipelineStatus.Stopped;
@@ -317,6 +319,13 @@ public sealed class RegistryGrain(
         }
 
         var existing = state.State.Pipelines[idx];
+
+        // Plan 016 wave 1-C: checked on EVERY update, not only when the name changes — that is what
+        // "existing violators keep working until someone edits one" means. A catalog that already holds
+        // two pipelines called 'trades' keeps serving both; the first edit to either is refused until the
+        // name is unique. Nothing scans the catalog at boot, and no migration runs.
+        ValidateUniquePipelineName(def.Name, excludePipelineId: existing.Id);
+
         var sqlChanged = existing.Sql != def.Sql;
         var wasRunning = existing.Status == PipelineStatus.Running;
 
@@ -493,10 +502,11 @@ public sealed class RegistryGrain(
         }
 
         var existing = state.State.Tables[idx];
-        if (!string.Equals(existing.Name, def.Name, StringComparison.Ordinal))
+        var renamed = !string.Equals(existing.Name, def.Name, StringComparison.Ordinal);
+        if (renamed)
         {
             ValidateUniqueTableName(def.Name, excludeTableId: existing.Id);
-            ValidateShardedTableIsNotRenamed(existing);
+            ValidateTableRenameAllowed(existing);
         }
         ValidateParallelism(def.Parallelism);
         ValidateFlushMs(def.FlushMs);
@@ -547,6 +557,12 @@ public sealed class RegistryGrain(
             existing.HistoryWindowMs != def.HistoryWindowMs;
         var wasRunning = existing.Status == PipelineStatus.Running;
 
+        // Plan 016 wave 1-C: BEFORE the store, so a rename never leaves the old name's tiers addressable.
+        if (renamed)
+        {
+            await ReleaseRenamedTiersAsync(existing.Name);
+        }
+
         // See CarryServerOwnedFields' doc comment: the incoming definition IS the new record, with only
         // the server-owned fields carried over from the stored one.
         CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
@@ -578,7 +594,11 @@ public sealed class RegistryGrain(
         // History config or the SQL it was derived from changed — the row-identity mapping and/or
         // retention policy is now stale, so reset (not resume) the history grain, exactly like a
         // SQL/search-config change restarts the table's own grain above.
-        if (sqlChanged || historyConfigChanged || shardByChanged)
+        // `renamed` is in this list because the tiers are keyed by NAME: ReleaseRenamedTiersAsync above
+        // tore down the OLD name's, so without this the renamed table would have no history tier at all
+        // under its new name — history would silently stop working for it. Found by the test that asserts
+        // the new name's tier is live, not by reading the code.
+        if (renamed || sqlChanged || historyConfigChanged || shardByChanged)
         {
             await ResetHistoryTiersAsync(def);
         }
@@ -910,6 +930,118 @@ public sealed class RegistryGrain(
 
         throw new InvalidOperationException(
             $"'{existing.Name}' is sharded by {string.Join(", ", existing.ShardBy)} and cannot be renamed: its shard grains are keyed by the table name, so a rename would strand every shard's rows and version trails under a key nothing looks up again. Clear shardBy first (which deletes the shards), rename, then shard again.");
+    }
+
+    /// <summary>Plan 016 wave 1-C — the whole rename policy for tables, in one place: allowed IFF the
+    /// table is <b>Stopped</b>, IFF <c>ShardBy</c> is empty, and IFF no other table lists it in
+    /// <c>TableInputs</c>. Everything else is refused with the reason.
+    ///
+    /// <para><b>Why three conditions rather than a flat prohibition.</b> A table rename is already
+    /// semantically broken well beyond the grain keys the sharded guard above talks about:
+    /// <c>TableInputs</c> holds NAMES, a dependent's SQL says <c>FROM oldname</c>, and nothing recompiles
+    /// it — so the dependent keeps running against a name that no longer resolves and fails only at its
+    /// next start. But the 95% case is fixing a typo on a table created a minute ago, which none of that
+    /// applies to. The three conditions are exactly the set that separates the two: Stopped means no live
+    /// grain is mid-flight under the old key, empty ShardBy means there is no name-keyed shard tier to
+    /// strand (see <see cref="ValidateShardedTableIsNotRenamed"/> for that hazard in full), and no
+    /// dependents means no other table's SQL or <c>TableInputs</c> is about to go stale.</para>
+    ///
+    /// <para><b>Dependents are checked at ANY status</b>, unlike <see cref="ThrowIfRunningDependents"/>
+    /// which only guards against Running ones. A stopped dependent still holds the old name in its SQL
+    /// text and in its persisted <c>TableInputs</c>; renaming out from under it would turn a table that
+    /// merely is not running into one that can never start again, which is worse than the refusal.</para>
+    ///
+    /// <para><b>Re-keying the tier on <see cref="TableDefinition.Id"/> stays the right eventual fix</b>
+    /// and is deliberately NOT done here — see <see cref="ValidateShardedTableIsNotRenamed"/>'s "THE
+    /// BETTER FIX" paragraph. Its blocker is unchanged and is now written down as a condition rather than
+    /// a mood: it is unblocked the moment somebody is willing to edit
+    /// <c>ShardedTableClusterTests</c> and <c>ShardedTableD2ClusterTests</c>, which address the tier by
+    /// name in a dozen places. Nothing else stands in the way.</para></summary>
+    private void ValidateTableRenameAllowed(TableDefinition existing)
+    {
+        if (existing.Status != PipelineStatus.Stopped)
+        {
+            throw new InvalidOperationException(
+                $"'{existing.Name}' is {existing.Status} and cannot be renamed: its grain, history and delta stream are all keyed by the table name, so the rename would leave the running copy addressed under the old one. Stop it first, rename, then start it again.");
+        }
+
+        ValidateShardedTableIsNotRenamed(existing);
+
+        var dependents = state.State.Tables
+            .Where(t => t.Id != existing.Id && t.TableInputs.Contains(existing.Name, StringComparer.Ordinal))
+            .Select(t => t.Name)
+            .ToList();
+        if (dependents.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"'{existing.Name}' cannot be renamed: table(s) {string.Join(", ", dependents)} read from it by name and nothing rewrites their SQL. Update them first, or rename this table before anything depends on it.");
+        }
+    }
+
+    /// <summary>Plan 016 wave 1-C — the other half of the rename policy, and the half that makes it safe:
+    /// the OLD name's tiers are torn down explicitly before the new name is persisted. Without this the
+    /// rename would leave a history grain (and, for a table that was once sharded, a router) holding state
+    /// under a key the catalog no longer mentions — invisible until somebody creates a NEW table with the
+    /// old name and inherits its predecessor's version trails.
+    ///
+    /// <para>Same two calls <see cref="DeleteTableAsync"/> makes, for the same reason: as far as the
+    /// old name is concerned, a rename IS a delete. Both are best-effort — a tier that fails to tear down
+    /// must not roll back a rename the caller has already been told is legal.</para>
+    ///
+    /// <para><b>ponytail: TableGrain's OWN persisted snapshot under the old name is NOT cleared here.</b>
+    /// Ceiling: after a rename, a brand-new table later created with the old name and READ BEFORE IT IS
+    /// STARTED would serve the previous table's last flushed rows (starting it clears them —
+    /// <c>ClearResumeMarkersAndDetect</c> resets the snapshot on every StartAsync). Reason it is not
+    /// closed here: <c>ITableGrain</c> has no clear/purge method, and adding one is a change to
+    /// <c>StreamForge.Abstractions</c>, which this wave does not own. The exposure is not new — it is
+    /// exactly what delete-then-recreate-with-the-same-name has always done. Upgrade path: an additive
+    /// <c>ITableGrain.ClearSnapshotAsync</c> (and its Dapr <c>ITableActor</c> twin) called from here and
+    /// from <see cref="DeleteTableAsync"/>, which would close both at once.</para></summary>
+    private async Task ReleaseRenamedTiersAsync(string oldName)
+    {
+        try
+        {
+            await GrainFactory.GetGrain<ITableHistoryGrain>(oldName).DisableAsync();
+        }
+        catch
+        {
+            // best-effort
+        }
+
+        try
+        {
+            await GrainFactory.GetGrain<ITableShardRouterGrain>(oldName).DisableAsync();
+        }
+        catch
+        {
+            // best-effort
+        }
+    }
+
+    /// <summary>Plan 016 wave 1-C — pipeline names are unique among PIPELINES, and deliberately not
+    /// against sources and tables. Pipelines are not in the SQL namespace: a pipeline named <c>trades</c>
+    /// that reads <c>FROM trades</c> is legal today, is in the seed data, and stays legal. Sources and
+    /// tables ARE in that namespace and keep their own cross-kind guard
+    /// (<see cref="ValidateUniqueTableName"/>).
+    ///
+    /// <para><b>Why this is worth enforcing at all when a pipeline is addressed by id.</b> Every
+    /// name-keyed read of a pipeline — config export/import, the entitlement scope
+    /// (<c>PipelinesEndpoints</c> scopes on the NAME, not the id), the CLI, <c>/proto</c> — has to pick
+    /// one of the duplicates, and until this guard the pick was silent. It also removes the state that
+    /// made <c>ImportPlanner.Plan</c> throw, i.e. that made <c>POST /api/config/import</c> answer 500 on a
+    /// catalog the platform itself had allowed.</para>
+    ///
+    /// <para><b>ponytail: no migration and no boot check.</b> Ceiling: a catalog written before this guard
+    /// can still hold duplicates and nothing here notices until one of them is edited; they surface
+    /// through <c>CatalogWarnings.Compute</c> (wave 5 hangs it off <c>GET /api/meta/instance</c>) and as a
+    /// diagnostic on any import that plans against one. Refusing to boot on a catalog that was legal when
+    /// it was written is the one outcome that must not happen.</para></summary>
+    private void ValidateUniquePipelineName(string name, string? excludePipelineId)
+    {
+        if (state.State.Pipelines.Any(p => p.Id != excludePipelineId && string.Equals(p.Name, name, StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException($"Name '{name}' is already used by another pipeline");
+        }
     }
 
     /// <summary>409-style guard: refuses to stop/delete a table that a currently-Running table depends on.</summary>
