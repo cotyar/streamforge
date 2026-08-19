@@ -209,6 +209,19 @@ public sealed class LoggingChatAuditSink(ILogger logger) : IChatAuditSink
             entry.Detail is null ? "" : $": {entry.Detail}");
 }
 
+/// <summary>Plan 015 wave 5: <see cref="IChatAuditSink"/> and <see cref="IAuditSink"/> are the same
+/// one-method shape, declared in two files because wave 3 needed a seam before wave 4 built the sink.
+/// Rather than merge them across a wave boundary, this bridges — so the chat's catalog mutations reach
+/// <see cref="CatalogChangeAudit"/>, which will only ever take an <see cref="IAuditSink"/>.
+///
+/// <para><c>ponytail:</c> two interfaces where one would do. Ceiling: a third sink shape would make it
+/// three. Upgrade path: delete <see cref="IChatAuditSink"/> and have the gate take
+/// <see cref="IAuditSink"/> directly — a mechanical change nobody needed to make mid-plan.</para></summary>
+internal sealed class ChatAuditSinkBridge(IChatAuditSink inner) : IAuditSink
+{
+    public void Record(AuditEntry entry) => inner.Record(entry);
+}
+
 /// <summary>What the model is told when a tool is refused outright. <see cref="Reason"/> is
 /// <see cref="AccessResult.Reason"/> verbatim — it names the grant that denied or says that none
 /// matched, which is what lets the model explain the refusal to the user instead of retrying blindly
@@ -292,6 +305,32 @@ public sealed class ChatToolGate
         _audit = null!;
         _logger = null!;
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // Plan 015 wave 5: before/after detail for a catalog change the MODEL made.
+    //
+    // Wave 5-B filled BeforeJson/AfterJson at the nine REST mutation sites and reported the gap it could
+    // not close from where it sat: the chat's mutating tools call ICatalogFacade directly and never pass
+    // through those handlers, so a change the model made was the one change with no record of WHAT it
+    // changed — on the surface where that question matters most. These are the explicit-sink overloads
+    // CatalogChangeAudit documents as "the seam any non-REST caller uses to keep its own attribution":
+    // the row is built by ChatAttribution.Row, so Actor stays the model, OnBehalfOf stays the human and
+    // Origin stays "chat", and the masking pass is the same one, because there is no overload without it.
+    // ---------------------------------------------------------------------------------------------
+
+    public void RecordSourceChange(string action, string scope, SourceDefinition? before, SourceDefinition? after) =>
+        CatalogChangeAudit.RecordSource(Bridge(), Attribution.Row(action, scope, "executed"), before, after);
+
+    public void RecordPipelineChange(string action, string scope, PipelineDefinition? before, PipelineDefinition? after) =>
+        CatalogChangeAudit.RecordPipeline(Bridge(), Attribution.Row(action, scope, "executed"), before, after);
+
+    public void RecordTableChange(string action, string scope, TableDefinition? before, TableDefinition? after) =>
+        CatalogChangeAudit.RecordTable(Bridge(), Attribution.Row(action, scope, "executed"), before, after);
+
+    /// <summary>Null on the unguarded gate, which the tool-loop unit tests use; CatalogChangeAudit
+    /// treats a null sink as "nowhere to write" and does no work, so a test driving the loop neither
+    /// records nor throws.</summary>
+    private IAuditSink? Bridge() => _audit is null ? null : new ChatAuditSinkBridge(_audit);
 
     /// <summary>A gate that checks nothing, for constructing <see cref="GeminiChatService"/> outside the
     /// HTTP pipeline — which in this repo means the unit tests that drive the tool loop against a stub

@@ -69,7 +69,7 @@ public static class PipelinesEndpoints
 
         // Create asks at the NAME BEING CREATED (the id does not exist until CreatePipelineAsync mints
         // one) with the request's own Tags — see the same note in SourcesEndpoints' create handler.
-        group.MapPost("/", async (CreatePipelineRequest req, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
+        group.MapPost("/", async (CreatePipelineRequest req, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             if (await RefuseAsync(guard, principal, Actions.PipelineWrite, req.Name ?? "", req.Tags) is { } refusal)
             {
@@ -136,12 +136,18 @@ public static class PipelinesEndpoints
                 Sinks = sinks,
             };
             var created = await registry.CreatePipelineAsync(def);
+
+            // Plan 015 wave 5-B: BeforeJson null, AfterJson the whole masked document. Scoped on the
+            // NAME, like the guard above and like every other 015 call site — the id was minted a line
+            // ago and a prod-* scope written by an operator matches nothing at all on a GUID.
+            CatalogChangeAudit.RecordPipeline(
+                http, principal, Actions.PipelineWrite, created.Name, before: null, after: created);
             return Results.Created($"/api/pipelines/{created.Id}", SecretsMasker.MaskPipeline(created));
         }).RequireAuthorization("Editor");
 
         // The STORED pipeline's name and tags decide, never the incoming body's: a caller who could
         // rename or re-tag their way into an entitlement would not be under one.
-        group.MapPut("/{id}", async (string id, CreatePipelineRequest req, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
+        group.MapPut("/{id}", async (string id, CreatePipelineRequest req, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var existing = await registry.GetPipelineAsync(id);
             if (await RefuseAsync(guard, principal, Actions.PipelineWrite, existing?.Name ?? id, existing?.Tags) is { } refusal)
@@ -153,6 +159,11 @@ public static class PipelinesEndpoints
             {
                 return Results.NotFound();
             }
+
+            // Plan 015 wave 5-B: this handler updates the STORED object in place a few lines down, so
+            // the audit's "before" has to be taken now — otherwise both sides of the diff would be the
+            // same object and every update would record as having changed nothing.
+            var before = CatalogChangeAudit.Snapshot(existing);
 
             // Plan 009 B2: null Sinks means "leave unchanged" (same convention as Tags/Metadata below);
             // a non-null Sinks that carries "***" (round-tripped from a masked GET) is restored from the
@@ -201,12 +212,18 @@ public static class PipelinesEndpoints
             existing.Metadata = req.Metadata ?? existing.Metadata;
             existing.Sinks = sinks;
             var updated = await registry.UpdatePipelineAsync(existing);
+            if (updated is not null)
+            {
+                CatalogChangeAudit.RecordPipeline(
+                    http, principal, Actions.PipelineWrite, before.Name, before: before, after: updated);
+            }
+
             return updated is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskPipeline(updated));
         }).RequireAuthorization("Editor");
 
         // One extra catalog read this handler did not do before: without the definition there is no name
         // and no tag list, and delete is the action an operator most wants to scope.
-        group.MapDelete("/{id}", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
+        group.MapDelete("/{id}", async (string id, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var existing = await registry.GetPipelineAsync(id);
             if (await RefuseAsync(guard, principal, Actions.PipelineDelete, existing?.Name ?? id, existing?.Tags) is { } refusal)
@@ -215,6 +232,12 @@ public static class PipelinesEndpoints
             }
 
             var removed = await registry.DeletePipelineAsync(id);
+            if (removed)
+            {
+                CatalogChangeAudit.RecordPipeline(
+                    http, principal, Actions.PipelineDelete, existing?.Name ?? id, before: existing, after: null);
+            }
+
             return removed ? Results.NoContent() : Results.NotFound();
         }).RequireAuthorization("Editor");
 

@@ -276,6 +276,63 @@ with a test that a hand-rolled walk passes everywhere else and fails only there.
 been copied into the state machine because `ScopeMatches` was private — an operator writing `tag:prod` in
 a grant and in an approval template would have got two behaviours.
 
+### Wave 5 — the audit row says what changed, and the credential hazard that made it non-trivial
+
+**The hazard first, because it is the reason this wave is not a serialisation exercise.** A source
+definition contains credentials. Serialising one into `BeforeJson`/`AfterJson` without the masking pass
+would turn the audit log — append-only, readable by anyone with `audit.read`, holding 20 000 rows a day,
+and thought of by nobody as a secret store — into a plaintext credential dump with a history feature.
+That is strictly worse than the bug `[Secret]` was introduced to prevent, because `GET /api/config/export`
+at least has an `includeSecrets` flag and an Admin check. So every value written goes through the same
+descriptor-driven `SecretsMasker` pass the read paths use, and `CatalogChangeAudit.Record<T>` takes the
+mask function as a **required** parameter — there is no entry point that accepts a definition and does
+not mask it.
+
+**Masking breaks the diff on the one edit that matters most, and that had to be handled separately.**
+The mask collapses both the old and the new password to `***`, so a diff taken after masking reports a
+credential rotation as "nothing changed" — the single most audit-relevant edit anyone makes to a source,
+silently missing. The unmasked pair is compared to decide *which* properties moved; every byte written
+comes from the masked serialisations.
+
+**Size**: an update records only the changed top-level properties on both sides, a create and a delete
+the whole masked document (there is no other side to diff against, and on a delete the row is the last
+surviving copy). Over the cap it degrades to the changed field *names*, not a truncated blob — JSON cut
+mid-object parses as nothing and answers nothing, while the names still answer "what changed".
+
+**Approvals sit on the Viewer floor and audit on the Admin one**, and the asymmetry is deliberate: the
+coarse policy is the only control that survives `Auth:Mode=legacy`, where the guard allows everything.
+Approvals can afford Viewer because the *store's* eligibility and self-vote rules are mode-independent —
+and because an approver is by design an ordinary user in a group, so an Admin floor would make the
+feature unusable by the people it is for. Audit has no store-side control at all, so it fails closed.
+
+**Listing an approval inbox is not a side channel.** A request is visible to the administrator
+(`access.read` at `*`), to its requester, or to someone who is both in one of its approver groups **and**
+allowed `approval.decide` at its scope. Both halves of the last are required: membership alone shows a
+team's traffic to someone who cannot act on it, the entitlement alone turns `approval.decide` at `*` into
+a feed of what every other team is doing. The filter runs through `PermissionEvaluator` directly and
+never through `AccessGuard` — one guard call per candidate row would write a denied audit row for every
+approval merely not in your inbox, on every poll, which is exactly the flood that would stop "a refusal
+is rare by construction" from being true.
+
+**`BeforeJson`/`AfterJson` are withheld from audit readers by default**, released only on an explicit
+`?includeChanges=true` **and** `access.read` at `*` — the same opt-in shape `includeSecrets` already
+established — and the withholding is never silent: the response says whether it carries them and counts
+the rows that had something to carry. Redaction is a whitelist copy, so a field added to the frozen
+`AuditEntry` later is dropped rather than leaked.
+
+**Two more cross-flavour divergences, both closed.** `VoteAsync` returned the stored request on refusal
+on Orleans and `null` on Dapr — reconciled to the Orleans reading, because **null has to mean one
+thing**: conflating "no such request" with "you may not vote on this" forces every caller into a second
+read and hands the user "not found" for a request sitting right in front of them. And `ListAsync` with a
+non-positive limit returned everything on Orleans and a page of 100 on Dapr; reconciled to the page,
+since nothing prunes terminal requests yet.
+
+**One gap the wave found and closed on the way out.** The chat's mutating tools call `ICatalogFacade`
+directly and never reach the REST handlers, so a change the *model* made was the one change with no
+record of what it changed — on the surface where that question matters most. Wired through the explicit
+seam `CatalogChangeAudit` already documented, so the row keeps the model as `Actor`, the human as
+`OnBehalfOf` and `chat` as `Origin`, and goes through the same masking.
+
 `hasRole` survives, implemented on top of `can()` — **zero of the 57 `RoleGate` references changes at
 cut-over.** That is the whole no-flag-day answer. The SPA treats a missing `permissions[]` as an old server
 and falls back to today's ordinal semantics, so a rolling deploy is safe.

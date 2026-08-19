@@ -70,7 +70,7 @@ public static class TablesEndpoints
 
         // Create asks at the NAME BEING CREATED with the request's own Tags — see the same note in
         // SourcesEndpoints' create handler.
-        group.MapPost("/", async (CreateTableRequest req, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ILoggerFactory loggers) =>
+        group.MapPost("/", async (CreateTableRequest req, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ILoggerFactory loggers) =>
         {
             if (await RefuseAsync(guard, principal, Actions.TableWrite, req.Name ?? "", req.Tags) is { } refusal)
             {
@@ -145,6 +145,12 @@ public static class TablesEndpoints
                 };
                 var created = await registry.CreateTableAsync(def);
                 WarnOnDegradedRowIdentity(loggers, created);
+
+                // Plan 015 wave 5-B: inside the try, AFTER CreateTableAsync — a create that throws
+                // InvalidOperationException below answers 409 and created nothing, and a row saying it
+                // did would be a lie in the one log that must not contain any.
+                CatalogChangeAudit.RecordTable(
+                    http, principal, Actions.TableWrite, created.Name, before: null, after: created);
                 return Results.Created($"/api/tables/{created.Id}", SecretsMasker.MaskTable(created));
             }
             catch (InvalidOperationException ex)
@@ -155,7 +161,7 @@ public static class TablesEndpoints
 
         // The STORED table's name and tags decide, never the incoming body's: a caller who could rename
         // or re-tag their way into an entitlement would not be under one.
-        group.MapPut("/{id}", async (string id, CreateTableRequest req, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ILoggerFactory loggers) =>
+        group.MapPut("/{id}", async (string id, CreateTableRequest req, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ILoggerFactory loggers) =>
         {
             var existing = await registry.GetTableAsync(id);
             if (await RefuseAsync(guard, principal, Actions.TableWrite, existing?.Name ?? id, existing?.Tags) is { } refusal)
@@ -167,6 +173,12 @@ public static class TablesEndpoints
             {
                 return Results.NotFound();
             }
+
+            // Plan 015 wave 5-B: taken before the in-place field copies below — see the identical note
+            // in PipelinesEndpoints' PUT handler. This is also the definition the size decision was made
+            // for: a table's SQL body and field list are the two big fields, and recording only what
+            // MOVED means an edit to HistoryLimit costs a few dozen bytes instead of two copies of both.
+            var before = CatalogChangeAudit.Snapshot(existing);
 
             // Plan 009 B2: null Sinks = unchanged; a non-null Sinks carrying "***" is restored from the
             // stored value first (SecretsMasker.MergeSinkSecrets — see the identical, more detailed note
@@ -234,6 +246,8 @@ public static class TablesEndpoints
                 if (updated is not null)
                 {
                     WarnOnDegradedRowIdentity(loggers, updated);
+                    CatalogChangeAudit.RecordTable(
+                        http, principal, Actions.TableWrite, before.Name, before: before, after: updated);
                 }
                 return updated is null ? Results.NotFound() : Results.Ok(SecretsMasker.MaskTable(updated));
             }
@@ -245,7 +259,7 @@ public static class TablesEndpoints
 
         // One extra catalog read this handler did not do before: without the definition there is no name
         // and no tag list, and delete is the action an operator most wants to scope.
-        group.MapDelete("/{id}", async (string id, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
+        group.MapDelete("/{id}", async (string id, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var existing = await registry.GetTableAsync(id);
             if (await RefuseAsync(guard, principal, Actions.TableDelete, existing?.Name ?? id, existing?.Tags) is { } refusal)
@@ -256,6 +270,12 @@ public static class TablesEndpoints
             try
             {
                 var removed = await registry.DeleteTableAsync(id);
+                if (removed)
+                {
+                    CatalogChangeAudit.RecordTable(
+                        http, principal, Actions.TableDelete, existing?.Name ?? id, before: existing, after: null);
+                }
+
                 return removed ? Results.NoContent() : Results.NotFound();
             }
             catch (InvalidOperationException ex)

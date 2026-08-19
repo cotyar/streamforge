@@ -2,6 +2,7 @@ using System.Security.Claims;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using StreamForge.Abstractions;
+using StreamForge.Api.Auth;
 using StreamForge.AppCore.Config;
 using StreamForge.Engine;
 using StreamForge.Host.Grains;
@@ -359,6 +360,7 @@ internal static class ChatToolExecutor
 
         var effective = SecretsMasker.MergeSecrets(def, existing);
         await ctx.Catalog.UpsertSourceAsync(effective);
+        ctx.Gate.RecordSourceChange(Actions.SourceWrite, effective.Name, before: null, after: effective);
         return SecretsMasker.Mask(effective);
     }
 
@@ -386,6 +388,10 @@ internal static class ChatToolExecutor
         {
             return new { error = $"source '{name}' not found" };
         }
+
+        // Snapshotted BEFORE the field assignments below, which mutate `existing` in place — without
+        // this the "before" and the "after" would be the same object and every diff would be empty.
+        var beforeUpdate = CatalogChangeAudit.Snapshot(existing);
 
         List<FieldDef> fields = existing.Fields;
         if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty("fields", out var fieldsEl) && fieldsEl.ValueKind == JsonValueKind.Array)
@@ -416,6 +422,7 @@ internal static class ChatToolExecutor
         }
 
         await ctx.Catalog.UpsertSourceAsync(existing);
+        ctx.Gate.RecordSourceChange(Actions.SourceWrite, existing.Name, beforeUpdate, existing);
         return SecretsMasker.Mask(existing);
     }
 
@@ -441,8 +448,10 @@ internal static class ChatToolExecutor
             return new { error = $"source '{name}' not found" };
         }
 
+        var beforeToggle = CatalogChangeAudit.Snapshot(existing);
         existing.Enabled = enabled;
         await ctx.Catalog.UpsertSourceAsync(existing);
+        ctx.Gate.RecordSourceChange(Actions.SourceWrite, existing.Name, beforeToggle, existing);
         return SecretsMasker.Mask(existing);
     }
 
@@ -468,6 +477,12 @@ internal static class ChatToolExecutor
         }
 
         var removed = await ctx.Catalog.DeleteSourceAsync(name);
+        if (removed)
+        {
+            // after: null — the row is the last surviving copy of what was deleted.
+            ctx.Gate.RecordSourceChange(Actions.SourceDelete, name, existing, after: null);
+        }
+
         return removed ? new { deleted = true, name } : new { error = $"source '{name}' not found" };
     }
 
@@ -545,6 +560,7 @@ internal static class ChatToolExecutor
             Tags = GetStringArray(args, "tags"),
         };
         var created = await ctx.Catalog.CreatePipelineAsync(def);
+        ctx.Gate.RecordPipelineChange(Actions.PipelineWrite, created.Name, before: null, after: created);
 
         return new
         {

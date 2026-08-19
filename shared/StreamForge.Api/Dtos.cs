@@ -46,6 +46,42 @@ public sealed record UpdateUserRequest(string? DisplayName, string? Role, string
 /// on the credential record.</summary>
 public sealed record SetAccessDisabledRequest(bool Disabled);
 
+/// <summary>Plan 015 wave 5-A: the body of <c>POST /api/approvals</c>. FOUR fields, and the four are
+/// exactly what a caller owns — what they want to do (<paramref name="Action"/>), to what
+/// (<paramref name="Scope"/>), why (<paramref name="Reason"/>) and the serialized request that would
+/// have executed (<paramref name="PayloadJson"/>).
+///
+/// <para>Deliberately NOT <see cref="ApprovalRequest"/> bound off the wire. That would be safe —
+/// <c>ApprovalStateMachine.CreateRequest</c> is a whitelist that discards <c>Votes</c>, <c>State</c>,
+/// <c>RequiredApprovals</c> and the rest whatever a caller sends — but publishing those fields as part
+/// of a request contract invites a client to fill them in and a future reader to assume they mean
+/// something. Above all there is no <c>RequestedBy</c>: the requester is the authenticated principal,
+/// always, and the entire self-vote rule rests on a caller being unable to say otherwise.</para></summary>
+public sealed record FileApprovalRequest(string Action, string Scope, string? Reason = null, string? PayloadJson = null);
+
+/// <summary>Plan 015 wave 5-A: the (optional) body of the approve/reject/cancel routes. One field,
+/// because the vote's identity and timestamp are server-set — a caller-supplied voter is an
+/// impersonation and a caller-supplied timestamp is a caller-supplied place in the ordering.</summary>
+public sealed record ApprovalDecisionRequest(string? Comment = null);
+
+/// <summary>Plan 015 wave 5-A: <c>GET /api/audit/{day}</c>.
+///
+/// <para><see cref="Truncated"/> is <see cref="AuditPage.Truncated"/> carried through unchanged and is
+/// NOT optional — the day shard's drop-oldest cap counts what it dropped precisely so that silence is
+/// never mistaken for absence, and a response shape that let a client omit it would undo that.</para>
+///
+/// <para><see cref="ChangesIncluded"/>/<see cref="ChangesWithheld"/> do the same job for the
+/// before/after payloads, which are off unless the caller asks for them AND is entitled to
+/// <c>access.read</c> — see <c>AuditEndpoints.RedactChanges</c> for why. A reader who cannot see a diff
+/// is told that one exists.</para></summary>
+public sealed record AuditPageResponse(
+    string Day,
+    IReadOnlyList<AuditEntry> Entries,
+    long Truncated,
+    int Total,
+    bool ChangesIncluded,
+    int ChangesWithheld);
+
 public sealed record CreatePipelineRequest(
     string Name,
     string Description,

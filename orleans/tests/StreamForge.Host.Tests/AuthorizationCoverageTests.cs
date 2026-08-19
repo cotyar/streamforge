@@ -226,6 +226,21 @@ public class AuthorizationCoverageTests
         new("PUT", "/api/access/approval-templates/{name}", Guards.Admin),
         new("DELETE", "/api/access/approval-templates/{name}", Guards.Admin),
 
+        // Plan 015 wave 5-A. Approvals sit on the VIEWER floor and audit on the ADMIN one, and the
+        // asymmetry is deliberate: the floor is the only control that survives Auth:Mode=legacy, where
+        // the guard allows everything. Approvals can afford Viewer because the STORE's eligibility and
+        // self-vote rules are mode-independent — and because an approver is by design an ordinary user
+        // in a group, so an Admin floor would make the feature unusable by the people it is for. Audit
+        // has no store-side control at all, so it fails closed and reproduces today's Admin-only reach.
+        new("POST", "/api/approvals/", Guards.Viewer),
+        new("GET", "/api/approvals/", Guards.Viewer),
+        new("GET", "/api/approvals/{id}", Guards.Viewer),
+        new("POST", "/api/approvals/{id}/approve", Guards.Viewer),
+        new("POST", "/api/approvals/{id}/reject", Guards.Viewer),
+        new("POST", "/api/approvals/{id}/cancel", Guards.Viewer),
+        new("GET", "/api/audit/days", Guards.Admin),
+        new("GET", "/api/audit/{day}", Guards.Admin),
+
         // ---- config, chat ------------------------------------------------------------------------
         new("GET", "/api/config/export", Guards.Viewer),
         new("POST", "/api/config/import", Guards.Editor),

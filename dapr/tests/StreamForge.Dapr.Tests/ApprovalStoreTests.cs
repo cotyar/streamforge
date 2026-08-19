@@ -135,7 +135,10 @@ public class ApprovalStoreTests
         var mutation = store.Vote("r1", Vote("alice"), VoterEligibility.Eligible, T0 + 1000);
 
         Assert.False(mutation.Result!.Accepted);
-        Assert.Null(mutation.Applied);
+        // Applied is the STORED request even on a refusal, and null only when no request has that id —
+        // reconciled with the Orleans twin during the wave-5 merge, because null has to mean one thing.
+        // What says "the vote was refused" is Result.Accepted, not the absence of a request.
+        Assert.Same(stored, mutation.Applied);
         Assert.False(mutation.Dirty);                       // nothing to persist
         Assert.Contains("cannot vote on it", mutation.Result.Reason);
         Assert.Empty(stored.Votes);
@@ -181,7 +184,7 @@ public class ApprovalStoreTests
         Assert.False(mutation.Result!.Accepted);
         Assert.True(mutation.Result.StateChanged);
         Assert.True(mutation.Dirty);                        // ← the whole point
-        Assert.Null(mutation.Applied);
+        Assert.Same(stored, mutation.Applied);              // refused, but the caller still sees Expired
         Assert.Equal(ApprovalState.Expired, stored.State);
         Assert.Equal(T0 + 60_000, stored.DecidedAtMs);
         Assert.Empty(stored.Votes);

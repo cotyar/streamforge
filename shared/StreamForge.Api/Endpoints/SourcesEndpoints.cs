@@ -101,7 +101,7 @@ public static class SourcesEndpoints
         // a tag they could equally have added a second later with a PUT — so honouring it costs nothing
         // that PUT does not already cost. (Contrast the transport probe, which passes no tags at all:
         // there, nothing is ever stored, so the tag would be pure self-assertion.)
-        group.MapPost("/", async (SourceDefinition def, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
+        group.MapPost("/", async (SourceDefinition def, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             if (await RefuseAsync(guard, principal, Actions.SourceWrite, def.Name, def.Tags) is { } refusal)
             {
@@ -125,6 +125,12 @@ public static class SourcesEndpoints
             // (it's a no-op when `stored` is null).
             var effective = SecretsMasker.MergeSecrets(def, existing);
             await registry.UpsertSourceAsync(effective);
+
+            // Plan 015 wave 5-B: BeforeJson is null on a create, and the whole (masked) document is the
+            // after. Written only here, after the store said yes — the guard's "allowed" row was written
+            // before the validation above could still have answered 400.
+            CatalogChangeAudit.RecordSource(
+                http, principal, Actions.SourceWrite, effective.Name, before: null, after: effective);
             return Results.Created($"/api/sources/{effective.Name}", SecretsMasker.Mask(effective));
         }).RequireAuthorization("Editor");
 
@@ -132,7 +138,7 @@ public static class SourcesEndpoints
         // an object that already exists, and letting the request's own tag list widen the entitlement
         // that authorizes the request would make every tag scope self-service. A caller who legitimately
         // holds the write may of course then re-tag it, which is the same authority they already had.
-        group.MapPut("/{name}", async (string name, SourceDefinition def, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
+        group.MapPut("/{name}", async (string name, SourceDefinition def, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var existing = await registry.GetSourceAsync(name);
             if (await RefuseAsync(guard, principal, Actions.SourceWrite, existing?.Name ?? name, existing?.Tags) is { } refusal)
@@ -157,6 +163,14 @@ public static class SourcesEndpoints
             // secret before it ever reaches UpsertSourceAsync — never persist the literal mask.
             var effective = SecretsMasker.MergeSecrets(def, existing);
             await registry.UpsertSourceAsync(effective);
+
+            // Plan 015 wave 5-B: an update records only the top-level properties that MOVED, on both
+            // sides — see CatalogChangeAudit for why that beats two near-identical whole documents, and
+            // for why the diff is decided on the unmasked pair so a rotated credential is not reported
+            // as no change. 'existing' is untouched by this handler (unlike the pipeline/table PUTs),
+            // so it is still the pre-write state here and needs no snapshot.
+            CatalogChangeAudit.RecordSource(
+                http, principal, Actions.SourceWrite, existing.Name, before: existing, after: effective);
             return Results.Ok(SecretsMasker.Mask(effective));
         }).RequireAuthorization("Editor");
 
@@ -164,7 +178,7 @@ public static class SourcesEndpoints
         // definition there are no Tags, so a `tag:sandbox` entitlement to delete could never match — and
         // delete is precisely the action an operator most wants to scope. The read is the same
         // GetSourceAsync every other route in this file already does.
-        group.MapDelete("/{name}", async (string name, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
+        group.MapDelete("/{name}", async (string name, HttpContext http, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry) =>
         {
             var existing = await registry.GetSourceAsync(name);
             if (await RefuseAsync(guard, principal, Actions.SourceDelete, existing?.Name ?? name, existing?.Tags) is { } refusal)
@@ -173,6 +187,15 @@ public static class SourcesEndpoints
             }
 
             var removed = await registry.DeleteSourceAsync(name);
+            if (removed)
+            {
+                // Plan 015 wave 5-B: AfterJson is null on a delete, and BeforeJson carries the WHOLE
+                // (masked) document — after a delete this row is the only surviving copy of what was
+                // there, which is exactly the case a diff cannot serve.
+                CatalogChangeAudit.RecordSource(
+                    http, principal, Actions.SourceDelete, existing?.Name ?? name, before: existing, after: null);
+            }
+
             return removed ? Results.NoContent() : Results.NotFound();
         }).RequireAuthorization("Editor");
 

@@ -167,6 +167,11 @@ public sealed class ApprovalGrain(
     /// <summary>Newest first, because every caller is an inbox. <paramref name="limit"/> &lt;= 0 means
     /// all — the same convention <see cref="ITableShardFacade.GetKeysAsync"/> and friends already
     /// use.</summary>
+    /// <summary>Default page size for a <see cref="ListAsync"/> call that asks for no limit. Held equal
+    /// to the Dapr store's <c>ApprovalStore.DefaultPageSize</c> on purpose — the same facade member must
+    /// return the same amount of data on both flavours.</summary>
+    public const int DefaultPageSize = 100;
+
     public Task<List<ApprovalRequest>> ListAsync(ApprovalState? stateFilter, int limit)
     {
         IEnumerable<ApprovalRequest> rows = state.State.Requests;
@@ -175,11 +180,13 @@ public sealed class ApprovalGrain(
             rows = rows.Where(r => r.State == stateFilter.Value);
         }
 
-        rows = rows.Reverse();
-        if (limit > 0)
-        {
-            rows = rows.Take(limit);
-        }
+        // A non-positive limit means "no limit specified", NOT "everything": it falls back to a page.
+        // This started as an unbounded return and was reconciled with the Dapr twin during the wave-5
+        // merge — the routes always send a clamped positive limit, so the two flavours answered
+        // identically through REST while any other caller of this facade member got a different amount
+        // of data per runtime. A facade whose default is "the whole collection" is also a foot-gun on a
+        // set that only grows: nothing prunes terminal requests yet.
+        rows = rows.Reverse().Take(limit > 0 ? limit : DefaultPageSize);
 
         return Task.FromResult(rows.ToList());
     }

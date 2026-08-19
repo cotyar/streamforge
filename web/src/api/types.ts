@@ -577,6 +577,42 @@ export interface AuditPage {
   total: number
 }
 
+/** Body of `POST /api/approvals`. Four fields, and there is deliberately no `requestedBy`: the server
+ *  stamps the authenticated principal, which is what the "you cannot approve your own request" rule
+ *  rests on. */
+export interface FileApprovalRequest {
+  action: string
+  scope: string
+  reason?: string | null
+  /** The request that would have executed, serialized. Replaying from it is the only replay
+   *  mechanism — nothing about the original HTTP request is retained. */
+  payloadJson?: string | null
+}
+
+/** Optional body of `POST /api/approvals/{id}/approve|reject|cancel`. The vote's username and
+ *  timestamp are server-set; only the comment is the caller's. */
+export interface ApprovalDecisionRequest {
+  comment?: string | null
+}
+
+/** What `GET /api/audit/{day}` answers. `truncated` is REQUIRED, not optional: the day shard drops
+ *  oldest-first under `Audit:MaxEntriesPerDay` and counts what it dropped so that silence is never
+ *  mistaken for absence — a client that could omit it would undo that.
+ *
+ *  `beforeJson`/`afterJson` on the entries are withheld unless the request passed
+ *  `?includeChanges=true` AND the caller is entitled to `access.read` (the same opt-in shape
+ *  `GET /api/config/export?includeSecrets` uses, because those payloads can carry stored secrets).
+ *  `changesIncluded` says whether this response carries them; `changesWithheld` counts the rows that
+ *  had something to carry. */
+export interface AuditPageResponse {
+  day: string
+  entries: AuditEntry[]
+  truncated: number
+  total: number
+  changesIncluded: boolean
+  changesWithheld: number
+}
+
 // SignalR hub `/hubs/stream` — client→server: subscribePipeline(id), unsubscribePipeline(id),
 // subscribeSource(name), unsubscribeSource(name), subscribeMetrics().
 // Server→client events:

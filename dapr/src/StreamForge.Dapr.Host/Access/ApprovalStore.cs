@@ -30,13 +30,19 @@ public sealed record ApprovalMutation(ApprovalRequest? Request, ApprovalVoteResu
     /// <summary>Whether the document changed and has to be written back.</summary>
     public bool Dirty => Result is not null && (Result.Accepted || Result.StateChanged);
 
-    /// <summary>The request if the transition actually happened, else null — the shape
-    /// <see cref="IApprovalFacade"/>'s <c>ApprovalRequest?</c> members return. Wave 1 pinned the
-    /// convention for this flavour on <c>IAccessPolicyActor</c>: "a refused mutation is a null or a
-    /// false". Null therefore means "the transition did not happen", covering both "no such request" and
-    /// "the state machine refused"; the refusal's sentence is logged by the actor, because the frozen
-    /// facade has nowhere to carry it.</summary>
-    public ApprovalRequest? Applied => Result is { Accepted: true } ? Request : null;
+    /// <summary>The stored request, whether the transition was accepted OR refused; null <b>only</b>
+    /// when no request has that id.
+    ///
+    /// <para>This started as "null on refusal too", following wave 1's <c>IAccessPolicyActor</c>
+    /// convention that a refused mutation is a null. It was changed during the wave-5 merge because the
+    /// Orleans twin had independently done the opposite, and because the Orleans reading is the right
+    /// one: <b>null has to mean one thing.</b> Conflating "no such request" with "you may not vote on
+    /// this" forces every caller into a second read to tell the two apart — which is exactly what the
+    /// approvals routes had to do — and hands the user "not found" for a request that is sitting right
+    /// there. The refusal's sentence is still logged by the actor, because the frozen facade has nowhere
+    /// to carry it; what the caller gets back is the request's real state, from which "did my vote
+    /// land" is answerable without a clock.</para></summary>
+    public ApprovalRequest? Applied => Request;
 }
 
 /// <summary>
