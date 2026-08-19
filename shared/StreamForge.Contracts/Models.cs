@@ -578,8 +578,20 @@ public sealed class TableDefinition
 
     /// <summary>Plan 015: who last changed this definition. CreatedBy has always been recorded; the
     /// counterpart was not, so "who broke prod" was unanswerable from the catalog alone. Set by
-    /// CatalogRecordMerge's 4-arg overload on every update; empty on records last written before 015.</summary>
-    [Id(26)] public string UpdatedBy { get; set; } = "";
+    /// CatalogRecordMerge's 4-arg overload on every update; empty on records last written before 015.
+    ///
+    /// <para><b>This was added at [Id(26)] and shipped that way, which was a COLLISION</b> —
+    /// <see cref="RetentionMaxRows"/> has held 26 since plan 011 C2, further down the class where the
+    /// "next free number" glance did not reach. Orleans' generated codec kept the first declaration and
+    /// dropped this one, so the property round-tripped as empty through every grain call and every
+    /// persisted snapshot: the field never worked on this flavour at all. Dapr, which serializes its
+    /// state as JSON by property name, was unaffected — so the two flavours disagreed as well.
+    /// Renumbered to 30 during plan 016 wave 0, before that wave added three more fields to this class.
+    /// The cost of the renumber is stated and small: an UpdatedBy written between plan 015 wave 5 and
+    /// this fix is not readable at 30 — but it was never readable at 26 either, so nothing that ever
+    /// worked is lost. The permanent guard is ContractFieldNumberTests, which now fails the build on any
+    /// duplicate rather than trusting the next person's glance.</para></summary>
+    [Id(30)] public string UpdatedBy { get; set; } = "";
 
     // ------------------------------------------------------------------
     // Plan 011 C2: opt-in ROW RETENTION. Both default to 0 = OFF, and that default is the whole reason
