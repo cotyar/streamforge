@@ -126,6 +126,7 @@ public static class ConfigComposer
         var pipelines = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
         var tables = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
         var version = 1;
+        string? schemaPolicy = null;
         var anySucceeded = false;
 
         foreach (var (label, node) in docs)
@@ -164,6 +165,23 @@ public static class ConfigComposer
             MergeEntitiesInto(sources, obj, "sources", label, diagnostics);
             MergeEntitiesInto(pipelines, obj, "pipelines", label, diagnostics);
             MergeEntitiesInto(tables, obj, "tables", label, diagnostics);
+
+            // Plan 016 wave 3 (orchestrator fix): schemaPolicy is a document-level SCALAR, and this
+            // method rebuilds the merged root from scratch — so before this line every non-entity
+            // top-level property was dropped, and `schemaPolicy: "any"` could never reach the import
+            // gate that reads it. Found live by wave 3-C, which owns the gate but not this file.
+            //
+            // Assigned unconditionally (absent overwrites present), which makes it the ROOT document's
+            // property rather than a merged one. Includes are collected depth-first BEFORE the document
+            // that includes them (see CollectIncludes), so the root is last and therefore always wins —
+            // consistent with this file's stated "later wins" rule, and the safe direction besides: an
+            // included fragment must not be able to switch off a schema gate the document being imported
+            // never asked to switch off. Only a document someone deliberately imports can relax its own
+            // promotion gate.
+            schemaPolicy = obj.TryGetPropertyValue("schemaPolicy", out var policyNode) &&
+                policyNode is JsonValue policyValue && policyValue.TryGetValue<string>(out var policyText)
+                    ? policyText
+                    : null;
             anySucceeded = true;
         }
 
@@ -174,6 +192,11 @@ public static class ConfigComposer
         }
 
         var root = new JsonObject { ["version"] = version };
+        if (!string.IsNullOrWhiteSpace(schemaPolicy))
+        {
+            root["schemaPolicy"] = schemaPolicy;
+        }
+
         if (sources.Count > 0)
         {
             root["sources"] = new JsonArray([.. sources.Values.Select(v => (JsonNode?)v.DeepClone())]);

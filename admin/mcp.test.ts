@@ -13,7 +13,11 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Subprocess } from "bun";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SfClient, SfError, toApprovalState } from "./sfclient.ts";
+import { formatImportReport } from "./sf.ts";
 
 // --- stub StreamForge instance ---------------------------------------------------------------------
 
@@ -78,6 +82,39 @@ const stub = Bun.serve({
           changesIncluded: false,
           changesWithheld: 1,
         });
+      // --- plan 016 wave 3-C: config import report ---
+      // Body-content-driven so the same route can hand back a clean report or either of
+      // ConfigImportService's two whole-import refusals — the CLI-level tests below only care that
+      // `sf config import` renders and exits correctly on each REPORT SHAPE, not that this stub
+      // reimplements the server's cycle/schema-compatibility logic.
+      case "POST /api/config/import": {
+        const body = recorded.at(-1)!.body;
+        if (body.includes("__CYCLE__")) {
+          return json({
+            mode: "validate",
+            ok: false,
+            entries: [{
+              kind: "document",
+              name: "table dependency cycle detected: a -> b -> a — import refused, nothing applied",
+              action: "error",
+              diagnostics: ["table dependency cycle detected: a -> b -> a — import refused, nothing applied"],
+            }],
+          });
+        }
+        if (body.includes("__BREAKING__")) {
+          return json({
+            mode: "validate",
+            ok: false,
+            entries: [{ kind: "source", name: "trades", action: "error", diagnostics: ["field 'qty' was removed"] }],
+          });
+        }
+        return json({
+          mode: "validate",
+          ok: true,
+          entries: [{ kind: "source", name: "trades", action: "created", diagnostics: [] }],
+        });
+      }
+
       default:
         return json({ error: `stub has no route for ${req.method} ${url.pathname}` }, 404);
     }
@@ -443,5 +480,117 @@ describe("SfClient", () => {
     const listed = recorded.filter((r) => r.path.startsWith("/api/approvals?")).at(-1)!;
     expect(listed.path).toBe("/api/approvals?limit=5&state=Pending");
     expect(() => toApprovalState("Bogus")).toThrow("Pending, Approved, Rejected");
+  });
+});
+
+// --- plan 016 wave 3-C: `sf config import`'s human-readable report --------------------------------
+
+/** Runs the real `sf.ts` binary as a subprocess against the stub instance — the same "real
+ * subprocess, not an in-process import of the handler" argument as the MCP `Session` class above:
+ * what is worth pinning is what actually reaches stdout and the actual process exit code, and
+ * `import.meta.main` (see sf.ts's trailing block) is what lets THIS file also import `sf.ts` directly
+ * for `formatImportReport` without accidentally invoking the CLI. */
+async function runCli(args: string[]): Promise<{ code: number; stdout: string }> {
+  const proc = Bun.spawn(["bun", `${import.meta.dir}/sf.ts`, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, SF_URL: STUB_URL, SF_TOKEN: "test-token" },
+  });
+  const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+  return { code, stdout };
+}
+
+function writeTempDoc(marker?: string): string {
+  const file = join(tmpdir(), `sf-config-import-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  Bun.write(file, JSON.stringify({ sources: [], pipelines: [], tables: [], ...(marker ? { [marker]: true } : {}) }));
+  return file;
+}
+
+describe("formatImportReport (pure)", () => {
+  test("renders each entity's kind/name/action plus its diagnostics, and a summary line", () => {
+    const lines = formatImportReport({
+      mode: "merge",
+      ok: true,
+      entries: [
+        { kind: "source", name: "trades", action: "created", diagnostics: [] },
+        { kind: "table", name: "positions", action: "updated", diagnostics: ["secrets: kept stored values"] },
+      ],
+    });
+
+    expect(lines.some((l) => l.includes("source") && l.includes("trades") && l.includes("created"))).toBe(true);
+    expect(lines.some((l) => l.includes("secrets: kept stored values"))).toBe(true);
+    expect(lines.at(-1)).toBe("mode=merge  OK  (1 created, 1 updated)");
+  });
+
+  test("a refused import (Ok:false) renders REFUSED, not OK, with the reason legible", () => {
+    const lines = formatImportReport({
+      mode: "validate",
+      ok: false,
+      entries: [{
+        kind: "document",
+        name: "table dependency cycle detected: a -> b -> a — import refused, nothing applied",
+        action: "error",
+        diagnostics: ["table dependency cycle detected: a -> b -> a — import refused, nothing applied"],
+      }],
+    });
+
+    expect(lines.at(-1)).toContain("REFUSED — nothing was applied");
+    expect(lines.some((l) => l.includes("a -> b -> a"))).toBe(true);
+  });
+
+  test("an empty plan (nothing to do) does not crash the summary", () => {
+    const lines = formatImportReport({ mode: "validate", ok: true, entries: [] });
+    expect(lines.at(-1)).toBe("mode=validate  OK  (nothing to do)");
+  });
+});
+
+describe("sf config import (CLI subprocess)", () => {
+  test("a clean import exits 0 and prints OK", async () => {
+    const file = writeTempDoc();
+    try {
+      const { code, stdout } = await runCli(["config", "import", file, "--mode", "validate"]);
+      expect(code).toBe(0);
+      expect(stdout).toContain("OK");
+      expect(stdout).not.toContain("REFUSED");
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
+
+  test("a table dependency cycle is refused: non-zero exit, full chain on stdout", async () => {
+    const file = writeTempDoc("__CYCLE__");
+    try {
+      const { code, stdout } = await runCli(["config", "import", file, "--mode", "validate"]);
+      expect(code).toBe(1);
+      expect(stdout).toContain("REFUSED");
+      expect(stdout).toContain("a -> b -> a");
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
+
+  test("a schemaPolicy-breaking source is refused: non-zero exit, the entity and the field named", async () => {
+    const file = writeTempDoc("__BREAKING__");
+    try {
+      const { code, stdout } = await runCli(["config", "import", file, "--mode", "validate"]);
+      expect(code).toBe(1);
+      expect(stdout).toContain("REFUSED");
+      expect(stdout).toContain("trades");
+      expect(stdout).toContain("qty");
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
+
+  test("--json still emits the server's report unchanged, exit code follows Ok", async () => {
+    const file = writeTempDoc("__CYCLE__");
+    try {
+      const { code, stdout } = await runCli(["config", "import", file, "--mode", "validate", "--json"]);
+      expect(code).toBe(1);
+      const parsed = JSON.parse(stdout) as Record<string, unknown>;
+      expect(parsed.ok).toBe(false);
+    } finally {
+      rmSync(file, { force: true });
+    }
   });
 });

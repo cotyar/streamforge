@@ -1,11 +1,13 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Config;
 using StreamForge.AppCore.Access;
 using StreamForge.AppCore.Sql;
 using StreamForge.Engine;
+using StreamForge.Host.Grpc.Dynamic;
 
 namespace StreamForge.Api;
 
@@ -353,6 +355,209 @@ public static class ConfigImportService
     }
 
     // ------------------------------------------------------------------
+    // Plan 016 wave 3-C — two fatal, WHOLE-IMPORT gates. Both run before the apply loop below (and
+    // before any world-schema building, so a compile that would otherwise "see" a table that should
+    // never have been reached never gets the chance), and both run identically whether RunImportAsync
+    // is called with apply:false (mode=validate) or apply:true (a real write) — the whole design point
+    // is that validate catches these before anything is applied, so it must not be a weaker check.
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Job 1 — cycles become fatal HERE, not in <see cref="ImportPlanner"/>. <c>ImportPlanner.Plan</c>
+    /// breaks a table-dependency cycle with a per-table diagnostic and still returns a usable (if
+    /// best-effort on the cyclic subset) apply order — <c>ImportPlannerTests</c> pins exactly that
+    /// behavior, and that file belongs to wave 3-B, so it does not change. This mirrors
+    /// <see cref="ConfigComposer"/>'s include-cycle precedent instead: a cycle here is fatal, refusing
+    /// the whole import before a single row is written, and naming the FULL chain — "a cycle exists"
+    /// tells an operator nothing they can act on; "a -&gt; b -&gt; c -&gt; a" does.
+    ///
+    /// <para><b>Deliberately independent of the planner's own diagnostic text</b> rather than parsing
+    /// <c>PlannedAction.Diagnostics</c> strings for the word "cycle" — that would silently stop working
+    /// the day <c>ImportPlanner</c>'s wording changes, in a file this wave does not own. Re-derives the
+    /// same graph instead: for a table that already exists in the catalog, its persisted
+    /// <c>TableInputs</c> — exact post-compile facts, exactly what the planner itself prefers for
+    /// existing tables. For a brand-new table, the same desugar-then-<see cref="SqlCompiler.ExtractReferences"/>
+    /// walk <c>ImportPlanner.ScanNewEntityReferences</c> settled on (wave 3-B, landed after this method
+    /// was first written — see <see cref="ScanNewEntityReferences"/> below, a same-behavior copy rather
+    /// than a cross-assembly call: that method is <c>internal</c> to <c>StreamForge.AppCore</c>, a file
+    /// this wave does not own, and there is no <c>InternalsVisibleTo</c> making it reachable from here):
+    /// desugar <c>INSERT INTO &lt;sink&gt;</c> first (the Engine has no INSERT production), extract via
+    /// the real compiler, and fall back to a FROM-only regex only on a genuine parse failure. Returns
+    /// null when the graph is acyclic.</para>
+    /// </summary>
+    public static string? DetectTableDependencyCycle(
+        ConfigDocument doc, IReadOnlyDictionary<string, TableDefinition> tableByName)
+    {
+        var plannedNames = doc.Tables.Select(t => t.Name).ToList();
+        var plannedSet = new HashSet<string>(plannedNames, StringComparer.Ordinal);
+        var docByName = doc.Tables.ToDictionary(t => t.Name, StringComparer.Ordinal);
+
+        var deps = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var name in plannedNames)
+        {
+            deps[name] = tableByName.TryGetValue(name, out var existing)
+                ? [.. existing.TableInputs.Where(plannedSet.Contains)]
+                : [.. ScanNewEntityReferences(docByName[name].Sql).Where(plannedSet.Contains)];
+        }
+
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var onStack = new HashSet<string>(StringComparer.Ordinal);
+        var stack = new List<string>();
+        string? cycle = null;
+
+        void Visit(string name)
+        {
+            if (cycle is not null || visited.Contains(name))
+            {
+                return;
+            }
+
+            stack.Add(name);
+            onStack.Add(name);
+
+            foreach (var dep in deps[name].OrderBy(x => x, StringComparer.Ordinal))
+            {
+                if (cycle is not null)
+                {
+                    break;
+                }
+
+                if (onStack.Contains(dep))
+                {
+                    var start = stack.IndexOf(dep);
+                    cycle = string.Join(" -> ", stack.Skip(start)) + " -> " + dep;
+                    break;
+                }
+
+                Visit(dep);
+            }
+
+            stack.RemoveAt(stack.Count - 1);
+            onStack.Remove(name);
+            visited.Add(name);
+        }
+
+        foreach (var name in plannedNames.OrderBy(x => x, StringComparer.Ordinal))
+        {
+            if (cycle is not null)
+            {
+                break;
+            }
+
+            Visit(name);
+        }
+
+        return cycle;
+    }
+
+    private static readonly Regex FromReferenceRegex = new(@"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>Same-behavior copy of <c>ImportPlanner.ScanNewEntityReferences</c> (wave 3-B) — desugar
+    /// <c>INSERT INTO &lt;sink&gt;</c> first (the Engine has no INSERT production, so a still-sugared
+    /// statement is a parse error to <see cref="SqlCompiler.ExtractReferences"/> and would otherwise
+    /// lose every dependency of the commonest authored form), extract via the real compiler, and fall
+    /// back to a FROM-only regex only when the compiler could not parse the statement at all — see that
+    /// method's doc comment (in a file this wave does not own) for why the fallback exists and when it
+    /// fires. Kept in sync by hand, the same "mirrors, does not share" rule
+    /// <see cref="ProcessTableAsync"/>'s doc comment already states for the reason
+    /// (<c>ImportPlanner.cs</c> and this file have different owners this wave).</summary>
+    private static List<string> ScanNewEntityReferences(string sql)
+    {
+        var desugared = SinkSugar.Desugar(sql ?? "").Sql;
+        var compiled = SqlCompiler.ExtractReferences(desugared);
+        if (compiled.Count > 0)
+        {
+            return [.. compiled];
+        }
+
+        var names = new List<string>();
+        foreach (Match m in FromReferenceRegex.Matches(desugared ?? ""))
+        {
+            names.Add(m.Groups[1].Value);
+        }
+
+        return names;
+    }
+
+    /// <summary>The document-level, 200-with-<c>Ok:false</c> report for a fatal cycle — the same shape
+    /// <see cref="DocumentErrorReport"/> uses for a composition failure (Kind="document"), because it is
+    /// the same kind of failure: nothing single-entity to point at, so the whole document is
+    /// refused.</summary>
+    public static ConfigImportReport CycleErrorReport(string mode, string cycle)
+    {
+        var message = $"table dependency cycle detected: {cycle} — import refused, nothing applied";
+        return new ConfigImportReport
+        {
+            Mode = mode,
+            Ok = false,
+            Entries = [new ConfigImportReportEntry { Kind = "document", Name = message, Action = "error", Diagnostics = [message] }],
+        };
+    }
+
+    /// <summary>
+    /// Job 2 — the <c>schemaPolicy</c> gate. <c>ConfigDocument.SchemaPolicy</c> is null-or-absent means
+    /// "compatible" (the gate is ON) and the literal string "any" is the only value that turns it off —
+    /// the same "a typo leaves enforcement on" rule <c>Auth:Mode</c> already follows, so a document that
+    /// meant to write <c>schemaPolicy: any</c> and typo'd it is still gated, not silently permissive.
+    /// For every source the incoming document shares a name with an existing catalog source,
+    /// <see cref="SchemaCompatibility.Compare"/> (the identical removal/type-change walk
+    /// <c>PUT /api/sources/{name}?allowBreaking=false</c> already uses — "compatible" means one thing
+    /// everywhere) decides whether the change is breaking. A brand-new source has nothing stored to be
+    /// incompatible WITH, so it is never gated here.
+    ///
+    /// <para><b>Decision: ONE breaking source refuses the WHOLE import, not only that source</b> — the
+    /// same rule, and the same reasoning, <see cref="FindUnentitledChangesAsync"/> already applies to
+    /// entitlement refusals one section up in this very file. Restated for schema instead of
+    /// authorization: (1) a config document describes one coherent desired end state, and a table or
+    /// pipeline ELSEWHERE in the same document may already read from the source whose change is
+    /// breaking — applying everything except that one source risks compiling a dependent against a
+    /// source that no longer matches what it was written against, which is "something different
+    /// happened", not "less happened". (2) <c>replace</c> mode makes partial application actively
+    /// destructive: skipping only the breaking source while applying every other created/updated/deleted
+    /// entity in the same document converges the catalog on neither the old state nor the document.
+    /// (3) refusing is recoverable — fix the source, or declare <c>schemaPolicy: "any"</c>, and re-run —
+    /// while a caller handed a 200 that silently skipped one source has already had the rest of a
+    /// catalog rewritten around a gap they may not notice until something downstream breaks. (4) two
+    /// gates in the same import path (this one and the entitlement one) that disagreed about
+    /// all-or-nothing would itself be a trap: an operator who has learned "an import error here means
+    /// nothing was applied" from one gate should not have to relearn a narrower promise from the other.
+    /// And <c>validate</c> agrees with a real apply for the identical reason
+    /// <see cref="FindUnentitledChangesAsync"/>'s does — catching this before anything is applied IS the
+    /// entire point of a dry run.</para>
+    /// </summary>
+    public static List<ConfigImportReportEntry> DetectBreakingSchemaChanges(
+        ConfigDocument doc, IReadOnlyDictionary<string, SourceDefinition> storedSourceByName)
+    {
+        if (string.Equals(doc.SchemaPolicy, "any", StringComparison.Ordinal))
+        {
+            return [];
+        }
+
+        var entries = new List<ConfigImportReportEntry>();
+        foreach (var docSource in doc.Sources.OrderBy(s => s.Name, StringComparer.Ordinal))
+        {
+            if (!storedSourceByName.TryGetValue(docSource.Name, out var stored))
+            {
+                continue; // brand new — nothing stored to be incompatible with.
+            }
+
+            var compat = SchemaCompatibility.Compare(stored.Fields, docSource.Fields);
+            if (!compat.IsCompatible)
+            {
+                entries.Add(new ConfigImportReportEntry
+                {
+                    Kind = "source",
+                    Name = docSource.Name,
+                    Action = "error",
+                    Diagnostics = [.. compat.BreakingReasons],
+                });
+            }
+        }
+
+        return entries;
+    }
+
+    // ------------------------------------------------------------------
     // Apply pipeline (impure — reads/writes through ICatalogFacade).
     // ------------------------------------------------------------------
 
@@ -375,6 +580,22 @@ public static class ConfigImportService
         var sourceByName = currentSources.ToDictionary(s => s.Name, StringComparer.Ordinal);
         var pipelineByName = FirstByName(currentPipelines, p => p.Name);
         var tableByName = FirstByName(currentTables, t => t.Name);
+
+        // Plan 016 wave 3-C — both fatal, whole-import gates, BEFORE any world-schema building or the
+        // apply loop below, and identically for apply:false (mode=validate) and apply:true (a real
+        // write): see DetectTableDependencyCycle/DetectBreakingSchemaChanges above for the arguments.
+        var cycle = DetectTableDependencyCycle(doc, tableByName);
+        if (cycle is not null)
+        {
+            return CycleErrorReport(mode, cycle);
+        }
+
+        var breakingSchemaEntries = DetectBreakingSchemaChanges(doc, sourceByName);
+        if (breakingSchemaEntries.Count > 0)
+        {
+            return new ConfigImportReport { Mode = mode, Ok = false, Entries = breakingSchemaEntries };
+        }
+
         var docSourceByName = doc.Sources.ToDictionary(s => s.Name, StringComparer.Ordinal);
         var docPipelineByName = doc.Pipelines.ToDictionary(p => p.Name, StringComparer.Ordinal);
         var docTableByName = doc.Tables.ToDictionary(t => t.Name, StringComparer.Ordinal);
@@ -601,6 +822,13 @@ public static class ConfigImportService
                     RetentionTtlMs = docTable.RetentionTtlMs,
                     ShardBy = [.. docTable.ShardBy],
                     Tags = [.. docTable.Tags],
+                    // Plan 016 wave 3-C: found live by wave 3-B and reproduced by it on a running
+                    // instance — this create path built a TableDefinition without the document's pins,
+                    // so an imported `dependsOn` silently vanished (200, entity reads back `[]`, and
+                    // Revision could never reflect the pin because the record the registry compared
+                    // never carried it). Same "whole replace" convention as Tags/ShardBy immediately
+                    // above: the document is the desired state, not a patch.
+                    DependsOn = [.. docTable.DependsOn],
                     Metadata = new Dictionary<string, string>(docTable.Metadata),
                     Parallelism = docTable.Parallelism,
                     // Plan 009 B2: a freshly-created table has no stored entity to merge secrets
@@ -625,6 +853,9 @@ public static class ConfigImportService
                 existing.RetentionTtlMs = docTable.RetentionTtlMs;
                 existing.ShardBy = [.. docTable.ShardBy];
                 existing.Tags = [.. docTable.Tags];
+                // Plan 016 wave 3-C: the update-path twin of the create-path fix above — same bug,
+                // same fix, same reasoning.
+                existing.DependsOn = [.. docTable.DependsOn];
                 existing.Metadata = new Dictionary<string, string>(docTable.Metadata);
                 existing.Parallelism = docTable.Parallelism;
                 // Plan 009 B2: D-J — SecretsMasker.MergeSinkSecrets(incoming, storedIfAny), the Sinks
@@ -730,6 +961,9 @@ public static class ConfigImportService
                     Sql = sugar.Sql,
                     CreatedBy = createdBy,
                     Tags = [.. docPipeline.Tags],
+                    // Plan 016 wave 3-C: see the identical note (and the coordinator-flagged live bug
+                    // it fixes) in ProcessTableAsync's create path above.
+                    DependsOn = [.. docPipeline.DependsOn],
                     Metadata = new Dictionary<string, string>(docPipeline.Metadata),
                     // Plan 009 B2: see the identical note in ProcessTableAsync's create path.
                     Sinks = [.. docPipeline.Sinks],
@@ -742,6 +976,8 @@ public static class ConfigImportService
                 existing.Description = docPipeline.Description;
                 existing.Sql = sugar.Sql;
                 existing.Tags = [.. docPipeline.Tags];
+                // Plan 016 wave 3-C: the update-path twin of the create-path fix above.
+                existing.DependsOn = [.. docPipeline.DependsOn];
                 existing.Metadata = new Dictionary<string, string>(docPipeline.Metadata);
                 // Plan 009 B2: see the identical note (including the Orleans RegistryGrain gap) in
                 // ProcessTableAsync's update path above.

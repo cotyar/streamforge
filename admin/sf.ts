@@ -210,6 +210,45 @@ function printAuditPage(page: Record<string, any>): void {
   }
 }
 
+// --- plan 016 wave 3-C: the config import report -------------------------------------------------
+//
+// `--json` still emits the server's ConfigImportReport unchanged (same rule as every other printer in
+// this file — see printAuditPage's comment for why a lossy human view and a lossless machine one never
+// share a code path). This is the human view: the plan an operator reads before saying yes to
+// `sf config import`, legible whether the import went through or was refused outright (a table
+// dependency cycle or a schemaPolicy-breaking source — see ConfigImportService.DetectTableDependencyCycle
+// / DetectBreakingSchemaChanges on the server: both refuse the WHOLE import, so `ok: false` here always
+// means "nothing was applied", not "some entities failed".
+
+function importEntryLine(e: Record<string, any>): string {
+  return `  ${String(e.kind ?? "?").padEnd(9)} ${String(e.name ?? "").padEnd(30)} ${String(e.action ?? "?")}`;
+}
+
+/** Exported for the admin test suite — a pure function over the server's JSON body, no I/O. */
+export function formatImportReport(report: Record<string, any>): string[] {
+  const entries = (report.entries ?? []) as Record<string, any>[];
+  const lines: string[] = [];
+  const counts: Record<string, number> = {};
+
+  for (const e of entries) {
+    const action = String(e.action ?? "?");
+    counts[action] = (counts[action] ?? 0) + 1;
+    lines.push(importEntryLine(e));
+    for (const d of (e.diagnostics ?? []) as string[]) {
+      lines.push(`      ${d}`);
+    }
+  }
+
+  const summary = Object.entries(counts).map(([a, n]) => `${n} ${a}`).join(", ") || "nothing to do";
+  lines.push("");
+  lines.push(
+    report.ok
+      ? `mode=${report.mode}  OK  (${summary})`
+      : `mode=${report.mode}  REFUSED — nothing was applied  (${summary})`,
+  );
+  return lines;
+}
+
 async function confirm(question: string): Promise<boolean> {
   process.stdout.write(`${question} [y/N] `);
   for await (const line of console) return line.trim().toLowerCase() === "y";
@@ -361,8 +400,12 @@ async function main(argv: string[]): Promise<number> {
         const file = required(positional[2], "file");
         const mode = (typeof flags.mode === "string" ? flags.mode : "validate") as
           "validate" | "merge" | "replace";
-        out(await client.importConfig(await Bun.file(file).text(), mode), json);
-        return 0;
+        const report = (await client.importConfig(await Bun.file(file).text(), mode)) as Record<string, any>;
+        if (json) return out(report, true), report.ok === false ? 1 : 0;
+        for (const line of formatImportReport(report)) console.log(line);
+        // Non-zero on refusal: a cycle or a schemaPolicy-breaking source means nothing was applied, and
+        // a script driving this (CI promoting a catalog) needs that to fail loudly, not just print red.
+        return report.ok === false ? 1 : 0;
       }
       throw new SfError("expected `config export` or `config import <file>`");
     }
@@ -534,14 +577,19 @@ function limitOf(flags: Record<string, string | boolean>): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 100;
 }
 
-try {
-  process.exit(await main(process.argv.slice(2)));
-} catch (err) {
-  // An SfError is an expected outcome (a 404, an unreachable host, a missing argument) and gets one
-  // clean line; anything else is a bug here and keeps its stack.
-  if (err instanceof SfError) {
-    console.error(`error: ${err.message}`);
-    process.exit(1);
+// Plan 016 wave 3-C: guarded so the admin test suite can import this file for formatImportReport
+// (and any other exported pure helper) without running the CLI — the same import.meta.main split
+// mcp.ts already uses for the identical reason.
+if (import.meta.main) {
+  try {
+    process.exit(await main(process.argv.slice(2)));
+  } catch (err) {
+    // An SfError is an expected outcome (a 404, an unreachable host, a missing argument) and gets one
+    // clean line; anything else is a bug here and keeps its stack.
+    if (err instanceof SfError) {
+      console.error(`error: ${err.message}`);
+      process.exit(1);
+    }
+    throw err;
   }
-  throw err;
 }
