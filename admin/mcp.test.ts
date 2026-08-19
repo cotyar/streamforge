@@ -13,7 +13,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Subprocess } from "bun";
-import { SfClient, SfError } from "./sfclient.ts";
+import { SfClient, SfError, toApprovalState } from "./sfclient.ts";
 
 // --- stub StreamForge instance ---------------------------------------------------------------------
 
@@ -55,6 +55,29 @@ const stub = Bun.serve({
         return json({ id: "t1", status: "Running" });
       case "GET /api/tables/missing":
         return json({ error: "table 'missing' not found" }, 404);
+
+      // --- plan 015: access, approvals, audit ---
+      case "GET /api/access":
+        return json({ roles: [], groups: [], users: [], approvalTemplates: [], version: 3, updatedAtMs: 1 });
+      case "GET /api/access/effective/editor":
+        return json({ username: "editor", disabled: true, roles: [], groups: [], grants: [], version: 3 });
+      case "PUT /api/access/users/editor/disabled":
+        return json({ username: "editor", disabled: true, roles: ["Editor"], grants: [] });
+      case "GET /api/approvals":
+        return json([{ id: "a1", state: "Pending", action: "pipeline.delete", requestedBy: "editor" }]);
+      case "POST /api/approvals":
+        return json({ id: "a2", state: "Pending", requestedBy: "admin" }, 201);
+      case "GET /api/audit/days":
+        return json(["20260819"]);
+      case "GET /api/audit/20260819":
+        return json({
+          day: "20260819",
+          entries: [{ id: "e1", atMs: 1, actor: "admin", action: "user.write", scope: "editor", outcome: "executed", origin: "rest" }],
+          truncated: 7,
+          total: 1,
+          changesIncluded: false,
+          changesWithheld: 1,
+        });
       default:
         return json({ error: `stub has no route for ${req.method} ${url.pathname}` }, 404);
     }
@@ -300,6 +323,64 @@ describe("MCP tools", () => {
   });
 });
 
+// --- plan 015: the MCP boundary ----------------------------------------------------------------------
+//
+// These are the assertions that make the argument in mcp.ts's tool list enforceable rather than
+// aspirational. If a later wave adds an approve tool, the first of them fails and says why.
+
+describe("MCP authorization boundary", () => {
+  test("there is no tool that decides an approval, and none that writes the access policy", async () => {
+    const res = (await session.send({ jsonrpc: "2.0", id: "boundary", method: "tools/list" }))!;
+    const names = ((res.result as any).tools as any[]).map((t) => t.name as string);
+
+    // An agent that can both propose and approve is not a second pair of eyes; it is the same pair
+    // twice, and the approval mechanism becomes a formality that logs itself. Reject and cancel are
+    // the same interference through a politer verb.
+    for (const forbidden of ["approve_request", "reject_request", "cancel_request"]) {
+      expect(names).not.toContain(forbidden);
+    }
+    // An agent that can edit the policy governing it is ungoverned. Reading it is fine.
+    expect(names.filter((n) => /^(upsert|set|delete|disable|enable)_(role|group|user|template|access)/.test(n))).toEqual([]);
+    expect(names).toContain("get_access_policy");
+    expect(names).toContain("request_approval");
+  });
+
+  test("request_approval files a request and never carries a requestedBy — the server stamps it", async () => {
+    const res = await callTool("request_approval", {
+      action: "pipeline.delete",
+      scope: "orders",
+      reason: "the agent proposes",
+    });
+
+    expect((res.result as any).isError).toBeUndefined();
+    const filed = recorded.filter((r) => r.method === "POST" && r.path === "/api/approvals").at(-1)!;
+    const body = JSON.parse(filed.body) as Record<string, unknown>;
+    expect(body).toEqual({ scope: "orders", action: "pipeline.delete", reason: "the agent proposes", payloadJson: undefined });
+    expect(body.requestedBy).toBeUndefined();
+  });
+
+  test("get_audit_day never asks for the before/after payloads, even when told to", async () => {
+    // includeChanges is not in the schema at all: those payloads can carry stored credential fields,
+    // which is why the server gates them twice and why export_config never passes includeSecrets.
+    await callTool("get_audit_day", { day: "20260819", includeChanges: true });
+
+    const read = recorded.filter((r) => r.path.startsWith("/api/audit/20260819")).at(-1)!;
+    expect(read.path).not.toContain("includeChanges");
+  });
+
+  test("a bogus approval state is refused here, because the server's 400 has an empty body", async () => {
+    const res = await callTool("list_approvals", { state: "Bogus" });
+    expect((res.result as any).isError).toBe(true);
+    expect((res.result as any).content[0].text).toContain("unknown approval state");
+  });
+
+  test("the audit page reaches the caller with its truncated counter intact", async () => {
+    const res = await callTool("get_audit_day", { day: "20260819" });
+    // Silence must never read as absence: 7 rows were dropped and the model has to be able to say so.
+    expect((res.result as any).content[0].text).toContain('"truncated": 7');
+  });
+});
+
 // --- the shared REST client -----------------------------------------------------------------------------
 
 describe("SfClient", () => {
@@ -326,5 +407,41 @@ describe("SfClient", () => {
   test("an unreachable instance is one clear error, not a raw fetch failure", async () => {
     const client = new SfClient({ url: "http://127.0.0.1:1", token: "t" });
     expect(client.health()).rejects.toThrow("cannot reach");
+  });
+
+  test("disabling a login sends ONE field to the route that exists for it", async () => {
+    const client = new SfClient({ url: STUB_URL, token: "t" });
+    await client.setUserDisabled("editor", true);
+
+    const put = recorded.filter((r) => r.path === "/api/access/users/editor/disabled").at(-1)!;
+    // Never the whole entry: a caller that had to re-send it would sooner or later re-send it without
+    // the grants it did not know about, which is how a revocation under pressure becomes a demotion.
+    expect(put.method).toBe("PUT");
+    expect(JSON.parse(put.body)).toEqual({ disabled: true });
+  });
+
+  test("an audit day that is not a day is refused before a request is made", async () => {
+    const client = new SfClient({ url: STUB_URL, token: "t" });
+    // The day is a STORAGE KEY (a grain key on Orleans, an actor id on Dapr), which is why the server
+    // validates it rather than forwarding it — and why this does too.
+    expect(client.auditDay("2026-08-19")).rejects.toThrow("is not a day");
+  });
+
+  test("the effective view of a disabled user is empty across the board — read the flag, not the lists", async () => {
+    const client = new SfClient({ url: STUB_URL, token: "t" });
+    const view = (await client.effectivePermissions("editor")) as Record<string, unknown>;
+
+    expect(view.disabled).toBe(true);
+    expect(view.roles).toEqual([]);
+    expect(view.grants).toEqual([]);
+  });
+
+  test("toApprovalState accepts what a human types and names the alternatives when it cannot", async () => {
+    const client = new SfClient({ url: STUB_URL, token: "t" });
+    await client.listApprovals(toApprovalState("pending"), 5);
+
+    const listed = recorded.filter((r) => r.path.startsWith("/api/approvals?")).at(-1)!;
+    expect(listed.path).toBe("/api/approvals?limit=5&state=Pending");
+    expect(() => toApprovalState("Bogus")).toThrow("Pending, Approved, Rejected");
   });
 });

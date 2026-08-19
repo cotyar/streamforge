@@ -1,12 +1,12 @@
 # StreamForge
 
-An enterprise streaming-platform foundation on **Microsoft Orleans 10** (.NET 10): declarative streaming pipelines in a SQL-like dialect — joins, temporal windows, grouping, filtering, projections — managed through a React console with live results and role-based access control. Zero external infrastructure: localhost clustering, in-memory Orleans streams, JSON-file persistence.
+An enterprise streaming-platform foundation on **Microsoft Orleans 10** (.NET 10): declarative streaming pipelines in a SQL-like dialect — joins, temporal windows, grouping, filtering, projections — managed through a React console with live results and per-resource entitlements. Zero external infrastructure: localhost clustering, in-memory Orleans streams, JSON-file persistence.
 
 ## Run
 
 ```bash
-# prerequisites: .NET 10 SDK (installed at ~/.dotnet), Node 22+
-cd web && npm install && npm run build && cd ..
+# prerequisites: .NET 10 SDK (installed at ~/.dotnet), bun
+cd web && bun install && bun run build && cd ..
 ~/.dotnet/dotnet run --project src/StreamForge.Host        # http://localhost:5199
 ```
 
@@ -14,11 +14,11 @@ Open http://localhost:5199 and log in:
 
 | user | password | role |
 |---|---|---|
-| `admin` | `admin123!` | Admin — everything + user management |
+| `admin` | `admin123!` | Admin — everything + users, entitlements, audit |
 | `editor` | `editor123!` | Editor — create/edit/start/stop pipelines & sources |
 | `viewer` | `viewer123!` | Viewer — read-only + live dashboards |
 
-Frontend dev mode: `cd web && npm run dev` → http://localhost:5173 (proxies to :5199).
+Frontend dev mode: `cd web && bun run dev` → http://localhost:5173 (proxies to :5199).
 
 Tests: `~/.dotnet/dotnet test tests/StreamForge.Engine.Tests` (86 tests: parser, validator, expression semantics, all five join types, all three window kinds, aggregates, late events, plus an Orleans TestingHost end-to-end smoke test).
 
@@ -86,7 +86,20 @@ Orleans silo (same process, localhost clustering, memory streams)
 | `tests/StreamForge.Engine.Tests` | 86 xunit tests incl. Orleans TestingHost smoke test. |
 | `web/` | Vite + React SPA: dashboard, SQL editor with live diagnostics, visual pipeline builder, live results/chart, sources with live tape, user management. |
 
-## RBAC
+## Access control
 
-JWT bearer (HS256, 12 h), role claim enforced by ASP.NET policies and mirrored in the UI:
-**Viewer** ⊂ **Editor** (pipeline/source CRUD, start/stop, validate) ⊂ **Admin** (user management). The SignalR hub authenticates via `access_token` query string, viewer-and-up.
+JWT bearer (HS256, 12 h) for authentication; authorization is **per-resource entitlements**. The three
+roles survive as built-in bundles of grants — **Viewer** ⊂ **Editor** (pipeline/source CRUD,
+start/stop, validate) ⊂ **Admin** (users, entitlements, audit) — and on top of them a grant is
+`action` (`pipeline.update`, `*`) × `scope` (`*`, an exact entity **name**, a prefix `prod-*`, or
+`tag:finance`) × `Allow`/`Deny`, with deny-overrides, attached to a user, a group or a role. Optional
+approvals and an append-only audit log come with it (`/api/access`, `/api/approvals`, `/api/audit`; the
+console's Access, Approvals and Audit pages).
+
+**Permissions are resolved server-side per request, not read from the token** — a revoked grant or a
+disabled login takes effect within `Auth:PolicyCacheSeconds` (default 10), not at the next login.
+`Auth:Mode=legacy` rolls the whole thing back to plain role checks. The SignalR hub authenticates via
+`access_token` query string and checks the entity's read entitlement per subscription.
+
+Full rules and curl recipes: the docs site's [Roles, entitlements & approvals](docs/index.html)
+section, or the `sf-access` skill.

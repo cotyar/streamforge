@@ -50,6 +50,23 @@ found live (every row a duplex sink actually forwards carries platform-reserved 
 `_source`/`_weight` — that the outbound mapper must skip rather than refuse) are in
 [`TRANSPORTS.md`](TRANSPORTS.md)'s `fix-duplex` sections.
 
+**Entitlements, approvals, audit** (plan 015): authorization is per-resource grants, not the three
+role strings. A grant is `action` (`pipeline.update`, `*`) × `scope` (`*` | exact entity **NAME** |
+prefix `prod-*` | `tag:finance`) × `Allow`/`Deny`, deny-overrides, attached to a user, a group or a
+role; `AccessGuard` asks it in every handler while the coarse `Viewer/Editor/Admin` policies stay on
+every route. **Permissions resolve server-side per request, never from the JWT** — a revocation lands
+within `Auth:PolicyCacheSeconds` (default 10). `Auth:Mode=legacy` is the one-flag rollback and the
+default is `entitlements`, so a typo in that value leaves enforcement **on**. `access.write` (not
+`user.write`) satisfies the coarse `Admin` policy — whatever satisfies it is the key to `/api/access`
+itself. Scope is the NAME because ids are `Guid("n")` and match no `prod-*` grant. Optional approvals
+(`Approvals:Enabled`, off by default; you cannot vote on your own request; approving records, it does
+not execute) and a day-sharded audit log whose `truncated` counter exists so silence is never read as
+absence. Masked `beforeJson`/`afterJson` are opt-in (`?includeChanges=true` + `access.read`) — a
+credential rotation reads `"***" → "***"`, the key's presence is the signal. Routes:
+`shared/StreamForge.Api/Endpoints/{AccessEndpoints,ApprovalsEndpoints,AuditEndpoints}.cs`; the pure
+decision: `shared/StreamForge.AppCore/Access/PermissionEvaluator.cs`. Operator recipes and the full
+gotcha list: the `sf-access` skill and `orleans/docs/index.html` § Roles, entitlements & approvals.
+
 ## Environment — non-negotiables
 
 - **dotnet**: `~/.dotnet/dotnet` (SDK 10.0.3xx). It is **NOT on PATH** — always use the full path.
@@ -99,7 +116,7 @@ Soak shapes: `tools/soak/run-soak.sh --shape orders|instruments`.
 
 Local skills (root `.claude/skills/`, `sf-` prefix) wrap the common workflows: `/sf-run` (both
 flavors), `/sf-verify` (both flavors), `/sf-sql`, `/sf-client-gen`, `/sf-config` (catalog
-export/import).
+export/import), `/sf-access` (entitlements, approvals, audit).
 
 **Containers, Cloud Run, admin, AI chat** (plan 007): `deploy/orleans/` and `deploy/dapr/` hold
 each flavor's Dockerfile(s), `compose.yaml` (host ports 6199/6399), Cloud Run `service.yaml`, and

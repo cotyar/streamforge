@@ -409,6 +409,58 @@ glance rather than the first click.
 - `origin` is `"rest"` on every row a REST caller can produce, and `chat`/`onBehalfOf` rendering is
   verified against the type only — producing a real chat-origin row needs `GEMINI_API_KEY`.
 
+### Wave 7 — docs, the `sf-access` skill, the admin surfaces, and two findings that outlive the plan
+
+Landed: `.claude/skills/sf-access/SKILL.md`; a rewritten authorization section in `SECURITY.md`; four new
+sub-sections under `#rbac` in `orleans/docs/index.html` plus six REST-table rows; `README.md`,
+`orleans/README.md`, `AGENTS.md`. On the admin side: 18 client methods, `sf access|approvals|audit`, seven
+new MCP tools, `bun test admin/` 21 → 30.
+
+**The MCP server gets `request_approval` and NOT `approve`**, and no access-write tool at all. An agent
+that can both propose and approve is the same pair of eyes twice, and shipping the approve tool would
+convert the mechanism into a formality that logs itself.
+
+**That boundary holds at the tool list only, and verification found where it stops holding.** The MCP
+server authenticates as whatever `SF_USER` is. In the live run that was `admin`, who was also in the
+template's approver group — so the agent filed *as the administrator*, and a human could then have
+approved the agent's own proposal with the store unable to tell, because the self-vote rule compares
+identities and the agent's identity WAS the administrator's. No tool list fixes that. The MCP server needs
+its own low-privilege login that is in no approver group; written into `admin/README.md` as a requirement
+and into `SECURITY.md` in its general form. `AuditEntry.onBehalfOf` and `origin` make the collapse visible
+after the fact; they do not prevent it.
+
+#### Two findings that are not documentation bugs
+
+**1. `requiresApproval` is not an override, so the natural way to express "prod deletes need a second pair
+of eyes" silently does nothing.** Observed live: an editor holding the Editor role (unconditional
+`pipeline.delete` on `*`) plus a narrower `{pipeline.delete, dev-*, requiresApproval: true}` grant
+**deleted the pipeline outright**, audit row `allowed by grant pipeline.delete on *`. Strip the role's
+plain Allow and the same grant correctly produces `403 … requires approval`.
+
+`PermissionEvaluator` prefers any unconditional Allow over any approval Allow, with no specificity
+ordering, and wave 1 had a reason: *"alice may deploy to prod-\*, and separately alice may deploy anywhere
+with an approval" must not force alice through an approval for prod.* That scenario is real, so simply
+inverting the rule swaps one footgun for its mirror image. **Both are resolved by the upgrade path the
+evaluator's own ponytail note already names** — score each matching grant by pattern specificity (tag <
+prefix < exact) and let the most specific win, Deny breaking ties. Alice's exact `prod-*` grant then beats
+her `*` approval grant; the operator's `dev-*` approval grant beats the role's `*` allow. It is a
+deliberate semantic change to the security core, in three places (the pure evaluator, both flavours by
+construction, and the TypeScript twin) — deferred to a decision, not done silently.
+
+**2. An approval executes nothing.** `IApprovalFacade.RecordOutcomeAsync` is implemented on both flavours
+and called from **no** REST route, gRPC service or chat path — verified by grepping every caller. So
+`Executed` and `Failed` are unreachable outside tests, and approving a request grants the requester no
+capability they did not already have: they must retry the original action, which will be refused again
+unless their grants changed. `ApprovalRequest.PayloadJson` was designed to carry "the request that would
+have executed", and nothing replays it. Wave table 015-E promised *request → N-of-M approve → execute*;
+the execute half is missing. Documented honestly as "an approval is a record, not an execution" rather
+than papered over.
+
+Also observed: **on a first start against an empty data dir the access bootstrap can beat the user
+seeder** — the log reads "seeded 3 built-in role(s) and mirrored **0** user role list(s)", `GET /api/access`
+shows `users: []`, and `effective/{u}` reads empty for a login that works fine by token-claim fallback,
+until the next host start or the next user PUT.
+
 ## OIDC — deferred to its own plan; the seams land here
 
 The `.AddJwtBearer("Oidc", …)` + issuer-selecting `PolicyScheme` is ~80 lines. These five are the real work:

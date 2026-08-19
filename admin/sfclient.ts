@@ -24,6 +24,56 @@ export function isKind(x: string): x is Kind {
 /** Kinds with a lifecycle. A source is enabled/disabled through its definition, not started. */
 export const RUNNABLE: Kind[] = ["pipelines", "tables"];
 
+/** Plan 015's `ApprovalState`, verbatim and in the server's own order.
+ *
+ * Duplicated here for ONE reason: `GET /api/approvals?state=Bogus` is answered with a 400 carrying an
+ * EMPTY BODY — ASP.NET's enum binder refuses before any handler runs, so unlike every other refusal on
+ * these routes there is no server sentence to relay. A client that just forwarded the string would
+ * print nothing at all. Validating here turns that into "unknown state 'Bogus' (expected …)". */
+export const APPROVAL_STATES = [
+  "Pending",
+  "Approved",
+  "Rejected",
+  "Expired",
+  "Executed",
+  "Failed",
+  "Cancelled",
+] as const;
+export type ApprovalState = (typeof APPROVAL_STATES)[number];
+
+/** Case-insensitive on the way in, exact on the way out: `pending` is what somebody types. */
+export function toApprovalState(raw: string): ApprovalState {
+  const match = APPROVAL_STATES.find((s) => s.toLowerCase() === raw.toLowerCase());
+  if (!match) {
+    throw new SfError(`unknown approval state '${raw}' (expected ${APPROVAL_STATES.join(", ")})`);
+  }
+  return match;
+}
+
+/** The audit day is a STORAGE KEY (a grain key on Orleans, an actor id on Dapr), not a filter — which
+ * is why the server validates its shape rather than forwarding it, and why this does too. */
+export function assertAuditDay(day: string): string {
+  if (!/^\d{8}$/.test(day)) {
+    throw new SfError(`'${day}' is not a day; expected yyyyMMdd (UTC), e.g. ${todayUtc()}`);
+  }
+  return day;
+}
+
+export function todayUtc(): string {
+  return new Date().toISOString().slice(0, 10).replace(/-/g, "");
+}
+
+/** Filters `GET /api/audit/{day}` accepts, and deliberately no more — `actor` is EXACT and `action` is
+ * a PREFIX. A day's rows are a stream somebody can point platform SQL at one layer up, which is where
+ * a real query language belongs; do not grow a client-side one here. */
+export interface AuditQuery {
+  actor?: string;
+  action?: string;
+  limit?: number;
+  offset?: number;
+  includeChanges?: boolean;
+}
+
 export class SfError extends Error {
   constructor(
     message: string,
@@ -92,11 +142,19 @@ export class SfClient {
       throw new SfError("no credentials: set SF_TOKEN, or SF_USER + SF_PASSWORD, or run `sf login`");
     }
 
-    const res = await fetch(`${this.url}/api/auth/login`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ username, password: secret }),
-    });
+    // Wrapped like request()'s fetch, and for the same reason: a host that is down here produced a raw
+    // Bun stack trace ("ECONNRESET", ten lines) instead of one sentence, on the very first call every
+    // env-configured command makes. Found while verifying the plan-015 commands against a wedged host.
+    let res: Response;
+    try {
+      res = await fetch(`${this.url}/api/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username, password: secret }),
+      });
+    } catch (err) {
+      throw new SfError(`cannot reach ${this.url}: ${err instanceof Error ? err.message : String(err)}`);
+    }
     if (!res.ok) {
       throw new SfError(`login failed as '${username}' (${res.status})`, res.status);
     }
@@ -224,6 +282,125 @@ export class SfClient {
       ? "application/json"
       : "application/yaml";
     return this.request("POST", `/api/config/import?mode=${mode}`, { body: document, contentType });
+  }
+
+  // ---- plan 015: access, approvals, audit -------------------------------------------------------
+  //
+  // One method per route, no cleverness: `web/src/api/{access,approvals,audit}.ts` is a working client
+  // for the same surface and this is the same shape, so the two can be read against each other.
+
+  /** The whole policy document — roles, groups, user entries, approval templates, version stamp. The
+   * server deliberately answers all four lists at once; this is not four calls. */
+  accessPolicy(): Promise<unknown> {
+    return this.request("GET", "/api/access");
+  }
+
+  /** What one user can actually do, flattened the way an authorization decision flattens it.
+   *
+   * Short-circuits on a DISABLED user and answers everything-empty, which is indistinguishable from
+   * "configured with nothing" except through the `disabled` flag — so anything rendering this must
+   * print that flag. See sf.ts's `printEffective`. */
+  effectivePermissions(username: string): Promise<unknown> {
+    return this.request("GET", `/api/access/effective/${encodeURIComponent(username)}`);
+  }
+
+  upsertRole(name: string, body: unknown): Promise<unknown> {
+    return this.request("PUT", `/api/access/roles/${encodeURIComponent(name)}`, { body });
+  }
+
+  deleteRole(name: string): Promise<unknown> {
+    return this.request("DELETE", `/api/access/roles/${encodeURIComponent(name)}`);
+  }
+
+  upsertGroup(name: string, body: unknown): Promise<unknown> {
+    return this.request("PUT", `/api/access/groups/${encodeURIComponent(name)}`, { body });
+  }
+
+  deleteGroup(name: string): Promise<unknown> {
+    return this.request("DELETE", `/api/access/groups/${encodeURIComponent(name)}`);
+  }
+
+  upsertUserAccess(username: string, body: unknown): Promise<unknown> {
+    return this.request("PUT", `/api/access/users/${encodeURIComponent(username)}`, { body });
+  }
+
+  deleteUserAccess(username: string): Promise<unknown> {
+    return this.request("DELETE", `/api/access/users/${encodeURIComponent(username)}`);
+  }
+
+  /** Its own route on purpose, and its own method here for the same reason: disabling a login is done
+   * under pressure, and a caller that had to send the whole entry to flip one boolean would sooner or
+   * later send it without the grants it did not know about. Never fold this into upsertUserAccess. */
+  setUserDisabled(username: string, disabled: boolean): Promise<unknown> {
+    return this.request("PUT", `/api/access/users/${encodeURIComponent(username)}/disabled`, {
+      body: { disabled },
+    });
+  }
+
+  upsertApprovalTemplate(name: string, body: unknown): Promise<unknown> {
+    return this.request("PUT", `/api/access/approval-templates/${encodeURIComponent(name)}`, { body });
+  }
+
+  deleteApprovalTemplate(name: string): Promise<unknown> {
+    return this.request("DELETE", `/api/access/approval-templates/${encodeURIComponent(name)}`);
+  }
+
+  /** The inbox, server-filtered to the administrator, the requester and the entitled approver.
+   *
+   * ponytail: no paging. The server applies `limit` BEFORE that visibility filter, so a page is "your
+   * requests among the most recent N", not "your N most recent" — an `--offset` here would be a lie
+   * about what it skipped. Ceiling: raise `--limit` (server caps at 500). Upgrade path is the server's
+   * (push the visibility predicate into the store), not this file's. */
+  listApprovals(state?: ApprovalState, limit = 100): Promise<unknown[]> {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (state) query.set("state", state);
+    return this.request<unknown[]>("GET", `/api/approvals?${query}`);
+  }
+
+  getApproval(id: string): Promise<unknown> {
+    return this.request("GET", `/api/approvals/${encodeURIComponent(id)}`);
+  }
+
+  /** File a request for a privileged action. There is no `requestedBy`: the server stamps the
+   * authenticated principal, and the "you cannot approve your own request" rule rests on that. */
+  fileApproval(body: {
+    action: string;
+    scope?: string;
+    reason?: string;
+    payloadJson?: string;
+  }): Promise<unknown> {
+    return this.request("POST", "/api/approvals", { body: { scope: "*", ...body } });
+  }
+
+  /** approve/reject are the same transition with a different verb; cancel is the requester withdrawing.
+   * The vote's username and timestamp are server-set — only the comment is the caller's. */
+  decideApproval(
+    id: string,
+    decision: "approve" | "reject" | "cancel",
+    comment?: string,
+  ): Promise<unknown> {
+    return this.request("POST", `/api/approvals/${encodeURIComponent(id)}/${decision}`, {
+      body: { comment: comment ?? null },
+    });
+  }
+
+  /** Which days hold entries. Reads an index and wakes no day shard, which is what makes it the cheap
+   * first call before asking for a day. */
+  auditDays(): Promise<string[]> {
+    return this.request<string[]>("GET", "/api/audit/days");
+  }
+
+  // `async` for the same reason `lifecycle` is: assertAuditDay must REJECT rather than throw
+  // synchronously out of a Promise-returning method, or a caller writing `.catch(...)` misses it.
+  async auditDay(day: string, query: AuditQuery = {}): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (query.actor) params.set("actor", query.actor);
+    if (query.action) params.set("action", query.action);
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    if (query.offset !== undefined) params.set("offset", String(query.offset));
+    if (query.includeChanges) params.set("includeChanges", "true");
+    const suffix = params.toString() ? `?${params}` : "";
+    return this.request("GET", `/api/audit/${encodeURIComponent(assertAuditDay(day))}${suffix}`);
   }
 }
 

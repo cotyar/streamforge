@@ -221,7 +221,11 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#tables-parallel" class="sub">Parallel execution</a>
   <a href="#tables-history" class="sub">Row history</a>
   <a href="#tables-metadata" class="sub">Tags &amp; metadata</a>
-  <a href="#rbac">Roles &amp; permissions</a>
+  <a href="#rbac">Roles, entitlements &amp; approvals</a>
+  <a href="#rbac-grants" class="sub">Grants: action × scope</a>
+  <a href="#rbac-disable" class="sub">Disabling a login</a>
+  <a href="#rbac-approvals" class="sub">Approvals</a>
+  <a href="#rbac-audit" class="sub">Audit log</a>
   <a href="#api">REST API</a>
   <a href="#grpc">gRPC &amp; typed clients</a>
   <a href="#grpc-reflection" class="sub">Dynamic reflection</a>
@@ -393,7 +397,7 @@ Row history is enabled in <code>LastN(8)</code> mode, so clicking a row in the c
 <p>Each source card shows its schema — <code>Json</code> fields expand into a <b>drill-down tree</b> — its rate, an enable switch, and a horizontally-scrollable <b>live tape</b> of raw events. In the editor, setting a field to <code>Json</code> reveals nested sub-field rows (recursively), so you can declare shapes like <code>payload → user → id/tier</code>. The <code>generic</code> profile generates values matching whatever schema you declare, including nested objects.</p>
 
 <h3 id="console-users">Users &amp; themes</h3>
-<p>Admins manage users on the Users page (create, edit role, reset password; self-deletion is blocked). The <b>theme switch</b> lives at the bottom of the sidebar — light is the default; the choice persists per browser and applies instantly with no flash on reload.</p>
+<p>Admins manage users on the Users page (create, edit role, reset password; self-deletion is blocked). Three more admin pages sit below it in the sidebar: <b>Access</b> (roles, groups, per-user entitlements, approval templates, and a user's flattened effective permissions), <b>Approvals</b> (ungated — it is where a requester watches their own request as well as where approvers vote), and <b>Audit</b>. Controls you are not entitled to use are simply not rendered; the console re-reads its permissions on login, on tab focus, and every 60s while the tab is visible. See <a href="#rbac">Roles, entitlements &amp; approvals</a>. The <b>theme switch</b> lives at the bottom of the sidebar — light is the default; the choice persists per browser and applies instantly with no flash on reload.</p>
 </section>
 
 <section id="sql">
@@ -519,21 +523,69 @@ Row history is enabled in <code>LastN(8)</code> mode, so clicking a row in the c
 </section>
 
 <section id="rbac">
-<h2>Roles &amp; permissions</h2>
+<h2>Roles, entitlements &amp; approvals</h2>
+<p>Authorization has two layers. The three roles below are still the shape of a normal deployment, and they are now <b>built-in role definitions</b> — named bundles of grants — rather than a hard-coded ordering. On top of them sit per-resource <b>entitlements</b>, <b>groups</b>, an optional <b>approval</b> workflow and an <b>audit log</b>.</p>
 <div class="tablewrap"><table>
 <thead><tr><th>Capability</th><th>Viewer</th><th>Editor</th><th>Admin</th></tr></thead>
 <tbody>
 <tr><td>View dashboards, definitions, live results, search</td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td>File an approval request</td><td>✓</td><td>✓</td><td>✓</td></tr>
 <tr><td>Create / edit / delete / start / stop pipelines &amp; tables</td><td>—</td><td>✓</td><td>✓</td></tr>
 <tr><td>Manage sources (schema, rate, enable) &amp; search indexes</td><td>—</td><td>✓</td><td>✓</td></tr>
-<tr><td>Manage users</td><td>—</td><td>—</td><td>✓</td></tr>
+<tr><td>Use the AI control chat</td><td>—</td><td>✓</td><td>✓</td></tr>
+<tr><td>Manage users, entitlements, groups, approval templates; read the audit log</td><td>—</td><td>—</td><td>✓</td></tr>
 </tbody></table></div>
-<p>Roles are enforced server-side by ASP.NET authorization policies on every endpoint and mirrored in the UI — Viewers simply don't see mutating controls. Authentication is JWT (12-hour expiry); passwords are PBKDF2-hashed.</p>
+<p>Authentication is JWT (12-hour expiry, PBKDF2-hashed passwords). <b>The token does not carry permissions.</b> Every request resolves the caller's grants server-side from the access document, so revoking an entitlement or disabling a login takes effect within <code>Auth:PolicyCacheSeconds</code> (default 10) — not at the user's next login. <code>Auth:Mode=legacy</code> rolls the whole feature back to plain role checks; it defaults to <code>entitlements</code>, and only the exact string <code>legacy</code> disables it, so a typo leaves enforcement on.</p>
+
+<h3 id="rbac-grants">Grants: action × scope × effect</h3>
+<p>A grant is three fields. Grants attach to a <b>role</b>, to a <b>group</b>, or directly to a <b>user</b>; a decision flattens all three lists together.</p>
+<pre><code>{ "action": "pipeline.*", "scope": "prod-*", "effect": "Deny", "note": "no prod writes" }
+{ "action": "table.read",  "scope": "tag:finance", "effect": "Allow" }
+{ "action": "source.write","scope": "*", "effect": "Allow", "requiresApproval": true }</code></pre>
+<ul>
+<li><b>Action</b> is a flat dotted string with <code>*</code> globs: <code>source.read|write|delete|ingest|run</code>, <code>pipeline.read|write|delete|control</code>, <code>table.read|write|delete|control</code>, <code>config.export|replace</code>, <code>user.read|write</code>, <code>access.read|write</code>, <code>audit.read</code>, <code>approval.request|decide|bypass</code>, <code>chat.use</code>.</li>
+<li><b>Scope</b> is <code>*</code>, an exact entity <b>name</b>, a prefix glob (<code>prod-*</code>), or <code>tag:finance</code> matching the entity's tags. <b>It is the name, never the id</b> — ids are random GUIDs, so a <code>prod-*</code> grant would match none of them.</li>
+<li><b>Deny overrides.</b> Any matching <code>Deny</code> anywhere in the flattened list beats every <code>Allow</code>; there is no specificity ordering.</li>
+<li><b>A single-entity read is refused before the 404</b>, so 403-vs-404 cannot be used to enumerate names. <b>Lists filter rather than refuse</b>: a caller entitled to nothing gets <code>200 []</code>.</li>
+<li><code>requiresApproval</code> is <b>not</b> an override — it applies only when no unconditional <code>Allow</code> matches. Adding it beside a role's broad <code>Allow</code> changes nothing; take the broad grant away (or <code>Deny</code> it) instead.</li>
+</ul>
+<p>The console's <b>Access</b> page edits all of this — roles, groups, per-user entries and approval templates — and shows a user's flattened effective permissions. Same thing over REST: <code>GET /api/access</code> for the whole document, <code>GET /api/access/effective/{user}</code> for the flattened answer, and <code>GET /api/auth/me</code> for the caller's own.</p>
+
+<h3 id="rbac-disable">Disabling a login</h3>
+<p><code>PUT /api/access/users/{username}/disabled</code> with <code>{"disabled": true}</code> empties that user's grant set within the same cache TTL — every route, including <code>/api/auth/me</code>, then answers 403 and the console ends the session. It is a one-field call on purpose, so nobody has to re-send an entitlement list they don't know, and it seeds the user's roles from their credential record when no access entry exists yet (so disable → enable returns a working login, not a silently demoted one).</p>
+<p><b>It is not token revocation.</b> The JWT stays valid and signed; what changes is that it resolves to nothing. There is no JTI denylist. <code>Auth:StrictViewer</code> (default <code>true</code>) is what makes even the coarse read policy refuse a disabled principal; it deliberately fails <i>open</i> when the policy store is unreachable or the document has not been migrated yet.</p>
+
+<h3 id="rbac-approvals">Approvals</h3>
+<p>Off by default (<code>Approvals:Enabled=false</code>; every <code>/api/approvals</code> route answers 503 naming the key until you turn it on). An <b>approval template</b> matches an action/scope pattern and names the groups that decide it:</p>
+<pre><code>PUT /api/access/approval-templates/prod-deletes
+{ "actionPattern": "pipeline.delete", "scopePattern": "prod-*", "requiredApprovals": 1,
+  "approverGroups": ["prod-approvers"], "expiresAfterSeconds": 3600,
+  "escalateAfterSeconds": 900, "escalationGroups": ["oncall"], "enabled": true }</code></pre>
+<p>A user files with <code>POST /api/approvals</code> (<code>{action, scope, reason, payloadJson}</code>), watches it on the console's <b>Approvals</b> page, and approvers vote with <code>POST /api/approvals/{id}/approve</code> or <code>/reject</code>; the requester can withdraw with <code>/cancel</code>. The rules, all enforced in one shared state machine:</p>
+<ul>
+<li><b>You cannot vote on your own request</b> (compared case-insensitively), and the message says so rather than "you are not an approver".</li>
+<li>A vote needs <b>both</b> the <code>approval.decide</code> entitlement at the request's scope <b>and</b> membership of one of its approver groups. <b>One rejection is decisive.</b></li>
+<li>An inbox shows a request to an administrator, to its requester, or to someone who is both in an approver group and entitled to decide at its scope.</li>
+<li>Template values are snapshotted when the request is filed, so editing a template cannot lower the bar under a request already collecting votes. A background sweeper expires and escalates; a past-deadline request also expires at vote time.</li>
+<li><code>origin: "chat"</code> marks a request the AI control chat proposed on a human's behalf. With <code>Chat:MayExecutePrivileged=true</code> the model executes such actions itself instead — leave it <code>false</code>.</li>
+</ul>
+<p><b>Give any automated caller its own login and keep it out of every approver group.</b> The self-vote rule compares identities, so a script or an agent authenticating as an administrator files requests a human administrator can then approve — the store cannot tell them apart, because they are the same principal. The MCP server exposes <code>request_approval</code> and not <code>approve</code> for this reason, but that boundary lives in its tool list and nowhere else.</p>
+<p><b>An approval is a record, not an execution.</b> Approving does not perform the action, and an action matched by <b>no</b> template requires no approval at all — so a misspelled <code>actionPattern</code> is a control that silently isn't there. Anything that must fail closed belongs behind a <code>Deny</code> grant.</p>
+
+<h3 id="rbac-audit">Audit log</h3>
+<p>Day-sharded and append-only; the console's <b>Audit</b> page and <code>GET /api/audit/days</code> + <code>GET /api/audit/{yyyyMMdd}</code> read it. Filters are exact <code>actor</code>, an <code>action</code> prefix, <code>limit</code> and <code>offset</code>.</p>
+<ul>
+<li><b>Every refusal is recorded, always.</b> Allowed <i>reads</i> are not — otherwise "alice changed the prod pipeline" drowns under "alice listed the pipelines" — and neither is allowed <code>source.ingest</code>, one check per message on the hottest path. Outcomes are <code>allowed</code>, <code>denied</code>, <code>requires-approval</code>, <code>executed</code>, <code>failed</code>.</li>
+<li><b><code>truncated</code> is on every page and matters.</b> A day is capped at <code>Audit:MaxEntriesPerDay</code> (20 000, drop-oldest) and the dropped count is persisted, so silence is never mistaken for absence. The in-process write queue drops the <i>newest</i> under load — the onset of a burst is the useful end — and emits a real <code>audit.dropped</code> row.</li>
+<li><b>Before/after payloads are opt-in twice</b>: <code>?includeChanges=true</code> <i>and</i> <code>access.read</code> at <code>*</code>. Withholding is reported (<code>changesIncluded</code>, <code>changesWithheld</code>), never silent.</li>
+<li><b>They are always masked</b>, with the same pass the config export uses. A credential rotation therefore reads <code>"passwordHash": "***" → "***"</code>: <b>the key's presence is the signal, the value never is</b> (the diff is computed on the unmasked pair precisely so a rotation isn't rendered as "nothing changed").</li>
+</ul>
+<p>Two rough edges worth knowing: <code>GET /api/access/effective/{user}</code> short-circuits on a disabled user (it reports the decision — no roles, no grants — so you can't see what the account <i>would</i> hold without re-enabling it), and every guard-level audit row is attributed <code>origin: "rest"</code> even when the decision was made on a gRPC call or a SignalR subscription. Only the chat's rows carry their own origin and <code>onBehalfOf</code>.</p>
 </section>
 
 <section id="api">
 <h2>REST API</h2>
-<p>All endpoints are JSON under <code>http://localhost:5199</code>, authenticated with <code>Authorization: Bearer &lt;token&gt;</code> from login. Roles: <span class="pill viewer">V</span> Viewer+ · <span class="pill editor">E</span> Editor+ · <span class="pill admin">A</span> Admin. An interactive OpenAPI reference (Scalar) lives at <code>/scalar</code> — authenticate there with the same Bearer token.</p>
+<p>All endpoints are JSON under <code>http://localhost:5199</code>, authenticated with <code>Authorization: Bearer &lt;token&gt;</code> from login. Roles: <span class="pill viewer">V</span> Viewer+ · <span class="pill editor">E</span> Editor+ · <span class="pill admin">A</span> Admin — that column is the coarse floor each route still carries; every handler additionally checks its own <a href="#rbac-grants">entitlement at the entity's name</a>, so a 403 can come from either. An interactive OpenAPI reference (Scalar) lives at <code>/scalar</code> — authenticate there with the same Bearer token.</p>
 <pre><code>curl -s -X POST localhost:5199/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"editor","password":"editor123!"}'   # → { token, username, displayName, role }</code></pre>
@@ -561,6 +613,12 @@ Row history is enabled in <code>LastN(8)</code> mode, so clicking a row in the c
 <tr><td><code>/api/{sources|pipelines|tables}/{key}/proto</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Self-contained <code>.proto</code> for the entity (by id or name) — see <a href="#grpc-codegen">Typed client codegen</a></td></tr>
 <tr><td><code>/api/meta/grpc</code> · <code>/api/meta/protos/static</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>gRPC surface catalog + static proto texts (powers the console's API Explorer)</td></tr>
 <tr><td><code>/api/users[…]</code></td><td class="pill mut">GET·POST·PUT·DELETE</td><td><span class="pill admin">A</span></td><td>User management (self-deletion rejected)</td></tr>
+<tr><td><code>/api/access</code> · <code>/api/access/effective/{user}</code></td><td class="pill get">GET</td><td><span class="pill admin">A</span></td><td>The whole access document (roles, groups, user entries, approval templates) · one user's flattened permissions — see <a href="#rbac-grants">Grants</a></td></tr>
+<tr><td><code>/api/access/{roles|groups|users|approval-templates}/{name}</code></td><td class="pill mut">PUT·DELETE</td><td><span class="pill admin">A</span></td><td>Upsert / delete one entry (whole-object PUT; built-in roles cannot be deleted → 409)</td></tr>
+<tr><td><code>/api/access/users/{username}/disabled</code></td><td class="pill mut">PUT</td><td><span class="pill admin">A</span></td><td><code>{"disabled":true}</code> — kills the login within the policy cache TTL; <a href="#rbac-disable">not token revocation</a></td></tr>
+<tr><td><code>/api/approvals?state=&amp;limit=</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Your inbox: what you filed, plus what you may decide. 503 when <code>Approvals:Enabled=false</code></td></tr>
+<tr><td><code>/api/approvals</code> · <code>/{id}/approve</code> · <code>/reject</code> · <code>/cancel</code></td><td class="pill mut">POST</td><td><span class="pill viewer">V</span></td><td>File a request; vote (needs <code>approval.decide</code> + approver-group membership, never your own request); withdraw your own</td></tr>
+<tr><td><code>/api/audit/days</code> · <code>/api/audit/{yyyyMMdd}?actor=&amp;action=&amp;includeChanges=</code></td><td class="pill get">GET</td><td><span class="pill admin">A</span></td><td>Which days have rows · one day's page with <code>truncated</code> — see <a href="#rbac-audit">Audit log</a></td></tr>
 </tbody></table></div>
 </section>
 

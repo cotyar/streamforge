@@ -17,7 +17,7 @@
 //       "args": ["/abs/path/to/admin/mcp.ts"],
 //       "env": { "SF_URL": "http://localhost:5199", "SF_USER": "admin", "SF_PASSWORD": "..." } } } }
 
-import { isKind, KINDS, SfClient, SfError, type Kind } from "./sfclient.ts";
+import { APPROVAL_STATES, isKind, KINDS, SfClient, SfError, toApprovalState, type Kind } from "./sfclient.ts";
 
 const SERVER_NAME = "streamforge-admin";
 const SERVER_VERSION = "1.0.0";
@@ -31,7 +31,16 @@ const INSTRUCTIONS = `Administers a running StreamForge instance (either runtime
 catalog, entity lifecycle, SQL validation, rows/results, and config export/import.
 
 Entity ids: sources are addressed by NAME, pipelines and tables by ID. list_entities returns both.
-A stopped pipeline or table produces nothing — check status before concluding a query is wrong.`;
+A stopped pipeline or table produces nothing — check status before concluding a query is wrong.
+
+It also READS the plan-015 authorization surface: the access policy, one user's effective permissions,
+the approval inbox and the audit log. It cannot write any of it. When an action needs a human's
+sign-off, file it with request_approval and say so — there is deliberately no tool here to approve,
+reject or cancel a request, because a proposer who can also approve is not a second pair of eyes. A
+person decides, in the console or with \`sf approvals approve\`.
+
+Scopes are entity NAMES, never ids. Audit \`action\` filters match by PREFIX. A non-zero \`truncated\`
+on an audit page means rows were dropped and the day is incomplete — report it rather than ignoring it.`;
 
 // --- JSON-RPC ------------------------------------------------------------------------------------
 
@@ -297,6 +306,151 @@ export const TOOLS: Tool[] = [
       }
       return client.importConfig(str(args, "document"), mode);
     },
+  },
+
+  // ================================================================================================
+  // Plan 015 — access, approvals, audit. READ, plus the one write that is a REQUEST.
+  //
+  // ------------------------------------------------------------------------------------------------
+  // Why there is no `approve_request` tool here, and why there must never be one.
+  //
+  // An approval exists so that a SECOND PAIR OF EYES sees a privileged action before it happens. An
+  // agent that can both propose and approve is not a second pair of eyes; it is the same pair twice.
+  // Shipping an approve tool would not weaken the mechanism at the margin — it would convert the whole
+  // thing into a formality that logs itself, and the log would then read as if a review had occurred.
+  // The server has its own half of this rule (ApprovalStateMachine refuses a requester's vote on their
+  // own request), but that only stops the SAME identity voting twice; an MCP server configured with an
+  // administrator's SF_USER and a human filing through the console are two identities, and the store
+  // cannot tell that one of them is a model. So the line is drawn here, at the tool list, which is the
+  // only place that knows the caller is an agent.
+  //
+  // The same reasoning bounds the rest of this block:
+  //
+  //   * NO access writes. `upsert_role`/`set_disabled`/... would be the entitlement store deciding
+  //     what the agent may do — an agent that can edit the policy that governs it is ungoverned, and
+  //     one PUT to /api/access/roles/Viewer is the whole distance from "read-only tools" to "anything".
+  //     Reading the policy is fine and is genuinely useful: "why was I refused" is answerable from it.
+  //   * NO cancel/reject either. They are less dangerous than approve (the state machine refuses
+  //     anybody but the requester on a cancel), but an agent withdrawing a request a human is about to
+  //     decide on is the same interference with the review, arriving through a politer verb.
+  //   * NO `includeChanges` on the audit tool. The before/after payloads can carry stored credential
+  //     fields, which is exactly why the server gates them twice; the precedent is right above — the
+  //     CLI's `config export --secrets` exists for a human who asked, and export_config never passes it.
+  //
+  // The CLI is a different case and carries all of it: `sf approvals approve`, `sf access role set`.
+  // That is a human at a terminal with their own token, which is what the mechanism is asking for.
+  // ------------------------------------------------------------------------------------------------
+
+  {
+    name: "get_access_policy",
+    title: "Read the access policy",
+    description:
+      "The whole entitlement document: roles, groups, per-user entries, approval templates and the policy version. Read-only — this server cannot edit the policy. Requires an administrator token.",
+    inputSchema: { type: "object", properties: {} },
+    annotations: READ_ONLY,
+    run: (_args, client) => client.accessPolicy(),
+  },
+  {
+    name: "get_effective_permissions",
+    title: "What one user may do",
+    description:
+      "One user's flattened entitlements — roles, groups, grants — as the authorization decision itself computes them. The answer for a DISABLED user is empty across the board (the server short-circuits), so read the `disabled` flag before concluding the user is configured with nothing.",
+    inputSchema: {
+      type: "object",
+      properties: { username: { type: "string" } },
+      required: ["username"],
+    },
+    annotations: READ_ONLY,
+    run: (args, client) => client.effectivePermissions(str(args, "username")),
+  },
+  {
+    name: "list_approvals",
+    title: "List approval requests",
+    description:
+      "Approval requests visible to this token: the ones it filed, the ones it may decide, or everything for an administrator. Optional state filter. Note the server applies `limit` BEFORE that visibility filter, so this is 'your requests among the most recent N', not 'your N most recent'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        state: { type: "string", enum: [...APPROVAL_STATES], description: "Optional; omit for all states." },
+        limit: { type: "number", description: "Default 100, server maximum 500." },
+      },
+    },
+    annotations: READ_ONLY,
+    run: (args, client) =>
+      client.listApprovals(
+        typeof args.state === "string" ? toApprovalState(args.state) : undefined,
+        limitOf(args),
+      ),
+  },
+  {
+    name: "get_approval",
+    title: "Read one approval request",
+    description: "One approval request in full, including its votes and the groups entitled to decide it.",
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+    annotations: READ_ONLY,
+    run: (args, client) => client.getApproval(str(args, "id")),
+  },
+  {
+    name: "request_approval",
+    title: "Ask a human to approve an action",
+    description:
+      "Files an approval request for a privileged action and returns its id. This is the tool to reach for when another tool was refused with 'requires approval', or when you are about to propose something a human should sign off on. It DOES NOT execute anything and there is no tool here to approve it — a person decides, in the console or with `sf approvals approve`. Scope is the entity NAME, never its id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", description: "The action being asked for, e.g. pipeline.delete." },
+        scope: { type: "string", description: "Entity NAME, a `prefix-*`, `tag:x`, or `*` (default)." },
+        reason: { type: "string", description: "Why. A human reads this before deciding." },
+        payloadJson: {
+          type: "string",
+          description: "The request that would have executed, serialized. The only replay mechanism there is.",
+        },
+      },
+      required: ["action"],
+    },
+    // Mutating but never destructive: it creates a pending request and changes nothing else.
+    annotations: MUTATING,
+    run: (args, client) =>
+      client.fileApproval({
+        action: str(args, "action"),
+        scope: str(args, "scope", false) || "*",
+        reason: str(args, "reason", false),
+        payloadJson: str(args, "payloadJson", false) || undefined,
+      }),
+  },
+  {
+    name: "get_audit_days",
+    title: "Which days have audit entries",
+    description: "The yyyyMMdd keys that hold audit rows, newest first. The cheap first call before get_audit_day.",
+    inputSchema: { type: "object", properties: {} },
+    annotations: READ_ONLY,
+    run: (_args, client) => client.auditDays(),
+  },
+  {
+    name: "get_audit_day",
+    title: "Read one day of the audit log",
+    description:
+      "One day's audit rows. `actor` is an EXACT match, `action` a PREFIX ('source' matches source.create; 'create' matches nothing). `truncated` in the response counts rows the day shard DROPPED under its cap — a non-zero value means the day is incomplete and should be reported as such, never ignored.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        day: { type: "string", description: "yyyyMMdd, UTC. get_audit_days lists the valid ones." },
+        actor: { type: "string", description: "Exact username." },
+        action: { type: "string", description: "Action prefix." },
+        limit: { type: "number", description: "Default 200, server maximum 2000." },
+        offset: { type: "number" },
+      },
+      required: ["day"],
+    },
+    annotations: READ_ONLY,
+    run: (args, client) =>
+      client.auditDay(str(args, "day"), {
+        actor: str(args, "actor", false) || undefined,
+        action: str(args, "action", false) || undefined,
+        limit: typeof args.limit === "number" ? Math.floor(args.limit) : undefined,
+        offset: typeof args.offset === "number" ? Math.floor(args.offset) : undefined,
+        // includeChanges is deliberately not settable — see the block comment above.
+      }),
   },
 ];
 

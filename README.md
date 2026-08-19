@@ -81,6 +81,13 @@ every tool call are shown inline.
 
 ![AI control chat](docs/img/chat.png)
 
+**Access control that outgrew its three roles.** Viewer/Editor/Admin are now built-in bundles of
+grants; on top of them an entitlement is `action` × `scope` (`*`, an entity name, a prefix `prod-*`,
+or `tag:finance`) × `Allow`/`Deny`, attached to a user, a group or a role, with deny-overrides. It is
+resolved server-side on every request rather than baked into the 12-hour token, so revoking one takes
+about ten seconds instead of a login. Optional approval workflows and an append-only, secret-masked
+audit log come with it. See [SECURITY.md](SECURITY.md#authorization--what-it-does-and-does-not-do).
+
 ## How it's put together
 
 ```

@@ -9,7 +9,16 @@
 //   bun admin/sf.ts health
 //   SF_URL=http://localhost:5399 bun admin/sf.ts ls tables     # the Dapr flavor, same commands
 
-import { isKind, KINDS, SfClient, SfError, writeStoredToken, type Kind } from "./sfclient.ts";
+import {
+  APPROVAL_STATES,
+  isKind,
+  KINDS,
+  SfClient,
+  SfError,
+  toApprovalState,
+  writeStoredToken,
+  type Kind,
+} from "./sfclient.ts";
 
 const USAGE = `sf — StreamForge admin CLI
 
@@ -27,6 +36,19 @@ const USAGE = `sf — StreamForge admin CLI
   sf config import <file> [--mode validate|merge|replace]
   sf api <METHOD> <path> [body.json]         escape hatch for anything not above
   sf mcp                                     run the MCP server on stdio (same as bun admin/mcp.ts)
+
+Plan 015 — entitlements, approvals, audit (all Admin-gated except \`approvals\`):
+  sf access get                              the whole policy document
+  sf access effective <username>             what that user can actually do (prints the disabled flag)
+  sf access role|group|user|template set <name> -f body.json
+  sf access role|group|user|template rm <name>
+  sf access disable|enable <username>        the one-field revocation route, not the whole entry
+  sf approvals ls [--state ${APPROVAL_STATES[0]}] [--limit N]
+  sf approvals get <id>
+  sf approvals file --action A [--scope S] [--reason R] [--payload body.json]
+  sf approvals approve|reject|cancel <id> [--comment C]
+  sf audit days                              which days hold entries
+  sf audit day <yyyyMMdd> [--actor A] [--action prefix] [--limit N] [--offset N] [--changes]
 
 Environment: SF_URL (default http://localhost:5199), SF_TOKEN, SF_USER, SF_PASSWORD.
 Global flags: --url URL, --token T, --json.
@@ -81,6 +103,111 @@ function summarize(kind: Kind, entity: Record<string, unknown>): string {
   return [idOf(entity).padEnd(34), String(entity.name ?? "").padEnd(24), state.padEnd(9), extra]
     .join(" ")
     .trimEnd();
+}
+
+// --- plan 015 printers ---------------------------------------------------------------------------
+//
+// Everything below is only the `--json`-off rendering; `--json` always emits the server's own body
+// unchanged, because these views are lossy on purpose and a script must never read a lossy one.
+
+function grantLine(g: Record<string, any>): string {
+  const suffix = g.requiresApproval ? "  (requires approval)" : "";
+  return `    ${String(g.effect ?? "?").padEnd(5)} ${String(g.action ?? "").padEnd(22)} ${String(g.scope ?? "")}${suffix}`;
+}
+
+function printPolicy(doc: Record<string, any>): void {
+  const roles = (doc.roles ?? []) as Record<string, any>[];
+  const groups = (doc.groups ?? []) as Record<string, any>[];
+  const users = (doc.users ?? []) as Record<string, any>[];
+  const templates = (doc.approvalTemplates ?? []) as Record<string, any>[];
+
+  console.log(`roles (${roles.length})`);
+  for (const r of roles) {
+    console.log(`  ${String(r.name).padEnd(20)} ${(r.builtIn ? "built-in" : "custom").padEnd(9)} ${(r.grants ?? []).length} grant(s)  ${r.description ?? ""}`.trimEnd());
+  }
+
+  console.log(`groups (${groups.length})`);
+  for (const g of groups) {
+    console.log(`  ${String(g.name).padEnd(20)} members: ${(g.members ?? []).join(", ") || "—"}  roles: ${(g.roles ?? []).join(", ") || "—"}  ${(g.grants ?? []).length} grant(s)`);
+  }
+
+  console.log(`users (${users.length})`);
+  for (const u of users) {
+    console.log(`  ${String(u.username).padEnd(20)} ${(u.disabled ? "DISABLED" : "enabled").padEnd(9)} roles: ${(u.roles ?? []).join(", ") || "—"}  ${(u.grants ?? []).length} grant(s)`);
+  }
+
+  console.log(`approval templates (${templates.length})`);
+  for (const t of templates) {
+    console.log(`  ${String(t.name).padEnd(20)} ${(t.enabled ? "enabled" : "disabled").padEnd(9)} ${t.actionPattern} @ ${t.scopePattern}  ${t.requiredApprovals}× from ${(t.approverGroups ?? []).join(", ") || "nobody"}`);
+  }
+
+  console.log(`policy version ${doc.version}`);
+}
+
+/** The `disabled` flag is printed FIRST and unconditionally, and the caveat under it is the reason:
+ * `GET /api/access/effective/{u}` short-circuits on a disabled user and answers everything-empty, so
+ * "disabled" and "configured with nothing" render identically without it. Do not drop this line. */
+function printEffective(view: Record<string, any>): void {
+  const grants = (view.grants ?? []) as Record<string, any>[];
+  console.log(`${view.username}: ${view.disabled ? "DISABLED" : "enabled"}  (policy version ${view.version})`);
+  if (view.disabled) {
+    console.log("  the server short-circuits a disabled user, so the empty lists below say nothing");
+    console.log("  about what this account would hold once re-enabled — `sf access get` shows the entry.");
+  }
+  console.log(`  roles:  ${(view.roles ?? []).join(", ") || "—"}`);
+  console.log(`  groups: ${(view.groups ?? []).join(", ") || "—"}`);
+  console.log(`  grants (${grants.length}):`);
+  for (const g of grants) console.log(grantLine(g));
+}
+
+function summarizeApproval(row: Record<string, any>): string {
+  const votes = (row.votes ?? []) as Record<string, any>[];
+  return [
+    String(row.id ?? "").padEnd(36),
+    String(row.state ?? "").padEnd(9),
+    String(row.action ?? "").padEnd(20),
+    String(row.scope ?? "").padEnd(14),
+    `by ${row.requestedBy ?? "?"}`.padEnd(16),
+    `${votes.length}/${row.requiredApprovals ?? "?"} votes`,
+    String(row.origin ?? ""),
+  ].join(" ").trimEnd();
+}
+
+/** `truncated` is printed whenever it is non-zero, and that is the whole point of the counter: the day
+ * shard drops oldest-first under `Audit:MaxEntriesPerDay` and persists what it dropped so that silence
+ * is never read as absence. A table that hides it defeats the mechanism. Same for `changesWithheld` —
+ * a reader who cannot see a diff at least learns that a diff exists. */
+function printAuditPage(page: Record<string, any>): void {
+  const entries = (page.entries ?? []) as Record<string, any>[];
+  for (const e of entries) {
+    const when = new Date(Number(e.atMs ?? 0)).toISOString().replace("T", " ").slice(0, 19);
+    console.log(
+      [
+        when,
+        String(e.actor ?? "").padEnd(14),
+        String(e.outcome ?? "").padEnd(18),
+        String(e.action ?? "").padEnd(22),
+        String(e.scope ?? ""),
+        e.onBehalfOf ? `(on behalf of ${e.onBehalfOf})` : "",
+        e.approvalId ? `[approval ${e.approvalId}]` : "",
+      ].join(" ").trimEnd(),
+    );
+    if (page.changesIncluded && (e.beforeJson || e.afterJson)) {
+      console.log(`    before: ${e.beforeJson ?? "—"}`);
+      console.log(`    after:  ${e.afterJson ?? "—"}`);
+    }
+  }
+
+  console.log(`${entries.length} of ${page.total} row(s) on ${page.day}`);
+  if (Number(page.truncated) > 0) {
+    console.log(`WARNING: ${page.truncated} row(s) were DROPPED from this day by the Audit:MaxEntriesPerDay cap.`);
+  }
+  if (Number(page.changesWithheld) > 0) {
+    console.log(
+      `${page.changesWithheld} row(s) carry before/after payloads that were withheld`
+      + (page.changesIncluded ? "." : " — pass --changes, and you also need access.read."),
+    );
+  }
 }
 
 async function confirm(question: string): Promise<boolean> {
@@ -238,6 +365,148 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       throw new SfError("expected `config export` or `config import <file>`");
+    }
+
+    // ---- plan 015 -------------------------------------------------------------------------------
+    //
+    // Unlike the MCP server (see mcp.ts's tool list and the argument next to it), the CLI carries the
+    // WRITE half of all three families: it is a human at a terminal holding their own token, so
+    // approving a request here is a second pair of eyes rather than the same pair twice.
+
+    case "access": {
+      const sub = positional[1];
+
+      if (sub === "get") {
+        const doc = (await client.accessPolicy()) as Record<string, any>;
+        if (json) return out(doc, true), 0;
+        printPolicy(doc);
+        return 0;
+      }
+
+      if (sub === "effective") {
+        const view = (await client.effectivePermissions(required(positional[2], "username"))) as
+          Record<string, any>;
+        if (json) return out(view, true), 0;
+        printEffective(view);
+        return 0;
+      }
+
+      if (sub === "disable" || sub === "enable") {
+        const username = required(positional[2], "username");
+        out(await client.setUserDisabled(username, sub === "disable"), json);
+        return 0;
+      }
+
+      // role|group|user|template × set|rm. Four nouns whose only difference is which pair of client
+      // methods they call, so they are a table rather than eight cases.
+      const nouns: Record<string, { set: (n: string, b: unknown) => Promise<unknown>; rm: (n: string) => Promise<unknown> }> = {
+        role: { set: (n, b) => client.upsertRole(n, b), rm: (n) => client.deleteRole(n) },
+        group: { set: (n, b) => client.upsertGroup(n, b), rm: (n) => client.deleteGroup(n) },
+        user: { set: (n, b) => client.upsertUserAccess(n, b), rm: (n) => client.deleteUserAccess(n) },
+        template: {
+          set: (n, b) => client.upsertApprovalTemplate(n, b),
+          rm: (n) => client.deleteApprovalTemplate(n),
+        },
+      };
+
+      const noun = nouns[sub ?? ""];
+      if (!noun) {
+        throw new SfError(
+          `expected \`access get|effective|disable|enable\` or \`access ${Object.keys(nouns).join("|")} set|rm <name>\``,
+        );
+      }
+
+      const verb = positional[2];
+      const name = required(positional[3], sub === "user" ? "username" : "name");
+      if (verb === "set") {
+        const file = typeof flags.file === "string" ? flags.file : undefined;
+        if (!file) throw new SfError(`-f <body.json> is required (the ${sub} definition)`);
+        out(await noun.set(name, JSON.parse(await Bun.file(file).text())), json);
+        return 0;
+      }
+      if (verb === "rm") {
+        if (flags.yes !== true && !(await confirm(`delete ${sub} '${name}'?`))) {
+          console.log("aborted");
+          return 1;
+        }
+        await noun.rm(name);
+        console.log(`deleted ${sub} '${name}'`);
+        return 0;
+      }
+      throw new SfError(`expected \`access ${sub} set|rm <name>\`, got '${verb ?? ""}'`);
+    }
+
+    case "approvals": {
+      const sub = positional[1] ?? "ls";
+
+      if (sub === "ls") {
+        // Validated HERE and not by the server: ?state=Bogus is a 400 with an EMPTY body (the enum
+        // binder refuses before any handler runs), so forwarding it would print nothing at all.
+        const state = typeof flags.state === "string" ? toApprovalState(flags.state) : undefined;
+        const rows = (await client.listApprovals(state, limitOf(flags))) as Record<string, any>[];
+        if (json) return out(rows, true), 0;
+        if (rows.length === 0) console.log(state ? `(no ${state} requests visible to you)` : "(nothing visible to you)");
+        for (const row of rows) console.log(summarizeApproval(row));
+        return 0;
+      }
+
+      if (sub === "get") {
+        out(await client.getApproval(required(positional[2], "approval id")), json);
+        return 0;
+      }
+
+      if (sub === "file") {
+        const action = typeof flags.action === "string" ? flags.action : "";
+        if (!action) throw new SfError("--action is required (the action being asked for)");
+        const payloadFile = typeof flags.payload === "string" ? flags.payload : undefined;
+        out(
+          await client.fileApproval({
+            action,
+            // Scope is the entity NAME, never its id — the whole grammar keys off names.
+            scope: typeof flags.scope === "string" ? flags.scope : "*",
+            reason: typeof flags.reason === "string" ? flags.reason : "",
+            payloadJson: payloadFile ? await Bun.file(payloadFile).text() : undefined,
+          }),
+          json,
+        );
+        return 0;
+      }
+
+      if (sub === "approve" || sub === "reject" || sub === "cancel") {
+        const id = required(positional[2], "approval id");
+        const comment = typeof flags.comment === "string" ? flags.comment : undefined;
+        out(await client.decideApproval(id, sub, comment), json);
+        return 0;
+      }
+
+      throw new SfError("expected `approvals ls|get|file|approve|reject|cancel`");
+    }
+
+    case "audit": {
+      const sub = positional[1];
+
+      if (sub === "days") {
+        const days = (await client.auditDays()) as string[];
+        if (json) return out(days, true), 0;
+        if (days.length === 0) console.log("(no audit days — nothing has been recorded, or Audit:Enabled=false)");
+        for (const day of days) console.log(day);
+        return 0;
+      }
+
+      if (sub === "day") {
+        const page = (await client.auditDay(required(positional[2], "yyyyMMdd"), {
+          actor: typeof flags.actor === "string" ? flags.actor : undefined,
+          action: typeof flags.action === "string" ? flags.action : undefined,
+          limit: typeof flags.limit === "string" ? Number(flags.limit) : undefined,
+          offset: typeof flags.offset === "string" ? Number(flags.offset) : undefined,
+          includeChanges: flags.changes === true,
+        })) as Record<string, any>;
+        if (json) return out(page, true), 0;
+        printAuditPage(page);
+        return 0;
+      }
+
+      throw new SfError("expected `audit days` or `audit day <yyyyMMdd>`");
     }
 
     case "api": {
