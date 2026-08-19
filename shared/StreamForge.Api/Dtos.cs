@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using StreamForge.Abstractions;
 
 namespace StreamForge.Api;
@@ -11,11 +12,39 @@ public sealed record LoginRequest(string Username, string Password);
 
 public sealed record LoginResponse(string Token, string Username, string DisplayName, string Role);
 
-public sealed record UserInfo(string Username, string DisplayName, string Role, long CreatedAtMs);
+/// <summary>Plan 015 wave 2-C: five ADDITIVE, OPTIONAL entitlement fields, populated by
+/// <c>GET /api/auth/me</c> and left null everywhere else.
+///
+/// <para>They are serialized only when populated. That is not tidiness — it is the rolling-deploy
+/// contract: <c>web/src/api/types.ts</c> declares every one of them optional and the SPA treats a
+/// MISSING <c>permissions[]</c> as "an old server, fall back to ordinal Viewer &lt; Editor &lt; Admin".
+/// A serialized <c>"permissions": null</c> is not missing, so the fallback would misfire; and
+/// <c>GET /api/users</c>, which still builds the four-argument form, keeps producing byte-identical
+/// JSON to the pre-015 server. The ignore condition lives on the record rather than in a global JSON
+/// option because this file does not own the global options and every other DTO's shape would move
+/// with them.</para></summary>
+public sealed record UserInfo(
+    string Username,
+    string DisplayName,
+    string Role,
+    long CreatedAtMs,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<PermissionGrant>? Permissions = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? Roles = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? Groups = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? Disabled = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? PolicyVersion = null);
 
 public sealed record CreateUserRequest(string Username, string DisplayName, string Role, string Password);
 
 public sealed record UpdateUserRequest(string? DisplayName, string? Role, string? Password);
+
+/// <summary>Plan 015 wave 2-C: the body of <c>PUT /api/access/users/{username}/disabled</c>. One field,
+/// its own record, because disabling a login is the cheap 90% of token revocation and must not require
+/// sending the rest of a <c>UserAccessEntry</c> — a caller under pressure would sooner or later send it
+/// without the grants they did not know were there. Deliberately NOT a field on
+/// <see cref="UpdateUserRequest"/>: "disabled" is policy, and policy lives in the access document, not
+/// on the credential record.</summary>
+public sealed record SetAccessDisabledRequest(bool Disabled);
 
 public sealed record CreatePipelineRequest(
     string Name,

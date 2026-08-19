@@ -489,6 +489,24 @@ export interface ApprovalTemplate {
   enabled: boolean
 }
 
+/** Body of `PUT /api/access/users/{username}/disabled` — the cheap 90% of token revocation, as one
+ *  field, so disabling a login never means re-sending grants the caller may not know about. */
+export interface SetAccessDisabledRequest {
+  disabled: boolean
+}
+
+/** What `GET /api/access/effective/{username}` answers: one user's flattened, version-stamped view,
+ *  built the same way every authorization decision builds it. `version` is the policy snapshot that
+ *  produced it. */
+export interface EffectivePermissions {
+  username: string
+  disabled: boolean
+  roles: string[]
+  groups: string[]
+  grants: PermissionGrant[]
+  version: number
+}
+
 export interface AccessPolicyDocument {
   roles: RoleDefinition[]
   groups: GroupDefinition[]

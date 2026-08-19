@@ -209,6 +209,23 @@ public class AuthorizationCoverageTests
         new("PUT", "/api/users/{username}", Guards.Admin),
         new("DELETE", "/api/users/{username}", Guards.Admin),
 
+        // Plan 015 wave 2-C. The Admin group policy is the COMPATIBILITY FLOOR, not the real check:
+        // every handler additionally asks AccessGuard for `access.read` or `access.write` at the scope
+        // named in its own route. That is the pattern wave 3 rolls out everywhere, and it is why these
+        // rows will read `Admin` right up until wave 3 drops the group policy — at which point the
+        // handlers already do the right thing and only these rows change.
+        new("GET", "/api/access/", Guards.Admin),
+        new("GET", "/api/access/effective/{username}", Guards.Admin),
+        new("PUT", "/api/access/roles/{name}", Guards.Admin),
+        new("DELETE", "/api/access/roles/{name}", Guards.Admin),
+        new("PUT", "/api/access/groups/{name}", Guards.Admin),
+        new("DELETE", "/api/access/groups/{name}", Guards.Admin),
+        new("PUT", "/api/access/users/{username}", Guards.Admin),
+        new("PUT", "/api/access/users/{username}/disabled", Guards.Admin),
+        new("DELETE", "/api/access/users/{username}", Guards.Admin),
+        new("PUT", "/api/access/approval-templates/{name}", Guards.Admin),
+        new("DELETE", "/api/access/approval-templates/{name}", Guards.Admin),
+
         // ---- config, chat ------------------------------------------------------------------------
         new("GET", "/api/config/export", Guards.Viewer),
         new("POST", "/api/config/import", Guards.Editor),
