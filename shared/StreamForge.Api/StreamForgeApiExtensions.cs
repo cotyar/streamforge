@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
 using Microsoft.IdentityModel.Tokens;
 using Scalar.AspNetCore;
 using StreamForge.Api.Auth;
@@ -113,7 +114,64 @@ public static class StreamForgeApiExtensions
             sp.GetRequiredService<StreamForge.Abstractions.IAccessPolicyFacade>(),
             sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<PermissionResolver>>(),
             policyCacheSeconds));
-        services.AddSingleton(sp => new AccessGuard(sp.GetRequiredService<PermissionResolver>(), entitlementsEnabled));
+
+        // ------------------------------------------------------------------------------------------
+        // Plan 015 wave 4-D — audit that never costs a request, and the sweeper that makes escalation
+        // happen. Both are registered here for the same reason AccessBootstrapService is: both hosts
+        // call AddStreamForgeApi, so this is the one place that reaches Orleans and Dapr at once.
+        //
+        // Every registration below is a FACTORY descriptor, and the two facades they need
+        // (IAuditFacade, IApprovalFacade) are resolved through a delegate rather than injected. Those
+        // facades are registered by each host's own AddOrleansFacades/AddDaprFacades AFTER this method
+        // runs — and on a tree where the sibling waves have not landed, not at all. A delegate makes
+        // "the store does not exist" a runtime fact the services already tolerate instead of a
+        // container-validation failure that stops a host from starting.
+        // ------------------------------------------------------------------------------------------
+        var auditEnabled = configuration.GetValue(AuditChannelSink.EnabledKey, true);
+        var auditCapacity = configuration.GetValue(AuditChannelSink.QueueCapacityKey, AuditChannelSink.DefaultQueueCapacity);
+        var auditAllowedMutations = configuration.GetValue(AuditChannelSink.RecordAllowedMutationsKey, true);
+        var approvalOptions = new ApprovalOptions(
+            configuration.GetValue(ApprovalOptions.EnabledKey, false),
+            configuration.GetValue(ApprovalOptions.SweepSecondsKey, ApprovalOptions.DefaultSweepSeconds));
+
+        services.AddSingleton(approvalOptions);
+        services.AddSingleton(sp => new AuditChannelSink(
+            auditCapacity,
+            auditEnabled,
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<AuditChannelSink>>()));
+        services.AddSingleton<IAuditSink>(sp => sp.GetRequiredService<AuditChannelSink>());
+        // The chat's wave-3-C seam, filled: the model's tool decisions land in the same queue and the
+        // same day shard as everything else, with Actor = the model and OnBehalfOf = the human.
+        services.AddSingleton<IChatAuditSink>(sp => sp.GetRequiredService<AuditChannelSink>());
+        services.AddSingleton<IChatApprovalFiler>(sp => new ApprovalStoreChatFiler(
+            () => sp.GetService<StreamForge.Abstractions.IApprovalFacade>(),
+            approvalOptions,
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ApprovalStoreChatFiler>>()));
+
+        // AddSingleton<IHostedService>(factory) rather than AddHostedService<T>(): a factory descriptor
+        // is skipped by ValidateOnBuild, which matters because these two reach for facades that may not
+        // be registered on this host at all.
+        if (auditEnabled)
+        {
+            services.AddSingleton<IHostedService>(sp => new AuditWriterService(
+                sp.GetRequiredService<AuditChannelSink>(),
+                () => sp.GetService<StreamForge.Abstractions.IAuditFacade>(),
+                sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<AuditWriterService>>()));
+        }
+
+        // Registered unconditionally; it returns immediately when Approvals:Enabled is false (default).
+        // Registering it conditionally would hide the feature's existence from a container dump, which
+        // is the one place an operator looks to find out why nothing is escalating.
+        services.AddSingleton<IHostedService>(sp => new ApprovalSweeperService(
+            () => sp.GetService<StreamForge.Abstractions.IApprovalFacade>(),
+            approvalOptions,
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ApprovalSweeperService>>()));
+
+        services.AddSingleton(sp => new AccessGuard(
+            sp.GetRequiredService<PermissionResolver>(),
+            entitlementsEnabled,
+            sp.GetRequiredService<IAuditSink>(),
+            auditAllowedMutations));
         services.AddSingleton<IAuthorizationHandler>(sp =>
             new LegacyPolicyHandler(sp.GetRequiredService<AccessGuard>()));
         services.AddSingleton<IAuthorizationHandler>(sp =>

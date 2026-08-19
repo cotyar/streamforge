@@ -1,6 +1,7 @@
 using Dapr.Actors;
 using Dapr.Actors.Client;
 using StreamForge.Abstractions;
+using StreamForge.Dapr.Host.Access;
 using StreamForge.Dapr.Host.Actors;
 
 namespace StreamForge.Dapr.Host.Facades;
@@ -43,6 +44,13 @@ public static class DaprFacadesExtensions
         // Plan 015 W1: the access-policy singleton. Registered here (not in a runtime-setup class) because
         // it is a plain singleton-actor adapter with no runtime to set up, exactly like the user store.
         services.AddSingleton<IAccessPolicyFacade, DaprAccessPolicyFacade>();
+        // Plan 015 W4-C: approvals (one singleton actor) and audit (one actor per day, plus the day
+        // index). Same reasoning as the access policy above — plain actor adapters with no runtime to
+        // set up. Both are resolved by StreamForge.Api through GetService<T>(), so a host that does not
+        // register them degrades to "no store" rather than failing to start; on this flavour they are
+        // always here.
+        services.AddSingleton<IApprovalFacade, DaprApprovalFacade>();
+        services.AddSingleton<IAuditFacade, DaprAuditFacade>();
         return services;
     }
 }
@@ -238,4 +246,73 @@ internal sealed class DaprAccessPolicyFacade : IAccessPolicyFacade
         _actor.UpsertApprovalTemplateAsync(new UpsertApprovalTemplateActorRequest(template, actor));
 
     public Task<bool> DeleteApprovalTemplateAsync(string name) => _actor.DeleteApprovalTemplateAsync(name);
+}
+
+/// <summary>Plan 015 W4-C: <see cref="IApprovalFacade"/> over the "approvals" singleton actor. One cached
+/// proxy in a field, like <see cref="DaprAccessPolicyFacade"/> and for the same reason — the id never
+/// varies, there is exactly one approvals document.
+///
+/// <para><see cref="RequestAsync"/> is the only member that unwraps an <see cref="ActorResult{T}"/>: filing
+/// can be refused for a reason an operator must see (no enabled template covers the action; the draft names
+/// no requester), and re-throwing it as an <see cref="InvalidOperationException"/> here puts it on the
+/// shared endpoints' existing 409 pathway — the same shape <see cref="DaprCatalogFacade.CreateTableAsync"/>
+/// uses. Everything else answers null when the transition did not happen, which is wave 1's convention for
+/// this flavour's stores.</para></summary>
+internal sealed class DaprApprovalFacade : IApprovalFacade
+{
+    private readonly IApprovalActor _actor =
+        ActorProxy.Create<IApprovalActor>(new ActorId(StreamConstants.ApprovalsKey), nameof(ApprovalActor), ActorProxyDefaults.Options);
+
+    public async Task<ApprovalRequest> RequestAsync(ApprovalRequest request)
+    {
+        var result = await _actor.RequestAsync(request);
+        return result.Ok ? result.Value! : throw new InvalidOperationException(result.Error);
+    }
+
+    public Task<ApprovalRequest?> GetAsync(string id) => _actor.GetAsync(id);
+
+    public Task<List<ApprovalRequest>> ListAsync(ApprovalState? state, int limit) =>
+        _actor.ListAsync(new ApprovalListActorRequest(state, limit));
+
+    public Task<ApprovalRequest?> VoteAsync(string id, ApprovalVote vote) =>
+        _actor.VoteAsync(new ApprovalVoteActorRequest(id, vote));
+
+    public Task<ApprovalRequest?> CancelAsync(string id, string username) =>
+        _actor.CancelAsync(new ApprovalCancelActorRequest(id, username));
+
+    public Task<ApprovalRequest?> RecordOutcomeAsync(string id, bool executed, string outcome) =>
+        _actor.RecordOutcomeAsync(new ApprovalOutcomeActorRequest(id, executed, outcome));
+
+    public Task<int> SweepAsync(long nowMs) => _actor.SweepAsync(nowMs);
+}
+
+/// <summary>Plan 015 W4-C: <see cref="IAuditFacade"/> over the day-sharded audit actors. Resolves a proxy
+/// per call — unlike the singleton facades above and exactly like <see cref="DaprPipelineReadFacade"/>,
+/// because the id IS the day and therefore varies per call.
+///
+/// <para>The routing function is <see cref="AuditLogStore.ActorIdFor"/>, shared with the tests rather than
+/// re-derived here, so "two different days land in two different keys" is asserted on the same code the
+/// facade runs.</para></summary>
+internal sealed class DaprAuditFacade : IAuditFacade
+{
+    public Task AppendAsync(AuditEntry entry)
+    {
+        // An unstamped entry would shard into 1970 and be invisible in every day the operator looks at.
+        // The sink stamps AtMs already; this is the belt, and it stamps the ENTRY rather than just the
+        // routing key so the row and the shard it lives in cannot disagree about when it happened.
+        if (entry.AtMs <= 0)
+        {
+            entry.AtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+
+        return Day(AuditLogStore.ActorIdFor(entry.AtMs)).AppendAsync(entry);
+    }
+
+    public Task<AuditPage> QueryAsync(string day, string? actor, string? actionPrefix, int limit, int offset) =>
+        Day(AuditLogStore.ActorIdForDay(day)).QueryAsync(new AuditQueryActorRequest(actor, actionPrefix, limit, offset));
+
+    public Task<List<string>> GetDaysAsync() => Day(AuditLogStore.IndexActorId).GetDaysAsync();
+
+    private static IAuditLogActor Day(string actorId) =>
+        ActorProxy.Create<IAuditLogActor>(new ActorId(actorId), nameof(AuditLogActor), ActorProxyDefaults.Options);
 }

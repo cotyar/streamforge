@@ -38,6 +38,11 @@ builder.Services.AddActors(options =>
     options.Actors.RegisterActor<RegistryActor>();
     options.Actors.RegisterActor<UserStoreActor>();
     options.Actors.RegisterActor<AccessPolicyActor>();
+    // Plan 015 W4-C. Two types, not three: AuditLogActor is BOTH the per-day shard (audit:yyyyMMdd) and
+    // the day index (audit:index) — see IAuditLogActor for why the index lives at a reserved id of the
+    // same type rather than in an actor type of its own.
+    options.Actors.RegisterActor<ApprovalActor>();
+    options.Actors.RegisterActor<AuditLogActor>();
     GeneratorRuntimeSetup.RegisterActors(options);
     ConnectorRuntimeSetup.RegisterActors(options);
     PipelineRuntimeSetup.RegisterActors(options);

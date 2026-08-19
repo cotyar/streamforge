@@ -43,6 +43,14 @@ public static class OrleansFacadesExtensions
         // already called from there.
         services.AddSingleton<IAccessPolicyFacade>(sp =>
             sp.GetRequiredService<IClusterClient>().GetGrain<IAccessPolicyGrain>(StreamConstants.AccessKey));
+        // Plan 015 W4-B: approvals, same zero-adapter shape again — IApprovalGrain inherits
+        // IApprovalFacade and the store is a singleton, so the grain reference IS-A facade.
+        services.AddSingleton<IApprovalFacade>(sp =>
+            sp.GetRequiredService<IClusterClient>().GetGrain<IApprovalGrain>(StreamConstants.ApprovalsKey));
+        // Audit is the one that CANNOT be a grain reference: it is day-sharded, so which grain answers
+        // depends on the entry's timestamp (append) or the caller's day (query), and GetDaysAsync must
+        // touch no day grain at all. OrleansAuditFacade holds that routing rule, and holds all of it.
+        services.AddSingleton<IAuditFacade, OrleansAuditFacade>();
         services.AddSingleton<IPipelineReadFacade, OrleansPipelineReadFacade>();
         services.AddSingleton<ITableReadFacade, OrleansTableReadFacade>();
         services.AddSingleton<ITableHistoryFacade, OrleansTableHistoryFacade>();

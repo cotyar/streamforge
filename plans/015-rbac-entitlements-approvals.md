@@ -222,6 +222,60 @@ would delete the entities the caller IS entitled to and leave the ones they are 
 neither the old state nor the document. Refusing is recoverable, partial application is not. `validate`
 gets the same check — a dry run that says yes where the real run 403s is worse than no dry run.
 
+### Wave 4 — approvals and audit, and what four agents had to be stopped from each deciding twice
+
+Wave 3 produced a three-way divergence because three agents each answered the same question for
+themselves. So wave 4 was built the other way round: one pure `ApprovalStateMachine` decides **every**
+transition, and both stores are storage. Neither flavour contains a rule about who may vote, when a
+request expires, or what counts.
+
+**The rules worth writing down**, all pinned by their own tests:
+
+- **The requester's own vote never counts.** A second pair of eyes that can be the first pair is not a
+  control. The self-vote check runs *before* the eligibility check, so an administrator who is also a
+  legitimate approver is told "you filed this" rather than "you are not an approver" — the second reads
+  as a misconfiguration and gets "fixed".
+- The self-vote comparison is the one **case-insensitive** username comparison in the repo. Refusing
+  "ALICE" a vote on "alice"'s request is an inconvenience somebody notices; letting a requester
+  self-approve through capitalisation is a control silently not existing.
+- **One rejection is decisive.** Requiring N rejections would let a requester shop for approvers.
+- **A past-deadline request expires at vote time, not only when the sweeper runs.** The sweeper is a
+  timer; "still Pending" and "not yet expired" are different statements, and trusting the former makes a
+  late approval land or not depending on how recently a tick happened. This is why the state machine
+  reports `Accepted` and `StateChanged` separately — a store must persist a request whose vote it just
+  refused.
+- **Eligibility cannot be forgotten**: a required positional enum whose `default` is `NotAnApprover`, so
+  a zeroed field or a literal `default` fails closed. And it is resolved **inside** the store from the
+  policy document, not taken from the caller — a transport asserting "this voter is an approver" would
+  make the store trust its input for the one rule the feature exists to enforce.
+- **Template values are snapshotted at filing time**, so editing a template cannot lower the bar under a
+  request already collecting votes. Identity comes from the authenticated caller and not from the draft,
+  or the self-vote rule is defeated by filing under someone else's name.
+- The fail-open direction is inverted from the evaluator's and is called out in the code: **no matching
+  template means no approval required**, which is what keeps `Approvals:Enabled=false` byte-identical —
+  and it means a misspelled `ActionPattern` is a control that silently does not exist. Anything that must
+  not fail open belongs behind a `Deny` grant, not a template.
+
+**Audit drops the newest, not the oldest — and the store does the opposite, deliberately.** In the
+in-process sink the competing rows are milliseconds apart during a burst, so the onset is the
+forensically valuable end and the hole lands in the middle with recording resuming after the burst; in
+the day shard they are a whole day apart, so recent wins. Both count what they dropped, and the sink
+additionally emits a real `audit.dropped` row so the gap reaches the log itself and not only a metric.
+
+**What is deliberately not audited**: allowed reads (the row "alice changed the prod pipeline" must not
+be buried under "alice listed the pipelines"), allowed `source.ingest` (one check per message on the
+platform's hottest path), and passing the coarse legacy `catalog.*` doors — passing a door is not doing a
+thing, and the route's own scoped check is the row that says what happened. **Every refusal is recorded,
+always.**
+
+**Three divergences the wave produced anyway, and how they were closed.** The Orleans store first walked
+`policy.Groups` by hand while Dapr resolved through `EffectivePermissionsBuilder` — not the same rule,
+because the builder returns no groups for a **disabled** user; that agent found it itself and converged,
+with a test that a hand-rolled walk passes everywhere else and fails only there. I closed the other two:
+`Audit:MaxEntriesPerDay=0` kept 20 000 rows on one flavour and 1 on the other, and the scope grammar had
+been copied into the state machine because `ScopeMatches` was private — an operator writing `tag:prod` in
+a grant and in an approval template would have got two behaviours.
+
 `hasRole` survives, implemented on top of `can()` — **zero of the 57 `RoleGate` references changes at
 cut-over.** That is the whole no-flag-day answer. The SPA treats a missing `permissions[]` as an old server
 and falls back to today's ordinal semantics, so a rolling deploy is safe.

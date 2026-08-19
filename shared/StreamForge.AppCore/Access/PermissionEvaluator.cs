@@ -142,7 +142,11 @@ public static class PermissionEvaluator
     /// id/name, and a prefix like <c>prod-*</c> — which are all one glob against the resource's id.
     /// Three of the four forms therefore need no code of their own, which is why the grammar was chosen
     /// this way.</summary>
-    private static bool ScopeMatches(string pattern, string scope, IReadOnlyCollection<string>? resourceTags)
+    /// <summary>Internal rather than private since plan 015 wave 4: <see cref="ApprovalTemplate.ScopePattern"/>
+    /// shares this exact grammar, and an approval template whose <c>tag:prod</c> meant something different
+    /// from the entitlement it guards would be the worst kind of wrong — one operator writing one string
+    /// twice and getting two behaviours. One copy, one meaning.</summary>
+    internal static bool ScopeMatches(string pattern, string scope, IReadOnlyCollection<string>? resourceTags)
     {
         if (pattern.StartsWith(TagPrefix, StringComparison.Ordinal))
         {
