@@ -87,6 +87,25 @@ public sealed class SourceDefinition
     /// counterpart was not, so "who broke prod" was unanswerable from the catalog alone. Set by
     /// CatalogRecordMerge's 4-arg overload on every update; empty on records last written before 015.</summary>
     [Id(13)] public string UpdatedBy { get; set; } = "";
+
+    // --------------------------------------------------------------------------------------------
+    // Plan 016 wave 0 — pre-built so wave 1's three concurrent agents never meet in this file.
+    //
+    // BOTH counters are REGISTRY-ASSIGNED and never client-settable: an incoming definition's values are
+    // discarded exactly the way CreatedAtMs already is (CatalogRecordMerge.CarryServerOwnedFields), or a
+    // caller could pin themselves to a revision they invented. Zero on records written before 016.
+    // --------------------------------------------------------------------------------------------
+
+    /// <summary>Monotonic, bumped whenever the stored definition actually changes — "changed" being
+    /// canonical-JSON inequality, the same predicate ImportPlanner already uses to tell "skipped" from
+    /// "updated", so a round-trip import that reports "skipped" provably does not bump this.</summary>
+    [Id(14)] public long Revision { get; set; }
+
+    /// <summary>Monotonic, bumped ONLY when the field shape changes — not when a knob does. That split is
+    /// the entire reason a pin is useful: an eventsPerSecond edit must not invalidate a downstream
+    /// dependant, and without two counters the choice is between pins that fire constantly and pins that
+    /// never fire.</summary>
+    [Id(15)] public long SchemaRevision { get; set; }
 }
 
 /// <summary>Well-known <see cref="SourceDefinition.GeneratorProfile"/> values that have a dedicated
@@ -449,6 +468,38 @@ public sealed class PipelineDefinition
     /// counterpart was not, so "who broke prod" was unanswerable from the catalog alone. Set by
     /// CatalogRecordMerge's 4-arg overload on every update; empty on records last written before 015.</summary>
     [Id(13)] public string UpdatedBy { get; set; } = "";
+
+    // --------------------------------------------------------------------------------------------
+    // Plan 016 wave 0 — pre-built so wave 1's three concurrent agents never meet in this file.
+    //
+    // BOTH counters are REGISTRY-ASSIGNED and never client-settable: an incoming definition's values are
+    // discarded exactly the way CreatedAtMs already is (CatalogRecordMerge.CarryServerOwnedFields), or a
+    // caller could pin themselves to a revision they invented. Zero on records written before 016.
+    // --------------------------------------------------------------------------------------------
+
+    /// <summary>Monotonic, bumped whenever the stored definition actually changes — "changed" being
+    /// canonical-JSON inequality, the same predicate ImportPlanner already uses to tell "skipped" from
+    /// "updated", so a round-trip import that reports "skipped" provably does not bump this.</summary>
+    [Id(14)] public long Revision { get; set; }
+
+    /// <summary>Plan 016: what this entity was authored against, checked at exactly two moments — config
+    /// import (against the post-import world, so mode=validate catches it before anything is applied) and
+    /// start. Deliberately NOT re-checked continuously: a pin broken by an upstream change sets
+    /// <see cref="StaleReason"/> and is badged, while the entity keeps running on its compiled plan, which
+    /// is what it does today — only now visibly.
+    ///
+    /// <para>Pins live here and in config documents, never in SQL. <c>FROM trades@3</c> would touch the
+    /// tokenizer, parser, AST, validator, planner, editor autocomplete, formatter and highlighter — the
+    /// most expensive change available, in the one project all work serializes on — and it would have no
+    /// coherent runtime meaning, because the engine executes against live streams with no versioned store
+    /// to read revision 3 out of.</para></summary>
+    [Id(15)] public List<EntityPin> DependsOn { get; set; } = [];
+
+    /// <summary>Why this entity's pins no longer hold, or null when they do. Set by the upstream change
+    /// that broke them; cleared when the pins are re-satisfied. A string rather than a flag because the
+    /// only useful thing to render is WHICH dependency moved and from what — a boolean would send the
+    /// operator to the logs to learn the one fact the badge exists to convey.</summary>
+    [Id(16)] public string? StaleReason { get; set; }
 }
 
 /// <summary>One emitted result row. Values are primitives only (string/double/long/bool/null).</summary>
@@ -689,6 +740,44 @@ public sealed class TableDefinition
     /// failure resets it to null (whole-row), the same fail-safe default a never-compiled table starts
     /// with, so a wrong key can never silently collapse distinct rows.</summary>
     [Id(29)] public List<string>? KeyFields { get; set; }
+
+    // --------------------------------------------------------------------------------------------
+    // Plan 016 wave 0 — pre-built so wave 1's three concurrent agents never meet in this file.
+    //
+    // BOTH counters are REGISTRY-ASSIGNED and never client-settable: an incoming definition's values are
+    // discarded exactly the way CreatedAtMs already is (CatalogRecordMerge.CarryServerOwnedFields), or a
+    // caller could pin themselves to a revision they invented. Zero on records written before 016.
+    // --------------------------------------------------------------------------------------------
+
+    /// <summary>Monotonic, bumped whenever the stored definition actually changes — "changed" being
+    /// canonical-JSON inequality, the same predicate ImportPlanner already uses to tell "skipped" from
+    /// "updated", so a round-trip import that reports "skipped" provably does not bump this.</summary>
+    [Id(31)] public long Revision { get; set; }
+
+    /// <summary>Monotonic, bumped ONLY when the field shape changes — not when a knob does. That split is
+    /// the entire reason a pin is useful: an eventsPerSecond edit must not invalidate a downstream
+    /// dependant, and without two counters the choice is between pins that fire constantly and pins that
+    /// never fire.</summary>
+    [Id(32)] public long SchemaRevision { get; set; }
+
+    /// <summary>Plan 016: what this entity was authored against, checked at exactly two moments — config
+    /// import (against the post-import world, so mode=validate catches it before anything is applied) and
+    /// start. Deliberately NOT re-checked continuously: a pin broken by an upstream change sets
+    /// <see cref="StaleReason"/> and is badged, while the entity keeps running on its compiled plan, which
+    /// is what it does today — only now visibly.
+    ///
+    /// <para>Pins live here and in config documents, never in SQL. <c>FROM trades@3</c> would touch the
+    /// tokenizer, parser, AST, validator, planner, editor autocomplete, formatter and highlighter — the
+    /// most expensive change available, in the one project all work serializes on — and it would have no
+    /// coherent runtime meaning, because the engine executes against live streams with no versioned store
+    /// to read revision 3 out of.</para></summary>
+    [Id(33)] public List<EntityPin> DependsOn { get; set; } = [];
+
+    /// <summary>Why this entity's pins no longer hold, or null when they do. Set by the upstream change
+    /// that broke them; cleared when the pins are re-satisfied. A string rather than a flag because the
+    /// only useful thing to render is WHICH dependency moved and from what — a boolean would send the
+    /// operator to the logs to learn the one fact the badge exists to convey.</summary>
+    [Id(34)] public string? StaleReason { get; set; }
 }
 
 /// <summary>Plan 008: per-table durability policy. State is the materialized snapshot; the question is only
@@ -971,6 +1060,32 @@ public sealed class TableHistoryStats
     [Id(1)] public TableHistoryMode Mode { get; set; }
     [Id(2)] public int KeyCount { get; set; }
     [Id(3)] public long TotalVersions { get; set; }
+}
+
+/// <summary>
+/// Plan 016 wave 0 — one entry in <see cref="PipelineDefinition.DependsOn"/> /
+/// <see cref="TableDefinition.DependsOn"/>: "I was authored against THIS shape of THAT entity".
+///
+/// <para>Pinned on <see cref="SchemaRevision"/> and never on the plain revision, because the plain one
+/// moves for every knob edit and a pin that fires on an unrelated change is a pin people learn to
+/// ignore.</para>
+/// </summary>
+[GenerateSerializer]
+public sealed class EntityPin
+{
+    /// <summary>"source" | "table". Pipelines are never depended upon — nothing reads a pipeline's
+    /// output by name.</summary>
+    [Id(0)] public string Kind { get; set; } = "";
+
+    /// <summary>By NAME, not id, and that is forced rather than chosen: sources have no id at all, and a
+    /// name is a stable key for exactly the entities whose runtime is name-keyed (sources cannot be
+    /// renamed, tables only conditionally). Pipelines — the one freely renameable entity — are the one
+    /// thing nothing pins.</summary>
+    [Id(1)] public string Name { get; set; } = "";
+
+    /// <summary>0 means "depends on it, pinned to nothing" — a declared edge with no compatibility
+    /// claim, which is still worth recording because it is what import ordering needs.</summary>
+    [Id(2)] public long SchemaRevision { get; set; }
 }
 
 [GenerateSerializer]

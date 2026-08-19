@@ -43,6 +43,13 @@ export interface SourceDefinition {
   ingest?: IngestConfig
   /** Plan 009 C2: coercion-failure policy for this source's inbound rows. Absent = 'Null'. */
   onCoercionFailure?: CoercionFailurePolicy
+
+  // Plan 016, all optional: absent = a pre-016 server, and the console must render the entity exactly
+  // as it does today rather than showing a badge for a revision nobody assigned.
+  /** Registry-assigned, monotonic; bumps only when the stored definition actually changed. */
+  revision?: number
+  /** Registry-assigned; bumps ONLY on a field-shape change, which is what makes a pin useful. */
+  schemaRevision?: number
 }
 
 // ============================================================================
@@ -346,6 +353,15 @@ export interface PipelineDefinition {
   sourceNames?: string[]
   /** Plan 009 B2: where this pipeline's rows are republished. Absent/empty = nowhere. */
   sinks?: SinkSpec[]
+
+  // Plan 016, all optional: absent = a pre-016 server, and the console must render the entity exactly
+  // as it does today rather than showing a badge for a revision nobody assigned.
+  /** Registry-assigned, monotonic; bumps only when the stored definition actually changed. */
+  revision?: number
+  /** Author-declared pins, checked at import and at start — never continuously. */
+  dependsOn?: EntityPin[]
+  /** Why this entity's pins no longer hold, or absent when they do. Renders as the stale badge. */
+  staleReason?: string | null
 }
 
 export interface JsonObject {
@@ -712,6 +728,17 @@ export interface TableDefinition {
    * behavior, not merely the conservative default. Absent (older engine builds) should be treated the
    * same as null. */
   keyFields?: string[] | null
+
+  // Plan 016, all optional: absent = a pre-016 server, and the console must render the entity exactly
+  // as it does today rather than showing a badge for a revision nobody assigned.
+  /** Registry-assigned, monotonic; bumps only when the stored definition actually changed. */
+  revision?: number
+  /** Registry-assigned; bumps ONLY on a field-shape change, which is what makes a pin useful. */
+  schemaRevision?: number
+  /** Author-declared pins, checked at import and at start — never continuously. */
+  dependsOn?: EntityPin[]
+  /** Why this entity's pins no longer hold, or absent when they do. Renders as the stale badge. */
+  staleReason?: string | null
 }
 
 /** Plan 008: how a table's snapshot reaches storage (wire values are PascalCase — confirmed against
@@ -1139,4 +1166,58 @@ export interface IngestStatusResponse {
    *  global; when aggregated is false they describe this instance alone. */
   instanceId?: string
   aggregated?: boolean
+}
+
+// ----------------------------------------------------------------------------------------------
+// Plan 016 — pins, and the discovery payloads. Everything a pre-016 server omits is optional above;
+// these two types are only ever read from routes a pre-016 server does not serve at all, so they are
+// not optional-per-field — a caller either got an answer or got a 404.
+// ----------------------------------------------------------------------------------------------
+
+/** One entry in `dependsOn`: "I was authored against THIS shape of THAT entity". Pinned on
+ *  `schemaRevision`, never the plain revision — a pin that fires on an unrelated knob edit is a pin
+ *  people learn to ignore. By NAME, because sources have no id at all. */
+export interface EntityPin {
+  /** 'source' | 'table'. Nothing pins a pipeline — nothing reads a pipeline's output by name. */
+  kind: string
+  name: string
+  /** 0 = a declared edge with no compatibility claim, which import ordering still needs. */
+  schemaRevision: number
+}
+
+/** What `GET /api/meta/instance` answers. Anonymous, like `/healthz`. */
+export interface InstanceInfo {
+  /** Stable across restarts — persisted, so "is this the same instance as yesterday" is answerable. */
+  instanceId: string
+  /** Operator-chosen and NOT unique; the id is the identity. */
+  name: string
+  /** 'orleans' | 'dapr'. */
+  flavor: string
+  version: string
+  /** Keyed by protocol ('rest', 'grpc'). */
+  endpoints: Record<string, string>
+  /** Test for a feature rather than inferring it from `version`. */
+  capabilities: string[]
+  plugins: string[]
+  catalogCounts: Record<string, number>
+  /** Conditions the catalog tolerates but somebody should see. Surfaced here rather than refused at
+   *  boot: a catalog that was legal when written must not become a host that will not start. */
+  catalogWarnings: string[]
+  startedAtMs: number
+}
+
+/** One known peer. `restEndpoint` is why this type earns its keep — the federated `grpc` source needs
+ *  it to translate an entity id to a name, and can run the same round trip in reverse so a peer's
+ *  entity may be named rather than GUID'd. */
+export interface PeerRecord {
+  name: string
+  /** Empty until the peer has been probed successfully: 'configured' vs 'seen'. */
+  instanceId: string
+  restEndpoint: string
+  grpcEndpoint: string
+  /** 0 = never reached. */
+  lastSeenAtMs: number
+  /** Kept next to `lastSeenAtMs` so "never reachable" and "was reachable" are distinguishable. */
+  lastError?: string | null
+  info?: InstanceInfo | null
 }

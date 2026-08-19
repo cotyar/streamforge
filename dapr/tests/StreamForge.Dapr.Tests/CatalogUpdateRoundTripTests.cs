@@ -28,15 +28,23 @@ public class CatalogUpdateRoundTripTests
     /// <summary>Fields the SERVER owns: identity, lifecycle, provenance, and anything recomputed from
     /// the compile result. A client's payload must NOT be able to set these, so they are excluded from
     /// the round-trip assertion and checked for preservation separately.</summary>
+    /// <para>Plan 016 wave 0 added "Revision" and "StaleReason" to both lists, plus "SchemaRevision" to
+    /// the table one. Same test, same reason: a client that could choose its own Revision could pin a
+    /// dependant to a revision that never existed, and one that could clear StaleReason could hide a
+    /// broken pin simply by re-saving the entity that broke it. "DependsOn" is deliberately NOT here —
+    /// a pin is the author's declaration of what they wrote the query against, so it round-trips like
+    /// any other client-owned field.</para>
     /// <para>Plan 015 added "UpdatedBy" to both lists. It is server-owned in the strongest sense in this
     /// file's vocabulary: it is the authenticated caller, and a client that could set it could forge the
     /// provenance of its own edit. Classifying it here is the opposite of excluding a client-owned field
     /// from the guard — the guard's whole subject is which side of that line a property is on.</para>
     private static readonly HashSet<string> PipelineServerOwned =
-        ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "UpdatedBy", "SourceNames"];
+        ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "UpdatedBy", "SourceNames",
+         "Revision", "StaleReason"];
 
     private static readonly HashSet<string> TableServerOwned =
-        ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "UpdatedBy", "OutputFields", "StreamInputs", "TableInputs", "KeyFields"];
+        ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "UpdatedBy", "OutputFields",
+         "StreamInputs", "TableInputs", "KeyFields", "Revision", "SchemaRevision", "StaleReason"];
 
     /// <summary>Values that would be rejected by validation if generated blindly (parallelism range,
     /// non-negative flush interval) or that must stay compilable/unique.</summary>
@@ -88,6 +96,13 @@ public class CatalogUpdateRoundTripTests
         if (type == typeof(List<string>)) return new List<string> { $"tag_{prop.Name}" };
         if (type == typeof(Dictionary<string, string>)) return new Dictionary<string, string> { ["k"] = prop.Name };
         if (type == typeof(List<FieldDef>)) return new List<FieldDef> { new("f", FieldType.String) };
+        // Plan 016: a pin is client-owned — the author's declaration of what they wrote the query
+        // against — so it has to round-trip like any other field the caller sends.
+        if (type == typeof(List<EntityPin>))
+        {
+            return new List<EntityPin> { new() { Kind = "source", Name = $"dep_{prop.Name}", SchemaRevision = 7 } };
+        }
+
         if (type == typeof(List<SinkSpec>))
         {
             return new List<SinkSpec>

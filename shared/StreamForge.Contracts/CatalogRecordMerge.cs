@@ -47,7 +47,20 @@ public static class CatalogRecordMerge
         incoming.CreatedAtMs = existing.CreatedAtMs;
         incoming.SourceNames = existing.SourceNames;
         incoming.UpdatedAtMs = nowMs;
-    }
+    
+        // Plan 016 wave 0. The counters and StaleReason are the REGISTRY's, carried forward here so an
+        // incoming definition can never set them: a caller who could choose its own Revision could pin a
+        // dependant to a revision that never existed, and one who could clear StaleReason could hide a
+        // broken pin by re-saving the entity that broke it. The BUMP belongs to the write path (wave 2),
+        // which is the only place that knows whether anything actually changed; this only guarantees the
+        // value it bumps is the stored one.
+        //
+        // NOTE for wave 2: there is no SourceDefinition overload of this method — sources are upserted
+        // without one — so a source's Revision/SchemaRevision carry has to be done at its own upsert
+        // site on both flavours. That asymmetry is pre-existing, not introduced here.
+        incoming.Revision = existing.Revision;
+        incoming.StaleReason = existing.StaleReason;
+}
 
     /// <summary>Table twin of the pipeline overload. OutputFields/StreamInputs/TableInputs/KeyFields are
     /// recomputed from the compile result right after this returns, and are carried for the same reason
@@ -71,5 +84,19 @@ public static class CatalogRecordMerge
         incoming.TableInputs = existing.TableInputs;
         incoming.KeyFields = existing.KeyFields;
         incoming.UpdatedAtMs = nowMs;
-    }
+    
+        // Plan 016 wave 0. The counters and StaleReason are the REGISTRY's, carried forward here so an
+        // incoming definition can never set them: a caller who could choose its own Revision could pin a
+        // dependant to a revision that never existed, and one who could clear StaleReason could hide a
+        // broken pin by re-saving the entity that broke it. The BUMP belongs to the write path (wave 2),
+        // which is the only place that knows whether anything actually changed; this only guarantees the
+        // value it bumps is the stored one.
+        //
+        // NOTE for wave 2: there is no SourceDefinition overload of this method — sources are upserted
+        // without one — so a source's Revision/SchemaRevision carry has to be done at its own upsert
+        // site on both flavours. That asymmetry is pre-existing, not introduced here.
+        incoming.Revision = existing.Revision;
+        incoming.SchemaRevision = existing.SchemaRevision;
+        incoming.StaleReason = existing.StaleReason;
+}
 }
