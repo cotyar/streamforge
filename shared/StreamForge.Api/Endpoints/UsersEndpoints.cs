@@ -36,20 +36,41 @@ public static class UsersEndpoints
     {
         var group = app.MapGroup("/api/users").RequireAuthorization("Admin");
 
-        group.MapGet("/", async (IUserStoreFacade userStore) =>
+        // Filtered per entry rather than refused wholesale, the shape /api/sources established: a
+        // caller entitled to read three of ten accounts gets their three, and one entitled to none gets
+        // an empty list instead of a 403 — the same statement, and the one a console can render.
+        group.MapGet("/", async (ClaimsPrincipal principal, AccessGuard guard, IUserStoreFacade userStore) =>
         {
             var users = await userStore.GetUsersAsync();
-            return Results.Ok(users.Select(ToUserInfo).ToList());
+            var visible = new List<UserInfo>(users.Count);
+            foreach (var u in users)
+            {
+                if (await guard.CheckAsync(principal, Actions.UserRead, u.Username) is { IsAllowed: true })
+                {
+                    visible.Add(ToUserInfo(u));
+                }
+            }
+
+            return Results.Ok(visible);
         });
 
         group.MapPost("/", async (
             CreateUserRequest req,
+            HttpContext http,
             ClaimsPrincipal principal,
+            AccessGuard guard,
             IUserStoreFacade userStore,
             IAccessPolicyFacade policy,
             PermissionResolver resolver,
             ILoggerFactory loggerFactory) =>
         {
+            // Scoped to the username being created, exactly as a source create is scoped to the name
+            // being created: a `user.write` on `contractor-*` is then a real, narrow authority.
+            if (await RefuseAsync(guard, principal, Actions.UserWrite, req.Username) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (string.IsNullOrWhiteSpace(req.Username) || string.IsNullOrWhiteSpace(req.Password))
             {
                 return Results.BadRequest(new ErrorResponse("username and password are required"));
@@ -71,18 +92,33 @@ public static class UsersEndpoints
                 return failure;
             }
 
+            CatalogChangeAudit.RecordUser(http, principal, Actions.UserWrite, user.Username, before: null, after: user);
             return Results.Created($"/api/users/{user.Username}", ToUserInfo(user));
         });
 
         group.MapPut("/{username}", async (
             string username,
             UpdateUserRequest req,
+            HttpContext http,
             ClaimsPrincipal principal,
+            AccessGuard guard,
             IUserStoreFacade userStore,
             IAccessPolicyFacade policy,
             PermissionResolver resolver,
             ILoggerFactory loggerFactory) =>
         {
+            if (await RefuseAsync(guard, principal, Actions.UserWrite, username) is { } refusal)
+            {
+                return refusal;
+            }
+
+            // Detached BEFORE the write: the store may hand back the live record, and comparing an
+            // object with itself would report every role change as a no-op.
+            var before = (await userStore.GetUsersAsync())
+                .FirstOrDefault(u => u.Username == username) is { } stored
+                ? CatalogChangeAudit.Snapshot(stored)
+                : null;
+
             var updated = await userStore.UpdateUserAsync(username, req.DisplayName, req.Role, req.Password);
             if (!updated)
             {
@@ -91,6 +127,7 @@ public static class UsersEndpoints
 
             var users = await userStore.GetUsersAsync();
             var user = users.First(u => u.Username == username);
+            CatalogChangeAudit.RecordUser(http, principal, Actions.UserWrite, username, before, user);
 
             // Unconditional, not "only when req.Role is non-null": a display-name-only edit on a user
             // whose entry is missing or stale is a free opportunity to repair it, and the mirror skips
@@ -106,22 +143,36 @@ public static class UsersEndpoints
 
         group.MapDelete("/{username}", async (
             string username,
+            HttpContext http,
             ClaimsPrincipal principal,
+            AccessGuard guard,
             IUserStoreFacade userStore,
             IAccessPolicyFacade policy,
             PermissionResolver resolver,
             ILoggerFactory loggerFactory) =>
         {
+            if (await RefuseAsync(guard, principal, Actions.UserWrite, username) is { } refusal)
+            {
+                return refusal;
+            }
+
             if (string.Equals(principal.Identity?.Name, username, StringComparison.Ordinal))
             {
                 return Results.BadRequest(new ErrorResponse("cannot delete yourself"));
             }
+
+            // Read before the delete, because afterwards there is nowhere left to read it from. This is
+            // the last copy of the record that will ever exist, which is why a delete keeps the whole
+            // (projected) document rather than a diff.
+            var before = (await userStore.GetUsersAsync()).FirstOrDefault(u => u.Username == username);
 
             var removed = await userStore.DeleteUserAsync(username);
             if (!removed)
             {
                 return Results.NotFound();
             }
+
+            CatalogChangeAudit.RecordUser(http, principal, Actions.UserWrite, username, before, after: null);
 
             // The access entry has to go with the credential record, and not for tidiness: a username
             // recreated later would otherwise inherit the deleted user's Disabled flag and direct
@@ -248,6 +299,24 @@ public static class UsersEndpoints
             loggerFactory.CreateLogger(LoggerCategory).LogError(ex, "{Message}", message);
             return Results.Json(new ErrorResponse(message), statusCode: StatusCodes.Status500InternalServerError);
         }
+    }
+
+    /// <summary>Null when the caller may proceed; the ready-made 403 when they may not — the same
+    /// helper the sources, pipelines and tables endpoints use.
+    ///
+    /// <para>Wave 2 chose <c>access.write</c>, not <c>user.write</c>, as the entitlement that satisfies
+    /// the coarse <c>Admin</c> POLICY, and wrote down why: whatever satisfies that policy is the key to
+    /// every Admin-gated route including <c>/api/access</c> itself, so a narrowly intended "user
+    /// administrator" would have silently gained the power to rewrite the entitlement document. The
+    /// stated consequence was that such a role is merely refused <c>/api/users</c> "until wave 3
+    /// migrates the group to per-action guards". Wave 3 migrated every other group and missed this one;
+    /// these four checks are that migration. <c>user.write</c> now buys exactly <c>/api/users</c>, and
+    /// buys it only in combination with an Admin-satisfying entitlement — the policy still runs
+    /// first.</para></summary>
+    private static async Task<IResult?> RefuseAsync(AccessGuard guard, ClaimsPrincipal principal, string action, string scope)
+    {
+        var result = await guard.CheckAsync(principal, action, scope);
+        return result.IsAllowed ? null : AccessGuard.Deny(result);
     }
 
     private static string ActorOf(ClaimsPrincipal principal) => principal.Identity?.Name ?? "";

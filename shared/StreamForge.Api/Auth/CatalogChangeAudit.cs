@@ -142,7 +142,7 @@ public static class CatalogChangeAudit
         JsonSerializer.SerializeToNode(value, JsonOptions)!.Deserialize<T>(JsonOptions)!;
 
     // ---------------------------------------------------------------------------------------------
-    // The nine call sites' entry points. Two overloads per entity type: the REST convenience one that
+    // The call sites' entry points. Two overloads per entity type: the REST convenience one that
     // pulls the sink off the request and builds its own row, and the explicit one that takes both — the
     // seam any non-REST caller (the chat, an approval replay) uses to keep its own attribution.
     // ---------------------------------------------------------------------------------------------
@@ -170,6 +170,39 @@ public static class CatalogChangeAudit
 
     public static void RecordTable(IAuditSink? sink, AuditEntry row, TableDefinition? before, TableDefinition? after) =>
         Record(sink, row, before, after, static d => SecretsMasker.MaskTable(d));
+
+    public static void RecordUser(
+        HttpContext? http, ClaimsPrincipal principal, string action, string scope,
+        UserRecord? before, UserRecord? after) =>
+        RecordUser(SinkOf(http), RestRow(principal, action, scope), before, after);
+
+    /// <summary>The credential record's diff — added in wave 6 after the audit console's first live run
+    /// showed <c>/api/users</c> writing NO row at all, for either the guard decision or the mutation.
+    /// Creating an account and changing someone's role are the most privileged mutations the platform
+    /// has, and they were the only ones invisible in the log.
+    ///
+    /// <para><b>The redactor is a projection, not a mask pass</b>, because <see cref="UserRecord"/> is
+    /// the one entity here whose secret is not a config field but the record's whole reason to exist.
+    /// <see cref="UserRecord.PasswordHash"/> and <see cref="UserRecord.PasswordSalt"/> are replaced with
+    /// the literal mask when non-empty rather than dropped, and that is deliberate: the diff is computed
+    /// on the UNMASKED pair (see <see cref="Record{T}"/>), so a password reset moves those keys and the
+    /// row therefore reports <c>passwordHash: "***" → "***"</c>. The key's presence is the signal, its
+    /// value never is — which is exactly the shape a rotated source credential already has, and the
+    /// reason an administrator can see "somebody reset bob's password" without the log holding anything
+    /// worth stealing. Dropping the fields instead would have made a password reset render as an empty
+    /// diff, i.e. as nothing having happened.</para></summary>
+    public static void RecordUser(IAuditSink? sink, AuditEntry row, UserRecord? before, UserRecord? after) =>
+        Record(sink, row, before, after, static u => new UserRecord
+        {
+            Username = u.Username,
+            DisplayName = u.DisplayName,
+            Role = u.Role,
+            CreatedAtMs = u.CreatedAtMs,
+            ExternalSubject = u.ExternalSubject,
+            IdentityProvider = u.IdentityProvider,
+            PasswordHash = u.PasswordHash.Length == 0 ? "" : SourceKinds.SecretMask,
+            PasswordSalt = u.PasswordSalt.Length == 0 ? "" : SourceKinds.SecretMask,
+        });
 
     // ---------------------------------------------------------------------------------------------
 

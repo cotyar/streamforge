@@ -40,6 +40,7 @@ public class CatalogChangeAuditTests
     private const string GrpcToken = "eyJhbGciOi-TOKEN-do-not-log";
     private const string HeaderSecret = "Bearer HEADER-SECRET-do-not-log";
     private const string RotatedPassword = "rotated-2NDpassword-do-not-log";
+    private const string NewPassword = "bobs-NEW-login-password-do-not-log";
 
     // ---------------------------------------------------------------------------------------------
     // 1. The hazard. A secret placed in a source config never appears in plaintext in an audit row.
@@ -459,6 +460,74 @@ public class CatalogChangeAuditTests
         }
     }
 
+    // ------------------------------------------------------------------------------------------
+    // Plan 015 wave 6: /api/users. Added after the audit console's first live run showed these three
+    // routes writing NO row at all — neither the guard's decision nor the mutation — which made
+    // creating an account and changing somebody's role the only privileged mutations invisible in the
+    // log. The credential hazard here is sharper than a source's: the secret is not a config field the
+    // masker walks, it IS the record.
+    // ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task APasswordResetIsRecordedWithoutThePasswordOrItsStoredHash()
+    {
+        var harness = Build();
+
+        var (status, _) = await harness.CallAsync(
+            "PUT /api/users/{username}", Admin, [("username", "bob")],
+            new UpdateUserRequest(null, null, NewPassword));
+        Assert.Equal(200, status);
+
+        var rows = harness.Rows();
+        Assert.NotEmpty(rows);
+        foreach (var row in rows)
+        {
+            var blob = string.Join('\n', row.BeforeJson, row.AfterJson, row.Detail);
+            Assert.DoesNotContain(NewPassword, blob, StringComparison.Ordinal);
+            Assert.DoesNotContain(FakeUserStore.StoredHashPrefix, blob, StringComparison.Ordinal);
+        }
+
+        // …and the reset is still VISIBLE. Both sides mask to "***", so the diff is carried by the key
+        // being present at all — which only works because the change is detected on the unmasked pair.
+        // Drop the fields instead of masking them and a password reset renders as nothing happening.
+        var executed = Assert.Single(rows, r => r.Outcome == CatalogChangeAudit.ExecutedOutcome);
+        Assert.Contains("passwordHash", executed.BeforeJson!, StringComparison.Ordinal);
+        Assert.Contains("passwordHash", executed.AfterJson!, StringComparison.Ordinal);
+        Assert.Contains(SourceKinds.SecretMask, executed.AfterJson!, StringComparison.Ordinal);
+        Assert.Equal("bob", executed.Scope);
+    }
+
+    [Fact]
+    public async Task ARoleChangeSaysWhichRoleItWasAndWhichItBecame()
+    {
+        var harness = Build();
+
+        Assert.Equal(200, (await harness.CallAsync(
+            "PUT /api/users/{username}", Admin, [("username", "bob")],
+            new UpdateUserRequest(null, "Admin", null))).Status);
+
+        var executed = Assert.Single(harness.Rows(), r => r.Outcome == CatalogChangeAudit.ExecutedOutcome);
+        Assert.Contains("Viewer", executed.BeforeJson!, StringComparison.Ordinal);
+        Assert.Contains("Admin", executed.AfterJson!, StringComparison.Ordinal);
+        Assert.Equal(Actions.UserWrite, executed.Action);
+    }
+
+    [Fact]
+    public async Task DeletingAUserKeepsTheLastCopyOfTheRecordAndStillNoCredential()
+    {
+        var harness = Build();
+
+        Assert.Equal(204, (await harness.CallAsync(
+            "DELETE /api/users/{username}", Admin, [("username", "bob")])).Status);
+
+        var executed = Assert.Single(harness.Rows(), r => r.Outcome == CatalogChangeAudit.ExecutedOutcome);
+        Assert.NotNull(executed.BeforeJson);
+        Assert.Null(executed.AfterJson);
+        Assert.Equal("deleted", executed.Detail);
+        Assert.Contains("bob", executed.BeforeJson!, StringComparison.Ordinal);
+        Assert.DoesNotContain(FakeUserStore.StoredHashPrefix, executed.BeforeJson!, StringComparison.Ordinal);
+    }
+
     private static Harness Build()
     {
         var catalog = new FakeCatalog
@@ -524,6 +593,7 @@ public class CatalogChangeAuditTests
         // as well as the ones this wave writes.
         builder.Services.AddSingleton(new AccessGuard(resolver, entitlementsEnabled: true, audit: sink));
         builder.Services.AddSingleton<ICatalogFacade>(catalog);
+        builder.Services.AddSingleton<IUserStoreFacade>(new FakeUserStore());
         builder.Services.AddSingleton(new IngestKeyUsageTracker());
         builder.Services.AddSingleton<IAuditSink>(sink);
 
@@ -623,10 +693,74 @@ public class CatalogChangeAuditTests
         public Task<bool> DeleteRoleAsync(string name) => throw new NotSupportedException();
         public Task<GroupDefinition?> UpsertGroupAsync(GroupDefinition group, string actor) => throw new NotSupportedException();
         public Task<bool> DeleteGroupAsync(string name) => throw new NotSupportedException();
-        public Task<UserAccessEntry?> UpsertUserAccessAsync(UserAccessEntry entry, string actor) => throw new NotSupportedException();
-        public Task<bool> DeleteUserAccessAsync(string username) => throw new NotSupportedException();
+        public Task<UserAccessEntry?> UpsertUserAccessAsync(UserAccessEntry entry, string actor)
+        {
+            document.Users.RemoveAll(u => u.Username == entry.Username);
+            document.Users.Add(entry);
+            return Task.FromResult<UserAccessEntry?>(entry);
+        }
+
+        public Task<bool> DeleteUserAccessAsync(string username) =>
+            Task.FromResult(document.Users.RemoveAll(u => u.Username == username) > 0);
         public Task<ApprovalTemplate?> UpsertApprovalTemplateAsync(ApprovalTemplate template, string actor) => throw new NotSupportedException();
         public Task<bool> DeleteApprovalTemplateAsync(string name) => throw new NotSupportedException();
+    }
+
+    /// <summary>The credential store, in memory. <see cref="HashOf"/> is deliberately a readable
+    /// function of the password rather than a real KDF: the point of the users tests is that NEITHER
+    /// the plaintext NOR the stored hash reaches a row, and a fake whose hash cannot be predicted could
+    /// not assert the second half.</summary>
+    private sealed class FakeUserStore : IUserStoreFacade
+    {
+        public const string StoredHashPrefix = "STORED-HASH-OF-";
+
+        private readonly List<UserRecord> _users =
+        [
+            new() { Username = "admin", DisplayName = "Admin", Role = "Admin", PasswordHash = HashOf("admin123!"), PasswordSalt = "salt-admin" },
+            new() { Username = "bob", DisplayName = "Bob", Role = "Viewer", PasswordHash = HashOf("bob-old-password"), PasswordSalt = "salt-bob" },
+        ];
+
+        public static string HashOf(string password) => StoredHashPrefix + password;
+
+        public Task<UserRecord?> ValidateCredentialsAsync(string username, string password) =>
+            Task.FromResult(_users.FirstOrDefault(u => u.Username == username && u.PasswordHash == HashOf(password)));
+
+        public Task<List<UserRecord>> GetUsersAsync() => Task.FromResult(_users);
+
+        public Task<bool> CreateUserAsync(string username, string displayName, string role, string password)
+        {
+            if (_users.Any(u => u.Username == username))
+            {
+                return Task.FromResult(false);
+            }
+
+            _users.Add(new UserRecord
+            {
+                Username = username,
+                DisplayName = displayName,
+                Role = role,
+                PasswordHash = HashOf(password),
+                PasswordSalt = "salt-" + username,
+            });
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> UpdateUserAsync(string username, string? displayName, string? role, string? password)
+        {
+            var user = _users.FirstOrDefault(u => u.Username == username);
+            if (user is null)
+            {
+                return Task.FromResult(false);
+            }
+
+            if (displayName is not null) user.DisplayName = displayName;
+            if (role is not null) user.Role = role;
+            if (password is not null) user.PasswordHash = HashOf(password);
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> DeleteUserAsync(string username) =>
+            Task.FromResult(_users.RemoveAll(u => u.Username == username) > 0);
     }
 
     private sealed class BodyAllowed : IHttpRequestBodyDetectionFeature
