@@ -154,6 +154,47 @@ public static class SqlCompiler
         IReadOnlyDictionary<string, SourceSchema> streamSchemas,
         IReadOnlyDictionary<string, SourceSchema> tableSchemas)
         => Planning.TablePlanner.Compile(sql, streamSchemas, tableSchemas);
+
+    /// <summary>
+    /// Plan 016 wave 3-A — ADDITIVE. Every relation name <paramref name="sql"/> READS FROM, as authored:
+    /// the FROM source, every JOIN source, every derived table / subquery source, every subquery inside
+    /// WHERE (IN / NOT IN / EXISTS / NOT EXISTS / scalar), and every branch of a UNION [ALL] chain, at any
+    /// nesting depth. Tokenize + parse only — <b>no schema resolution</b>, which is the whole point: this
+    /// answers "what does this statement mention?" for entities that DO NOT EXIST YET (a config document
+    /// being import-planned), where <see cref="CompileResult.SourceNames"/> cannot help because nothing has
+    /// been compiled. For an entity that does exist, SourceNames / StreamInputs / TableInputs remain the
+    /// authoritative post-compile answer and this method is not a substitute for them.
+    ///
+    /// <para><b>CTEs are not references.</b> A name defined by this statement's own WITH list is resolved
+    /// away (the parser substitutes CTE bodies in place), so <c>WITH recent AS (SELECT … FROM trades)
+    /// SELECT * FROM recent</c> returns <c>["trades"]</c>. A CTE that is declared but never referenced
+    /// contributes nothing at all — the statement does not read it either.</para>
+    ///
+    /// <para><b>Ordering and duplicates.</b> Distinct by ORDINAL (case-sensitive) comparison, in first-
+    /// appearance order, where "first appearance" means reading order — FROM, then each JOIN's source and
+    /// ON, then WHERE, then SELECT, then GROUP BY / LATEST BY — recursing into nested queries as they are
+    /// met. A self-join or a name repeated across UNION branches therefore appears ONCE: the caller wants a
+    /// dependency set, and a count of textual occurrences is information it has no use for. Ordinal (not
+    /// case-insensitive) distinctness means <c>FROM Trades JOIN trades</c> returns both spellings — the
+    /// names come back exactly as written, and matching them against a catalog (which resolves names
+    /// case-insensitively) is the caller's job, not this method's guess.</para>
+    ///
+    /// <para><b>Never throws, for any input</b> — malformed SQL, empty string, null, whitespace, a
+    /// tokenizer error, an unsupported statement form. All of those return an EMPTY list, and an empty list
+    /// is <b>deliberately indistinguishable</b> from "parsed fine, reads nothing": callers must not try to
+    /// tell a parse failure from a genuine absence of references here. Anything that needs to report WHY a
+    /// statement is bad must call <see cref="Compile"/> / <see cref="CompileTable"/>, which return
+    /// diagnostics. This method exists so that a planner walking a document full of possibly-broken SQL
+    /// keeps planning instead of crashing a dry run.</para>
+    ///
+    /// <para><b>Pre-parse sugar is not stripped here.</b> The Engine has no <c>INSERT INTO &lt;sink&gt;</c>
+    /// production (that sugar lives above it, in AppCore's SinkSugar), so a still-sugared statement is a
+    /// parse error and returns empty. Desugar before calling if the text may carry it.</para>
+    /// </summary>
+    /// <param name="sql">Statement text; null, empty and whitespace are accepted and return an empty list.</param>
+    /// <returns>Distinct relation names in first-appearance order; empty on parse failure OR on a statement
+    /// that reads nothing — the two cases are not distinguishable by design.</returns>
+    public static IReadOnlyList<string> ExtractReferences(string? sql) => Sql.ReferenceExtractor.Extract(sql);
 }
 
 /// <summary>Compiled, immutable table plan. Thread-safe to share; executors hold the mutable state.</summary>
