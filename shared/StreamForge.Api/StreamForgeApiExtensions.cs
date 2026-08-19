@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Hosting;
@@ -82,10 +83,76 @@ public static class StreamForgeApiExtensions
                 };
             });
 
+        // ------------------------------------------------------------------------------------------
+        // Plan 015 wave 2 — entitlements, wired so that nothing has to change on the same day.
+        //
+        // Auth:Mode DEFAULTS TO "entitlements", and the word the plan uses for the flag is "rollback",
+        // not "opt-in": `legacy` is what you set when something has gone wrong, which only makes sense
+        // if the feature is on by default. Two more reasons it has to be this way round. First,
+        // Auth:StrictViewer defaults to true and is described as the plan's one intentional behaviour
+        // change — a default that only bites in a non-default mode would not be a behaviour change at
+        // all, it would be dead configuration. Second, the entire backward-compatibility design below
+        // (each policy satisfied by the entitlement OR the legacy role) exists precisely so that turning
+        // this on by default is safe; if it were not safe on by default, that design has failed and the
+        // right response is to fix it rather than to hide behind the flag.
+        //
+        // What `legacy` buys, exactly: the policies below fall back to the role checks they replaced,
+        // the resolver is never consulted (see LegacyPolicyHandler for why that has to be an explicit
+        // branch rather than a no-op check), and StrictViewer is inert — so Viewer is
+        // RequireAuthenticatedUser() and nothing more, as it is today.
+        // ------------------------------------------------------------------------------------------
+        var entitlementsEnabled = !string.Equals(configuration["Auth:Mode"], "legacy", StringComparison.OrdinalIgnoreCase);
+        var strictViewer = configuration.GetValue("Auth:StrictViewer", true);
+        var policyCacheSeconds = configuration.GetValue("Auth:PolicyCacheSeconds", 10);
+
+        // Factory registrations, not AddSingleton<T>(): the IAccessPolicyFacade these depend on is
+        // registered by each host's own AddOrleansFacades/AddDaprFacades AFTER this method runs, and a
+        // factory is resolved lazily (and skipped by ValidateOnBuild) where an implementation-type
+        // descriptor would not be.
+        services.AddSingleton(sp => new PermissionResolver(
+            sp.GetRequiredService<StreamForge.Abstractions.IAccessPolicyFacade>(),
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<PermissionResolver>>(),
+            policyCacheSeconds));
+        services.AddSingleton(sp => new AccessGuard(sp.GetRequiredService<PermissionResolver>(), entitlementsEnabled));
+        services.AddSingleton<IAuthorizationHandler>(sp =>
+            new LegacyPolicyHandler(sp.GetRequiredService<AccessGuard>()));
+        services.AddSingleton<IAuthorizationHandler>(sp =>
+            new StrictViewerHandler(sp.GetRequiredService<AccessGuard>(), sp.GetRequiredService<PermissionResolver>(), strictViewer));
+
+        // The three policy NAMES are frozen, which is what keeps all 68 RequireAuthorization sites and
+        // all 30 gRPC [Authorize(Policy = …)] attributes compiling and behaving unchanged. RequireRole
+        // cannot appear here: ASP.NET AND-s a policy's requirements, and the entitlement and the legacy
+        // role have to satisfy it independently — hence one requirement carrying both halves.
         services.AddAuthorizationBuilder()
-            .AddPolicy("Viewer", p => p.RequireAuthenticatedUser())
-            .AddPolicy("Editor", p => p.RequireRole("Editor", "Admin"))
-            .AddPolicy("Admin", p => p.RequireRole("Admin"));
+            .AddPolicy("Viewer", p =>
+            {
+                p.RequireAuthenticatedUser();
+                p.AddRequirements(new StrictViewerRequirement());
+            })
+            .AddPolicy("Editor", p =>
+            {
+                // RequireAuthenticatedUser is additive but behaviourally neutral here: an anonymous
+                // principal already failed RequireRole today, and whether a request is answered 401 or
+                // 403 is decided by whether authentication succeeded, not by which requirement failed.
+                p.RequireAuthenticatedUser();
+                p.AddRequirements(new LegacyPolicyRequirement(
+                    LegacyPolicyPermissions.Editor,
+                    [StreamForge.Abstractions.BuiltInRoles.Editor, StreamForge.Abstractions.BuiltInRoles.Admin]));
+            })
+            .AddPolicy("Admin", p =>
+            {
+                p.RequireAuthenticatedUser();
+                p.AddRequirements(new LegacyPolicyRequirement(
+                    LegacyPolicyPermissions.Admin,
+                    [StreamForge.Abstractions.BuiltInRoles.Admin]));
+            });
+
+        // LegacyRoleMigration has to actually run, and this is the only registration point both hosts
+        // share. Deliberately registered in BOTH modes: the access document is what the user store
+        // mirrors roles into from here on, so letting it drift while someone is rolled back to `legacy`
+        // would make flipping the flag forward again a data-repair job rather than a restart. It never
+        // fails the host — see the service.
+        services.AddHostedService<AccessBootstrapService>();
 
         // Cors:AllowedOrigins (env: Cors__AllowedOrigins__0, __1, ...) extends/replaces the
         // dev-SPA default so an external console (e.g. an Office add-in or another web app)

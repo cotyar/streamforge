@@ -132,6 +132,41 @@ before a single enforcement site was migrated.
 `CatalogInitializationService`), so a `BackgroundService` sweeper is the one shape that works identically on
 a stack with no scheduler. Confirmed by reading the wiring, not by writing a throwaway service.
 
+### Wave 2 — the decisions the briefs left open, and one gap they exposed
+
+**The Admin policy is satisfied by `access.write`, not `user.write`.** `/api/users` is the only
+Admin-gated surface today, which makes `user.write` the obvious pick and the wrong one: whatever
+permission satisfies the Admin *policy* becomes the key to every Admin-gated route, including the
+`/api/access` routes. Under `user.write`, a narrowly intended "user administrator" role would silently
+gain the power to rewrite the entitlement document; under `access.write` that role is merely refused
+`/api/users` until wave 3 migrates the group to per-action guards. Over-granting and under-granting are
+not symmetric mistakes. `access.write` is also the honest reading of what Admin already meant: the
+entitlement from which every other one can be self-granted.
+
+**`Auth:Mode` defaults to `entitlements`.** The plan calls the flag a rollback, not an opt-in — `legacy`
+is what you set when something is wrong, which only makes sense if the feature is on. `Auth:StrictViewer`
+would also be dead configuration under a `legacy` default. Anything but the exact string `legacy`
+(case-insensitive) means entitlements, so a typo leaves enforcement **on**.
+
+**`Auth:StrictViewer` fails open in three cases**, deliberately: no snapshot (the store is unreachable),
+a document with zero roles (a pre-upgrade catalog whose migration has not run), and a user carrying
+direct grants or group membership but no role. It denies only a `Disabled` user or one whose every role
+name is absent from the document. Nothing pre-existing broke, because no test exercises the ASP.NET
+policies at all — `AuthorizationCoverageTests` reads metadata and never authorizes.
+
+**What the OR costs, stated plainly.** Because `Editor` is satisfied by `catalog.write` **OR** the legacy
+role claim, a user with an explicit `Deny` on `catalog.write` still passes the Editor policy while their
+token carries the legacy `Editor` role. A test pins exactly that. It is the price of no flag day and it
+disappears route by route as wave 3 migrates call sites to scoped guards; the same is true of the
+coarse policies asking at scope `*`, which means an entitlement scoped to `prod-*` does not satisfy them.
+Widening either would have defeated a Deny written at `*` — the one direction not worth going.
+
+**The gap wave 2 exposed: nothing mirrors a runtime role change.** Wave 0's note assigned the user
+store's mirror of `UserRecord.Role` into `UserAccessEntry.Roles` to wave 1, and it did not land there.
+`AccessBootstrapService` mirrors existing users once per start, so a user created or role-changed at
+runtime has no entry until the next restart and falls back to the token's role claim — safe, but it
+means "revocation lands in ~10s" is only half true. Wave 2-C owns closing it at the REST layer.
+
 `hasRole` survives, implemented on top of `can()` — **zero of the 57 `RoleGate` references changes at
 cut-over.** That is the whole no-flag-day answer. The SPA treats a missing `permissions[]` as an old server
 and falls back to today's ordinal semantics, so a rolling deploy is safe.

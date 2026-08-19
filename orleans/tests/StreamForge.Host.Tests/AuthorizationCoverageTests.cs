@@ -76,6 +76,287 @@ public class AuthorizationCoverageTests
         }
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // The table.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>The guard a route is expected to carry, as the canonical string
+    /// <see cref="GuardOf"/> renders. Not an enum: the whole point is that the expected and the actual
+    /// value are produced by two different mechanisms (a literal here, reflection over
+    /// <see cref="EndpointDataSource"/> there) and compared as text, so a drift reads as a diff.</summary>
+    private static class Guards
+    {
+        public const string Viewer = "Viewer";
+        public const string Editor = "Editor";
+        public const string Admin = "Admin";
+
+        /// <summary>Explicit <c>.AllowAnonymous()</c>.</summary>
+        public const string Anonymous = "anonymous";
+
+        /// <summary>Scalar's own embedded static assets under a <c>RequireAuthorization</c>'d prefix:
+        /// Scalar marks its asset routes AllowAnonymous, and AllowAnonymous wins, so the JS bundle is
+        /// public while the page and the document it fetches are not. Recorded, not "fixed" — the
+        /// assets are a stock UI bundle and carry nothing about this deployment.</summary>
+        public const string AnonymousAndViewer = "anonymous+Viewer";
+
+        /// <summary>Neither <c>IAuthorizeData</c> nor <c>IAllowAnonymous</c>. No fallback policy is
+        /// registered, so this is anonymous in effect — indistinguishable, from the outside, from
+        /// "somebody forgot". Only tolerated OUTSIDE <c>/api/</c>; inside it, the floor test below
+        /// fails.</summary>
+        public const string Unmarked = "(unmarked)";
+    }
+
+    /// <param name="Method">HTTP method(s), <c>|</c>-joined, or <c>(any)</c> for a route with no
+    /// <see cref="HttpMethodMetadata"/> (the SignalR hub).</param>
+    /// <param name="Pattern">The route pattern verbatim, trailing slash and all — <c>MapGroup("/api/x")
+    /// + MapGet("/")</c> really does produce <c>/api/x/</c>, and pinning what is mapped rather than what
+    /// is tidy is the point.</param>
+    /// <param name="Note">Why this row is what it is, for the rows where that is not obvious.</param>
+    private sealed record ExpectedRoute(string Method, string Pattern, string Guard, string? Note = null);
+
+    /// <summary>
+    /// Every route <see cref="StreamForgeApiExtensions.MapStreamForgeApi"/> maps, and the guard it is
+    /// expected to carry. Read off the map sites — every <c>Map{Get,Post,Put,Delete}</c> and
+    /// <c>MapGroup</c> under <c>shared/StreamForge.Api/Endpoints/**</c> and
+    /// <c>shared/StreamForge.Api/Chat/</c>, plus the Scalar loop, the <c>/healthz</c> pair and the hub in
+    /// <c>StreamForgeApiExtensions.cs</c> — not from memory.
+    ///
+    /// <para>Where a route is <c>MapGroup</c>-gated (<c>/api/users</c> is <c>RequireAuthorization("Admin")</c>
+    /// on the group) the group's policy is the row's guard, because that is what the endpoint's metadata
+    /// ends up carrying.</para>
+    ///
+    /// <para>This table is the REST half of the same specification
+    /// <c>StreamForge.AppCore.Tests/Access/LegacyEquivalenceMatrixTests.cs</c> states in terms of
+    /// entitlement actions. That one proves the evaluator answers what the policy answers; this one
+    /// proves the policy is still attached to the route.</para>
+    /// </summary>
+    private static readonly ExpectedRoute[] Expected =
+    [
+        // ---- liveness + auth ------------------------------------------------------------------
+        new("GET", "/healthz", Guards.Anonymous),
+        new("GET", "/api/healthz", Guards.Anonymous),
+        new("POST", "/api/auth/login", Guards.Anonymous),
+        new("POST", "/api/auth/logout", Guards.Anonymous),
+        new("GET", "/api/auth/me", Guards.Viewer),
+
+        // ---- sources ---------------------------------------------------------------------------
+        new("GET", "/api/sources/", Guards.Viewer),
+        new("GET", "/api/sources/{name}", Guards.Viewer),
+        new("GET", "/api/sources/{name}/proto", Guards.Viewer),
+        new("GET", "/api/sources/{name}/status", Guards.Viewer),
+        new("GET", "/api/sources/{name}/ingest", Guards.Viewer),
+        new("POST", "/api/sources/", Guards.Editor),
+        new("PUT", "/api/sources/{name}", Guards.Editor),
+        new("DELETE", "/api/sources/{name}", Guards.Editor),
+        new("POST", "/api/sources/{name}/ingest/keys", Guards.Editor),
+        new("GET", "/api/sources/{name}/ingest/keys", Guards.Editor),
+        new("DELETE", "/api/sources/{name}/ingest/keys/{id}", Guards.Editor),
+        new("POST", "/api/sources/schema/mapping-validate", Guards.Editor),
+        new("POST", "/api/sources/schema/derive-openapi", Guards.Editor),
+        new("POST", "/api/sources/schema/from-remote", Guards.Editor),
+        new("POST", "/api/sources/{name}/run", Guards.Editor),
+
+        // The one REST route that is anonymous ON PURPOSE at the metadata layer. Plan 009 A1.2: a
+        // telemetry producer holds an ingest key, not a JWT, so route-level authorization cannot express
+        // the requirement. The REAL gate is the manual dual check at the top of the handler in
+        // shared/StreamForge.Api/Endpoints/SourcesEndpoints.cs — IsAuthorizedToPushAsync: an Editor JWT
+        // (resolved through the REAL "Editor" policy via IAuthorizationService, so it cannot drift) OR a
+        // valid X-SF-Ingest-Key for THAT source. Do not "fix" this row by adding RequireAuthorization:
+        // that breaks every key-holding producer. See DualAuthPathsAreAnonymousAtTheMetadataLayer below,
+        // which pins both halves of the same decision.
+        new("POST", "/api/sources/{name}/events", Guards.Anonymous,
+            "deliberate: manual Editor-JWT-or-ingest-key dual check inside the handler (plan 009 A1.2)"),
+
+        // ---- pipelines -------------------------------------------------------------------------
+        new("GET", "/api/pipelines/", Guards.Viewer),
+        new("GET", "/api/pipelines/{id}", Guards.Viewer),
+        new("GET", "/api/pipelines/{id}/proto", Guards.Viewer),
+        new("GET", "/api/pipelines/{id}/plan", Guards.Viewer),
+        new("GET", "/api/pipelines/{id}/results", Guards.Viewer),
+        new("GET", "/api/pipelines/{id}/results.csv", Guards.Viewer),
+        new("GET", "/api/pipelines/{id}/metrics", Guards.Viewer),
+        new("POST", "/api/pipelines/", Guards.Editor),
+        new("PUT", "/api/pipelines/{id}", Guards.Editor),
+        new("DELETE", "/api/pipelines/{id}", Guards.Editor),
+        new("POST", "/api/pipelines/{id}/start", Guards.Editor),
+        new("POST", "/api/pipelines/{id}/stop", Guards.Editor),
+        new("POST", "/api/pipelines/validate", Guards.Editor),
+
+        // ---- tables ----------------------------------------------------------------------------
+        new("GET", "/api/tables/", Guards.Viewer),
+        new("GET", "/api/tables/{id}", Guards.Viewer),
+        new("GET", "/api/tables/{id}/plan", Guards.Viewer),
+        new("GET", "/api/tables/{id}/rows", Guards.Viewer),
+        new("GET", "/api/tables/{id}/rows.csv", Guards.Viewer),
+        new("GET", "/api/tables/{id}/metrics", Guards.Viewer),
+        new("GET", "/api/tables/{id}/proto", Guards.Viewer),
+        new("GET", "/api/tables/{id}/search", Guards.Viewer),
+        new("POST", "/api/tables/{id}/history/lookup", Guards.Viewer),
+        new("GET", "/api/tables/{id}/history/stats", Guards.Viewer),
+        new("POST", "/api/tables/{id}/shard/lookup", Guards.Viewer),
+        new("GET", "/api/tables/{id}/shards", Guards.Viewer),
+        new("GET", "/api/tables/{id}/shards/scan", Guards.Viewer),
+        new("POST", "/api/tables/", Guards.Editor),
+        new("PUT", "/api/tables/{id}", Guards.Editor),
+        new("DELETE", "/api/tables/{id}", Guards.Editor),
+        new("POST", "/api/tables/{id}/start", Guards.Editor),
+        new("POST", "/api/tables/{id}/stop", Guards.Editor),
+        new("POST", "/api/tables/validate", Guards.Editor),
+
+        // ---- users (the WHOLE group is Admin, on the MapGroup) -----------------------------------
+        new("GET", "/api/users/", Guards.Admin),
+        new("POST", "/api/users/", Guards.Admin),
+        new("PUT", "/api/users/{username}", Guards.Admin),
+        new("DELETE", "/api/users/{username}", Guards.Admin),
+
+        // ---- config, chat ------------------------------------------------------------------------
+        new("GET", "/api/config/export", Guards.Viewer),
+        new("POST", "/api/config/import", Guards.Editor),
+        new("POST", "/api/chat/", Guards.Editor),
+
+        // ---- platform metadata ---------------------------------------------------------------------
+        new("GET", "/api/meta/protos/static", Guards.Viewer),
+        new("GET", "/api/meta/grpc", Guards.Viewer),
+        new("GET", "/api/meta/arrangements", Guards.Viewer),
+        new("GET", "/api/transports", Guards.Viewer),
+        new("POST", "/api/transports/{kind}/probe", Guards.Editor),
+        new("GET", "/api/sql/functions", Guards.Viewer),
+
+        // ---- per-entity OpenAPI documents (EntityOpenApiEndpoints.RouteSuffix) ----------------------
+        new("GET", "/api/tables/{id}/openapi.json", Guards.Viewer),
+        new("GET", "/api/pipelines/{id}/openapi.json", Guards.Viewer),
+        new("GET", "/api/sources/{name}/openapi.json", Guards.Viewer),
+
+        // ---- SignalR ---------------------------------------------------------------------------------
+        // [Authorize(Policy = "Viewer")] on StreamHub itself, which is why both the connection route and
+        // the negotiate route carry it. No HttpMethodMetadata on either.
+        new("(any)", "/hubs/stream", Guards.Viewer),
+        new("(any)", "/hubs/stream/negotiate", Guards.Viewer),
+
+        // ---- OpenAPI document + the whole-application Scalar page ------------------------------------
+        // Unmarked, i.e. anonymous in effect. Outside /api/, so the floor test does not reach them; noted
+        // rather than silently accepted, since the document does describe the whole surface.
+        new("GET", "/openapi/{documentName}.json", Guards.Unmarked,
+            "unmarked = anonymous in effect; the app-wide OpenAPI document is public"),
+        new("GET", "/scalar/{documentName?}", Guards.Unmarked, "the app-wide Scalar page; public"),
+        new("GET", "/scalar/favicon.svg", Guards.Anonymous),
+        new("GET", "/scalar/scalar.js", Guards.Anonymous),
+        new("GET", "/scalar/scalar.aspnetcore.js", Guards.Anonymous),
+
+        // ---- the per-entity Scalar loop (3 iterations x 4 routes each) --------------------------------
+        // The PAGE is Viewer-gated (satisfied by the DocsAuthCookie, since Scalar cannot send a header);
+        // the three static assets Scalar maps under the same prefix are its own AllowAnonymous bundle
+        // routes, and AllowAnonymous wins over the group's RequireAuthorization.
+        new("GET", "/scalar/tables/{id}/{documentName?}", Guards.Viewer),
+        new("GET", "/scalar/tables/{id}/favicon.svg", Guards.AnonymousAndViewer),
+        new("GET", "/scalar/tables/{id}/scalar.js", Guards.AnonymousAndViewer),
+        new("GET", "/scalar/tables/{id}/scalar.aspnetcore.js", Guards.AnonymousAndViewer),
+        new("GET", "/scalar/pipelines/{id}/{documentName?}", Guards.Viewer),
+        new("GET", "/scalar/pipelines/{id}/favicon.svg", Guards.AnonymousAndViewer),
+        new("GET", "/scalar/pipelines/{id}/scalar.js", Guards.AnonymousAndViewer),
+        new("GET", "/scalar/pipelines/{id}/scalar.aspnetcore.js", Guards.AnonymousAndViewer),
+        new("GET", "/scalar/sources/{name}/{documentName?}", Guards.Viewer),
+        new("GET", "/scalar/sources/{name}/favicon.svg", Guards.AnonymousAndViewer),
+        new("GET", "/scalar/sources/{name}/scalar.js", Guards.AnonymousAndViewer),
+        new("GET", "/scalar/sources/{name}/scalar.aspnetcore.js", Guards.AnonymousAndViewer),
+    ];
+
+    /// <summary>The canonical rendering of what a route's metadata actually says. Explicit
+    /// <c>AllowAnonymous</c> first, then every authorize policy in metadata order — so a route that is
+    /// BOTH (Scalar's asset routes under a gated prefix) renders as both rather than hiding one.</summary>
+    private static string GuardOf(RouteEndpoint endpoint)
+    {
+        var parts = new List<string>();
+        if (endpoint.Metadata.GetMetadata<IAllowAnonymous>() is not null)
+        {
+            parts.Add(Guards.Anonymous);
+        }
+
+        parts.AddRange(endpoint.Metadata.GetOrderedMetadata<IAuthorizeData>()
+            .Select(a => string.IsNullOrEmpty(a.Policy) ? "authenticated" : a.Policy!));
+
+        return parts.Count == 0 ? Guards.Unmarked : string.Join("+", parts);
+    }
+
+    private static string KeyOf(RouteEndpoint endpoint)
+    {
+        var methods = endpoint.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods;
+        var method = methods is null || methods.Count == 0 ? "(any)" : string.Join("|", methods);
+        return $"{method} /{endpoint.RoutePattern.RawText?.TrimStart('/')}";
+    }
+
+    [Fact]
+    public void TheAuthorizationSurfaceMatchesThePinnedTableExactly()
+    {
+        var actual = BuildEndpoints().OfType<RouteEndpoint>()
+            .ToDictionary(KeyOf, GuardOf, StringComparer.Ordinal);
+        var expected = Expected.ToDictionary(
+            r => $"{r.Method} {r.Pattern}", r => r, StringComparer.Ordinal);
+
+        var problems = new List<string>();
+
+        foreach (var (key, guard) in actual.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+        {
+            if (!expected.TryGetValue(key, out var row))
+            {
+                problems.Add(
+                    $"NEW ROUTE, no table row: '{key}' is mapped with guard '{guard}'. Nobody has decided " +
+                    "what it should be guarded by. Add a row to AuthorizationCoverageTests.Expected " +
+                    "stating the policy you intend, then make sure the map site agrees.");
+            }
+            else if (!string.Equals(row.Guard, guard, StringComparison.Ordinal))
+            {
+                problems.Add(
+                    $"GUARD DRIFTED on '{key}': the table says '{row.Guard}', the route now carries " +
+                    $"'{guard}'. Either the RequireAuthorization/AllowAnonymous at the map site changed " +
+                    "and the table must follow, or the change was an accident and the map site must be " +
+                    "put back." + (row.Note is null ? "" : $" Row note: {row.Note}"));
+            }
+        }
+
+        foreach (var key in expected.Keys.Except(actual.Keys, StringComparer.Ordinal)
+                     .OrderBy(k => k, StringComparer.Ordinal))
+        {
+            problems.Add(
+                $"ROUTE GONE: the table expects '{key}' (guard '{expected[key].Guard}') but nothing maps " +
+                "it. If it was renamed or removed on purpose, update the table; if it vanished by " +
+                "accident, an authorization-relevant route just stopped existing.");
+        }
+
+        Assert.True(problems.Count == 0,
+            $"The mapped authorization surface no longer matches the table pinned in " +
+            $"{nameof(AuthorizationCoverageTests)}.{nameof(Expected)} " +
+            $"({expected.Count} rows expected, {actual.Count} routes mapped):\n\n  "
+            + string.Join("\n\n  ", problems));
+    }
+
+    /// <summary>
+    /// The two ingest paths are AllowAnonymous at the metadata layer on purpose (plan 009 A1.2) and the
+    /// real check is a manual dual check inside the handler. Pinned here so that "this route has no
+    /// policy" reads as a decision and not as an omission, on both halves at once: the REST route's
+    /// metadata, and the gRPC service's absent <c>[Authorize]</c>.
+    /// </summary>
+    [Fact]
+    public void DualAuthPathsAreAnonymousAtTheMetadataLayer()
+    {
+        var events = BuildEndpoints().OfType<RouteEndpoint>()
+            .Single(e => KeyOf(e) == "POST /api/sources/{name}/events");
+
+        Assert.Equal(Guards.Anonymous, GuardOf(events));
+        Assert.Empty(events.Metadata.GetOrderedMetadata<IAuthorizeData>());
+
+        // The gRPC twin. It never reaches an EndpointDataSource here (this test maps no gRPC services),
+        // so it is pinned by reflection instead: IngestGrpcService.Ingest must carry NO [Authorize],
+        // because it authorizes PER MESSAGE — request.SourceName travels on every message and an ingest
+        // key only ever authorizes one source. Its real gate is IsAuthorizedAsync in
+        // orleans/src/StreamForge.Host/Grpc/IngestGrpcService.cs, which resolves the same "Editor" policy
+        // through IAuthorizationService, exactly as the REST route does.
+        var grpc = typeof(StreamForge.Host.Grpc.IngestGrpcService);
+        Assert.Empty(grpc.GetCustomAttributes(typeof(AuthorizeAttribute), inherit: true));
+        Assert.Empty(grpc.GetMethod(nameof(StreamForge.Host.Grpc.IngestGrpcService.Ingest))!
+            .GetCustomAttributes(typeof(AuthorizeAttribute), inherit: true));
+    }
+
     [Fact]
     public void EveryApiEndpointIsEitherAuthorizedOrExplicitlyAnonymous()
     {
