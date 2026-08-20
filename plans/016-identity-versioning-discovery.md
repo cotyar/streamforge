@@ -189,6 +189,7 @@ half nobody can act on later.
 | 3-B | `e778d39` | Planner uses the compiler for NEW entities and persisted inputs for existing ones; missing-dependency diagnostics; `dependsOn` through export/import mapping. |
 | 3-C | `113d444` | Fatal cycles naming the full chain; the `schemaPolicy` gate; the `dependsOn` mapping the import service was missing; and `ConfigComposer.MergeDocs` carrying document-level scalars at all. |
 | — | `7b83410` | Follow-up: the FROM-regex fallback deleted and the unparseable `"TABLE AS SELECT …"` fixtures fixed. A declared behaviour change — those expectations were not testing the behaviour they claimed to. |
+| 5 | `23538a8` `247fdab` `c6d28d7` `15c3a9e` | The discovery headline. `GET /api/meta/instance` (anonymous, like `/healthz`), `/api/meta/peers` + a probe, a static `PeerDirectory` configured from `Discovery:Peers`, an instance id persisted at `{DataDir}/instance.json`; `GrpcSubConfig.Peer` resolved fresh at every (re)connect; `table:<name>` federation; the admin token store keyed per instance; the console can name a peer. **Gate met: two live instances, the consumer's source carrying `peer: "producer"` + `entityKey: "table:positions"` and no address and no GUID, ingesting 79 events.** |
 
 ## Found and deliberately not fixed
 
@@ -217,6 +218,35 @@ argument rather than rediscovering the symptom.
   can never resolve. A false negative, mirroring the regex it replaced.
 - **Exports carry `revision`/`schemaRevision` on sources** — harmless (comparison strips them) but visible
   to a document reader.
+- **`GET /api/meta/instance` is anonymous and reports a version, a flavor and connector-kind names.**
+  That is the endpoint's purpose — a peer probes it before it holds any credential — but it is a real
+  widening of what an unauthenticated caller learns about a deployment. The line drawn is entity
+  *counts* and *kind* names, never entity names; a test asserts no fixture entity's name reaches the
+  warnings even though every fixture entity is deliberately in a warning state. An operator who wants
+  the endpoint gated has no switch for it today.
+- **A peer probe is an outbound request a Viewer can trigger.** Only to a configured peer's configured
+  address, chosen by whoever wired the host, so it is not an open redirect — but it is the first route
+  in this codebase where a read-scoped caller causes the server to dial out.
+- **`PeerDirectory` is process-wide static and never expires an entry.** A probe result stays until the
+  next probe. That is the "not an HA service registry" ceiling the plan asked for, stated where it is
+  felt: nothing in this wave notices a peer that went away.
+- **The Dapr flavor writes `instance.json` into a `DataDir` it otherwise does not use.** Its state lives
+  in Redis; this one file does not. Deleting that directory silently gives the instance a new identity,
+  which is correct for Orleans (that IS the documented reseed) and merely arbitrary for Dapr.
+
+### Wave 5, in the plan's own terms
+
+The plan promised `IPeerDirectory` with `StaticPeerDirectory` as its first implementation. Shipped as one
+static class, `PeerDirectory`, for the reason `InboundTransports`' class doc already writes down: the
+consumer that needs a peer most is the federated `grpc` source, whose driver is an Orleans grain / Dapr
+actor constructed by runtime machinery whose DI container is **not** the host's. The interface earns its
+keep when the heartbeat variant exists; extracting one then is a ten-line change.
+
+The other honest surprise is how little `table:<name>` cost. Wave 1 had already made the remote's
+`GET /api/{tables|pipelines}/{id}` routes id-or-name, and `GrpcSubscriberCore` was *already* making that
+exact round trip to turn an id into the display name reflection needs. So the feature the plan called
+"where name resolution and discovery meet" was, mechanically, already there — what was missing was error
+text: a 404 and wave 1's ambiguity 409 both fell into `EnsureSuccessStatusCode`'s generic sentence.
 
 ## Environment note, corrected
 
@@ -224,3 +254,12 @@ An agent reported that the documented `--Http:Port` isolated-instance recipe "re
 after the first connection" on this machine and switched to `--urls`. **Not reproducible** — 12/12
 sequential requests succeeded against an instance started exactly the documented way, and every other
 live check in this plan used it without incident. The documented recipe stands.
+
+**Reported a second time in wave 5**, by a different agent, with a symptom string the first report did
+not have: `SocketAddress is an invalid size`. Still not reproducible here — wave 5's own gate ran **two**
+instances started exactly the documented way, side by side, through roughly four minutes and several
+dozen requests including a live gRPC federation between them, with no fault. So: two agents have hit it,
+two orchestrator attempts have not. The recipe stays documented, and the symptom string is written down
+here so the next person who hits it can recognise it rather than rediscover it. If it recurs, the thing
+to capture is whether other instances were already bound on this machine at the time — that is the
+variable the two failing runs and the two clean ones most obviously differ on.
