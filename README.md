@@ -36,6 +36,7 @@ docker compose -f deploy/orleans/compose.yaml up   # console on http://localhost
 Or from source (needs the .NET 10 SDK and [bun](https://bun.sh)):
 
 ```bash
+git submodule update --init            # external/ycs — the Yjs CRDT port; the build needs it
 cd web && bun install && bun run build && cd ..
 dotnet run --project orleans/src/StreamForge.Host   # http://localhost:5199
 ```

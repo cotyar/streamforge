@@ -1,0 +1,4 @@
+[submodule "external/ycs"]
+	path = external/ycs
+	url = https://github.com/cotyar/ycs.git
+	branch = parity-yjs-13.6.32

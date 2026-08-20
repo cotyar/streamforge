@@ -27,13 +27,13 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{0AB3BF05
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamForge.Dapr.Tests", "tests\StreamForge.Dapr.Tests\StreamForge.Dapr.Tests.csproj", "{AD74C069-D0FF-47B3-9F28-448127CC51D2}"
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "shared", "shared", "{4F52FD11-658E-A102-6CD3-7D7C16FFA15B}"
-EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamForge.Quant", "..\shared\StreamForge.Quant\StreamForge.Quant.csproj", "{194CBE34-BA34-4D82-98E9-F66F63B5D7FB}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamForge.Quant.Tests", "..\shared\StreamForge.Quant.Tests\StreamForge.Quant.Tests.csproj", "{4FF07CBB-5CC9-4805-A05F-41CAF2F485AB}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamForge.AppCore.Tests", "..\shared\StreamForge.AppCore.Tests\StreamForge.AppCore.Tests.csproj", "{BB6D0263-F248-4CFE-A2F4-C975C37EB0CE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamForge.Connectors.Crdt.Tests", "..\shared\StreamForge.Connectors.Crdt.Tests\StreamForge.Connectors.Crdt.Tests.csproj", "{9B491453-AAD5-470D-AE00-D87F28DD3E6D}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -201,6 +201,18 @@ Global
 		{BB6D0263-F248-4CFE-A2F4-C975C37EB0CE}.Release|x64.Build.0 = Release|Any CPU
 		{BB6D0263-F248-4CFE-A2F4-C975C37EB0CE}.Release|x86.ActiveCfg = Release|Any CPU
 		{BB6D0263-F248-4CFE-A2F4-C975C37EB0CE}.Release|x86.Build.0 = Release|Any CPU
+		{9B491453-AAD5-470D-AE00-D87F28DD3E6D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9B491453-AAD5-470D-AE00-D87F28DD3E6D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9B491453-AAD5-470D-AE00-D87F28DD3E6D}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{9B491453-AAD5-470D-AE00-D87F28DD3E6D}.Debug|x64.Build.0 = Debug|Any CPU
+		{9B491453-AAD5-470D-AE00-D87F28DD3E6D}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{9B491453-AAD5-470D-AE00-D87F28DD3E6D}.Debug|x86.Build.0 = Debug|Any CPU
+		{9B491453-AAD5-470D-AE00-D87F28DD3E6D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9B491453-AAD5-470D-AE00-D87F28DD3E6D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9B491453-AAD5-470D-AE00-D87F28DD3E6D}.Release|x64.ActiveCfg = Release|Any CPU
+		{9B491453-AAD5-470D-AE00-D87F28DD3E6D}.Release|x64.Build.0 = Release|Any CPU
+		{9B491453-AAD5-470D-AE00-D87F28DD3E6D}.Release|x86.ActiveCfg = Release|Any CPU
+		{9B491453-AAD5-470D-AE00-D87F28DD3E6D}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

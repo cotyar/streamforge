@@ -139,6 +139,10 @@ the `/sf-env` skill; per-wave outcomes and the found-and-not-fixed list at the e
 
 ## Build / test / run
 
+One git submodule, `external/ycs` (plan 020): a fresh clone must run `git submodule update --init`
+or **both solutions fail to build** — `StreamForge.Connectors.Crdt.Tests` ProjectReferences it. It is
+pinned to the fork's `parity-yjs-13.6.32` branch, NOT `main`; see that project's csproj for why.
+
 ```bash
 ~/.dotnet/dotnet build orleans/StreamForge.sln
 ~/.dotnet/dotnet test  orleans/StreamForge.sln     # 2424 tests — the whole suite must be green

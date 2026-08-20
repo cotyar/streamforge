@@ -237,3 +237,55 @@ that intuition about this platform's memory is wrong.
    protocol is a second seam and should wait until the first one has a user.
 7. **A document browser in the console.** The projected table is already viewable; a raw-document inspector
    is a debugging tool nobody has asked for yet.
+
+---
+
+## Wave outcomes
+
+### Wave A · Vendoring — DONE (2026-08-20)
+
+**D10 is overruled: a git submodule, not a NuGet package.** The plan said "a pinned version from GitHub
+Packages built from the fork". There is no such package and there was no way to make one without acting
+on somebody's GitHub account: `cotyar/ycs` has **zero releases**, nothing is published to nuget.org
+(searched), and listing GitHub Packages needs a `read:packages` scope the local token does not carry.
+D10's stated goals — a clean boundary and an upgrade that is one line — are met by a submodule pinned to
+a commit just as well; what is lost is that a fresh clone must now run `git submodule update --init` or
+both solutions fail to build, which is written into `README.md` and `AGENTS.md`. If the package ever gets
+published, going back is a one-line csproj change.
+
+**The pin is a branch, and the branch matters.** `external/ycs` is held at `75a815c` on
+**`parity-yjs-13.6.32`**, not `main`. This was nearly a silent trap: `main` carries only the v2 update
+encoding and has neither `UpdateOperations` (`MergeUpdates` / `DiffUpdate` / `EncodeStateVectorFromUpdate`
+/ `DecodeUpdate` / `ParseUpdateMeta`) nor `PermanentUserData`. **Wave C compacts its update log with
+`MergeUpdates` and wave D inspects updates with `DecodeUpdate` before merging** — on `main` neither wave
+can be written at all. The plan's own dependency paragraph describes the parity branch's contents while
+naming the repository, so a reader would reasonably have cloned `main` and discovered this two waves in.
+
+**What the fork already does, so this wave did not redo it:** 274 tests green on that branch, an
+`interop/` harness that round-trips against the published `yjs@13.6.32` *and* `yjs@14.0.0-16` packages
+through Node, and real-Yjs updates pinned as base64 fixtures inside its own test project. Wave A's brief
+asked for "a test that round-trips a v1 update through Ycs and asserts the bytes match a fixture produced
+by real Yjs" — that test already exists upstream, and duplicating it here would be re-testing somebody
+else's library.
+
+So `shared/StreamForge.Connectors.Crdt.Tests/YcsPinTests.cs` (4 tests) tests **the pin** instead:
+- a v1 update produced by real Yjs decodes to the expected values, nested Y-types included;
+- re-encoding converges to the same document — byte equality is deliberately **not** asserted, because
+  Yjs guarantees no such thing across versions and pinning it would turn a legal encoder change into a
+  red suite;
+- `MergeUpdates` and `DecodeUpdate` are called, so a submodule bumped onto `main` fails **here** rather
+  than in wave C;
+- **D7's idempotence** is asserted directly: applying the same update three times leaves the encoded
+  state identical to after the first. It is the property the entire store-and-forward design rests on and
+  it costs four lines to pin.
+
+**No empty library was created.** Wave B owns `shared/StreamForge.Connectors.Crdt`; until it exists the
+test project references `external/ycs/src/Ycs/Ycs.csproj` directly. `Ycs.csproj` is deliberately **not**
+listed in either solution — a `ProjectReference` builds only its `net10.0` target, whereas a solution
+entry would build all three (`netstandard2.0`, `net8.0`, `net10.0`) on every build forever.
+
+**One dependency fact worth knowing:** Ycs pulls `Newtonsoft.Json`. On `main` that is `12.0.3`, which
+carries a known high-severity advisory (`NU1903`); the parity branch bumps it to `13.0.3`, which is
+clean. A third reason the branch pin is the right one.
+
+Gates: `dotnet build` green on both solutions; `YcsPinTests` 4/4.

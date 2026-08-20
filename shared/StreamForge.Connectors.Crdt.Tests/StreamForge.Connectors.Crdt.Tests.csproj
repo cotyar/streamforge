@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="xunit" Version="2.9.*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Plan 020 wave A — THE PIN. Ycs is a git submodule at external/ycs, held at the
+         `parity-yjs-13.6.32` branch, NOT at `main`: main is v2-encoding-only and has no
+         UpdateOperations (MergeUpdates/DiffUpdate/EncodeStateVectorFromUpdate/DecodeUpdate) and no
+         PermanentUserData, which waves C and D are built on. YcsPinTests asserts that, so a submodule
+         bumped onto the wrong branch fails HERE rather than three waves later.
+
+         Wave B adds shared/StreamForge.Connectors.Crdt and this reference moves behind it. Until then
+         the test project references Ycs directly rather than creating an empty library to hold it. -->
+    <ProjectReference Include="..\..\external\ycs\src\Ycs\Ycs.csproj" />
+  </ItemGroup>
+</Project>

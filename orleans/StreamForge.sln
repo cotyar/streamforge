@@ -37,6 +37,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamForge.Quant.Tests", "
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamForge.AppCore.Tests", "..\shared\StreamForge.AppCore.Tests\StreamForge.AppCore.Tests.csproj", "{B4300C50-70F0-47B1-848E-E491AD17DE66}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamForge.Connectors.Crdt.Tests", "..\shared\StreamForge.Connectors.Crdt.Tests\StreamForge.Connectors.Crdt.Tests.csproj", "{AE1D27AF-D937-4A40-B479-4D0F59F5C399}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -227,6 +229,18 @@ Global
 		{B4300C50-70F0-47B1-848E-E491AD17DE66}.Release|x64.Build.0 = Release|Any CPU
 		{B4300C50-70F0-47B1-848E-E491AD17DE66}.Release|x86.ActiveCfg = Release|Any CPU
 		{B4300C50-70F0-47B1-848E-E491AD17DE66}.Release|x86.Build.0 = Release|Any CPU
+		{AE1D27AF-D937-4A40-B479-4D0F59F5C399}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AE1D27AF-D937-4A40-B479-4D0F59F5C399}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AE1D27AF-D937-4A40-B479-4D0F59F5C399}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{AE1D27AF-D937-4A40-B479-4D0F59F5C399}.Debug|x64.Build.0 = Debug|Any CPU
+		{AE1D27AF-D937-4A40-B479-4D0F59F5C399}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{AE1D27AF-D937-4A40-B479-4D0F59F5C399}.Debug|x86.Build.0 = Debug|Any CPU
+		{AE1D27AF-D937-4A40-B479-4D0F59F5C399}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AE1D27AF-D937-4A40-B479-4D0F59F5C399}.Release|Any CPU.Build.0 = Release|Any CPU
+		{AE1D27AF-D937-4A40-B479-4D0F59F5C399}.Release|x64.ActiveCfg = Release|Any CPU
+		{AE1D27AF-D937-4A40-B479-4D0F59F5C399}.Release|x64.Build.0 = Release|Any CPU
+		{AE1D27AF-D937-4A40-B479-4D0F59F5C399}.Release|x86.ActiveCfg = Release|Any CPU
+		{AE1D27AF-D937-4A40-B479-4D0F59F5C399}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
