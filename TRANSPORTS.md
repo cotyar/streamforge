@@ -729,6 +729,39 @@ validator in TypeScript that drifts from the first.
 
 ---
 
+## Named external endpoints (`@name`)
+
+Plan 016 wave 6. Any config field holding a host, URL or connection string can be authored as `@name`
+instead of a literal — the **whole** value, never a substring (`nats://user@host:4222` is left exactly as
+written; only a value that is *entirely* `@` + a name counts). `NamedEndpoints.Resolve(value)`
+(`shared/StreamForge.AppCore/Discovery/NamedEndpoints.cs`) turns it into whatever this environment has
+configured under `Endpoints:<name>` — read once at host startup from `--Endpoints:<name>=…` /
+`Endpoints__NAME` / an `Endpoints` object in `appsettings.json`, never from the catalog — and throws a
+message naming both the missing endpoint and every name this environment does know. `TryResolve` is the
+same lookup without throwing, for the one caller (`ConfigImportService`) that has to keep going and report
+a warning instead of aborting.
+
+**A new transport that dials out wires this in itself.** It is not free from `IInboundTransport` /
+`ISinkTransport` / `IPolledTransport` the way secret masking or eligibility filtering is, because only the
+transport knows which of its own fields are endpoint-shaped. The six existing call sites are the pattern to
+copy — one `NamedEndpoints.Resolve(...)` call each, right where the literal would otherwise be handed to the
+client library, so a `@name` reference is indistinguishable from a resolved literal by the time it reaches
+the wire: the `url` poll driver (both flavors' connector grain/actor, on `ConnectorConfig.Url`),
+`NatsConnectionSettings` (`Url`), `HttpSinkClient` (`Url`), `GrpcPeerResolver` (`Address`/`RestAddress`,
+on the branch that has no `Peer` set — see below), both SQL dialects' `CreateConnection` (`Host`/
+`ConnectionString`), and the FIX session builder (`Host`).
+
+**Resolve at connect time, never at validate/save time.** A document imported into an environment that
+doesn't (yet) have the name configured must still import — only dialing fails. Resolving early (inside
+`Validate()`, say) would reject an otherwise-portable document on the wrong environment for the wrong
+reason.
+
+**Not masked.** `GET /api/meta/endpoints` (Viewer) returns every configured name's *value*, in the clear —
+a connection string put behind a name carries its credential exactly as configured. Say so in your new
+kind's own docs if its endpoint-shaped field is the sort that might hold one.
+
+---
+
 ## Transports whose client library cannot ship in this repo
 
 TIBCO Rendezvous is the motivating case: `TIBCO.Rendezvous` is not on public NuGet — it ships with a
@@ -758,6 +791,12 @@ opaque-payload family (NATS today; RV, MQTT, AMQP, Kafka next); `IPolledTranspor
 pull-shaped family covered above (postgres/mssql/postgres-cdc/mssql-cdc today) — between the two, most
 future ingress kinds fit one or the other.
 
+**Plan 016 wave 5 added `GrpcSubConfig.Peer`**: a configured peer NAME, resolved by `GrpcPeerResolver` at
+each (re)connect and winning over `Address`/`RestAddress` when set — see
+[Federated addressing](orleans/docs/index.html#discovery-federation) for the discovery side of this. It
+lives entirely inside the branch above; the seam itself — still its own thing, still not
+`IInboundTransport` — is unchanged.
+
 **The registries are static lists, not DI discovery.** Assembly scanning would buy nothing — transports are
 compile-time known — and both connector drivers are constructed by runtime machinery (an Orleans grain, a
 Dapr actor) whose container is not the host's; injecting a registry into a grain has already broken this
@@ -768,6 +807,9 @@ repo's test cluster once. `Register()` covers the out-of-tree case above.
 ## Checklist
 
 - [ ] Config class with the next free `[Id(n)]`, `[Secret]` on every credential, nothing else marked
+- [ ] Every host/URL/connection-string field routed through `NamedEndpoints.Resolve` at connect time (see
+      [Named external endpoints](#named-external-endpoints-name) above) — skip only if the kind genuinely
+      dials nothing external
 - [ ] `IInboundTransport` / `ISinkTransport` implemented, including `Describe()` — **or**, for a pull-shaped
       kind, `IPolledTransport` (plus `ISchemaProbe` if it can discover its own schema)
 - [ ] Registered in `InboundTransports` / `SinkTransports` / `PolledTransports` (or from host startup, if

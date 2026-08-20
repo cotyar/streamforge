@@ -227,6 +227,8 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#rbac-approvals" class="sub">Approvals</a>
   <a href="#rbac-audit" class="sub">Audit log</a>
   <a href="#api">REST API</a>
+  <a href="#api-naming" class="sub">Id-or-name resolution</a>
+  <a href="#api-revisions" class="sub">Revisions &amp; schema compat.</a>
   <a href="#grpc">gRPC &amp; typed clients</a>
   <a href="#grpc-reflection" class="sub">Dynamic reflection</a>
   <a href="#grpc-codegen" class="sub">Typed client codegen</a>
@@ -238,10 +240,17 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#connectors-openapi" class="sub">OpenAPI derivation</a>
   <a href="#connectors-files" class="sub">File &amp; folder sources</a>
   <a href="#connectors-grpc" class="sub">gRPC federation</a>
+  <a href="#connectors-endpoints" class="sub">Named external endpoints</a>
   <a href="#connectors-secrets" class="sub">Secrets-lite</a>
+  <a href="#discovery">Instance discovery &amp; federation</a>
+  <a href="#discovery-instance" class="sub">Instance identity</a>
+  <a href="#discovery-peers" class="sub">Peer directory</a>
+  <a href="#discovery-federation" class="sub">Federated addressing</a>
   <a href="#config">Configuration import/export</a>
   <a href="#config-format" class="sub">Document format</a>
   <a href="#config-compose" class="sub">Compose &amp; merge rules</a>
+  <a href="#config-deps" class="sub">Dependency pins</a>
+  <a href="#config-requires" class="sub">Connector version requirements</a>
   <a href="#config-import" class="sub">Import modes</a>
   <a href="#aichat">AI control chat</a>
   <a href="#deploy">Deployment &amp; admin</a>
@@ -620,6 +629,23 @@ Row history is enabled in <code>LastN(8)</code> mode, so clicking a row in the c
 <tr><td><code>/api/approvals</code> · <code>/{id}/approve</code> · <code>/reject</code> · <code>/cancel</code></td><td class="pill mut">POST</td><td><span class="pill viewer">V</span></td><td>File a request; vote (needs <code>approval.decide</code> + approver-group membership, never your own request); withdraw your own</td></tr>
 <tr><td><code>/api/audit/days</code> · <code>/api/audit/{yyyyMMdd}?actor=&amp;action=&amp;includeChanges=</code></td><td class="pill get">GET</td><td><span class="pill admin">A</span></td><td>Which days have rows · one day's page with <code>truncated</code> — see <a href="#rbac-audit">Audit log</a></td></tr>
 </tbody></table></div>
+
+<h3 id="api-naming">Id-or-name resolution</h3>
+<p>Every read route under <code>/api/{sources|pipelines|tables}/{key}</code> accepts either the entity's ordinal <b>Id</b> or its exact <b>Name</b> — an id match wins outright, otherwise an exact name match. Matching is ordinal (case-sensitive, no prefix, no fuzzy) — the same rule the SQL namespace itself uses internally, so <code>GET /api/tables/Trades</code> and <code>FROM Trades</code> can never disagree about which table that is. Sources have no id at all — the name <i>is</i> the key, everywhere from the REST route to the stream to the SQL namespace — and a source can never be renamed.</p>
+<pre><code>curl localhost:5199/api/tables/positions      -H "Authorization: Bearer $TOKEN"   # by name -> 200
+curl localhost:5199/api/tables/no-such-table  -H "Authorization: Bearer $TOKEN"   # -> 404
+curl -X PUT localhost:5199/api/tables/positions -H "Authorization: Bearer $TOKEN" -d '{...}'  # -> 404</code></pre>
+<p>Zero or one match behaves as you'd expect (404 / 200). <b>Two or more entities sharing a name is 409</b>, not 404 (which would claim the entity doesn't exist) and not a silent pick of the first match — the body names every candidate id: <code>{"error": "2 pipelines are named 'dup_name' — address one by id: id1, id2"}</code>. gRPC maps the identical outcome to <code>FailedPrecondition</code>, never <code>NotFound</code>.</p>
+<div class="callout"><b>Only <code>GET</code> is id-or-name.</b> <code>PUT</code>/<code>DELETE</code>/<code>/start</code>/<code>/stop</code> resolve by exact <b>id</b> only, on every entity kind — a name a <code>GET</code> happily resolves 404s on a mutation to the identical URL, as the third line above shows. Deciding what an ambiguous name should do on a write was scoped out on purpose; fetch the id first for anything that mutates.</div>
+<p><b>Renaming</b> is asymmetric by design. A table's <code>PUT</code> may change <code>name</code> only while it is <code>Stopped</code>, carries no <code>shardBy</code>, and appears in no other table's inputs — the three ways a rename would otherwise strand something (a running query mid-flight, a sharded tier keyed by the old name, a dependent's <code>FROM oldname</code>); verified live — a Stopped, unsharded, unreferenced table renamed cleanly, and its old name 404s immediately afterward. Pipeline names are enforced <b>unique going forward</b> at create/rename time (<code>409 "Name 'x' is already used by another pipeline"</code>); a catalog with pre-existing duplicate pipeline names (legal before this) keeps working and surfaces in <code>catalogWarnings</code> on <a href="#discovery-instance"><code>/api/meta/instance</code></a> rather than refusing to boot.</p>
+
+<h3 id="api-revisions">Revisions &amp; schema compatibility</h3>
+<p>Every source, pipeline and table carries two registry-assigned counters — read-only over the API, never client-settable. <code>revision</code> bumps on <b>any</b> definition change. <code>schemaRevision</code> — sources and tables only — bumps <b>only</b> when the field <i>shape</i> changes (a field added, removed, or its type changed); editing <code>eventsPerSecond</code> or a schedule leaves it untouched. That split is what makes a <a href="#config-deps">dependency pin</a> useful at all: a cosmetic edit upstream must not invalidate every downstream pin.</p>
+<p>Interactive editing stays permissive: <code>PUT /api/sources/{name}</code> allows a breaking field change by default (200). Pass <code>?allowBreaking=false</code> to opt into the gate instead:</p>
+<pre><code>curl -X PUT "localhost:5199/api/sources/trades?allowBreaking=false" -H "Authorization: Bearer $TOKEN" -d '{... "qty" now String, was Double ...}'
+# -> 409 {"error":"source 'trades': schema change is breaking",
+#         "breakingReasons":["field 'qty' changed type: Double -> String"]}</code></pre>
+<p><a href="#config-import">Config import</a> defaults the other way — gated unless the document opts out. On any upstream schema change (interactive or imported), every table that reads it has its persisted output schema and field numbers refreshed automatically, so <a href="#grpc">reflection and downloaded <code>.proto</code></a> files stop serving a shape the source or table no longer produces — the dependent table itself is <b>not</b> restarted; it keeps running its already-compiled plan against the new shape. One gap: <code>ConfigTable</code>/<code>ConfigPipeline</code> export/import documents don't carry the purely operational <code>persistence</code>/<code>flushMs</code>/<code>journalMaxEntries</code> knobs, so editing only those through config import never bumps <code>revision</code> (a direct REST <code>PUT</code> does).</p>
 </section>
 
 <section id="grpc">
@@ -766,8 +792,56 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 <p>Try a target before saving: <code>POST /api/sources/schema/from-remote</code> with <code>{ grpc }</code> → <code>{ fields, fieldNumbersJson, diagnostics }</code> (Editor-only — it dials out). For <code>table</code>/<code>pipeline</code> entity keys, the ident in <code>entityKey</code> is an opaque id, not the remote's generated proto message name (which is derived from the entity's display <b>name</b>) — the reflection path resolves id→name first via a REST GET against <code>restAddress</code> before asking reflection for the symbol; a <code>source:{name}</code> key needs no such lookup, since the ident already is the name.</p>
 <div class="callout"><b>Dapr can subscribe, not serve.</b> The Dapr flavor can run a <code>grpc</code>-kind source against any StreamForge instance (Orleans or Dapr, wherever gRPC serving is live). Being a federation <i>server</i> — accepting <code>SubscribeEntity</code> calls — stays Orleans-only (<code>:5299</code>); the Dapr flavor's gRPC port (<code>:5499</code>) remains reserved, unserved.</div>
 
+<h3 id="connectors-endpoints">Named external endpoints (<code>@name</code>)</h3>
+<p>Any endpoint-shaped string on a connector — a <code>url</code> source's <code>url</code>, a NATS/Postgres/MSSQL/FIX host, an HTTP sink's <code>url</code>, a <code>grpc</code> connector's <code>address</code>/<code>restAddress</code> — can be written as <code>@name</code> instead of a literal, <b>as the whole value</b>: a URL that merely contains an <code>@</code>, like <code>nats://user@host:4222</code>, is left exactly as authored, since only a value that is <i>entirely</i> a reference counts. It resolves at <b>connect time</b> from <code>Endpoints:&lt;name&gt;</code> configuration — <code>--Endpoints:primary-oltp=host:5432</code>, <code>Endpoints__PRIMARY_OLTP</code>, or an <code>Endpoints</code> object in <code>appsettings.json</code> — never from the catalog, and the resolved value is <b>never written back</b>: an export still reads <code>@primary-oltp</code>.</p>
+<p><b>The whole point:</b> one catalog, authored once, imports byte-identical into every environment and connects to a different backend in each — verified live: the same document, never edited, ingested <code>PROD-AAA</code> under one <code>--Endpoints:feed</code> value and <code>DEV-ZZZ</code> under another, while its export still read <code>"url":"@feed"</code> and the resolved host appeared in it zero times.</p>
+<p><code>GET /api/meta/endpoints</code> (Viewer — <b>not</b> anonymous, unlike <code>/api/meta/instance</code>) lists every configured name and its value, for the operator who needs to know what a name resolves to. An unresolvable reference is an <b>error</b> at connect time (there's nothing to dial) but only a <b>warning</b> at import — a document destined for another environment must still be importable, which is the entire point of promotion.</p>
+<div class="callout"><b>Values are not masked.</b> Unlike a connector's own secret fields (below), <code>Endpoints:</code> values read back in the clear at <code>GET /api/meta/endpoints</code> — a connection string put behind a name carries its credential exactly as configured, Viewer-gated but not hidden. And a sink whose <code>@name</code> fails to resolve simply drops out of its entity with a log line; the entity's own status has no per-sink field to say so.</div>
+
 <h3 id="connectors-secrets">Secrets-lite</h3>
 <p>The two secret slots on a connector — URL header <i>values</i> and gRPC <code>password</code>/<code>token</code> — follow a deliberately honest, minimal ceiling: stored <b>plaintext at rest</b> in each flavor's own store (Orleans JSON file / Dapr Redis — the same posture as JWT signing config today), <b>no KMS, no encryption</b>. Every read path (GET one, list, export) masks a non-empty secret as <code>"***"</code>. Writing back a literal <code>"***"</code> means <b>"keep the stored value"</b> — this is what makes the SPA's GET (masked) → edit → PUT (whole object) cycle safe: it never clobbers a real secret with the mask string. <code>GET /api/config/export</code> omits real secret values unless the caller is Admin and passes <code>includeSecrets=true</code>.</p>
+</section>
+
+<section id="discovery">
+<h2>Instance discovery &amp; federation</h2>
+<p>Two layers, and the first is most of the value. <b>Layer 1</b>: every instance answers <code>GET /api/meta/instance</code> anonymously, like <code>/healthz</code> — enough for a peer, the admin app, or a human with just an address to learn what it is. <b>Layer 2</b>: a configured <b>directory of peers</b>, each probed via that same endpoint — which is what lets a <a href="#connectors-grpc"><code>grpc</code> source</a> federate by peer name instead of a hardcoded address.</p>
+<div class="callout"><b>Not an HA service registry.</b> The peer directory is a process-wide, in-memory list with no heartbeat, no expiry, and no leader election. A probe result is kept until the next probe — a peer that went away is simply not noticed until someone probes it again.</div>
+
+<h3 id="discovery-instance">Instance identity</h3>
+<p><code>GET /api/meta/instance</code> is <b>anonymous</b>, deliberately: a peer has to learn what a deployment is before it holds any credential for it. It reports identity, capability, and catalog health, never entity names:</p>
+<pre><code>curl localhost:5199/api/meta/instance
+{
+  "instanceId": "7f44872c866646e2aeb4afa9831704f9",
+  "name": "prod-1", "flavor": "orleans", "version": "1.0.0+85aa5d08",
+  "endpoints": { "rest": "http://localhost:5199", "grpc": "http://localhost:5299" },
+  "capabilities": ["grpc"],
+  "plugins": ["generator","url","file","folder","grpc","nats","fix", "..."],
+  "catalogCounts": { "sources": 6, "pipelines": 7, "tables": 5 },
+  "catalogWarnings": [],
+  "startedAtMs": 1787190620573
+}</code></pre>
+<p><code>instanceId</code> is persisted at <code>{DataDir}/instance.json</code>, so it survives a restart — deleting that directory mints a new identity, which is the documented reseed on the Orleans flavor and is merely arbitrary on Dapr, whose state otherwise lives entirely in Redis. <code>catalogWarnings</code> reports <b>counts and kind names only</b> — <code>"1 pipeline(s) have a stale pin"</code>, <code>"1 entit(ies) use kind 'x', which this instance has no connector registered for"</code> — never an entity's own name, since this route has no credential to gate that on. There is no switch to turn the route off.</p>
+
+<h3 id="discovery-peers">Peer directory</h3>
+<p>Configured peers come from <code>Discovery:Peers</code> — a <b>section</b>, so it binds as an array from any provider: CLI (<code>--Discovery:Peers:0:Name producer --Discovery:Peers:0:RestEndpoint http://host:5199 --Discovery:Peers:0:GrpcEndpoint http://host:5299</code>), env (<code>DISCOVERY__PEERS__0__NAME</code>), or an <code>appsettings.json</code> <code>Discovery.Peers</code> array. <code>GET /api/meta/peers</code> and <code>POST /api/meta/peers/{name}/probe</code> are Viewer-gated — unlike <code>/instance</code> above, this route is about <i>this instance's own</i> configuration, which does need a credential:</p>
+<pre><code>curl localhost:5199/api/meta/peers -H "Authorization: Bearer $TOKEN"
+# [{"name":"producer","instanceId":"","restEndpoint":"http://localhost:7921",
+#   "grpcEndpoint":"http://localhost:7922","lastSeenAtMs":0,"lastError":null,"info":null}]
+
+curl -X POST localhost:5199/api/meta/peers/producer/probe -H "Authorization: Bearer $TOKEN"
+# -> the same record, now with instanceId/lastSeenAtMs/info filled in from the peer's own /instance</code></pre>
+<div class="callout"><b>A probe dials out.</b> It is the first route in the platform where a read-scoped (Viewer) caller causes the server to make an outbound request — only to a configured peer's configured address (not an open redirect), but worth knowing before granting Viewer broadly.</div>
+
+<h3 id="discovery-federation">Federated addressing</h3>
+<p>A <code>grpc</code>-kind source's <code>connector.grpc.peer</code> names a configured peer instead of an <code>address</code>/<code>restAddress</code> literal, resolved fresh at every (re)connect. When set, it <b>wins over</b> both address fields rather than filling them in when blank — a source naming a peer alongside a stale literal address must never silently connect to the stale one. Combined with <a href="#api-naming">id-or-name resolution</a>, this is what lets an <code>entityKey</code> be authored as <code>table:positions</code> instead of <code>table:&lt;guid&gt;</code>: the consumer's existing id→name REST round trip (already needed to translate a remote reflection symbol) runs in reverse to canonicalize it.</p>
+<pre><code>{
+  "connector": { "grpc": {
+    "peer": "producer",
+    "entityKey": "table:positions",
+    "username": "admin", "password": "admin123!"
+  } }
+}</code></pre>
+<p>No address, no GUID, anywhere in the source's own definition — verified live: two instances, one federating a table from the other by peer name and table name alone. An unresolvable peer name takes the existing status-error path at the existing backoff, same as an unreachable literal address always has.</p>
 </section>
 
 <section id="config">
@@ -810,6 +884,21 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 </ul>
 <p>Includes resolve two ways depending on how the import arrives: an ordered multi-document JSON array composes directly (no filesystem involved — later element wins, same rules); a <b>multipart file-set upload</b> resolves each document's <code>include</code> entries by exact file <b>name</b> within the uploaded set only — <b>the server never reads its own filesystem</b> for an include, by construction (no path traversal possible). A single document with a non-empty <code>include</code> list is rejected outside a multipart upload — there's nothing on the server for it to resolve against.</p>
 
+<h3 id="config-deps">Dependency pins</h3>
+<p>A pipeline or table's config document can carry <code>"dependsOn": [{ "kind": "source", "name": "trades", "schemaRevision": 3 }]</code> — a pin against the exact <a href="#api-revisions"><code>schemaRevision</code></a> the query was authored against (<code>schemaRevision: 0</code> declares the dependency edge with no compatibility claim — never stale, by design, which is what makes it safe to record a dependency nobody explicitly pinned a shape to). There is no SQL-level equivalent — <code>FROM trades@3</code> does not exist and won't; the engine runs against live streams, not a versioned store — so pinning lives in the config document only.</p>
+<p>A violated pin never stops anything: the entity's <code>staleReason</code> is set to a sentence naming what moved and from what, rolled into <code>catalogWarnings</code> on <a href="#discovery-instance"><code>/api/meta/instance</code></a> as a count, while the entity keeps running its already-compiled plan.</p>
+<div class="callout"><b>Checked on write, not by <code>mode=validate</code>.</b> <code>staleReason</code> is (re)computed by the registry every time the pinned entity, or the thing it depends on, is actually created, updated or deleted. <code>validate</code> mode never applies anything, so importing a document whose pin is already broken reports an empty <code>diagnostics</code> list under <code>validate</code> — the break only shows up once you read the entity back after a real <code>merge</code>/<code>replace</code>. Budget for that before treating <code>validate</code> as a pin pre-flight check.</div>
+
+<h3 id="config-requires">Connector version requirements</h3>
+<p>A config document can declare <code>"requires": [{ "kind": "postgres-cdc", "version": "^2.0.0" }]</code> — a SemVer-range subset (<code>^</code>, <code>~</code>, <code>&gt;=a &lt;b</code>, <code>*</code>/omitted = any) checked against this instance's own registered kinds (the same list <code>plugins</code> reports on <a href="#discovery-instance"><code>/api/meta/instance</code></a>) before anything else in the document is touched. An unsatisfied requirement refuses the <b>whole</b> import — not just the entities using that kind — identically under <code>mode=validate</code> and an apply mode:</p>
+<pre><code>curl -X POST "localhost:5199/api/config/import?mode=merge" -H "Authorization: Bearer $TOKEN" \
+  -d '{"requires":[{"kind":"url","version":"^2.0.0"}], "sources":[...]}'
+# -> HTTP 200 {"mode":"merge","ok":false,
+#     "entries":[{"kind":"requires","name":"url","action":"error",
+#       "diagnostics":["kind 'url' is installed at version '1.0.0', which does not satisfy the required range '^2.0.0'"]}]}
+# nothing in the document was applied — every built-in kind reports version 1.0.0 until a plugin
+# system exists to declare otherwise; a document that never sets "requires" is unaffected.</code></pre>
+
 <h3 id="config-import">Import modes</h3>
 <p><code>POST /api/config/import?mode=validate|merge|replace</code> — body is a single document, an ordered JSON array, or a multipart file set (detected by Content-Type).</p>
 <div class="tablewrap"><table>
@@ -835,6 +924,8 @@ curl -s -X POST "localhost:5199/api/config/import?mode=merge" \
   -H "Authorization: Bearer $EDITOR_TOKEN" \
   -F "base.json=@base.json" -F "overlay.json=@overlay.json"</code></pre>
 <p>Auth summary: export is Viewer (Admin for <code>includeSecrets=true</code>); import is Editor; <code>replace</code> additionally requires Admin. Whole-import atomicity is <b>not</b> promised — each entity applies through the same serialized catalog registry (grain/actor turn-based), so per-entity writes are atomic but a failure partway through an import leaves earlier entities in this run already applied (the report shows exactly what happened, entity by entity).</p>
+<p>Promotion is gated on schema shape by default: an entity whose incoming fields are a <b>breaking</b> change from what's stored — a type change, a removed field — is refused (<code>action: "error"</code>, the field-level diagnostic naming what changed) unless the document sets <code>"schemaPolicy": "any"</code>; that string, and only that string, turns the gate off — a typo (<code>"compatable"</code>) leaves it on. This is the opposite default from <a href="#api-revisions">interactive editing</a>, and deliberately: promoting a document is not the moment to discover a generated client three deployments away stopped decoding.</p>
+<div class="callout"><b>A refusal is still HTTP 200.</b> A refused entity, and a refused whole-import (<a href="#config-requires">an unsatisfied <code>requires</code></a>), both come back as <code>200</code> with <code>"ok": false</code> — consistent with this route's per-entity convention, but it means <code>curl -f</code> reads a refused import as applied. Check <code>ok</code> (the bundled CLI's <code>sf config import</code> already does), not the status code.</div>
 </section>
 
 <section id="aichat">

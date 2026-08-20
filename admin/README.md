@@ -120,7 +120,7 @@ SF_URL=http://localhost:5399 bun admin/sf.ts ls tables    # the Dapr flavor, sam
 | `sf validate <pipelines\|tables> "<sql>"` | Compiles without creating anything |
 | `sf config export [--yaml] [--secrets] [-o file]` | Catalog export (`--secrets` needs the Admin role) |
 | `sf config import <file> [--mode validate\|merge\|replace]` | Catalog import |
-| `sf api <METHOD> <path> [body.json]` | Escape hatch for anything not above — users, shards, ingest keys |
+| `sf api <METHOD> <path> [body.json]` | Escape hatch for anything not above — users, shards, ingest keys, named endpoints (`GET /api/meta/endpoints`, plan 016 wave 6 — no dedicated command) |
 | `sf mcp` | Runs the MCP server on stdio, same as `bun mcp.ts` |
 
 ### Entitlements, approvals and audit (plan 015)

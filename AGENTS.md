@@ -67,6 +67,29 @@ credential rotation reads `"***" → "***"`, the key's presence is the signal. R
 decision: `shared/StreamForge.AppCore/Access/PermissionEvaluator.cs`. Operator recipes and the full
 gotcha list: the `sf-access` skill and `orleans/docs/index.html` § Roles, entitlements & approvals.
 
+**Name resolution, versioning & discovery** (plan 016): every `GET /api/{sources|pipelines|tables}/{key}`
+resolves the segment as an ordinal **id, else name** — 1 match, 0 → 404, ≥2 → **409** naming every candidate
+id, never a silent first match. **`PUT`/`DELETE`/`start`/`stop` stay id-only** — a name a `GET` resolves
+happily still 404s on a write to the identical URL. Sources have no id and can never be renamed; a table
+renames only while `Stopped`, unsharded and unreferenced; pipeline names are enforced unique going forward.
+Two registry-assigned counters — `Revision` (any change) and `SchemaRevision` (sources/tables, shape only)
+— back `dependsOn: [{kind, name, schemaRevision}]` pins on pipeline/table config documents: a violated pin
+sets `staleReason` and rolls into `catalogWarnings` as a count, it never stops the entity, and it is
+evaluated only when the pinned entity or its dependency is actually written — **`mode=validate` reports
+nothing for it**, the break only shows up after a real `merge`/`replace`. Config import is schema-gated by
+default (`schemaPolicy: "any"` is the one string that turns it off) and can declare
+`requires: [{kind, version}]` connector versions that refuse the **whole** import when unsatisfied — like
+every per-entity refusal here, that comes back as **HTTP 200** with `ok:false`, so `curl -f` reads a
+refusal as success. `GET /api/meta/instance` (anonymous) plus a configured `Discovery:Peers` directory let
+a `grpc` source federate by **peer name + entity name** — no address, no GUID (`GrpcSubConfig.Peer`,
+resolved fresh at each reconnect, wins over a literal `Address`/`RestAddress` when set); the peer directory
+has no heartbeat or expiry, so a peer that went away is not noticed until re-probed. `@name` resolves any
+endpoint-shaped config field (host/URL/connection string) from `Endpoints:<name>` at connect time, never
+from the catalog and never written back on export — values read back unmasked at `GET /api/meta/endpoints`.
+Full routes and verified live recipes: `orleans/docs/index.html` §§ REST API / Instance discovery &
+federation / Configuration import-export; contributor-facing `@name` wiring: `TRANSPORTS.md`'s Named
+external endpoints section.
+
 ## Environment — non-negotiables
 
 - **dotnet**: `~/.dotnet/dotnet` (SDK 10.0.3xx). It is **NOT on PATH** — always use the full path.
@@ -130,7 +153,8 @@ Soak shapes: `tools/soak/run-soak.sh --shape orders|instruments`.
 
 Local skills (root `.claude/skills/`, `sf-` prefix) wrap the common workflows: `/sf-run` (both
 flavors), `/sf-verify` (both flavors), `/sf-sql`, `/sf-client-gen`, `/sf-config` (catalog
-export/import), `/sf-access` (entitlements, approvals, audit).
+export/import), `/sf-access` (entitlements, approvals, audit), `/sf-federate` (instance discovery,
+peer federation, named external endpoints).
 
 **Containers, Cloud Run, admin, AI chat** (plan 007): `deploy/orleans/` and `deploy/dapr/` hold
 each flavor's Dockerfile(s), `compose.yaml` (host ports 6199/6399), Cloud Run `service.yaml`, and
