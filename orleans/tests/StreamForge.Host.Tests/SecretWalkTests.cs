@@ -45,6 +45,10 @@ public class SecretWalkTests
         Nats = new NatsSubConfig { Url = "nats://localhost:4222", Subject = "t.>" },
         Db = new DbSourceConfig { Host = "localhost", Database = "d", Table = "t" },
         Fix = new FixSourceConfig { Host = "fix.venue.example.com", Port = 9880, SenderCompId = "CLIENT", TargetCompId = "VENUE" },
+        // Plan 020: CrdtSourceConfig carries no [Secret] property TODAY, which is exactly why it has to
+        // be populated here anyway — the coverage check below exists so that the day one is added, the
+        // mask tests are already walking this container instead of passing over it unvisited.
+        Crdt = new CrdtSourceConfig { RootMap = "root", KeyField = "id" },
         Mapping = new MappingSpec(),
         Schedule = new ScheduleSpec { IntervalMs = 30_000 },
     };
