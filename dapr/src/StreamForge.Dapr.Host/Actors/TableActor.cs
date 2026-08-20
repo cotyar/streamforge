@@ -150,7 +150,7 @@ namespace StreamForge.Dapr.Host.Actors;
 /// unbounded key space still grows without bound. See orleans/DESIGN.md's "Known ceilings", which covers
 /// both flavors.</para>
 /// </summary>
-public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<TableActor> logger)
+public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEventRouter tableRouter, ILogger<TableActor> logger)
     : Actor(host), ITableActor
 {
     private const string StateName = "table";
@@ -168,6 +168,14 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     private List<string> _streamInputs = [];
     private List<string> _tableInputs = [];
     private string? _lastCompileError;
+
+    /// <summary>PARITY.md debt item D2 — Dapr counterpart of <c>TableGrain</c>'s identical field: BARE
+    /// upstream table name -&gt; the epoch (<see cref="TableAttachSnapshot.Epoch"/>) this table's backfill
+    /// for that input was taken at, for <see cref="ProcessTableDeltasAsync"/>'s own epoch filter — see
+    /// <see cref="RegisterRouterAndAttachToTableInputsAsync"/>'s doc comment for the full protocol.
+    /// Populated once per table input during that method, before it returns; cleared on <see cref="StopAsync"/>
+    /// and re-populated from scratch by every subsequent <see cref="StartAsync"/>/self-heal reactivation.</summary>
+    private readonly Dictionary<string, long> _tableInputCutoffEpoch = new(StringComparer.Ordinal);
 
     /// <summary>Write-behind-flushed consolidated snapshot (canonical row key -&gt; row/weight) —
     /// <see cref="GetRowsAsync"/>/<see cref="GetRowCountAsync"/> read THIS, not the live executor (see
@@ -269,6 +277,18 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             ActivateExecutor();
             if (_executor is not null)
             {
+                // PARITY.md D2: a self-healed reactivation compiles a BRAND-NEW executor exactly like a
+                // fresh StartAsync does (see class doc's "RESTART-RESUME LIMITATION" — ActivateExecutor
+                // resets _flushed/marks _rebuilding whenever it finds a non-empty persisted snapshot), so
+                // it needs the identical router-registration-then-attach treatment StartAsync gets, not
+                // just the timer re-arm — otherwise a table that self-heals (rather than going through an
+                // explicit start) over an already-warm upstream would silently skip both the backfill AND
+                // the warm-upstream diagnostic. See RegisterRouterAndAttachToTableInputsAsync's own doc
+                // comment for why running it here, before this OnActivateAsync call returns, is exactly as
+                // race-free as running it inside StartAsync — this whole method is itself part of the one
+                // actor turn that gates the very first post-activation invocation.
+                await RegisterRouterAndAttachToTableInputsAsync();
+
                 // Plan 009 A2: persist the (possibly just-cleared) journal BEFORE arming the timer — see
                 // class doc's "Resume" paragraph and _journalNeedsPersistedClear's own doc comment for why
                 // this can't just wait for the next periodic tick (a mode switch away from Journaled would
@@ -333,7 +353,7 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             return ActorResult<TableInputNames>.Failure(_lastCompileError!);
         }
 
-        await WarnIfTableInputsAlreadyHoldRowsAsync();
+        await RegisterRouterAndAttachToTableInputsAsync();
 
         // Plan 009 A2: see OnActivateAsync's self-heal branch for why this has to happen here, immediately,
         // rather than waiting for the next periodic tick.
@@ -351,62 +371,81 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     }
 
     /// <summary>
-    /// Wishlist #14, STILL option (b) on THIS flavor — NOT superseded here the way
-    /// <c>TableGrain.AttachToTableInputAsync</c> (Orleans) now supersedes its own former
-    /// WarnIfTableInputsAlreadyHoldRowsAsync sibling. Real investigation, not an assumption: the Orleans fix
-    /// needs two things this actor cannot get within this change's file ownership —
+    /// PARITY.md debt item D2 — REAL backfill on attach, Dapr counterpart of <c>TableGrain.
+    /// AttachToTableInputAsync</c> (see its own doc comment for the full protocol this ports), closing the
+    /// gap this actor's former <c>WarnIfTableInputsAlreadyHoldRowsAsync</c> left open. That method's own
+    /// doc comment (see git history) named two blockers: no atomic (snapshot, epoch) read reachable on the
+    /// upstream actor, and no subscribe-before-attach ordering point to hook. Both are closed as of this
+    /// change: <see cref="ITableActor.AttachSnapshotAsync"/> is the new interface method (added because
+    /// this change now owns <c>ITableActor.cs</c>) providing the first; THIS method registering
+    /// <paramref name="tableRouter"/> before reading any upstream snapshot, called from inside
+    /// <see cref="StartAsync"/>/<see cref="OnActivateAsync"/>'s self-heal branch rather than from
+    /// <c>Lifecycle.DaprLifecycleOrchestrator</c> after the fact, provides the second.
     ///
-    /// <para><b>1. An atomic (snapshot, epoch) read on the UPSTREAM actor.</b> Orleans added
-    /// <c>ITableGrain.AttachSnapshotAsync</c> (a new grain method returning both
-    /// <c>TableExecutor.Snapshot()</c> and <c>TableExecutor.LastEpoch</c> together, synchronously, so nothing
-    /// can advance between the two reads). Dapr actors are only invocable through their declared
-    /// <see cref="ITableActor"/> interface methods (Dapr's actor RPC dispatch is interface-method-based,
-    /// exactly like Orleans grain interfaces) — a new method on the ACTOR CLASS with no interface
-    /// counterpart is simply uncallable from another actor. <see cref="ITableActor"/> is declared in
-    /// <c>ITableActor.cs</c>, a file this change does not own (per its file-ownership list, only
-    /// <c>TableActor.cs</c> itself is in scope). Every EXISTING method on that interface was checked for a
-    /// substitute: <see cref="ITableActor.GetRowsAsync"/> reads the write-behind-FLUSHED cache (up to
-    /// <see cref="TableDefinition.FlushMs"/> stale — see class doc's "flushed vs. live" split), not a live
-    /// snapshot, and carries no epoch at all; <see cref="ITableActor.GetSeqAsync"/> is a DIFFERENT counter
-    /// (flush-generation, ticks on a timer) that does not correspond 1:1 with <c>TableExecutor.LastEpoch</c>
-    /// admissions — using either as a stand-in cutoff would not merely be incomplete, it would be WRONG
-    /// (silently double-counting or dropping rows under exactly the same "wrong answer by a different route"
-    /// hazard the epoch contract exists to prevent), so this was rejected rather than shipped as a
-    /// partial fix.</para>
+    /// <para><b>WHY REGISTERING FIRST IS SAFE, NOT JUST CONVENTIONAL — Dapr shape of the Orleans argument:</b>
+    /// Dapr actors process at most one invocation at a time per actor id (dapr/ARCHITECTURE.md's reentrancy
+    /// decision) — the direct analogue of Orleans grain non-reentrancy. This method runs INSIDE the caller's
+    /// own <see cref="StartAsync"/>/<see cref="OnActivateAsync"/> turn on THIS actor id. Registering
+    /// <paramref name="tableRouter"/> here — BEFORE any `await` that reads an upstream snapshot — makes this
+    /// actor id routable while that turn is still executing; the router's fan-out (<see cref="Streaming.
+    /// TableEventRouter.OnSourceEventsAsync"/>/<see cref="Streaming.TableEventRouter.OnTableDeltaAsync"/>)
+    /// then issues an ordinary <c>ActorProxy</c> call against THIS SAME actor id for anything published from
+    /// here on — a NEW invocation, which Dapr queues behind the still-in-flight
+    /// StartAsync/OnActivateAsync turn rather than dropping (the router simply did not know to route to
+    /// this actor at all before registration) or interleaving with it. Nothing published between
+    /// "registered" and "this method returns" is ever lost — at worst it is deferred until after this whole
+    /// method (and its caller's turn) returns, at which point <see cref="_tableInputCutoffEpoch"/> is
+    /// already populated for every input, so <see cref="ProcessTableDeltasAsync"/>'s own epoch filter makes
+    /// replaying it either a correct application (Epoch &gt; cutoff) or a correct no-op (Epoch &lt;= cutoff
+    /// — already reflected in the snapshot just admitted). Registering ALL of this table's inputs (both
+    /// stream and table) in the ONE <see cref="Streaming.TableEventRouter.Register"/> call below, before ANY
+    /// upstream attach read, extends the identical guarantee to plain stream-fed tables too — a source event
+    /// published between compile and registration used to have the same theoretical loss window this item's
+    /// PARITY.md entry calls out for table-over-table chaining specifically.</para>
     ///
-    /// <para><b>2. A subscribe-before-attach ordering guarantee.</b> Orleans' fix relies on
-    /// <c>TableGrain</c> being non-reentrant: any delta delivered to a stream subscription registered while
-    /// <c>StartClassicAsync</c> is still running is QUEUED by Orleans until that whole call returns, so
-    /// nothing published between "subscribed" and "attached" is ever lost. Dapr has no equivalent point to
-    /// hook this into: this actor never subscribes to anything itself (class doc's "where events/deltas come
-    /// from" paragraph) — <c>Streaming.TableEventRouter</c> is what makes upstream deltas reach this actor
-    /// at all, and <c>Lifecycle.DaprLifecycleOrchestrator.StartTableAsync</c> only calls
-    /// <c>tableRouter.Register(...)</c> AFTER this actor's own <see cref="StartAsync"/> has already
-    /// returned — a gap this actor has no way to close from inside its own turn, since the registration call
-    /// happens in a DIFFERENT object entirely. Both of those files are also outside this change's ownership.
-    /// </para>
+    /// <para>Rows are admitted through <see cref="TableExecutor.OnTableDeltaBatch"/> — the SAME entry point
+    /// a live batch from <paramref name="upstreamName"/> (informal — see the loop below) uses — so GROUP
+    /// BY/JOIN/LATEST BY state is correctly built up from them rather than bypassed, and the result is
+    /// republished via <see cref="ApplyAndPublishAsync"/> exactly like live traffic, so a table chained off
+    /// THIS one sees this table's backfilled rows too when it, in turn, attaches to this one.</para>
     ///
-    /// <para>So: still the loud diagnostic only. <see cref="TableDeltaDto.Epoch"/> IS now stamped on every
-    /// batch this actor publishes (see <see cref="ApplyAndPublishAsync"/>) — the wire-contract half is real
-    /// and ready for whoever next owns <c>ITableActor.cs</c>/<c>TableEventRouter.cs</c>/
-    /// <c>DaprLifecycleOrchestrator.cs</c> to finish the other half. Checks each declared table input
-    /// (<see cref="_tableInputs"/>, populated by <see cref="ActivateExecutor"/> just above) for a non-zero
-    /// row count via its own <see cref="ITableActor.GetRowCountAsync"/>, BEFORE this actor's own delta
-    /// routing goes live, and logs — by table name and row count — exactly the situation wishlist #14
-    /// describes. Advisory only: a failed/not-yet-started upstream actor is swallowed (Dapr virtual actors
-    /// auto-activate on first call, so a table input that has never run answers 0 rows harmlessly rather
-    /// than throwing), and the count itself is a best-effort read with no synchronization guarantee against
-    /// the routing that follows.</para>
+    /// <para><b>STILL WARNS</b> — same shape as before (table name, upstream name, row count,
+    /// docs/otc-demo-wishlist.md #14 reference), re-worded now that the rows it reports ARE being backfilled
+    /// rather than silently dropped, and driven by the SAME atomic <see cref="ITableActor.AttachSnapshotAsync"/>
+    /// read the backfill itself uses (the old best-effort <see cref="ITableActor.GetRowCountAsync"/> probe,
+    /// which could itself race the routing it described, is gone).</para>
     /// </summary>
-    private async Task WarnIfTableInputsAlreadyHoldRowsAsync()
+    private async Task RegisterRouterAndAttachToTableInputsAsync()
     {
+        // PARITY.md D2: cleared and fully repopulated on every call rather than merely overwritten per key
+        // — see this field's own doc comment. A table whose SQL dropped a former table input must not keep
+        // serving that input's stale cutoff (harmless today since the router no longer routes that input's
+        // deltas here either, but this keeps the invariant "this dictionary's keys are exactly this table's
+        // CURRENT table inputs" true by construction rather than by coincidence).
+        _tableInputCutoffEpoch.Clear();
+
+        // Register EVERY input (stream AND table) this compile resolved BEFORE reading any upstream
+        // snapshot below — see this method's own doc comment for why that ordering is what makes the whole
+        // handshake race-free. Idempotent (Streaming.TableEventRouter.Register replaces this table's prior
+        // subscription set), so a restart-after-edit registers the new set cleanly.
+        //
+        // Plan 021 D6: _streamInputs/_tableInputs are BARE (compiled against this table's own environment's
+        // catalog); the router is shared process-wide, so both the router's own key (this table's qualified
+        // name) and every input it fans in from must be qualified with THIS table's own environment — same
+        // reasoning DaprLifecycleOrchestrator.StartTableAsync used to apply after the fact.
+        tableRouter.Register(
+            EnvKeys.Qualify(_def!.Environment, _def.Name),
+            _streamInputs.Select(s => EnvKeys.Qualify(_def!.Environment, s)).ToList(),
+            _tableInputs.Select(t => EnvKeys.Qualify(_def!.Environment, t)).ToList());
+
         foreach (var upstreamName in _tableInputs.Distinct())
         {
-            // Defensive only (see the Orleans-flavor sibling): a self-referencing table input would call
-            // straight back into this same actor id's not-yet-finished StartAsync turn and deadlock.
+            // A table cannot legitimately depend on itself (the SQL compiler has no recursive-table feature
+            // to produce one) — skip defensively rather than ever calling back into this same actor id's
+            // not-yet-finished StartAsync/OnActivateAsync turn, which would deadlock.
             if (upstreamName == _def!.Name) continue;
 
-            int upstreamRowCount;
+            TableAttachSnapshot snapshot;
             try
             {
                 // Plan 021: upstreamName is BARE (TableInputs, compiled against this table's own
@@ -414,26 +453,46 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
                 // environment table dependencies entirely (see plans/021-environment-isolation.md's "Cut"
                 // list), so the upstream lives in THIS table's own environment — qualify with it.
                 var upstream = ActorProxy.Create<ITableActor>(new ActorId(EnvKeys.Qualify(_def!.Environment, upstreamName)), nameof(TableActor), ActorProxyDefaults.Options);
-                upstreamRowCount = await upstream.GetRowCountAsync();
+                snapshot = await upstream.AttachSnapshotAsync();
             }
             catch (Exception ex)
             {
-                logger.LogDebug(ex, "TableActor[{Name}]: could not read row count of table input '{Upstream}' for the warm-upstream diagnostic — skipping.", _def!.Name, upstreamName);
-                continue;
+                // Best-effort: an upstream table that hasn't been created/started yet (or errors for its
+                // own reasons) has no snapshot to backfill from — this table starts empty for that input and
+                // relies on live traffic from here, exactly like every input already does. Never let this
+                // block the table from starting. Dapr virtual actors auto-activate on first call, so a table
+                // input that has never run answers a fresh AttachSnapshotAsync (empty rows, epoch -1)
+                // harmlessly rather than throwing; this catch is for the genuinely-unreachable/erroring case.
+                logger.LogDebug(ex, "TableActor[{Name}]: could not attach to table input '{Upstream}' for backfill — starting empty for this input.", _def!.Name, upstreamName);
+                snapshot = new TableAttachSnapshot([], -1);
             }
 
-            if (upstreamRowCount > 0)
+            // Recorded BEFORE this method returns — see this method's own doc comment for why that
+            // ordering, relative to StartAsync's/OnActivateAsync's turn ending, is what makes
+            // ProcessTableDeltasAsync's own filter correct for anything the router queued while this call
+            // was in flight.
+            _tableInputCutoffEpoch[upstreamName] = snapshot.Epoch;
+
+            if (snapshot.Rows.Count > 0)
             {
-                // NOTE: each placeholder name appears exactly once — see the Orleans-flavor sibling's
-                // identical comment on why a repeated placeholder name silently desyncs
-                // Microsoft.Extensions.Logging's positional argument binding instead of reusing the value.
+                // NOTE: each placeholder name appears exactly once — Microsoft.Extensions.Logging's
+                // structured-logging formatter binds placeholders to args POSITIONALLY, so repeating a name
+                // (e.g. two "{Table}" occurrences) silently desyncs every placeholder after the first repeat
+                // from the argument list actually supplied, rather than substituting the same value twice.
                 logger.LogWarning(
-                    "TableActor[{Name}] is starting with table input '{Upstream}' ({RowCount} row(s) already present). " +
-                    "Those rows are NOT backfilled — this actor starts empty and only reflects changes to its table " +
-                    "input from now on. For a plain projection this self-heals as rows churn; for a GROUP BY/aggregate " +
-                    "it does not (see TableExecutor.UnmatchedRetractions) — the aggregate can report a wrong count " +
-                    "until restarted. See docs/otc-demo-wishlist.md #14.",
-                    _def!.Name, upstreamName, upstreamRowCount);
+                    "TableActor[{Name}] is starting with table input '{Upstream}' ({RowCount} row(s) already present) " +
+                    "— replaying them now as this table's initial state (wishlist #14 option (a); see " +
+                    "docs/otc-demo-wishlist.md #14).",
+                    _def!.Name, upstreamName, snapshot.Rows.Count);
+
+                var seedDeltas = snapshot.Rows.Select(r => new TableDelta(new EventRecord(r.Row), r.Weight)).ToList();
+                _deltasIn += seedDeltas.Count;
+                var outAll = _executor!.OnTableDeltaBatch(upstreamName, seedDeltas);
+                _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (outAll.Count > 0)
+                {
+                    await ApplyAndPublishAsync(outAll);
+                }
             }
         }
     }
@@ -450,6 +509,7 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         _executor = null;
         _searchIndex = null;
         _running = false;
+        _tableInputCutoffEpoch.Clear(); // PARITY.md D2 — a restart re-attaches and re-populates this fresh.
         await SaveControlStateAsync();
     }
 
@@ -517,6 +577,15 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     /// consolidated (see Engine-side ConsolidateEpochOutput) and republished atomically instead of being
     /// split across as many downstream epochs as the envelope had elements, with a wrong intermediate state
     /// observable in between.
+    ///
+    /// <para><b>PARITY.md D2 — epoch cutoff filter:</b> <see cref="TableDeltaDto.Epoch"/> on each element of
+    /// <paramref name="envelope"/> is the upstream's own <c>TableExecutor.LastEpoch</c> at the moment IT
+    /// admitted that delta (stamped by ITS <see cref="ApplyAndPublishAsync"/>). Anything at or below the
+    /// cutoff <see cref="RegisterRouterAndAttachToTableInputsAsync"/> recorded for this specific upstream in
+    /// <see cref="_tableInputCutoffEpoch"/> is already reflected in the snapshot this table backfilled from
+    /// — applying it again would double its Z-set weight — so it is filtered out before admission. See
+    /// <c>TableGrain.OnTableDeltaBatchAsync</c>'s own doc comment for why this filter, not delivery timing,
+    /// is what actually makes the register-then-attach handshake race-free.</para>
     /// </summary>
     public async Task ProcessTableDeltasAsync(TableDeltaEnvelope envelope)
     {
@@ -536,11 +605,25 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             JsonValueNormalizer.NormalizeInPlace(d.Row);
         }
 
-        var deltas = envelope.Deltas.Select(d => new TableDelta(new EventRecord(d.Row), d.Weight)).ToList();
-        _deltasIn += deltas.Count;
         // Plan 021 D6: same strip as ProcessSourceEventsAsync above — envelope.Table is qualified for
-        // routing, TableExecutor's own upstream-table bookkeeping is keyed bare.
-        var outAll = _executor.OnTableDeltaBatch(EnvKeys.Split(envelope.Table).Key, deltas);
+        // routing, TableExecutor's own upstream-table bookkeeping (and _tableInputCutoffEpoch's own keys)
+        // are bare.
+        var upstream = EnvKeys.Split(envelope.Table).Key;
+
+        // PARITY.md D2: a cutoff we never recorded for this upstream (upstream had no snapshot to attach
+        // to, or this table doesn't actually declare it as a table input) means -1 — admit unconditionally,
+        // same as TableGrain.OnTableDeltaBatchAsync's identical default. See TableAttachPolicy's own doc
+        // comment for why this decision is a separate, unit-testable static method rather than inlined here.
+        var cutoff = _tableInputCutoffEpoch.GetValueOrDefault(upstream, -1);
+        var admissible = TableAttachPolicy.FilterAdmissible(envelope.Deltas, cutoff);
+        if (admissible.Count == 0)
+        {
+            return;
+        }
+
+        var deltas = admissible.Select(d => new TableDelta(new EventRecord(d.Row), d.Weight)).ToList();
+        _deltasIn += deltas.Count;
+        var outAll = _executor.OnTableDeltaBatch(upstream, deltas);
         _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         _rebuilding = false;
 
@@ -560,6 +643,30 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
     }
 
     public Task<int> GetRowCountAsync() => Task.FromResult(_flushed.Count);
+
+    /// <summary>PARITY.md debt item D2 — see <see cref="ITableActor.AttachSnapshotAsync"/>'s own doc
+    /// comment for the contract and <see cref="RegisterRouterAndAttachToTableInputsAsync"/> for the caller
+    /// side. Purely synchronous (no `await`) so the (rows, epoch) pair is atomic by construction: Dapr
+    /// actors process one invocation at a time per actor id, so nothing can advance <see cref="_executor"/>
+    /// between the two reads below within this one call.
+    ///
+    /// Reads the LIVE <see cref="_executor"/> snapshot — NOT <see cref="_flushed"/> (which
+    /// <see cref="GetRowsAsync"/>/<see cref="GetRowCountAsync"/> read, up to one flush interval stale and
+    /// carrying no epoch at all — see class doc's "flushed vs. live" split and <see cref="ITableActor.
+    /// AttachSnapshotAsync"/>'s own doc comment for why using either as a stand-in here would be WRONG, not
+    /// just stale).</summary>
+    public Task<TableAttachSnapshot> AttachSnapshotAsync()
+    {
+        if (_executor is null)
+        {
+            return Task.FromResult(new TableAttachSnapshot([], -1));
+        }
+
+        var rows = _executor.Snapshot().Values
+            .Select(v => new TableRowDto { Row = new Dictionary<string, object?>(v.Row), Weight = v.Weight })
+            .ToList();
+        return Task.FromResult(new TableAttachSnapshot(rows, _executor.LastEpoch));
+    }
 
     public Task<long> GetSeqAsync() => Task.FromResult(_seq);
 
@@ -727,8 +834,9 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
         // Plan 011 C2: Evicted rides along so TableHistoryActor can tell a retention eviction apart from an
         // ordinary upstream retraction — see TableDeltaDto.Evicted. Every other subscriber ignores it.
         //
-        // Wishlist #14 option (a) — WIRE-CONTRACT HALF ONLY (see WarnIfTableInputsAlreadyHoldRowsAsync's own
-        // doc comment for the full account of why the REST of option (a) is not implemented on this flavor).
+        // Wishlist #14 option (a) / PARITY.md D2 — this Epoch is both the wire-contract stamp AND, as of
+        // closing D2, the value RegisterRouterAndAttachToTableInputsAsync's epoch-cutoff filter on a
+        // DOWNSTREAM table relies on (see ProcessTableDeltasAsync's own doc comment for the consumer side).
         // Epoch is TableExecutor.LastEpoch read HERE, synchronously — no `await` since the
         // _executor.OnStreamEvent/OnTableDelta/OnTableDeltaBatch call that produced `deltas` returned — so
         // it means exactly the same thing here as on the Orleans side (see that property's own doc comment
@@ -1268,4 +1376,23 @@ public static class TableCompilation
         FieldType.Json => FieldKind.Json,
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown field type"),
     };
+}
+
+/// <summary>PARITY.md debt item D2 — the pure epoch-cutoff decision <see cref="TableActor.
+/// ProcessTableDeltasAsync"/> applies to an upstream table-delta batch, pulled out to its own static class
+/// (same reason <see cref="TablePersistencePolicy"/>/<see cref="TableJournalPolicy"/> exist: a
+/// <see cref="TableActor"/> instance needs a live Dapr sidecar to construct at all, so the ACTOR method
+/// itself is not unit-testable, but the decision it delegates to can be — see dapr/tests/
+/// StreamForge.Dapr.Tests/TableAttachPolicyTests.cs). Verbatim port of the inline filter
+/// <c>TableGrain.OnTableDeltaBatchAsync</c> (Orleans) applies: a delta whose <c>TableDeltaDto.Epoch</c> is
+/// at or below <paramref name="cutoff"/> is already reflected in the snapshot this table backfilled from
+/// (<see cref="TableActor.RegisterRouterAndAttachToTableInputsAsync"/>) — admitting it again would double
+/// its Z-set weight — so it is dropped before admission. <paramref name="cutoff"/> &lt; 0 (this table never
+/// recorded a cutoff for this upstream — no snapshot existed to backfill from, or this upstream isn't a
+/// declared table input at all) admits everything unconditionally, the same "nothing to double-count
+/// against" default <see cref="TableAttachSnapshot"/>'s own doc comment states.</summary>
+public static class TableAttachPolicy
+{
+    public static List<TableDeltaDto> FilterAdmissible(IReadOnlyList<TableDeltaDto> batch, long cutoff) =>
+        cutoff < 0 ? batch.ToList() : batch.Where(d => d.Epoch > cutoff).ToList();
 }

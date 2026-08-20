@@ -62,17 +62,67 @@ Three consequences that read as separate bugs if you meet them without this cont
   client simply has nothing to dial. The TypeScript client's `"auto"` transport falls back to SignalR;
   gRPC ingest has no Dapr equivalent at all, REST ingest does.
 
-### D2 · Table-over-table warm attach — Orleans admits the snapshot, Dapr only warns
+### D2 · Table-over-table warm attach — CLOSED in code, unverified live (see section 3's methodology)
 
 Orleans' `TableGrain.AttachToTableInputAsync` does a real atomic `(rows, LastEpoch)` read of the
-upstream table and admits the rows. `Actors/TableActor.cs` on Dapr still ships option (b): a loud
-diagnostic, no back-fill. Its own doc comment names both blockers — no `AttachSnapshotAsync` on
-`ITableActor`, and `DaprLifecycleOrchestrator.StartTableAsync` registers the event router *after*
-`StartAsync` returns, so there is no subscribe-before-attach point to hook — and hands off explicitly
-to whoever next owns `ITableActor.cs` / `TableEventRouter.cs` / `DaprLifecycleOrchestrator.cs`. The
-wire half is already done: `TableDeltaDto.Epoch` is stamped on every batch this actor publishes.
+upstream table and admits the rows. `Actors/TableActor.cs` on Dapr used to ship option (b) only: a
+loud diagnostic, no back-fill. Both blockers its own doc comment used to name are closed:
 
-This is the clearest genuinely-scoped debt item in the repo. Closing it is three files, not a design.
+- **`ITableActor.AttachSnapshotAsync`** (Dapr counterpart of `ITableGrain.AttachSnapshotAsync`) now
+  exists — a synchronous (no `await` between the two reads) read of `TableExecutor.Snapshot()` +
+  `TableExecutor.LastEpoch`, same atomicity argument as the Orleans method, resting on the same
+  guarantee (Dapr actors process one invocation at a time per actor id — dapr/ARCHITECTURE.md's
+  reentrancy decision — the direct analogue of Orleans grain non-reentrancy).
+- **Registration moved *inside* the actor.** `TableActor.StartAsync`/`OnActivateAsync`'s self-heal
+  branch now call a new private method, `RegisterRouterAndAttachToTableInputsAsync`, which registers
+  `TableEventRouter` with this table's stream/table inputs **before** reading any upstream snapshot —
+  not `DaprLifecycleOrchestrator.StartTableAsync` after the actor call returns, which is the ordering
+  this entry used to name as the second blocker. Because registering happens while this actor's own
+  `StartAsync`/`OnActivateAsync` turn is still executing, any `ProcessSourceEventsAsync`/
+  `ProcessTableDeltasAsync` call the newly-registered router issues against this SAME actor id is a new
+  invocation that Dapr queues behind the still-in-flight turn rather than dropping (the router didn't
+  know to route here before registration) or interleaving with it — the Dapr-shape version of the
+  subscribe-before-attach argument `TableGrain.AttachToTableInputAsync`'s own doc comment makes. A
+  per-input epoch cutoff (`TableActor._tableInputCutoffEpoch`, filtered by the new pure
+  `TableAttachPolicy.FilterAdmissible`) makes anything the router queued during that window either a
+  correct application (`Epoch > cutoff`) or a correct no-op (`Epoch <= cutoff`, already in the admitted
+  snapshot) once it runs — so nothing is lost and nothing is double-counted. `DaprLifecycleOrchestrator`
+  no longer registers the router on a successful start (only unregisters defensively on failure, and on
+  `StopTableAsync`); `TableEventRouter.cs`'s own doc comment records the new caller.
+- The self-heal reactivation path (`OnActivateAsync`, triggered by Dapr's on-demand actor activation on
+  a host restart, distinct from an explicit `POST /api/tables/{id}/start`) gets the identical treatment,
+  not just the explicit-start path — a self-healed table recompiles a brand-new executor exactly like a
+  fresh start does (see `TableActor`'s "RESTART-RESUME LIMITATION" class-doc paragraph), so it needed
+  the same backfill, and previously got neither the backfill nor even the old warning.
+- An upstream with no snapshot to attach to (not yet created/started, or erroring) is unchanged from
+  before: best-effort, swallowed, this table starts empty for that input and relies on live traffic —
+  same as Orleans' identical `catch` in `AttachToTableInputAsync`.
+
+**Unverified claim, stated explicitly (see section 3 below):** this closes the code path — `dotnet
+build`/`dotnet test` on `dapr/StreamForge.Dapr.sln` are green, including new `TableAttachPolicyTests`
+covering the epoch-cutoff filter — but the register-before-attach ordering argument itself (that a
+concurrent actor invocation genuinely queues rather than drops or interleaves) rests on Dapr's
+documented actor-turn concurrency model, not on a test against a live sidecar: no `TableActor` instance
+can be constructed in this test suite without one (same limitation `TablePersistencePolicyTests`/
+`TableJournalPolicyTests` already work around by testing extracted pure logic instead — there is still
+no actor-level test harness in this repo). A live check — start a table over an already-warm upstream
+table on `:5399` and confirm the rows appear immediately rather than only via subsequent churn — has NOT
+been run, for the same two structural reasons section 3 gives for every other unverified claim (no
+`dapr init` on this machine; no isolated-instance mode to run it on safely). Whoever next runs a live
+Dapr sweep should add this to the list.
+
+**Reviewed by the orchestrator, and one justification corrected.** The implementation extends the attach
+to `OnActivateAsync`'s self-heal branch, which Orleans has no counterpart for (`TableGrain` attaches only
+from `StartAsync` and overrides no activation hook). That makes an outbound `ActorProxy` call from inside
+an activation turn, so a table-input **cycle** would deadlock A.activate → B.attach → B.activate →
+A.attach until Dapr's call timeout. The submitted justification — "the SQL compiler has no recursive-table
+feature to produce one" — is not the real mechanism: a cycle needs no such feature, and `ImportPlanner`
+only *diagnoses* a table dependency cycle before proceeding. Measured instead (Orleans, isolated instance,
+2026-08-20): repointing a table at its own downstream is **accepted at PUT** and **refused at start** —
+`Failed`, `1:15 Unknown source 'cyc_b'`, `tableInputs` empty — so no attach is issued and the chain never
+forms. That is one construction failing, not a proof that every cycle is refused; the residual and the
+Dapr-only exposure are written up in `dapr/ARCHITECTURE.md`. The failure mode would be a loud timeout, not
+a silent wrong answer, which is why it is documented rather than guarded against.
 
 ### D3 · `instance.json` lives in a `DataDir` this flavor otherwise does not use
 

@@ -379,13 +379,42 @@ fetching that inside the call via `ICatalogFacade` would be a self-call back int
 still-in-flight turn — the exact reentrancy hazard this document's reentrancy decision exists to prevent.
 `Catalog/CatalogStore.cs`'s two call sites (`UpdateTableAsync`, `SetTableStatusAsync`) already hold
 `state.Sources`/`state.Tables` in full, so passing them through needs no extra lookup.
-`DaprLifecycleOrchestrator.StartTableAsync` starts `TableActor` and, on success, registers
-`TableEventRouter` with the stream/table input names `TableActor.StartAsync` itself resolved (no second
-compile in the orchestrator, same pattern as pipelines); `StopTableAsync` unregisters it. `TableActor`
-is a pure LEAF (never resolves `ICatalogFacade`/`IRegistryActor`/any other actor proxy — everything arrives
-as a method parameter), so this inline, synchronously-awaited actor call from inside `RegistryActor`'s own
-turn cannot deadlock, exactly the same "acyclic by construction" argument `GeneratorActor`/`PipelineActor`
-already make.
+`DaprLifecycleOrchestrator.StartTableAsync` starts `TableActor`; `StopTableAsync` stops it and
+unregisters `TableEventRouter`. `TableActor` is still a pure leaf with respect to `RegistryActor`/
+`ICatalogFacade` (never resolves either — everything arrives as a method parameter), so this inline,
+synchronously-awaited actor call from inside `RegistryActor`'s own turn cannot deadlock, exactly the
+same "acyclic by construction" argument `GeneratorActor`/`PipelineActor` already make.
+
+**PARITY.md D2 (table-over-table warm attach) changed WHO registers `TableEventRouter`, and WHEN.**
+Unlike every other worker actor here, `TableActor` is no longer a total leaf: `StartAsync`/
+`OnActivateAsync`'s self-heal branch now call `TableEventRouter.Register` themselves — with the
+stream/table input names the actor's own compile just resolved — BEFORE reading any upstream table's
+snapshot, and (for a table input) call a DIFFERENT `TableActor` instance's `ITableActor.
+AttachSnapshotAsync` via `ActorProxy`. Neither is the reentrancy cycle this document's decision above
+guards against, but the reason is worth stating accurately rather than plausibly. It is **not** that "the
+SQL compiler has no recursive-table feature" — a cycle needs no such feature, only two ordinary tables
+each selecting from the other, and `ImportPlanner`'s topo sort merely *diagnoses* a table dependency cycle
+and proceeds. What was actually measured (Orleans, isolated instance, 2026-08-20): creating `cyc_a` over a
+source, `cyc_b` over `cyc_a`, then repointing `cyc_a` at `cyc_b` is **accepted at PUT** and then **refused
+at start** — the table goes `Failed` with `1:15 Unknown source 'cyc_b'` and its `tableInputs` stays empty,
+so no attach is ever issued and the A→B→A call chain never forms. `TableEventRouter` is a plain injected
+singleton, not an actor, so it adds no cycle of its own.
+
+*The residual, stated rather than hidden:* that one construction failing is not a proof that the compiler
+systematically refuses every table-input cycle. If one ever does form, the exposure is specific to THIS
+flavour and to the branch below: `OnActivateAsync` makes an outbound `ActorProxy` call, and Dapr activates
+an actor on demand, so ordinary traffic — not just an explicit start sequence — could drive
+A.activate → B.attach → B.activate → A.attach, which queues behind A's in-flight activation turn and
+blocks until Dapr's actor call timeout. Orleans has no counterpart: its `TableGrain` attaches only from
+`StartAsync` and overrides no activation hook. The failure mode is a loud timeout, not a silent wrong
+answer, which is why this is documented rather than guarded against. The orchestrator no longer registers the router on a successful start — only `TableActor` itself
+does, which is what makes the register-then-attach ordering hold: while this actor's own `StartAsync`
+turn is still executing, any `TableEventRouter`-issued call the fresh registration provokes against this
+SAME actor id queues behind that turn (Dapr actors process one invocation at a time per actor id) rather
+than being dropped (unregistered) or interleaved with it. See `Actors/TableActor.cs`'s
+`RegisterRouterAndAttachToTableInputsAsync` doc comment for the full protocol and
+`dapr/tests/StreamForge.Dapr.Tests/TableAttachPolicyTests.cs` for the epoch-cutoff filter this relies on
+to make a delta admitted during that queued window neither lost nor double-counted.
 
 **Snapshot/search/seq design — mirrors `TableGrain`'s classic path field-for-field:**
 - *Write-behind snapshot, not live-per-delta.* `GetRowsAsync`/`GetRowCountAsync`/`GetSeqAsync` are served

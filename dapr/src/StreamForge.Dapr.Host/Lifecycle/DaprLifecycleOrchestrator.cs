@@ -43,12 +43,19 @@ namespace StreamForge.Dapr.Host.Lifecycle;
 /// <see cref="Services.PipelineSupervisorService"/>'s boot-resume sweep that mutates the router — see that
 /// service's doc comment for why a sweep-side repair is still needed for a self-healed actor.</para>
 ///
-/// <para><b><see cref="Streaming.TableEventRouter"/> bookkeeping (W7-A) — same pattern, one more
-/// router:</b> every successful <see cref="StartTableAsync"/> registers
-/// <see cref="Streaming.TableEventRouter"/> with the stream/table input names
-/// <see cref="TableActor.StartAsync"/> itself resolved; every <see cref="StopTableAsync"/> (and a failed
-/// start) unregisters it. <see cref="Services.TableSupervisorService"/>'s boot-resume sweep is the only
-/// other place that mutates it, for the same self-healed-actor reason as the pipeline router.</para>
+/// <para><b><see cref="Streaming.TableEventRouter"/> bookkeeping — DIFFERENT from the pipeline router as
+/// of PARITY.md debt item D2:</b> unlike <see cref="Streaming.PipelineEventRouter"/> (still registered
+/// here, in <see cref="StartPipelineAsync"/>, after <see cref="PipelineActor.StartAsync"/> returns),
+/// <see cref="Streaming.TableEventRouter"/> registration lives INSIDE <see cref="TableActor.StartAsync"/>/
+/// <c>OnActivateAsync</c>'s self-heal branch themselves now — see <see cref="TableActor"/>'s
+/// <c>RegisterRouterAndAttachToTableInputsAsync</c> doc comment for why: a table-over-table warm attach
+/// needs the router registered BEFORE the atomic upstream snapshot read, and this class calling the actor
+/// THEN registering (the old sequence, and still <see cref="Streaming.PipelineEventRouter"/>'s sequence —
+/// pipelines have no analogous attach-from-upstream step) leaves no point to hook that ordering into.
+/// <see cref="StartTableAsync"/> here only unregisters defensively on failure; <see cref="StopTableAsync"/>
+/// still unregisters directly (no ordering hazard on the way down — see its own doc comment).
+/// <see cref="Services.TableSupervisorService"/>'s boot-resume sweep still repairs the router for a
+/// self-healed actor with no recompile, unchanged by this item.</para>
 /// </summary>
 public sealed partial class DaprLifecycleOrchestrator(
     DaprClient daprClient,
@@ -230,12 +237,18 @@ public sealed partial class DaprLifecycleOrchestrator(
     // DaprLifecycleOrchestrator.History.cs — still W4's warn-and-succeed no-op, untouched here.
     // ------------------------------------------------------------------
 
-    /// <summary>Compiles (inside <see cref="TableActor.StartAsync"/>, not here — see the class doc's
-    /// "acyclic by construction" note) and starts <paramref name="def"/>'s table actor, then registers
-    /// <see cref="Streaming.TableEventRouter"/> with the stream/table input names the actor's own compile
-    /// resolved. On a compile/start/Parallelism-rejection failure, unregisters the router (defensive — a
-    /// table that failed to start must not be left routable) and turns the actor's error message into a
-    /// <see cref="LifecycleOutcome.Failure"/> for <c>CatalogStore</c> to record as
+    /// <summary>Compiles and starts <paramref name="def"/>'s table actor. PARITY.md debt item D2 moved
+    /// <see cref="Streaming.TableEventRouter"/> registration INSIDE <see cref="TableActor.StartAsync"/>
+    /// itself (<c>RegisterRouterAndAttachToTableInputsAsync</c>, called before that method reads any
+    /// upstream table's snapshot — see its own doc comment for why that ordering, not registering here
+    /// after the actor call returns, is what makes the atomic snapshot-then-backfill handshake race-free)
+    /// — this method no longer registers the router on success, only <see cref="TableActor.StartAsync"/>
+    /// does. On a compile/start/Parallelism-rejection failure (which by construction happens BEFORE the
+    /// actor registers anything — see <see cref="ITableActor.StartAsync"/>'s doc comment), this still
+    /// unregisters the router defensively — a no-op per <see cref="Streaming.TableEventRouter.Unregister"/>'s
+    /// own idempotency guarantee when nothing was registered, but cheap insurance against a partially
+    /// registered state some future failure path might introduce — and turns the actor's error message
+    /// into a <see cref="LifecycleOutcome.Failure"/> for <c>CatalogStore</c> to record as
     /// <c>Status=Failed</c>/<c>Error</c>, mirroring <see cref="StartPipelineAsync"/>'s identical
     /// exception-free actor-boundary contract.</summary>
     public async Task<LifecycleOutcome> StartTableAsync(TableDefinition def, IReadOnlyList<SourceDefinition> sources, IReadOnlyList<TableDefinition> tables)
@@ -249,14 +262,6 @@ public sealed partial class DaprLifecycleOrchestrator(
             return LifecycleOutcome.Failure(result.Error ?? "table failed to start");
         }
 
-        // Plan 021 D6: same reasoning as StartPipelineAsync above — StreamInputs/TableInputs are BARE
-        // (this table's own environment's catalog), the router is shared process-wide, so both the
-        // router's own key (this table's qualified name) and every input it fans in from must be
-        // qualified with THIS table's environment before they go in the index.
-        tableRouter.Register(
-            qualifiedName,
-            result.Value!.StreamInputs.Select(s => EnvKeys.Qualify(def.Environment, s)).ToList(),
-            result.Value.TableInputs.Select(t => EnvKeys.Qualify(def.Environment, t)).ToList());
         return LifecycleOutcome.Success;
     }
 

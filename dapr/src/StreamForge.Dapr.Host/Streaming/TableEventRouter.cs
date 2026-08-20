@@ -21,12 +21,24 @@ namespace StreamForge.Dapr.Host.Streaming;
 /// "hot_symbols" FROM "positions" demo). <see cref="OnSourceEventsAsync"/> fans a <c>sf-sources</c>
 /// envelope out to every table subscribed to that STREAM source; <see cref="OnTableDeltaAsync"/> fans a
 /// <c>sf-table-delta</c> envelope out to every table subscribed to that UPSTREAM TABLE. Both indexes are
-/// pure in-memory (never persisted) many-to-many maps, maintained by <see cref="Lifecycle.
-/// DaprLifecycleOrchestrator.StartTableAsync"/>/<see cref="Lifecycle.DaprLifecycleOrchestrator.StopTableAsync"/>
-/// on every explicit start/stop, and repaired by <see cref="Services.TableSupervisorService"/>'s sweep for
-/// a <see cref="TableActor"/> that self-healed on reactivation without going through either of those two
-/// calls — exactly the same relationship <see cref="PipelineEventRouter"/> has to
-/// <see cref="Services.PipelineSupervisorService"/>.</para>
+/// pure in-memory (never persisted) many-to-many maps.</para>
+///
+/// <para><b>Who registers, and when — changed by PARITY.md debt item D2:</b> <see cref="Register"/> used
+/// to be called only from <see cref="Lifecycle.DaprLifecycleOrchestrator.StartTableAsync"/>, AFTER
+/// <see cref="Actors.TableActor.StartAsync"/> had already returned. It is now called from INSIDE
+/// <see cref="Actors.TableActor.StartAsync"/>/<c>OnActivateAsync</c>'s self-heal branch themselves
+/// (<c>RegisterRouterAndAttachToTableInputsAsync</c>), BEFORE those methods read any upstream table's
+/// snapshot for a table-over-table warm attach — see that method's own doc comment for why registering
+/// first is what makes a subsequent <see cref="OnTableDeltaAsync"/>/<see cref="OnSourceEventsAsync"/> call
+/// against the newly-registered table queue behind the still-in-flight StartAsync/OnActivateAsync turn
+/// (Dapr actors process one invocation at a time per actor id) rather than arrive too early and be
+/// dropped. <see cref="Unregister"/> is still called from <see cref="Lifecycle.
+/// DaprLifecycleOrchestrator.StopTableAsync"/> (and defensively from <see cref="Lifecycle.
+/// DaprLifecycleOrchestrator.StartTableAsync"/> on a pre-registration failure) — there is no equivalent
+/// ordering hazard on the way down. <see cref="Services.TableSupervisorService"/>'s sweep still repairs
+/// this router for a <see cref="TableActor"/> that self-healed on reactivation without going through
+/// either of those two calls, unchanged by this item — the same relationship <see cref="PipelineEventRouter"/>
+/// has to <see cref="Services.PipelineSupervisorService"/>.</para>
 ///
 /// <para><b>Self-filter (a table must never receive its own output deltas):</b>
 /// <see cref="OnTableDeltaAsync"/> skips any consumer whose name equals the delta batch's own
