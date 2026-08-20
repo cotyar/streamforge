@@ -230,6 +230,17 @@ internal sealed class OrleansCrdtFacade(IClusterClient client) : ICrdtFacade
         return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).GetStatusAsync();
     }
 
+    public async Task<CrdtMergeResult?> ReplayAsync(string sourceName)
+    {
+        var def = await ResolveCrdtSourceAsync(sourceName);
+        if (def is null)
+        {
+            return null;
+        }
+
+        return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).ReplayAsync();
+    }
+
     private async Task<SourceDefinition?> ResolveCrdtSourceAsync(string sourceName)
     {
         // Plan 021 D4 — a facade answering one request reads the ambient.

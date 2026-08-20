@@ -310,6 +310,17 @@ public interface ICrdtFacade
     /// method needs no request id, no dedup key and no transaction.</para></summary>
     Task<CrdtMergeResult?> MergeAsync(string sourceName, IReadOnlyList<byte[]> updates);
 
+    /// <summary>Plan 020 wave C — re-emit the document's whole current projection as create rows, merging
+    /// nothing. <c>null</c> under the same conditions as <see cref="MergeAsync"/>.
+    ///
+    /// <para>This is the escape from the one gap idempotence creates: because replaying an edge's updates
+    /// is a no-op (D7), a consumer that lost its rows — a table resumed after a silo recycle, or a table
+    /// created over a document that was already populated — cannot be refilled by re-sending updates. It
+    /// can only be refilled by re-asserting current state. The boot path issues this automatically for
+    /// every enabled document once tables are Running; the route exists for the runtime case, where a new
+    /// consumer attaches to a document that is not going to change again on its own.</para></summary>
+    Task<CrdtMergeResult?> ReplayAsync(string sourceName);
+
     /// <summary>Counters for the console and for an operator asking "did my updates land". <c>null</c>
     /// under the same conditions as <see cref="MergeAsync"/>.</summary>
     Task<CrdtDocStatus?> GetStatusAsync(string sourceName);

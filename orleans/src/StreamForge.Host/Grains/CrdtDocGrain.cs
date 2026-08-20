@@ -13,18 +13,30 @@ public sealed class CrdtDocGrainState
     public SourceDefinition? Def { get; set; }
     public bool Running { get; set; }
 
-    /// <summary>Plan 020 wave B-2 durability, and its stated ceiling: the WHOLE document, re-encoded from
-    /// scratch after every completed merge (<c>YDoc.EncodeStateAsUpdateV1()</c> with no target state
-    /// vector — the entire current state, not a delta). Rehydrated with a single <c>ApplyUpdateV1</c> on
-    /// activation (<see cref="CrdtDocGrain.RehydrateDoc"/>).
+    /// <summary>Plan 020 wave C durability: a COMPACTED SNAPSHOT (<c>YDoc.EncodeStateAsUpdateV1()</c> with
+    /// no target state vector — the entire document state as of the last compaction, not a delta), no
+    /// longer re-encoded on every merge. The raw bytes of updates accepted since this snapshot live in
+    /// <see cref="PendingUpdates"/>; <see cref="CrdtDocGrain.RehydrateDoc"/> applies this snapshot first,
+    /// then each log entry in order.
     ///
-    /// <para><b>ponytail:</b> this is a whole-state rewrite on every merge — fine for wave B's document
-    /// sizes, expensive for a document with a long edit history once <c>Gc</c>-eligible tombstones start
-    /// piling up between merges. Plan 020 wave C's job, explicitly NOT this wave's: keep a snapshot plus a
-    /// compacted update log (<c>UpdateOperations.MergeUpdates</c>) instead of one growing blob, verified
-    /// against a killed-and-restarted instance rather than in-process. This wave stops at "correct and
-    /// simple", not "efficient at scale" — see plan 020's wave table, round 3.</para></summary>
+    /// <para><b>Honest accounting</b> (see <see cref="CrdtDocGrain"/>'s own doc comment for the full
+    /// version): this buys back the per-merge <c>EncodeStateAsUpdateV1</c> CPU cost wave B paid on every
+    /// single call, and it stops a document with a long edit history from re-serializing its own entire
+    /// state, tombstones included, on every merge. It does NOT reduce persisted bytes under
+    /// <c>JsonFileGrainStorage</c> — <c>IGrainStorage.WriteStateAsync</c> has no append; the whole
+    /// <see cref="CrdtDocGrainState"/> blob (snapshot AND log) is serialized in full on every write, same
+    /// as wave B's whole-blob-per-merge did. Between compactions the blob is temporarily LARGER than wave
+    /// B's (snapshot plus a growing log, where wave B had only ever the snapshot).</para></summary>
     public byte[]? DocBytes { get; set; }
+
+    /// <summary>Raw accepted-update bytes merged since <see cref="DocBytes"/> was last compacted — see
+    /// <see cref="CrdtDocGrain.MergeAsync"/>'s append site for what "accepted" means (a frame that failed
+    /// to decode/apply never lands here) and <see cref="CrdtDocGrain.CompactionEntryThreshold"/> /
+    /// <see cref="CrdtDocGrain.CompactionByteThreshold"/> for when this list gets folded back into
+    /// <see cref="DocBytes"/> and cleared. Additive relative to wave B's shape (which had no such
+    /// property) — a state file wave B wrote deserializes with this defaulting to an empty list, so
+    /// <see cref="CrdtDocGrain.RehydrateDoc"/> reads it back exactly as wave B would have. Never null.</summary>
+    public List<byte[]> PendingUpdates { get; set; } = [];
 
     public long UpdatesMerged { get; set; }
     public long RowsEmittedTotal { get; set; }
@@ -106,11 +118,37 @@ public sealed class CrdtDocGrain(
 
     public Task PingAsync() => Task.CompletedTask;
 
-    /// <summary>Rebuilds <see cref="_doc"/> from persisted bytes (or a fresh empty document if none yet) —
-    /// called on every <see cref="StartAsync"/> AND on a resuming <see cref="OnActivateAsync"/>, so both a
-    /// restart and a config-only re-<c>StartAsync</c> land on the SAME document content; only
+    /// <summary>Plan 020 wave C: how large <see cref="CrdtDocGrainState.PendingUpdates"/> is allowed to
+    /// grow, by entry count, before <see cref="MergeAsync"/> folds it back into
+    /// <see cref="CrdtDocGrainState.DocBytes"/> via <see cref="UpdateOperations.MergeUpdates"/> and clears
+    /// it.
+    ///
+    /// <para><b>ponytail:</b> the trade this knob makes. A HIGHER threshold means fewer
+    /// <c>MergeUpdates</c> calls (less CPU spent compacting) but a longer straight-line
+    /// <c>ApplyUpdateV1</c> replay in <see cref="RehydrateDoc"/> on the NEXT activation, and a bigger
+    /// persisted blob sitting between compactions. A LOWER threshold is the opposite. 32 is picked so the
+    /// worst-case replay on activation is "a few dozen small ApplyUpdateV1 calls", not hundreds — cheap
+    /// either way relative to the merge/emit work MergeAsync already does per call.</para></summary>
+    private const int CompactionEntryThreshold = 32;
+
+    /// <summary>The companion byte-size bound: guards against a SINGLE oversized update (a multi-megabyte
+    /// batch from an edge with a long offline history) sitting in the log unbounded just because the entry
+    /// COUNT hasn't crossed <see cref="CompactionEntryThreshold"/> yet — one update near or past this size
+    /// forces a compaction right after it lands, same as 32 small ones would.</summary>
+    private const long CompactionByteThreshold = 2 * 1024 * 1024; // 2 MB
+
+    /// <summary>Rebuilds <see cref="_doc"/> from the persisted snapshot (or a fresh empty document if none
+    /// yet), then replays <see cref="CrdtDocGrainState.PendingUpdates"/> in order on top of it — called on
+    /// every <see cref="StartAsync"/> AND on a resuming <see cref="OnActivateAsync"/>, so both a restart
+    /// and a config-only re-<c>StartAsync</c> land on the SAME document content; only
     /// <see cref="SourceDefinition"/> (fields/config) changes underneath it. D8: <c>Gc = true</c>, the Ycs
-    /// default, stated explicitly rather than left implicit.</summary>
+    /// default, stated explicitly rather than left implicit.
+    ///
+    /// <para>Deliberately simple, per wave C's brief: no <see cref="UpdateOperations.MergeUpdates"/> on
+    /// this path — that only runs at compaction time (<see cref="CompactLog"/>). A wave-B-shaped state
+    /// (full <see cref="CrdtDocGrainState.DocBytes"/>, no log — <see cref="CrdtDocGrainState.PendingUpdates"/>
+    /// deserializes to an empty list when the persisted JSON has no such property) replays byte-identically
+    /// to how wave B's single-<c>ApplyUpdateV1</c> RehydrateDoc did.</para></summary>
     private void RehydrateDoc()
     {
         _doc = new YDoc(new YDocOptions { Gc = true });
@@ -118,6 +156,34 @@ public sealed class CrdtDocGrain(
         {
             _doc.ApplyUpdateV1(bytes);
         }
+
+        foreach (var update in state.State.PendingUpdates)
+        {
+            _doc.ApplyUpdateV1(update);
+        }
+    }
+
+    /// <summary>Folds <see cref="CrdtDocGrainState.PendingUpdates"/> back into
+    /// <see cref="CrdtDocGrainState.DocBytes"/> via <see cref="UpdateOperations.MergeUpdates"/> — safe
+    /// because merging is associative and idempotent and explicitly accepts updates that were themselves
+    /// produced by an earlier merge (the existing snapshot IS exactly that: a prior merge's output), per
+    /// that method's own doc comment. Caller's responsibility to call <c>state.WriteStateAsync()</c>
+    /// afterward — this only mutates the in-memory <see cref="IPersistentState{T}.State"/> object.</summary>
+    private void CompactLog()
+    {
+        var toMerge = new List<byte[]>();
+        if (state.State.DocBytes is { Length: > 0 } snapshot)
+        {
+            toMerge.Add(snapshot);
+        }
+
+        toMerge.AddRange(state.State.PendingUpdates);
+        if (toMerge.Count > 0)
+        {
+            state.State.DocBytes = toMerge.Count == 1 ? toMerge[0] : UpdateOperations.MergeUpdates(toMerge);
+        }
+
+        state.State.PendingUpdates.Clear();
     }
 
     /// <summary>The whole algorithm plan 020 wave B names: flatten before, apply every update (one bad
@@ -155,12 +221,18 @@ public sealed class CrdtDocGrain(
         var before = CrdtProjector.Flatten(doc, config, def.Fields, diagnostics);
 
         var applied = 0;
+        // Wave C hazard 1: only bytes that ACTUALLY applied go in acceptedUpdates, which is what feeds the
+        // durable log below. A frame that failed to decode/apply must never reach it — if it did,
+        // RehydrateDoc would rethrow decoding it on every future activation, and a single corrupt byte
+        // from an edge would permanently deny-of-service this grain (it would never activate again).
+        var acceptedUpdates = new List<byte[]>(updates.Count);
         for (var i = 0; i < updates.Count; i++)
         {
             try
             {
                 doc.ApplyUpdateV1(updates[i]);
                 applied++;
+                acceptedUpdates.Add(updates[i]);
             }
             catch (Exception ex)
             {
@@ -173,18 +245,7 @@ public sealed class CrdtDocGrain(
         var after = CrdtProjector.Flatten(doc, config, def.Fields, diagnostics);
         var rows = CrdtProjector.Diff(before, after, config);
 
-        if (rows.Count > 0)
-        {
-            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var stream = this.GetStreamProvider(StreamConstants.ProviderName)
-                .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, this.GetPrimaryKeyString()));
-            foreach (var row in rows)
-            {
-                row.TryAdd("_source", def.Name);
-                row.TryAdd("_ts", nowMs);
-                await stream.OnNextAsync(new EventRecord(row));
-            }
-        }
+        await EmitRowsAsync(rows, def);
 
         if (generation != _generation)
         {
@@ -197,12 +258,108 @@ public sealed class CrdtDocGrain(
             return new CrdtMergeResult { UpdatesApplied = applied, RowsEmitted = rows.Count, Diagnostics = diagnostics };
         }
 
-        state.State.DocBytes = doc.EncodeStateAsUpdateV1();
+        // Wave C hazard 3: this append sits inside the SAME generation-guard skip as the rest of the
+        // persist, above — a stale continuation whose generation has already moved on must not append to
+        // a fresher activation's log any more than it may overwrite its DocBytes/counters.
+        //
+        // Wave C hazard 4: a redelivered batch (D7) applies cleanly and changes nothing, so its bytes are
+        // "accepted" and land here too — acceptable by design, not an oversight. The threshold below
+        // bounds how large that gets, and MergeUpdates collapses the redundancy away at compaction time
+        // (it is explicitly idempotent per its own doc comment), so a no-op replay costs bounded log
+        // growth, never unbounded growth or a wrong document.
+        state.State.PendingUpdates.AddRange(acceptedUpdates);
         state.State.UpdatesMerged += applied;
         state.State.RowsEmittedTotal += rows.Count;
+
+        var logBytes = 0L;
+        foreach (var u in state.State.PendingUpdates)
+        {
+            logBytes += u.Length;
+        }
+
+        if (state.State.PendingUpdates.Count >= CompactionEntryThreshold || logBytes >= CompactionByteThreshold)
+        {
+            CompactLog();
+        }
+
         await state.WriteStateAsync();
 
         return new CrdtMergeResult { UpdatesApplied = applied, RowsEmitted = rows.Count, Diagnostics = diagnostics };
+    }
+
+    /// <summary>The one door out of this grain (plan D1/D4) — one <see cref="EventRecord"/> per row onto
+    /// <c>(SourcesNamespace, primaryKey)</c>, stamped exactly as <see cref="ConnectorGrain.EmitRowsAsync"/>
+    /// stamps a connector's rows, so a subscribed table cannot tell a document from a generator. Shared by
+    /// <see cref="MergeAsync"/> (deltas) and <see cref="ReplayAsync"/> (a full re-assert) so the two can
+    /// never drift apart in how a row reaches the platform.</summary>
+    private async Task EmitRowsAsync(List<Dictionary<string, object?>> rows, SourceDefinition def)
+    {
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var stream = this.GetStreamProvider(StreamConstants.ProviderName)
+            .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, this.GetPrimaryKeyString()));
+        foreach (var row in rows)
+        {
+            row.TryAdd("_source", def.Name);
+            row.TryAdd("_ts", nowMs);
+            await stream.OnNextAsync(new EventRecord(row));
+        }
+    }
+
+    /// <summary>Diffing the live projection against THIS is what turns "the document's current state" into
+    /// a full set of create rows — no second projection path, just <see cref="CrdtProjector.Diff"/> with
+    /// nothing on the before side.</summary>
+    private static readonly Dictionary<string, Dictionary<string, object?>> EmptyProjection = new(StringComparer.Ordinal);
+
+    /// <summary>Plan 020 wave C. See <see cref="ICrdtDocGrain.ReplayAsync"/> for why this exists at all —
+    /// short version: D7 makes an update replay a no-op, so a consumer that lost its rows cannot be
+    /// refilled by re-sending history, only by re-asserting current state.
+    ///
+    /// <para>Merges nothing and therefore cannot corrupt the document — it only reads it. The generation
+    /// guard is the same one <see cref="MergeAsync"/> documents, for the same reason: the emission loop
+    /// awaits, so a <see cref="StartAsync"/>/<see cref="StopAsync"/> can land underneath it.</para></summary>
+    public async Task<CrdtMergeResult> ReplayAsync()
+    {
+        var def = state.State.Def;
+        if (def is null || !state.State.Running || _doc is null)
+        {
+            // Same reasoning as MergeAsync's defensive floor: a bare zero here is indistinguishable from
+            // "the document is genuinely empty", and the caller asked for a refill precisely because
+            // something downstream is empty. Say which one it is.
+            return new CrdtMergeResult
+            {
+                Diagnostics =
+                {
+                    $"document '{state.State.Def?.Name ?? this.GetPrimaryKeyString()}' is not running — "
+                    + "nothing was replayed; start the source and re-issue the replay.",
+                },
+            };
+        }
+
+        var generation = _generation;
+        var config = def.Connector?.Crdt ?? new CrdtSourceConfig();
+        var diagnostics = new List<string>();
+
+        var rows = CrdtProjector.Diff(
+            EmptyProjection,
+            CrdtProjector.Flatten(_doc, config, def.Fields, diagnostics),
+            config);
+
+        await EmitRowsAsync(rows, def);
+
+        if (generation == _generation)
+        {
+            state.State.RowsEmittedTotal += rows.Count;
+            await state.WriteStateAsync();
+        }
+
+        // UpdatesApplied stays 0: nothing was merged. A caller reading "0 applied, N rows" from THIS
+        // method is reading the truth, not MergeAsync's replay-was-a-no-op signal.
+        return new CrdtMergeResult { RowsEmitted = rows.Count, Diagnostics = diagnostics };
     }
 
     public Task<CrdtDocStatus> GetStatusAsync()

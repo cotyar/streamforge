@@ -83,6 +83,11 @@ public sealed class CrdtEndpointsTests : IAsyncDisposable
 
         public Task<CrdtDocStatus?> GetStatusAsync(string sourceName) =>
             Task.FromResult<CrdtDocStatus?>(new CrdtDocStatus { EntityCount = 3, UpdatesMerged = 5, RowsEmitted = 5 });
+
+        // Plan 020 wave C — the replay route's fake. Reports rows but zero updates applied, which is what
+        // a real replay returns: it re-asserts the projection and merges nothing.
+        public Task<CrdtMergeResult?> ReplayAsync(string sourceName) =>
+            Task.FromResult<CrdtMergeResult?>(new CrdtMergeResult { UpdatesApplied = 0, RowsEmitted = 3 });
     }
 
     private sealed class FakeUserStoreFacade : IUserStoreFacade

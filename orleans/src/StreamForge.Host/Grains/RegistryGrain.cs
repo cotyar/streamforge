@@ -195,6 +195,37 @@ public sealed class RegistryGrain(
             }
         }
 
+        // Plan 020 wave C: CRDT documents re-assert their projection AFTER the tables above are Running
+        // and subscribed — never earlier. The ordering in this method is load-bearing, not incidental:
+        // sources resume first (the loop far above), so a document that replayed on its own activation
+        // would publish into a stream nobody has subscribed to yet and the rows would be dropped. This is
+        // the recovery for TableGrain's RESTART-RESUME LIMITATION, which resets a resuming table to empty
+        // and rebuilds it "purely from live traffic" — a document has no further live traffic to rebuild
+        // from, because D7 makes replaying its update history emit nothing. Best-effort like every other
+        // resume in this method; a document that fails to replay is still a correct document, just an
+        // empty table until its next edit or an explicit POST .../crdt/replay.
+        //
+        // EVERY time this method runs, not once per boot — and that is not laziness, it was measured. This
+        // method has two callers on boot (Program.cs's per-environment loop and StreamBridgeService) and
+        // no idempotency guard, so the tables loop just above runs TWICE, and each pass calls
+        // ITableGrain.StartAsync again, which re-runs the resume path and RESETS the table to empty
+        // (TableGrain's ClearResumeMarkersAndDetect). A replay that fires only on the first pass is
+        // therefore wiped by the second pass's reset — verified live: latching this to once-per-activation
+        // put the table straight back to rowCount 0 / rebuilding true. Re-asserting is idempotent for a
+        // LATEST BY consumer, so paying it once per pass is the cheap half of this trade.
+        foreach (var src in state.State.Sources.Where(s =>
+                     s.Enabled && SourceKindDispatch.Classify(s.Kind) == SourceKindDispatch.ActorKind.Crdt))
+        {
+            try
+            {
+                await GrainFactory.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(_env, src.Name)).ReplayAsync();
+            }
+            catch
+            {
+                // best-effort on boot; an operator can re-issue the replay by hand.
+            }
+        }
+
         if (statusChanged)
         {
             await state.WriteStateAsync();

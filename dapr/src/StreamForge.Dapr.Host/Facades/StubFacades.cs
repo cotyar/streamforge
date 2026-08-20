@@ -88,4 +88,7 @@ public sealed class DisabledCrdtFacade : ICrdtFacade
 
     public Task<CrdtDocStatus?> GetStatusAsync(string sourceName) =>
         Task.FromResult<CrdtDocStatus?>(null);
+
+    public Task<CrdtMergeResult?> ReplayAsync(string sourceName) =>
+        Task.FromResult<CrdtMergeResult?>(null);
 }

@@ -31,6 +31,26 @@ public interface ICrdtDocGrain : IGrainWithStringKey
     /// correctly-wired caller should reach.</summary>
     Task<CrdtMergeResult> MergeAsync(IReadOnlyList<byte[]> updates);
 
+    /// <summary>Plan 020 wave C — re-emit the document's ENTIRE current projection as create rows, without
+    /// merging anything. The recovery action for the one thing a CRDT cannot recover from on its own:
+    /// D7 makes replaying an edge's update history a no-op, so a consumer that lost its rows can never be
+    /// refilled by re-sending updates — only by re-asserting the document's current state, which is what
+    /// this does.
+    ///
+    /// <para><b>Why it is needed at all.</b> <c>TableGrain</c>'s RESTART-RESUME LIMITATION (its class doc)
+    /// resets a resuming table's rows to empty and marks it Rebuilding — it rebuilds "purely from live
+    /// traffic going forward". For a generator or a broker that is fine, because traffic keeps arriving.
+    /// A document is not a stream of new events: its VALUE is its current state, and re-delivering the
+    /// history that produced that state emits nothing. Without this call a twin's table is empty after
+    /// every silo recycle, and a table created over an already-populated document starts empty too.</para>
+    ///
+    /// <para>Emits one <c>_op = c</c>, <c>_weight = +1</c> row per live entity — a re-assert, not a delta,
+    /// which is why a <c>LATEST BY</c> consumer converges on it and why calling it twice is harmless.
+    /// Tombstoned keys do not enumerate, so a deleted entity is not resurrected. Counts toward
+    /// <see cref="CrdtDocStatus.RowsEmitted"/> like any other emission; merges nothing, so
+    /// <see cref="CrdtDocStatus.UpdatesMerged"/> is untouched.</para></summary>
+    Task<CrdtMergeResult> ReplayAsync();
+
     /// <summary>Never null, for the same reason as <see cref="MergeAsync"/> — see
     /// <see cref="CrdtDocStatus.Error"/> for how "not currently running" is represented instead.</summary>
     Task<CrdtDocStatus> GetStatusAsync();

@@ -84,6 +84,42 @@ public static class CrdtEndpoints
             return Results.Ok(result);
         }).RequireAuthorization("Editor");
 
+        // Plan 020 wave C. Same 501 -> guard -> 404 -> 409 ordering as the intake route above, and the
+        // same Editor/SourceWrite gate: it publishes rows onto the source's stream, which is a write to
+        // everything downstream even though it does not touch the document.
+        group.MapPost("/{name}/crdt/replay", async (
+            string name, ClaimsPrincipal principal, AccessGuard guard,
+            ICatalogFacade registry, ICrdtFacade crdt) =>
+        {
+            if (!crdt.Enabled)
+            {
+                return Results.Json(
+                    new ErrorResponse("this build has no CRDT document runtime"),
+                    statusCode: StatusCodes.Status501NotImplemented);
+            }
+
+            var src = await registry.GetSourceAsync(name);
+            if (await RefuseAsync(guard, principal, Actions.SourceWrite, src?.Name ?? name, src?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
+            if (src is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (src.Kind != SourceKinds.Crdt)
+            {
+                return Results.Json(
+                    new ErrorResponse($"source '{name}' is not crdt-kind"),
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+
+            var result = await crdt.ReplayAsync(name);
+            return result is null ? Results.NotFound() : Results.Ok(result);
+        }).RequireAuthorization("Editor");
+
         group.MapGet("/{name}/crdt", async (
             string name, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ICrdtFacade crdt) =>
         {

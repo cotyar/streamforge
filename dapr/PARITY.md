@@ -106,7 +106,11 @@ all. Until a document runtime lands here, the intended escape hatch is plan 006'
 Dapr instance subscribing to a document projected by an Orleans one over a `grpc` source.
 
 The intake endpoint answers **501**, not 404, via `ICrdtFacade.Enabled` — deliberately, so an operator
-can tell "this build cannot do that" from "you typed the wrong source name".
+can tell "this build cannot do that" from "you typed the wrong source name". Plan 020 wave C's
+`POST /api/sources/{name}/crdt/replay` is behind the same flag and answers 501 the same way; when a Dapr
+document runtime does land, the replay is **not optional extra credit** — it is what refills a table after
+a restart, because the Dapr flavor's table actor resets a resuming table exactly as `TableGrain` does and
+D7 means re-delivering an edge's updates emits nothing. See plan 020's wave C outcomes.
 
 ### Explicitly NOT debt — checked and present on Dapr
 

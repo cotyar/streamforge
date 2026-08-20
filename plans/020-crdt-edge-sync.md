@@ -364,3 +364,72 @@ every non-Connector kind. One empty file per document, no second driver running.
 **Not built here:** wave C's durability (the grain persists the whole document per merge — ceiling and
 upgrade path marked with a `ponytail:` comment), waves D/E/F/G. The Dapr flavor stores the kind and
 refuses to run it (D9); its gap is item D5 in `dapr/PARITY.md`.
+
+### Wave C · Durability — DONE (2026-08-20)
+
+**What the wave asked for, and what it actually buys.** `CrdtDocGrainState.DocBytes` is now a *compacted
+snapshot* plus `PendingUpdates`, the raw bytes of every update that actually applied since it;
+`RehydrateDoc` applies the snapshot then replays the log; `MergeUpdates` folds the log back in at 32
+entries or 2 MB, whichever trips first. `EncodeStateAsUpdateV1()` no longer runs on every merge.
+
+The obvious framing for this wave — "fewer bytes written" — is **false, and was checked before being
+written down**. Orleans grain storage has no append: `WriteStateAsync` serializes the entire
+`CrdtDocGrainState` blob every time, so the snapshot is written on every merge exactly as wave B wrote it,
+and between compactions the blob is temporarily **larger** (snapshot *and* a growing log). What the wave
+genuinely buys is the per-merge `EncodeStateAsUpdateV1` CPU — O(document), tombstones included — which now
+runs only at compaction. That accounting is in `DocBytes`'s own doc comment so nobody has to re-derive it.
+
+**Three hazards, each with its own test** (`CrdtDurabilityTests`): a frame that failed to apply never
+enters the log — if it did, `RehydrateDoc` would rethrow it on *every* activation and one corrupt byte
+from an edge would be a permanent denial of service on that document; a wave-B-shaped state file (full
+`DocBytes`, no `pendingUpdates` key at all) rehydrates byte-identically, so the upgrade needs no migration;
+and compaction does not change what the document says, pinned across a real deactivation.
+
+**The wave's acceptance criterion failed, and that is the finding.** "A silo recycle mid-stream loses
+nothing" was checked live — `kill -9` on the host PID, restart on the same data dir — and the **document**
+came back perfectly while the **table** came back at `rowCount: 0`, `rebuilding: true`, and stayed there.
+
+The cause is a collision between two existing, individually correct properties. `TableGrain`'s
+RESTART-RESUME LIMITATION (its class doc) resets a resuming table to empty and rebuilds it "purely from
+live traffic going forward" — fine for a generator or a broker, which keep producing. And D7 guarantees
+that re-delivering an edge's update history emits **nothing**. A document is not a stream of new events:
+its value *is* its current state, so the one thing that could refill the table is the one thing
+idempotence forbids. Wave B's own restart check never caught this because it verified document status and
+a zero-row replay, never table content. The same defect appears with no restart at all: a table created
+over an already-populated document also starts empty.
+
+The fix is a re-assert, not a new mechanism: `ICrdtDocGrain.ReplayAsync()` diffs the live projection
+against an **empty** before-state, which is exactly `CrdtProjector.Diff`'s existing create-row path — no
+second projection path, and tombstoned keys do not enumerate, so a deleted entity is not resurrected. It
+merges nothing, so it cannot corrupt the document. `RegistryGrain.EnsureInitializedAsync` issues it for
+every enabled document **after** the tables loop, and `POST /api/sources/{name}/crdt/replay` (Editor —
+it publishes to every downstream consumer) covers the runtime case.
+
+**A cheap optimization broke the wave, and the live check caught it.** Latching the boot replay to
+once-per-activation put the table straight back to `rowCount: 0`. `EnsureInitializedAsync` has two callers
+on boot and no idempotency guard, so the tables loop runs **twice**, and the second pass's
+`ITableGrain.StartAsync` re-runs the resume path and resets the table again — meaning it was never the
+first replay that stuck, it was the second. The replay must follow *every* table-resume pass. The reverted
+latch and the reason are commented at the call site; this is why the acceptance gate is a killed instance
+and not an in-process test.
+
+**Live transcript** (isolated instance, ports 7440/7540/7640/7740, temp data dir, torn down): offline
+batch of 3 updates → 1 row, table holds `AAPL / Apple / 250`; `kill -9` + restart → document
+`entityCount: 1` and table back to `rowCount: 1`, `rebuilding: false`; a second table created over the
+already-populated document starts empty and converges on `POST .../crdt/replay`
+(`{"updatesApplied":0,"rowsEmitted":1}` — zero applied is the truth, not a replay-was-a-no-op signal);
+D7 unchanged (`3 applied, 0 rows`); the tombstone still converges the table to 0 rows; a replay against an
+emptied document emits 0 and does not resurrect the key. Route refusals: unknown 404, non-crdt 409, no
+token 401.
+
+**A guard test earned its keep.** `AuthorizationCoverageTests` failed on the new route with "Nobody has
+decided what it should be guarded by" — exactly its job. The row is pinned with the reason Editor and not
+Viewer.
+
+**Gates:** both solutions build; Orleans 1531 host tests with 4 failures, all four green under `--filter`
+(`LoopbackCycleTests` 3/3, `TablePersistenceModeClusterTests` 7/7, `BackfillOnAttachClusterTests` 2/2,
+`ShardedTableD2ClusterTests` 10/10) — the last of those was **not** on AGENTS.md's known-flake list and has
+been added to it with the reason: its shard-history assertion sits behind a fixed `Task.Delay(600)` rather
+than a poll. Dapr 1482 across six projects, zero failures.
+
+**Not built here:** waves D/E/F/G. Dapr still stores the `crdt` kind and refuses to start it (D9).

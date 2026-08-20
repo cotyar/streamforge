@@ -159,6 +159,10 @@ public class AuthorizationCoverageTests
         // Plan 020 wave B-2: the CRDT document intake route.
         new("POST", "/api/sources/{name}/crdt/updates", Guards.Editor),
         new("GET", "/api/sources/{name}/crdt", Guards.Viewer),
+        // Plan 020 wave C: the replay route. Editor, not Viewer, deliberately — it merges nothing and
+        // cannot change the document, but it PUBLISHES the whole projection onto the source's stream,
+        // which is a write to every table and sink downstream.
+        new("POST", "/api/sources/{name}/crdt/replay", Guards.Editor),
 
         // The one REST route that is anonymous ON PURPOSE at the metadata layer. Plan 009 A1.2: a
         // telemetry producer holds an ingest key, not a JWT, so route-level authorization cannot express

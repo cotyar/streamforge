@@ -164,7 +164,12 @@ whole-solution parallel load — never under `--filter` on their own): `Loopback
 `ConnectorGrainClusterTests.GetStatusAsync_reflects_a_successful_run` (waits for a connector run's
 status to propagate before a deadline),
 `WarmUpstreamDiagnosticClusterTests.TableStartedAfterItsTableInputAlreadyHoldsRows_*` (waits for a
-warning log line to be emitted before a deadline).
+warning log line to be emitted before a deadline),
+`ShardedTableD2ClusterTests.ShardedTable_ResumesAsRebuilding_WithoutTheMirrorToDetectItBy` (added
+2026-08-20 during plan 020 wave C — its shard-history assertion sits behind a fixed `await Task.Delay(600)`
+"to let the write-behind flush persist the HadRows marker", which is the weakest form of deadline: a hard
+sleep rather than a poll, so under whole-solution parallel load the second version has not reached the
+shard tier yet and `view.History.Sum(...)` reads 1 instead of 2. Passes 10/10 under `--filter`).
 Re-run a failure in isolation before calling it a regression — and report BOTH results, never just the
 green one. Nothing else on this list is allowed to grow without a paragraph saying why the test is
 time-bounded; a genuinely broken test hiding among "known flakes" is the failure mode this list can cause.
