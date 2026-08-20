@@ -92,6 +92,17 @@ StreamForge.Quant.QuantFunctions.RegisterAll();
 // way ConnectorGrain does on the other flavor.
 PeerDirectory.Configure(builder.Configuration.GetSection("Discovery:Peers").Get<List<PeerRecord>>() ?? []);
 
+// Plan 016 wave 6: named external endpoints, read from the SAME configuration providers by the same
+// rules — `--Endpoints:primary-oltp=host:5432` on the command line, Endpoints__PRIMARY_OLTP as an env
+// var, or an "Endpoints" object in appsettings.json. A flat name->value map rather than a section of
+// objects, because that is all an alias is. Deliberately NOT read from the catalog: a document that
+// carried environment-specific endpoints would defeat the indirection it is asking for, and keeping the
+// map here is what lets one exported catalog import into prod and dev alike.
+NamedEndpoints.Configure(
+    builder.Configuration.GetSection("Endpoints").GetChildren()
+        .Where(c => c.Value is not null)
+        .Select(c => new KeyValuePair<string, string>(c.Key, c.Value!)));
+
 var app = builder.Build();
 
 // Host-specific facts StreamForgeApiOptions carries so the shared endpoints stay byte-identical across
