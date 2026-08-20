@@ -836,6 +836,19 @@ each (re)connect and winning over `Address`/`RestAddress` when set — see
 lives entirely inside the branch above; the seam itself — still its own thing, still not
 `IInboundTransport` — is unchanged.
 
+**`crdt` (plan 020) isn't here either, and for a sharper reason than `grpc`'s.** A Yjs update is not
+bytes in a named format — it's a delta against durable, per-document state, and it only produces rows
+after being merged into that state. `IInboundTransport`'s seam is "bytes → rows through a named format
+parser" (`FormatOf` returns `"json"`/`"csv"`/`"fix"`, and `ConnectorPollCycle.ExecuteMessage` does the
+rest); bending a CRDT merge into that shape would mean a transport that secretly owns persistence — the
+exact second extraction path with its own subtly different semantics this seam exists to prevent (plan
+020 D3). So `crdt` dispatches to its own grain (`CrdtDocGrain`, the same shape as `IGeneratorGrain`), not
+through `InboundTransports`/`ConnectorGrain` at all, and Orleans-only for now (plan 020 D9 — the Dapr
+flavor stores the kind and refuses to start it). Full documentation, including the config shape, the
+three-stamp deletion convention, the replay route, and the reconciliation pattern for what a CRDT cannot
+enforce, is in [orleans/docs/index.html#crdt](orleans/docs/index.html#crdt) — this document stays the
+transport recipe, and a CRDT document isn't a transport.
+
 **The registries are static lists, not DI discovery.** Assembly scanning would buy nothing — transports are
 compile-time known — and both connector drivers are constructed by runtime machinery (an Orleans grain, a
 Dapr actor) whose container is not the host's; injecting a registry into a grain has already broken this

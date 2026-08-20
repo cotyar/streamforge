@@ -242,6 +242,12 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#connectors-grpc" class="sub">gRPC federation</a>
   <a href="#connectors-endpoints" class="sub">Named external endpoints</a>
   <a href="#connectors-secrets" class="sub">Secrets-lite</a>
+  <a href="#crdt">CRDT document sync</a>
+  <a href="#crdt-config" class="sub">Kind &amp; document shape</a>
+  <a href="#crdt-stamps" class="sub">Three stamps, three readers</a>
+  <a href="#crdt-routes" class="sub">Routes &amp; replay</a>
+  <a href="#crdt-offline" class="sub">Offline convergence</a>
+  <a href="#crdt-reconcile" class="sub">Reconciliation pattern</a>
   <a href="#discovery">Instance discovery &amp; federation</a>
   <a href="#discovery-instance" class="sub">Instance identity</a>
   <a href="#discovery-peers" class="sub">Peer directory</a>
@@ -804,6 +810,97 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 
 <h3 id="connectors-secrets">Secrets-lite</h3>
 <p>The two secret slots on a connector — URL header <i>values</i> and gRPC <code>password</code>/<code>token</code> — follow a deliberately honest, minimal ceiling: stored <b>plaintext at rest</b> in each flavor's own store (Orleans JSON file / Dapr Redis — the same posture as JWT signing config today), <b>no KMS, no encryption</b>. Every read path (GET one, list, export) masks a non-empty secret as <code>"***"</code>. Writing back a literal <code>"***"</code> means <b>"keep the stored value"</b> — this is what makes the SPA's GET (masked) → edit → PUT (whole object) cycle safe: it never clobbers a real secret with the mask string. <code>GET /api/config/export</code> omits real secret values unless the caller is Admin and passes <code>includeSecrets=true</code>.</p>
+</section>
+
+<section id="crdt">
+<h2>CRDT document sync</h2>
+<p>A <code>crdt</code>-kind source is an offline-tolerant twin, not a connector — it exists for a link that drops (an ERP integration across an unreliable network) or a document edited from more than one place (a digital twin whose connectivity isn't guaranteed). It is deliberately <b>not</b> an <code>IInboundTransport</code>: a Yjs update is a delta against durable, per-document state, not bytes through a named format parser, so it is driven by its own grain (<code>CrdtDocGrain</code>) rather than the connector driver every other kind shares. It never enters the dataflow — a document merges independently of pipelines/tables/SQL, and what crosses into the platform is the same thing every other source produces: ordinary rows on the source's stream. <b>Orleans-only</b> today; the Dapr flavor stores the kind and refuses to start it, the same shape as a sharded table.</p>
+
+<h3 id="crdt-config">Kind &amp; document shape</h3>
+<p>Two config fields, both optional:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Field</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>connector.crdt.rootMap</code></td><td><code>"root"</code></td><td>Name of the document's root <code>YMap</code> — the map whose keys are entity keys. No discovery: a document with no writes yet looks identical to one whose root is named something else, so this must match what the edge writes into.</td></tr>
+<tr><td><code>connector.crdt.keyField</code></td><td><code>"id"</code></td><td>Column the entity's key is projected into. Must be declared in <code>fields</code> like any other column — the projector never invents schema.</td></tr>
+</tbody></table></div>
+<p><b>The document shape is a contract, not a convention.</b> The root <code>YMap</code>'s keys are entity keys; each value is either a nested <code>YMap</code> (the entity's attributes) or a scalar (a single-column entity). <b>One key projects to one row.</b> A nested <code>YMap</code>/<code>YArray</code> attribute flattens recursively into a dotted column path (<code>address</code> containing <code>city</code> becomes <code>address.city</code>; an array element's path segment is its index, so <code>tags: ["a","b"]</code> becomes <code>tags.0</code>/<code>tags.1</code>) — every dotted column must still be declared in <code>fields</code>. A document key that collides with a platform-reserved column name (<code>_ts</code>, <code>_source</code>, <code>_weight</code>, <code>_op</code>, <code>_retract</code>) is renamed rather than dropped or refused: strip the leading underscore(s) and prepend <code>doc_</code>, so a document's own <code>_weight</code> field becomes column <code>doc_weight</code>. <code>Y.Text</code> projects as its plain string — formatting is out of scope. A document key with no matching declared field is dropped, never guessed; a value that won't coerce to its declared type is set to <code>null</code> with a diagnostic, matching the platform's lenient coercion-failure default.</p>
+<pre><code>{
+  "name": "inventory_twin",
+  "kind": "crdt",
+  "fields": [
+    { "name": "sku",      "type": "String" },
+    { "name": "qty",      "type": "Long" },
+    { "name": "site",     "type": "String" },
+    { "name": "_op",      "type": "String" },
+    { "name": "_weight",  "type": "Long" },
+    { "name": "_retract", "type": "Bool" }
+  ],
+  "connector": {
+    "crdt": { "rootMap": "root", "keyField": "sku" }
+  }
+}</code></pre>
+<p>Declaring the three reserved/tombstone columns above (<code>_op</code>/<code>_weight</code>/<code>_retract</code>) as ordinary schema fields is what lets downstream SQL address them by name, the same as a CDC source's <code>fields</code> declares them — see <a href="#crdt-stamps">Three stamps, three readers</a>.</p>
+
+<h3 id="crdt-stamps">Three stamps, three readers</h3>
+<p>A source emits weight-1 asserts — there is no way for a row on an inbound stream to say "this key is gone." Deletion (a key removed from the root <code>YMap</code>) therefore has to be expressed as a convention on the row, and this platform reuses the one CDC already established rather than inventing a third spelling: a tombstone row carries <b>only</b> the entity's key plus three stamps, no stale attribute values.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Stamp</th><th>Values</th><th>Read by</th></tr></thead>
+<tbody>
+<tr><td><code>_op</code></td><td><code>"c"</code> / <code>"u"</code> / <code>"d"</code></td><td>SQL — <code>WHERE _op &lt;&gt; 'd'</code> is the filter that hides a deleted key from a query.</td></tr>
+<tr><td><code>_weight</code></td><td><code>+1</code> / <code>-1</code></td><td>A sink — a database sink reads <code>-1</code> and issues a <code>DELETE</code>.</td></tr>
+<tr><td><code>_retract</code></td><td><code>true</code> on a tombstone, absent otherwise</td><td>A table — <code>TableIngestOp</code> honours it unconditionally, overriding the row's normal assert with a genuine <code>-1</code>.</td></tr>
+</tbody></table></div>
+<p>All three are needed because <code>_weight</code> on an <i>inbound</i> row is just a column, not a real retraction — the Engine's Z-set weights are computed <i>from</i> table SQL, never carried in from ingress, so every source event is admitted as a <code>+1</code> assert regardless of what it says. Without <code>_retract</code>, a deleted key reaches a <code>LATEST BY</code> table as one more create and the table ends up holding both the original row and a second, all-null row for the same key — found live during this feature's development. This is a property of the platform, not a defect this feature introduced: a Debezium/CDC delete has exactly the same limit, and <code>WHERE _op &lt;&gt; 'd'</code> is the identical working pattern used for CDC sources. <code>_retract</code> is what actually frees the key on a <code>LATEST BY</code> table; without it, the row is merely hidden by the <code>WHERE</code> clause, not gone.</p>
+<div class="callout"><b>One asymmetry, stated rather than hidden.</b> A REST-pushed <code>_retract</code> on the ordinary ingest path is gated — rejected unless every running consumer is <code>LATEST BY</code>-shaped. The CRDT path does not cross that gate, because the platform, not an external caller, is the one stamping the tombstone. It relies on the Engine's own stated safety contract for other table shapes instead: never corrupt, at worst under-report.</div>
+
+<h3 id="crdt-routes">Routes &amp; replay</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Route</th><th>Guard</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>POST /api/sources/{name}/crdt/updates</code></td><td>Editor</td><td>Body <code>{ "updates": ["&lt;base64 v1 update&gt;", …] }</code> — a batch, because a store-and-forward edge naturally accumulates several before it gets a chance to flush. Merges each in order and emits whatever rows changed: <code>{ updatesApplied, rowsEmitted, diagnostics }</code>.</td></tr>
+<tr><td><code>POST /api/sources/{name}/crdt/replay</code></td><td>Editor</td><td>Re-emits the document's <b>entire current projection</b> as create rows, merging nothing. See below for why this exists.</td></tr>
+<tr><td><code>GET /api/sources/{name}/crdt</code></td><td>Viewer</td><td>Counters: <code>{ entityCount, updatesMerged, rowsEmitted, error }</code>.</td></tr>
+</tbody></table></div>
+<p>Status codes, in the order checked: <b>501</b> when this build has no CRDT document runtime at all (the Dapr flavor); then the usual guard-before-404 ordering so an unentitled caller can't use 403-vs-404 to enumerate names; <b>404</b> unknown source; <b>409</b> the source exists but isn't <code>crdt</code>-kind; a malformed base64 update is <b>400</b>, checked last; <b>200</b> otherwise.</p>
+<p><b>Why replay exists.</b> A resuming table rebuilds its rows "purely from live traffic going forward" after a restart — correct for a generator or a broker, which keep producing. A CRDT document is not a stream of new events: its value <i>is</i> its current state, and D7 (below) makes re-delivering the update history that produced that state a no-op. So a consumer that lost its rows — a table resumed after a restart, or a table created over a document that was already populated — can never be refilled by re-sending updates; only by re-asserting current state, which is what replay does. It emits one <code>_op = "c"</code>, <code>_weight = +1</code> row per live entity; tombstoned keys don't enumerate, so a deleted entity is never resurrected, and calling it twice is harmless. <b>The boot path issues this automatically</b> for every enabled document once tables are running — this is what makes a silo recycle transparent. The route exists for the runtime case: a new table created over an already-populated document, or an operator who wants to force a refill without restarting anything.</p>
+
+<h3 id="crdt-offline">Offline convergence</h3>
+<p>Re-applying an already-merged update changes no state, so the projection is unchanged and nothing is emitted downstream — a flaky link that redelivers the same batch four times costs four merges and zero downstream events (D7). This is what makes store-and-forward safe, and it has a sharper consequence than "no duplicates": <b>an edge's whole offline session costs the platform exactly its net result</b>, nothing more. Verified live (isolated instance): three transactions made entirely offline — create two entities, correct one's quantity, delete the other — drained as one batch on reconnect produced <code>updatesApplied: 3</code>, <code>rowsEmitted: 1</code>. One row reached the table, holding the <i>corrected</i> value, not the original; the created-then-deleted entity never appeared downstream at all, because create-then-delete inside one offline session has no net effect for anyone watching the projection.</p>
+<div class="callout"><b>Convergence is decided by Yjs, not by arrival order at this endpoint.</b> When two sites independently create the <i>same</i> key without ever having synced with each other — the offline scenario this feature exists for — the key's surviving value is resolved by Yjs's own internal conflict rule, not by which update batch this platform's REST endpoint happened to receive last. An edge that wants its edit to <i>win</i> a conflict needs to have synced current state first (ordinary Yjs peer sync), not merely submit its update after another edge's. Observed live while building the reconciliation example below: a third, still-independent write to an already-contested key lost the conflict and emitted zero rows, even though it reached this platform strictly after the other two.</div>
+
+<h3 id="crdt-reconcile">The reconciliation pattern</h3>
+<p>A CRDT converges <i>state</i>. It has no place to <i>reject</i> a state. Two sites can each make an edit that is perfectly valid from where they're standing — a plausible local sale against a plausible local count — and the document that results from merging both is exactly as invalid as any single one of them, because nothing in the merge path ever asked whether the result makes domain sense. <b>The merge always succeeds.</b> A CRDT cannot enforce "stock never goes below zero": that's a global invariant, and a CRDT gives up global agreement by construction to get offline tolerance at all (D1/D2). So a domain invariant here is detected <i>after</i> the fact and compensated — never prevented.</p>
+<p>The honest answer this platform has for that is two ordinary entities, built from nothing but streaming SQL over the projection — no new mechanism, because the projection already <i>is</i> queryable rows.</p>
+<p><b>An exceptions/DLQ table</b>, fed by streaming SQL straight off the source (never off a downstream table — see the callout below for why):</p>
+<pre><code><span class="sql-k">SELECT</span> sku, qty, site, _ts <span class="sql-k">AS</span> detected_at
+<span class="sql-k">FROM</span> inventory_twin
+<span class="sql-k">WHERE</span> qty &lt; 0 <span class="sql-k">AND</span> _op &lt;&gt; <span class="sql-s">'d'</span></code></pre>
+<p>Run live against a document with two entities — <code>WIDGET-1</code>, independently oversold by two sites that never saw each other's edit (one to <code>qty: -4</code>, the other to <code>qty: -7</code>; Yjs kept <code>-7</code>) — and a healthy <code>GADGET-2</code> at <code>qty: 12</code>, this table (no <code>LATEST BY</code> — an exception log accumulates, it doesn't converge) held, after a replay of current state:</p>
+<pre><code>{
+  "rows": [
+    { "row": { "sku": "WIDGET-1", "qty": -7, "site": "dock-b", "detected_at": 1787237386729 }, "weight": 1 }
+  ],
+  "totalRows": 1
+}</code></pre>
+<p><code>GADGET-2</code> never appears — the table is selective, not a mirror of everything. Every subsequent replay while the key stays broken appends another detection row (confirmed live by replaying twice: <code>totalRows</code> went to 2) — a repeat detection is logged, not deduplicated, which is the correct behavior for a DLQ that's supposed to answer "how long has this been broken."</p>
+<p><b>Compensation reading those exceptions</b> — a second <i>table</i>, chained onto the first by name, computing the corrective action. Nothing here re-states the detection predicate; the exceptions table already decided what is broken:</p>
+<pre><code><span class="sql-k">SELECT</span> sku, site, (0 - qty) <span class="sql-k">AS</span> replenish_qty, detected_at
+<span class="sql-k">FROM</span> inventory_exceptions</code></pre>
+<p>Created live, this comes back with <code>"tableInputs": ["inventory_exceptions"]</code> and <code>"streamInputs": []</code> — it reads the table, not the document. After the two offline edits above land, the exceptions table holds both detections (it is a log, not a converged view: no <code>LATEST BY</code>), and the compensation table holds one corrective row for each:</p>
+<pre><code>{
+  "rows": [
+    { "row": { "sku": "WIDGET-1", "site": "dock-a", "replenish_qty": 4,
+               "detected_at": 1787237911227, "_source": "inventory_exceptions" }, "weight": 1 },
+    { "row": { "sku": "WIDGET-1", "site": "dock-b", "replenish_qty": 7,
+               "detected_at": 1787237911278, "_source": "inventory_exceptions" }, "weight": 1 }
+  ],
+  "totalRows": 2
+}</code></pre>
+<p><code>_source</code> reads <code>inventory_exceptions</code>, which is the chain saying so in the row itself. From here compensation leaves the platform the ordinary way — a <a href="#tables">sink</a> on the compensation table — because issuing the replenishment is somebody else&#39;s system&#39;s job, not this one&#39;s.</p>
+<div class="callout warn"><b>Chain with a table, not a pipeline.</b> A StreamForge <i>pipeline</i> is a continuous query <b>over sources</b> — the Engine resolves a pipeline&#39;s <code>FROM</code> against sources only, and only a <i>table</i> carries <code>tableInputs</code> and may <code>FROM</code>/<code>JOIN</code> another table (see <a href="#tables">Materialized tables</a>). Pointing a compensation <i>pipeline</i> at the exceptions table by name fails live with <code>Unknown source &#39;inventory_exceptions&#39;</code>. If you want the compensation to be a pipeline anyway — to feed a pipeline-only consumer — it has to re-state the detection predicate over the document, and you then own keeping two copies of that predicate in step. The chained table above does not have that problem, which is why it is the default shown here.</div>
+<p><b>What this pattern does not give you.</b> It is <b>eventual</b> — there is a real window, between the merge and whatever SQL cycle notices it, during which the invalid state is live and queryable by anyone reading the projection. It is <b>after-the-fact</b> — detection and compensation both run once the bad state already exists; nothing in this pattern, or in the CRDT layer beneath it, can refuse the merge that produced it. And compensating a state does not erase that it existed — the exceptions table is a permanent record, by design, not a queue that drains to empty.</p>
+<p>The one case that <i>can</i> be prevented rather than merely compensated is a one-sided numeric bound — "this counter never goes negative," not general domain invariants. That's <b>bounded counters on a plain <code>YMap</code></b> (Balegas et al., 2015): pre-allocate an allowance across named replicas so each can only ever spend what it locally holds, at the cost of the rebalance itself being an online, pairwise operation (a node that has spent its share stops until it reconnects) and a key count of O(replicas²) — a mechanism for named sites, not thousands of browser tabs. It's a distinct, narrower answer to a distinct, narrower problem, described in the plan's own Escrow section — not yet built in this repository (a later wave), and worth knowing about precisely because it's easy to reach for it where this section's pattern is what's actually called for, or vice versa.</p>
 </section>
 
 <section id="discovery">

@@ -433,3 +433,43 @@ been added to it with the reason: its shard-history assertion sits behind a fixe
 than a poll. Dapr 1482 across six projects, zero failures.
 
 **Not built here:** waves D/E/F/G. Dapr still stores the `crdt` kind and refuses to start it (D9).
+
+### Wave E · Reconciliation — DONE (2026-08-20)
+
+**A gap found before the wave's own work started:** `grep -c crdt orleans/docs/index.html` returned **0**.
+Waves A–C had shipped a whole source kind with no operator documentation at all. So wave E delivers both:
+a `#crdt` section (config and the document-shape contract, the three stamps and their three readers,
+the routes including wave C's replay, offline convergence) and the reconciliation pattern it was scoped to.
+
+**The wave's own brief was wrong, and the agent said so instead of quietly reinterpreting it.** "Compensation
+written as a pipeline" reading the exceptions table is structurally impossible: `TableInputs` is a member of
+`TableDefinition` only — a pipeline resolves `FROM` against **sources**, and pointing a compensation pipeline
+at a table fails live with `Unknown source 'inventory_exceptions'`.
+
+The first resolution — two independent readers of the same predicate, one table and one pipeline — was honest
+but taught the wrong thing: it hands the reader two copies of a detection predicate to keep in step, and the
+platform does not require that. Verified live instead: a compensation **table** chains onto the exceptions
+table by name and comes back with `"tableInputs": ["inventory_exceptions"]`, `"streamInputs": []`, its rows
+stamped `_source: "inventory_exceptions"`. Two independently-oversold offline edits (`-4` at `dock-a`, `-7` at
+`dock-b`, never synced with each other) produce two detection rows and two corrective rows
+(`replenish_qty` 4 and 7). The docs now show the chain as the default and keep the pipeline constraint as the
+callout explaining when you would still pay the duplication.
+
+**A stale doc comment propagated into the new documentation, and was caught by reading it against the code.**
+`CrdtProjector`'s "Reserved-column defense" paragraph listed four reserved columns (`_ts`, `_source`,
+`_weight`, `_op`); `ReservedColumns` has held **five** since wave B added `_retract`. A document field named
+`_retract` really is renamed to `doc_retract`. Both the comment and the new docs section are corrected —
+worth noting as a mechanism: the documentation pass read the doc comments, so the doc comment's error became
+the manual's error.
+
+**Also recorded from the live run** (isolated instance, ports 7450–7760, torn down): convergence for a
+contested key is decided by Yjs's own conflict rule, **not** by which batch reached the REST endpoint last —
+a third independent write to an already-contested key lost and emitted zero rows despite arriving strictly
+after the other two. An edge that wants its edit to win must sync current state first. That is easy to
+misread and is now a callout in `#crdt-offline`.
+
+`TRANSPORTS.md` gains a pointer only: `crdt` is not an `IInboundTransport` (D3) and that document stays the
+transport recipe.
+
+**Gates:** docs-only plus one doc-comment correction; both solutions build, `Connectors.Crdt.Tests` 20/20,
+every SQL statement published was executed and its real output pasted. Round 3 of plan 020 is complete.

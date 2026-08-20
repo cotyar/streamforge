@@ -17,9 +17,11 @@ namespace StreamForge.Connectors.Crdt;
 /// enumerates, which is how a <c>YMap.Delete</c> reaches <see cref="Diff"/> as a removed key with no
 /// extra bookkeeping on this class's part.</para>
 ///
-/// <para><b>Reserved-column defense.</b> <c>_ts</c>, <c>_source</c>, <c>_weight</c>, <c>_op</c> are
-/// stamped by the platform (<c>EventRecord.Timestamp</c>/<c>.Source</c>,
-/// <c>SinkStepGuard</c>'s row weight, and this class's own tombstone op letter — see below). A
+/// <para><b>Reserved-column defense.</b> <c>_ts</c>, <c>_source</c>, <c>_weight</c>, <c>_op</c> and
+/// <c>_retract</c> are stamped by the platform (<c>EventRecord.Timestamp</c>/<c>.Source</c>,
+/// <c>SinkStepGuard</c>'s row weight, <c>IngressRowAcceptance.RetractField</c>, and this class's own
+/// tombstone op letter — see below). All five are in <see cref="ReservedColumns"/>; this sentence
+/// listed only the first four until plan 020 wave E's documentation pass read it against the set. A
 /// DOCUMENT-content key spelled like one of these is renamed, never passed through: strip its leading
 /// underscore(s) and prepend <c>doc_</c>, so <c>_ts</c> becomes <c>doc_ts</c>, <c>_weight</c> becomes
 /// <c>doc_weight</c>. Chosen over silently dropping the key (an edge's genuine field disappearing with
