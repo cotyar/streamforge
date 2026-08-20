@@ -79,25 +79,31 @@ public sealed class GrpcSubscriberCore
             _onStatus("connecting", null);
             try
             {
+                // Plan 016 wave 5: resolved fresh at the top of every (re)connect, never cached across
+                // attempts — see GrpcPeerResolver's class remarks. A GrpcSubConfig.Peer that is
+                // unresolvable, or whose gRPC endpoint is blank, throws here and is caught below,
+                // landing on exactly the same status-error/backoff path a dial failure would.
+                var endpoints = GrpcPeerResolver.Resolve(_config);
+
                 var token = staticToken;
                 if (needsLogin)
                 {
-                    token = await LoginAsync(ct).ConfigureAwait(false); // fresh login every (re)connect
+                    token = await LoginAsync(endpoints, ct).ConfigureAwait(false); // fresh login every (re)connect
                 }
 
-                var (fields, numbers) = await FetchSchemaAsync(token, ct).ConfigureAwait(false);
+                var (fields, numbers) = await FetchSchemaAsync(endpoints, token, ct).ConfigureAwait(false);
 
                 for (var attempt = 0; attempt < 2; attempt++)
                 {
                     try
                     {
                         _onStatus("ok", null);
-                        await SubscribeAndPumpAsync(fields, numbers, token, ct).ConfigureAwait(false);
+                        await SubscribeAndPumpAsync(endpoints.GrpcAddress, fields, numbers, token, ct).ConfigureAwait(false);
                         break; // clean end of stream (or cancellation, checked below)
                     }
                     catch (RpcException rpc) when (rpc.StatusCode == StatusCode.Unauthenticated && needsLogin && attempt == 0)
                     {
-                        token = await LoginAsync(ct).ConfigureAwait(false); // immediate re-login once, then retry
+                        token = await LoginAsync(endpoints, ct).ConfigureAwait(false); // immediate re-login once, then retry
                     }
                 }
 
@@ -151,17 +157,24 @@ public sealed class GrpcSubscriberCore
     // Login
     // ------------------------------------------------------------------
 
-    private async Task<string> LoginAsync(CancellationToken ct)
+    private async Task<string> LoginAsync(ResolvedGrpcEndpoints endpoints, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(_config.RestAddress))
+        if (string.IsNullOrEmpty(endpoints.RestAddress))
         {
+            if (endpoints.PeerName is not null)
+            {
+                throw new InvalidOperationException(
+                    $"GrpcSubConfig.Peer '{endpoints.PeerName}' has no REST endpoint configured - needed " +
+                    $"to POST /api/auth/login on it for GrpcSubConfig.Username.");
+            }
+
             throw new InvalidOperationException(
                 "GrpcSubConfig.Username is set but RestAddress is null - set RestAddress to the remote's " +
                 "REST base (e.g. \"http://localhost:5199\") so GrpcSubscriberCore knows where to POST " +
                 "/api/auth/login; it will not guess a REST port from the gRPC Address.");
         }
 
-        var baseUrl = _config.RestAddress.TrimEnd('/');
+        var baseUrl = endpoints.RestAddress.TrimEnd('/');
         var payload = JsonSerializer.Serialize(new { username = _config.Username, password = _config.Password });
         using var content = new StringContent(payload, Encoding.UTF8, "application/json");
         using var response = await SharedHttp.PostAsync($"{baseUrl}/api/auth/login", content, ct).ConfigureAwait(false);
@@ -180,7 +193,7 @@ public sealed class GrpcSubscriberCore
     // Schema acquisition
     // ------------------------------------------------------------------
 
-    private async Task<(List<FieldDef> Fields, FieldNumberMap Numbers)> FetchSchemaAsync(string? token, CancellationToken ct)
+    private async Task<(List<FieldDef> Fields, FieldNumberMap Numbers)> FetchSchemaAsync(ResolvedGrpcEndpoints endpoints, string? token, CancellationToken ct)
     {
         if (string.Equals(_config.SchemaSource, "proto", StringComparison.OrdinalIgnoreCase))
         {
@@ -192,17 +205,17 @@ public sealed class GrpcSubscriberCore
             return (fields, numbers);
         }
 
-        return await FetchViaReflectionAsync(token, ct).ConfigureAwait(false);
+        return await FetchViaReflectionAsync(endpoints, token, ct).ConfigureAwait(false);
     }
 
-    private async Task<(List<FieldDef> Fields, FieldNumberMap Numbers)> FetchViaReflectionAsync(string? token, CancellationToken ct)
+    private async Task<(List<FieldDef> Fields, FieldNumberMap Numbers)> FetchViaReflectionAsync(ResolvedGrpcEndpoints endpoints, string? token, CancellationToken ct)
     {
-        using var channel = CreateChannel(_config.Address);
+        using var channel = CreateChannel(endpoints.GrpcAddress);
         var client = new ServerReflection.ServerReflectionClient(channel);
         using var call = client.ServerReflectionInfo(cancellationToken: ct);
 
         var (kind, ident) = ParseEntityKey(_config.EntityKey);
-        var messageIdent = await ResolveMessageIdentAsync(_config, kind, ident, token, ct).ConfigureAwait(false);
+        var messageIdent = await ResolveMessageIdentAsync(endpoints.RestAddress, endpoints.PeerName, kind, ident, token, ct).ConfigureAwait(false);
         var messageSymbol = $"{DescriptorFactory.PackageName}.{DescriptorFactory.ToPascalCase(messageIdent)}";
 
         await call.RequestStream.WriteAsync(new ServerReflectionRequest { Host = "", FileContainingSymbol = messageSymbol }).ConfigureAwait(false);
@@ -260,19 +273,25 @@ public sealed class GrpcSubscriberCore
 
         try
         {
+            // Plan 016 wave 5: this one-shot fetch is, for resolution purposes, a single connect
+            // attempt — resolved fresh here too (never cached), same as the reconnect loop's per-attempt
+            // resolution. That is what lets a preview of a peer-configured source's schema (this method
+            // backs POST /api/sources/schema/from-remote) work without a literal address either.
+            var endpoints = GrpcPeerResolver.Resolve(config);
+
             string? token = config.Token;
             if (string.IsNullOrEmpty(token) && !string.IsNullOrEmpty(config.Username))
             {
                 var probe = new GrpcSubscriberCore(config, static (_, _) => Task.CompletedTask, static (_, _) => { });
-                token = await probe.LoginAsync(ct).ConfigureAwait(false);
+                token = await probe.LoginAsync(endpoints, ct).ConfigureAwait(false);
             }
 
-            using var channel = CreateChannel(config.Address);
+            using var channel = CreateChannel(endpoints.GrpcAddress);
             var client = new ServerReflection.ServerReflectionClient(channel);
             using var call = client.ServerReflectionInfo(cancellationToken: ct);
 
             var (kind, ident) = ParseEntityKey(config.EntityKey);
-            var messageIdent = await ResolveMessageIdentAsync(config, kind, ident, token, ct).ConfigureAwait(false);
+            var messageIdent = await ResolveMessageIdentAsync(endpoints.RestAddress, endpoints.PeerName, kind, ident, token, ct).ConfigureAwait(false);
             var messageSymbol = $"{DescriptorFactory.PackageName}.{DescriptorFactory.ToPascalCase(messageIdent)}";
 
             await call.RequestStream.WriteAsync(new ServerReflectionRequest { Host = "", FileContainingSymbol = messageSymbol }).ConfigureAwait(false);
@@ -321,37 +340,86 @@ public sealed class GrpcSubscriberCore
     /// triplet" fallback never gets a chance to run, since an ErrorResponse carries no descriptors to feed
     /// it. Resolving the real name first via a REST GET against <see cref="GrpcSubConfig.RestAddress"/>
     /// (already required for login) closes that gap.</para></summary>
-    private static async Task<string> ResolveMessageIdentAsync(GrpcSubConfig config, string kind, string ident, string? token, CancellationToken ct)
+    /// <remarks><paramref name="restAddress"/> and <paramref name="peerName"/> come from the caller's
+    /// already-resolved <see cref="ResolvedGrpcEndpoints"/> (plan 016 wave 5) rather than reading
+    /// <c>config.RestAddress</c> directly, because a <c>GrpcSubConfig.Peer</c> WINS over that field - see
+    /// <see cref="GrpcPeerResolver"/>. <paramref name="ident"/> may be an id OR a display name for
+    /// <c>table:</c>/<c>pipeline:</c> keys: wave 1 made the remote's <c>GET /api/{tables|pipelines}/{id}</c>
+    /// routes id-or-name, so this round trip works unchanged either way and always returns the canonical
+    /// display name the reflection symbol is built from.</remarks>
+    internal static async Task<string> ResolveMessageIdentAsync(string? restAddress, string? peerName, string kind, string ident, string? token, CancellationToken ct)
     {
         if (kind is not ("table" or "pipeline"))
         {
             return ident; // "source:{name}" - ident already IS the display name.
         }
 
-        if (string.IsNullOrEmpty(config.RestAddress))
+        if (string.IsNullOrEmpty(restAddress))
         {
+            if (peerName is not null)
+            {
+                throw new InvalidOperationException(
+                    $"GrpcSubConfig.Peer '{peerName}' has no REST endpoint configured - needed to resolve " +
+                    $"EntityKey '{kind}:{ident}' to a display name via a REST GET on it.");
+            }
+
             throw new InvalidOperationException(
                 $"GrpcSubConfig.EntityKey '{kind}:{ident}' needs RestAddress set: gRPC reflection can only " +
                 "look up a message by its exact generated name (derived from the entity's display NAME, not " +
                 "its id), so the id must first be resolved to a name via a REST GET on the remote.");
         }
 
-        var baseUrl = config.RestAddress.TrimEnd('/');
+        var baseUrl = restAddress.TrimEnd('/');
         var path = kind == "table" ? "tables" : "pipelines";
         var url = $"{baseUrl}/api/{path}/{ident}";
+        var remoteLabel = peerName is null ? $"remote '{baseUrl}'" : $"peer '{peerName}' ('{baseUrl}')";
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         if (!string.IsNullOrEmpty(token))
         {
             request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
         }
         using var response = await SharedHttp.SendAsync(request, ct).ConfigureAwait(false);
+
+        // Plan 016 wave 5 part 2: NotFound and Conflict get distinct, actionable messages rather than
+        // EnsureSuccessStatusCode's generic "status code does not indicate success" text. Conflict (409)
+        // is wave 1's ambiguous-name outcome on this exact route (EntityLookup.Reject) — its body already
+        // names the candidates, so it is RELAYED verbatim rather than reinvented here.
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            throw new InvalidOperationException(
+                $"GrpcSubConfig.EntityKey '{kind}:{ident}' was not found on {remoteLabel} (GET '{url}' -> 404).");
+        }
+
+        if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+        {
+            var conflictBody = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            string? remoteMessage = null;
+            try
+            {
+                using var conflictDoc = JsonDocument.Parse(conflictBody);
+                if (conflictDoc.RootElement.TryGetProperty("error", out var errorProp))
+                {
+                    remoteMessage = errorProp.GetString();
+                }
+            }
+            catch (JsonException)
+            {
+                // Body wasn't the expected { "error": "..." } shape - fall through and relay it raw
+                // rather than inventing a message that might not match what actually happened.
+            }
+
+            throw new InvalidOperationException(
+                $"GrpcSubConfig.EntityKey '{kind}:{ident}' is ambiguous on {remoteLabel} (GET '{url}' -> 409): " +
+                (remoteMessage ?? conflictBody));
+        }
+
         response.EnsureSuccessStatusCode();
 
         var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         using var doc = JsonDocument.Parse(body);
         if (!doc.RootElement.TryGetProperty("name", out var nameProp) || nameProp.GetString() is not { Length: > 0 } name)
         {
-            throw new InvalidOperationException($"GET '{url}' did not contain a non-empty 'name' field.");
+            throw new InvalidOperationException($"GET '{url}' on {remoteLabel} did not contain a non-empty 'name' field.");
         }
         return name;
     }
@@ -370,9 +438,9 @@ public sealed class GrpcSubscriberCore
     // Subscribe + pump
     // ------------------------------------------------------------------
 
-    private async Task SubscribeAndPumpAsync(List<FieldDef> fields, FieldNumberMap numbers, string? token, CancellationToken ct)
+    private async Task SubscribeAndPumpAsync(string grpcAddress, List<FieldDef> fields, FieldNumberMap numbers, string? token, CancellationToken ct)
     {
-        using var channel = CreateChannel(_config.Address);
+        using var channel = CreateChannel(grpcAddress);
         var invoker = channel.CreateCallInvoker();
 
         var method = new Method<SubscribeRequestMsg, FrameMsg>(
