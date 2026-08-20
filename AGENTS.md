@@ -91,6 +91,31 @@ Full routes and verified live recipes: `orleans/docs/index.html` §§ REST API /
 federation / Configuration import-export; contributor-facing `@name` wiring: `TRANSPORTS.md`'s Named
 external endpoints section.
 
+**Environment isolation** (plan 021): an environment is the **registry KEY**, not a column — Orleans
+activates a whole separate `RegistryGrain` per environment (Dapr: `RegistryActor`), so two same-named
+tables in two environments are two grains with two states, not one filtered read. `default` is the
+**empty string** internally and renders as `default` only in the API and console; `EnvKeys.Qualify("", k)
+== k`, which is why an existing `data/` directory and an existing Redis store come up byte-identical —
+there is no migration. The separator is `.`, **not** the `:` the plan's own D3 named — overruled in wave
+0, because `JsonFileGrainStorage` sanitizes every state-filename character outside `[A-Za-z0-9_.-]` to
+`_`, and `_` is legal in an entity name: `staging:orders` and a default-environment table named
+`staging_orders` would sanitize to the SAME file. A source/table name may not contain `.` going forward
+(refused at create/rename), which costs nothing real — the SQL tokenizer already can't reference a dotted
+identifier. The ambient (`EnvironmentAmbient`, an `AsyncLocal`) is **request-only**, set by exactly one
+middleware and read only where a runtime key is composed; background work — supervisors, the lifecycle
+orchestrator, connector drivers — never reads it and instead reads `Environment` off the definition it is
+acting on, because the ambient is empty outside a request and empty silently means default. **Seeding is
+default-environment-only**: `RegistryGrain.EnsureInitializedAsync` runs on every environment's registry at
+boot (so already-Running entities resume everywhere), but its three seed blocks are gated on
+`_env == EnvKeys.Default` — otherwise creating an empty `staging` and restarting would fill it with the
+demo catalog, and force-deleting an environment's contents would silently re-seed them on the next boot.
+Environments are a **namespace, not a security boundary** until 015's grants are scoped to one (the
+plan's D9) — any authenticated Editor can point `X-StreamForge-Environment` at any environment today.
+Full routes, the console picker, force-delete semantics and the gotcha list: `orleans/docs/index.html`
+§ Environments; contributor-facing key composition: `orleans/ARCHITECTURE.md` / `dapr/ARCHITECTURE.md`;
+the `/sf-env` skill; per-wave outcomes and the found-and-not-fixed list at the end of
+`plans/021-environment-isolation.md`.
+
 ## Environment — non-negotiables
 
 - **dotnet**: `~/.dotnet/dotnet` (SDK 10.0.3xx). It is **NOT on PATH** — always use the full path.
@@ -155,7 +180,7 @@ Soak shapes: `tools/soak/run-soak.sh --shape orders|instruments`.
 Local skills (root `.claude/skills/`, `sf-` prefix) wrap the common workflows: `/sf-run` (both
 flavors), `/sf-verify` (both flavors), `/sf-sql`, `/sf-client-gen`, `/sf-config` (catalog
 export/import), `/sf-access` (entitlements, approvals, audit), `/sf-federate` (instance discovery,
-peer federation, named external endpoints).
+peer federation, named external endpoints), `/sf-env` (environment isolation — create/select/force-delete).
 
 **Containers, Cloud Run, admin, AI chat** (plan 007): `deploy/orleans/` and `deploy/dapr/` hold
 each flavor's Dockerfile(s), `compose.yaml` (host ports 6199/6399), Cloud Run `service.yaml`, and

@@ -172,6 +172,45 @@ Register in `SinkTransports.Registered`, same as above.
 
 ---
 
+## What environment isolation (plan 021) does to a transport
+
+Most transports need to do nothing at all for this. `nats`, `http`, `db` and `file` all name something
+**outside this process** — a subject, a URL, a database table, a path on the host filesystem — and an
+environment has no opinion about any of those: qualifying them would silently rename an operator's Kafka
+subject or their database table out from under them. `ISinkTransport`'s and `IInboundTransport`'s
+signatures are unchanged by plan 021 for exactly this reason, so an out-of-tree transport written against
+plan 010's SPI still compiles.
+
+**`loopback` and `duplex` are the two exceptions, because both name a CATALOG ENTITY rather than an
+external endpoint.** A `loopback` sink's `targetSourceName` names a generator source that is meant to
+receive the sink's rows back as new events (`LoopbackHub`); a `duplex` sink's `sourceName` names a
+`fix-duplex` source owning a live FIX session (`DuplexSessions`). Both registries are keyed by the
+entity's **runtime key** — `EnvKeys.Qualify(environment, name)` — because that is what plan 021 qualified
+every name-keyed grain/actor by. Before wave 2 of that plan, the sink's config held the bare catalog name
+and nothing translated it, and the bug this produced was silent and it wrote across the environment
+boundary: a table in `staging` with a `loopback` sink to `feed` published to the bare key `feed`, which is
+exactly the key `default`'s own generator is attached at — `staging`'s rows landed in `default`'s source,
+and the publish **reported success**. Not a missing feature; a working cross-environment write, found
+while chasing an unrelated loopback inconsistency.
+
+`SinkEnvironmentScoping.Scope` (`shared/StreamForge.AppCore/Sinks/SinkEnvironmentScoping.cs`) is the fix:
+called at sink-client construction, it qualifies `Loopback.TargetSourceName` / `Duplex.SourceName` by the
+entity's own environment and returns a cloned `SinkSpec` — never written back to the catalog, the same
+rule plan 016 gives `@name` endpoints, so an export from `staging` stays importable into `prod`. The
+default environment gets the identical `SinkSpec` instance back, so nothing about an untouched deployment
+allocates or changes.
+
+**If your new sink kind ever names a catalog entity by string** (not a URL, not a subject, not a table) —
+the way `loopback` and `duplex` do — route it through `SinkEnvironmentScoping.Scope` the same way, or it
+will reproduce exactly this leak the moment more than one environment exists.
+
+**`fix-duplex` sources register under the environment-qualified key too** — `ConnectorGrain`/`ConnectorActor`
+activate at `EnvKeys.Qualify(environment, sourceName)` like every other connector, so `DuplexSessions.Find`
+is looked up by the qualified name from the scoped `SinkSpec` above, not the bare one a `duplex` sink's
+config still carries.
+
+---
+
 ## Polled sources (a database, or anything else pull-shaped)
 
 Everything above is **push**-shaped: something else decides when a message exists, and `SubscribeAsync`

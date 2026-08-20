@@ -636,6 +636,65 @@ the Orleans flavor's `positions` table by id, over both gRPC reflection and prot
 *server* stays Orleans-only — see "gRPC serving" below; this flavor's gRPC port (`:5499`) still only
 serves proto downloads, never `SubscribeEntity`.
 
+## Environment isolation (plan 021)
+
+**One singleton actor per environment**, exactly like the Orleans flavor's grain: `RegistryActor`'s actor
+id is `EnvKeys.Qualify(environment, StreamConstants.RegistryKey)` (`"catalog"` for the default environment
+— `EnvKeys.Qualify("", k) == k` — byte-identical to every pre-plan-021 Redis key), and every name-keyed
+actor kind (`GeneratorActor`, `ConnectorActor`, `TableActor`, `TableHistoryActor`) is created the same
+way. `PipelineActor` stays keyed by its GUID id, needing no qualification. `EnvironmentRegistryActor`
+(id = `StreamConstants.EnvironmentsKey`, `"environments"`, backed by `EnvironmentRegistryStore` — a plain,
+actor-framework-free class the actor delegates to, same pattern `CatalogStore` set for `RegistryActor`) is
+the one singleton that stays unqualified, for the identical reason the Orleans grain does.
+
+**An actor learns its own environment from its own actor id, not from an ambient**, the same discipline
+`RegistryGrain` uses: `RegistryActor.OnActivateAsync` reads `EnvKeys.EnvOf(Id.GetId())` — `EnvKeys.EnvOf`
+on an id with no `.` returns the empty string, so `RegistryActor`'s id `"catalog"` yields the default
+environment and `"staging.catalog"` yields `"staging"`. `CatalogStore` is constructed with that string
+(`environment` parameter, default `EnvKeys.Default`) and never reads an ambient itself. Because every
+`ICatalogFacade` consumer in this project is one of two shapes — a request-scoped one that wants
+`EnvironmentAmbient.Current`, or a background sweep that must visit every environment in turn —
+`ICatalogFacadeFactory.For(environment)` (`Facades/CatalogFacadeFactory.cs`) is what lets the background
+kind exist without a facade-per-environment DI registration: it hands back a fresh
+`ICatalogFacade`/`RegistryActor` proxy pair for an explicit environment name, on demand, as many times as
+asked. The four periodic supervisors (`GeneratorSupervisorService`, `PipelineSupervisorService`,
+`TableSupervisorService`, `TableHistorySupervisorService`) and `IngestDrainPumpService` all use it to loop
+`IEnvironmentRegistryGrain`-equivalent's `ListAsync()` result, exactly like Orleans' boot-time sweeps do.
+
+**Seeding is default-environment-only here too.** `CatalogInitializationService` runs UNQUALIFIED — i.e.
+always against the default environment's catalog — the same guard Orleans' `RegistryGrain.EnsureInitializedAsync`
+applies per-environment; a named environment starts with an empty catalog and stays that way until
+something writes to it.
+
+**No per-environment stream namespace — the entity key inside a fixed topic is qualified instead**, and
+that is the one place this flavor's shape genuinely differs from Orleans'. The five app-wide pub/sub
+topics (`StreamingRuntimeSetup.cs`) do not multiply per environment; every publisher (`GeneratorActor`,
+`ConnectorActor`, `PipelineActor`, `TableActor`) stamps its own **qualified** actor id into the envelope's
+entity-key field (`envelope.Source` / `envelope.Table` / `envelope.PipelineId`) before publishing, and
+dispatch reads that key back out of the envelope after receipt — so routing to the right actor/subscriber
+falls out of the qualified key for free, the same way plan 016's federation reused id-or-name resolution
+instead of adding a new addressing scheme. `DaprStreamBridge` follows one rule per envelope, stated in its
+own comments: **group qualified, payload bare** — the SignalR group name is the envelope's entity key
+as-is (already qualified, matching `StreamHub`'s subscribe-side `$"table:{EnvKeys.Qualify(env, name)}"`),
+while the argument value handed to the browser is `EnvKeys.Split(key).Key` — stripped back to bare —
+because the SPA keys its own state on the plain name and never sees a qualified one anywhere else. The
+`"metrics"` group is the same deliberately-unqualified exception both flavors share.
+
+**"Strip the qualification at the Engine boundary" is the rule this flavor has to state explicitly that
+Orleans gets for free.** `TableExecutor`/`PipelineExecutor` — the shared, environment-unaware Engine (hard
+rule 2: no runtime types inside it, which includes no notion of "environment") — are built once per actor
+against that actor's own **bare**, unqualified `StreamInputs`/`SourceNames`. But the envelope arriving
+from a fixed, cross-environment topic carries the **qualified** key, because that is what let dispatch
+find the right actor in the first place. `TableActor.ProcessSourceEventsAsync` and
+`ProcessTableDeltasAsync`, and `PipelineActor`'s event handler, all call
+`EnvKeys.Split(envelope.Source /* or .Table */).Key` — discarding the environment half — immediately
+before handing the bare name to `_executor.OnEvent`/`OnStreamEvent`/`OnTableDeltaBatch`. Skipping this
+strip would make every compiled plan's own key lookups miss (the Engine was built with bare keys) the
+moment more than one environment existed. Orleans never needs an equivalent line: its streams are already
+per-entity (`StreamId.Create(namespace, qualifiedKey)`), so a subscriber only ever receives its own
+already-unambiguous stream and the Engine is called with the same bare name it was compiled against by
+construction.
+
 ## What's NOT here yet (by design — permanent descopes, not later waves)
 
 Every wave through W8 has landed (Generators W5, Pipelines W6, Tables W7-A, Row history W7-B,

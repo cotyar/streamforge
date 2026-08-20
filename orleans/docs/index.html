@@ -246,6 +246,10 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#discovery-instance" class="sub">Instance identity</a>
   <a href="#discovery-peers" class="sub">Peer directory</a>
   <a href="#discovery-federation" class="sub">Federated addressing</a>
+  <a href="#environments">Environments</a>
+  <a href="#environments-list" class="sub">Creating &amp; listing</a>
+  <a href="#environments-select" class="sub">Selecting one</a>
+  <a href="#environments-delete" class="sub">Force-delete</a>
   <a href="#config">Configuration import/export</a>
   <a href="#config-format" class="sub">Document format</a>
   <a href="#config-compose" class="sub">Compose &amp; merge rules</a>
@@ -842,6 +846,56 @@ curl -X POST localhost:5199/api/meta/peers/producer/probe -H "Authorization: Bea
   } }
 }</code></pre>
 <p>No address, no GUID, anywhere in the source's own definition — verified live: two instances, one federating a table from the other by peer name and table name alone. An unresolvable peer name takes the existing status-error path at the existing backoff, same as an unreachable literal address always has.</p>
+</section>
+
+<section id="environments">
+<h2>Environments</h2>
+<p>A named <b>partition inside one running server</b> — its own sources, pipelines and tables, its own name uniqueness, its own SQL namespace (<code>FROM orders</code> in <code>staging</code> can never resolve to <code>default</code>'s <code>orders</code>), its own grain/actor keys. Every deployment already has one: <code>default</code>, which nothing has to create and which is exactly today's catalog under a new name.</p>
+<div class="callout"><b>Not a security boundary, and not a resource boundary.</b> Any authenticated Editor can point <code>X-StreamForge-Environment</code> at any environment and edit it — nothing in the <a href="#rbac">entitlement model</a> scopes a grant to one, yet (that hook is named and ready for plan 015's resolver, deliberately not built here). It is also one process and one heap: a runaway pipeline in <code>staging</code> starves <code>default</code> exactly as much as it does today. Environments partition <i>naming and state</i>, not access or capacity.</div>
+
+<h3 id="environments-list">Creating &amp; listing</h3>
+<p><code>GET /api/environments</code> (Viewer) always returns <code>default</code> first — synthesised, never stored, present even on an instance that predates this feature entirely — then every created environment, name-ordered, each with a live <code>entityCount</code> (sources + pipelines + tables, −1 if it could not be counted). Creating and deleting are Admin-only, deliberately: an environment is the one part of this feature that is genuinely destructive to get wrong, so a typo must never silently deploy into a brand-new empty catalog nobody meant to make.</p>
+<pre><code>curl localhost:5199/api/environments -H "Authorization: Bearer $TOKEN"
+# [{"name":"default","description":"...","createdAtMs":0,"createdBy":"","entityCount":18}]
+
+curl -X POST localhost:5199/api/environments -H "Authorization: Bearer $TOKEN" \
+  -d '{"name":"staging","description":"pre-prod"}'
+# -> 200 {"name":"staging","description":"pre-prod","createdAtMs":...,"createdBy":"admin","entityCount":-1}
+
+curl -X POST localhost:5199/api/environments -H "Authorization: Bearer $TOKEN" -d '{"name":"default"}'
+# -> 400 {"error":"'default' is not a valid environment name — ... and not one of the reserved names
+#          (default, catalog, users, access, approvals, audit, events, metrics)."}
+curl -X POST localhost:5199/api/environments -H "Authorization: Bearer $TOKEN" -d '{"name":"staging"}'
+# -> 409 {"error":"Environment 'staging' already exists."}</code></pre>
+<p>Names are lower-case letters, digits and hyphens, 1–32 characters, and may not be one of the words already claimed elsewhere in this key space (<code>default</code>, <code>catalog</code>, <code>users</code>, <code>access</code>, <code>approvals</code>, <code>audit</code>, <code>events</code>, <code>metrics</code>). <b>No environment can ever be renamed</b> — there is no route for it — for the identical reason a sharded table can't be: the name is qualified into every grain key, actor id and stream id that environment's entities ever produced, and a rename would silently orphan all of it.</p>
+
+<h3 id="environments-select">Selecting one</h3>
+<p>Every request that names an environment does so with the <code>X-StreamForge-Environment</code> header; a <code>?env=</code> query parameter overrides the header when both are present, for a browser navigation, an <code>&lt;img&gt;</code>/download link, or a <code>curl</code> that would rather not set a header. Naming <code>default</code> explicitly, an empty value, or naming nothing at all are the same thing and cost nothing extra — no lookup, no per-request state write. Naming anything else validates against the environment registry <b>before</b> the request reaches its route:</p>
+<pre><code>curl localhost:5199/api/tables -H "Authorization: Bearer $TOKEN" -H 'X-StreamForge-Environment: staging'
+# [] — staging's own (empty, until something is created in it) table list
+
+curl localhost:5199/api/tables -H "Authorization: Bearer $TOKEN" -H 'X-StreamForge-Environment: nope'
+# -> 404 {"error":"environment 'nope' does not exist"} — refused before any catalog is touched
+
+curl -X POST "localhost:5199/api/environments?env=staging" -H "Authorization: Bearer $TOKEN" \
+     -H 'X-StreamForge-Environment: nope'
+# ?env= wins: the request resolves against staging, "nope" is never consulted</code></pre>
+<p>The 404 fires only <i>after</i> authentication and authorization run — an anonymous caller can never use this route to enumerate which environment names exist by probing the header against a protected path, because they never get past 401 to see it. <code>/api/environments</code> itself, <code>/healthz</code>, <code>/api/meta/instance</code> and every <code>/api/auth/*</code> route ignore the header entirely: the first is how a client recovers from having its own selected environment force-deleted out from under it (it must stay reachable to discover that, or an <code>X-StreamForge-Environment</code> pointed at a name that no longer exists 404s on <i>every</i> route, including the one that would tell you why), and the rest describe the server process or a global user account, neither of which an environment partitions.</p>
+<p>The console carries a matching <b>environment picker</b> next to the theme toggle: it stores the selection in the browser (not a server-side session), injects the header on every REST call, and passes <code>?env=</code> to the SignalR connection — a stale selection pointing at a since-deleted environment falls back to <code>default</code> automatically rather than dead-ending on repeated 404s.</p>
+
+<h3 id="environments-delete">Force-delete, and exactly what it erases</h3>
+<p><code>DELETE /api/environments/{name}</code> (Admin) refuses a non-empty environment outright; add <code>?force=true</code> to delete it anyway. <code>default</code> refuses unconditionally, force or not — it always exists and this is the one route that can never touch that.</p>
+<pre><code>curl -X DELETE localhost:5199/api/environments/staging -H "Authorization: Bearer $TOKEN"
+# -> 409 {"error":"Environment 'staging' is not empty (1 source(s), 0 pipeline(s), 1 table(s)) —
+#          pass force=true to delete it and everything in it."}
+
+curl -X DELETE "localhost:5199/api/environments/staging?force=true" -H "Authorization: Bearer $TOKEN"
+# -> 204, and default's own tables/sources are provably untouched afterward
+
+curl -X DELETE "localhost:5199/api/environments/default?force=true" -H "Authorization: Bearer $TOKEN"
+# -> 409 {"error":"The default environment cannot be deleted."}</code></pre>
+<p>Force-delete is the one genuinely destructive operation this feature adds: it deletes the environment's <b>catalog and the runtime state of everything in it</b> — every source, pipeline and table is torn down through the same code path a manual one-at-a-time delete uses (so a Running table is stopped first, its history/shard tiers released), then the environment record itself is removed. The console's picker makes this a deliberate two-step confirmation — a plain delete first, which escalates to an explicit "force-delete erases catalog AND runtime state" dialog only after the server has confirmed the environment is non-empty.</p>
+<div class="callout"><b>What force-delete does not clean up.</b> The environment's own registry state (an Orleans grain-storage JSON file, a Dapr Redis entry) is left behind holding an <i>empty</i> catalog — nothing in either flavor's storage layer can delete a grain/actor's own persisted file outright, only empty the object living in it. Its field-number map for the deleted entities is left behind too (harmless: field numbers are meant to persist forever regardless — see the API's <a href="#grpc-reflection">field-number stability</a> rule). Re-creating an environment with the same name later inherits that dead weight rather than starting clean.</div>
 </section>
 
 <section id="config">

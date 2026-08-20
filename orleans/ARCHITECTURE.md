@@ -118,6 +118,60 @@ source stream ─▶ TableIngestGrain ──epoch-stamped batches──▶ Table
 - Measured (soak, 2 000 ev/s × 60 s): P=4 p99 latency **0.70×** the single-grain baseline
   (higher median from epoch batching, radically tighter tail — the point of the design).
 
+## Environment isolation (plan 021)
+
+An environment is not a field anywhere — it is **which key a singleton grain is activated at**.
+`RegistryGrain`'s key is `EnvKeys.Qualify(env, "catalog")` (`EnvKeys.Qualify("", k) == k`, so the default
+environment's key is the literal string `"catalog"`, byte-identical to every pre-plan-021 deployment), and
+every name-keyed grain kind — `GeneratorGrain`, `ConnectorGrain`, `TableGrain` and its dataflow satellites,
+`TableHistoryGrain`, the shard tier, `ArrangementGrain` — is activated the same way:
+`EnvKeys.Qualify(env, name)`. `IPipelineGrain` stays keyed by its GUID id and needs no qualification at
+all — a GUID is already unique across every environment. `IEnvironmentRegistryGrain` (key =
+`StreamConstants.EnvironmentsKey`, `"environments"`) is the one singleton that is **never** itself
+qualified — it is the thing that says which environments exist, so exactly one per silo is the point.
+
+**A grain learns its own environment once, from its own primary key, never from the ambient.**
+`RegistryGrain.OnActivateAsync` sets `_env = EnvKeys.EnvOf(this.GetPrimaryKeyString())` — `EnvKeys.EnvOf`
+on a key with no `.` separator returns the empty string, so an activation whose key nobody ever qualified
+learns `_env = ""` exactly as it always implicitly was. Every entity that grain's `Upsert`/`Create*Async`
+methods write gets `Environment = _env` forced onto it, overriding whatever (if anything) the caller's
+payload said — the same "server owns this field" discipline `CatalogRecordMerge.CarryServerOwnedFields`
+already applies to `Revision`/`SchemaRevision`. Every call this grain makes to another grain kind passes
+`_env` through `EnvKeys.Qualify`, never `EnvironmentAmbient.Current` — this is plan 021 D5 in one field:
+the runtime reads the definition, not the ambient, because the ambient (an `AsyncLocal` written by exactly
+one REST middleware) is empty outside a request and empty silently means default.
+
+**Seeding is gated the same way.** `EnsureInitializedAsync` runs unconditionally on every environment's
+`RegistryGrain` at boot, so already-`Running` sources/pipelines/tables resume everywhere — but its three
+seed blocks (`SeedCatalog.Sources()`/`.Pipelines()`/`.Tables()`) only fire when `_env == EnvKeys.Default`.
+Without that guard, creating an empty `staging` and restarting the silo would fill it with the demo
+catalog on the next boot, silently.
+
+**One lifecycle stream per environment**, not a new namespace: `RegistryGrain` publishes onto
+`StreamId.Create(StreamConstants.LifecycleNamespace, EnvKeys.Qualify(_env, StreamConstants.LifecycleEventsKey))`
+— the four namespace constants (`sources`, `pipeline-out`, `table-delta`, `lifecycle`) are unchanged; only
+the entity key inside each stream id is qualified, which `StreamBridgeService` (below) and every table/
+pipeline stream already did for free once `EnvKeys.Qualify` was applied at every `GetGrain<...>` call site.
+Without a qualified lifecycle stream, a `staging` deploy would wake every `default` (and every other
+environment's) lifecycle subscriber.
+
+**SignalR groups are qualified at the relay, not at the grain.** `StreamBridgeService` composes group names
+like `table:{EnvKeys.Qualify(env, name)}` when it relays a grain's stream onto SignalR; `StreamHub`'s
+subscribe methods compose the identical qualified group name from the connection's own selected
+environment (`ConnectionEnv`, read off `HttpContext.Items` — see `EnvironmentSelectionMiddleware`'s class
+doc for why a hub connection can't read the ambient directly). The one exception is the `"metrics"` group,
+left deliberately cluster-wide — see `StreamHub.SubscribeMetrics`'s own doc comment for the argument.
+
+**`RegistryGrainKeys.RegistryFor`** (`orleans/src/StreamForge.Host/Facades/RegistryGrainKeys.cs`) is the
+one place `StreamForge.Host` turns "which environment" into "which `IRegistryGrain`" — every
+`GetGrain<IRegistryGrain>(StreamConstants.RegistryKey)` call site in this codebase became
+`client.RegistryFor(env)` / `factory.RegistryFor(env)` instead, so there is exactly one place that
+composes the qualified registry key. Which environment a caller passes is decided at the call site: a
+facade answering one REST request passes `EnvironmentAmbient.Current`; a grain acting on its own
+already-loaded definition passes that definition's `Environment` field; a background service that must
+act on every environment (the four boot-time sweeps, `IngestDrainPumpService`) enumerates
+`IEnvironmentRegistryGrain.ListAsync()` and loops.
+
 ## Surfaces (one process, two ports)
 
 | Surface | Where | Notes |
