@@ -137,15 +137,20 @@ public sealed class RegistryGrain(
         {
             try
             {
-                // Plan 006 D-C / plan 008 W4 / plan 009 wave D: three-way Kind dispatch via the shared
-                // SourceKindDispatch.Classify (StreamForge.Abstractions — both flavors use it, see its own
-                // class doc). Generator (or unset — pre-006 seeds/sources) keeps the pre-existing
-                // IGeneratorGrain path unchanged; Ingest starts NO grain at all (rows arrive through
-                // IIngressFacade); Connector (everything else) goes to IConnectorGrain.
+                // Plan 006 D-C / plan 008 W4 / plan 009 wave D / plan 020 wave B-2: four-way Kind dispatch
+                // via the shared SourceKindDispatch.Classify (StreamForge.Abstractions — both flavors use
+                // it, see its own class doc). Generator (or unset — pre-006 seeds/sources) keeps the
+                // pre-existing IGeneratorGrain path unchanged; Ingest starts NO grain at all (rows arrive
+                // through IIngressFacade); Crdt goes to ICrdtDocGrain (D3 — never IConnectorGrain);
+                // Connector (everything else) goes to IConnectorGrain.
                 var kind = SourceKindDispatch.Classify(src.Kind);
                 if (kind == SourceKindDispatch.ActorKind.Generator)
                 {
                     await GrainFactory.GetGrain<IGeneratorGrain>(EnvKeys.Qualify(_env, src.Name)).StartAsync(src);
+                }
+                else if (kind == SourceKindDispatch.ActorKind.Crdt)
+                {
+                    await GrainFactory.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(_env, src.Name)).StartAsync(src);
                 }
                 else if (kind != SourceKindDispatch.ActorKind.Ingest)
                 {
@@ -298,13 +303,14 @@ public sealed class RegistryGrain(
         RecomputeStaleReasons();
         await state.WriteStateAsync();
 
-        // Plan 006 D-C / plan 009 wave D: Kind dispatch via the shared SourceKindDispatch.Classify. On an
-        // update where Kind CHANGED (e.g. generator -> url), the grain for the OLD kind is still activated
-        // and would otherwise keep polling/ticking forever — so both StopAsync calls always run (cheap/
-        // idempotent no-ops on whichever kind wasn't actually running) rather than tracking the previous
-        // Kind separately just to target one Stop call.
+        // Plan 006 D-C / plan 009 wave D / plan 020 wave B-2: Kind dispatch via the shared
+        // SourceKindDispatch.Classify. On an update where Kind CHANGED (e.g. generator -> url), the grain
+        // for the OLD kind is still activated and would otherwise keep polling/ticking forever — so every
+        // non-selected kind's StopAsync always runs (cheap/idempotent no-ops on whichever kind wasn't
+        // actually running) rather than tracking the previous Kind separately just to target one Stop call.
         var generator = GrainFactory.GetGrain<IGeneratorGrain>(EnvKeys.Qualify(_env, def.Name));
         var connector = GrainFactory.GetGrain<IConnectorGrain>(EnvKeys.Qualify(_env, def.Name));
+        var crdt = GrainFactory.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(_env, def.Name));
         if (def.Enabled)
         {
             switch (SourceKindDispatch.Classify(def.Kind))
@@ -312,14 +318,22 @@ public sealed class RegistryGrain(
                 case SourceKindDispatch.ActorKind.Generator:
                     await generator.StartAsync(def);
                     await connector.StopAsync();
+                    await crdt.StopAsync();
                     break;
                 case SourceKindDispatch.ActorKind.Ingest:
+                    await generator.StopAsync();
+                    await connector.StopAsync();
+                    await crdt.StopAsync();
+                    break;
+                case SourceKindDispatch.ActorKind.Crdt:
+                    await crdt.StartAsync(def);
                     await generator.StopAsync();
                     await connector.StopAsync();
                     break;
                 default: // Connector
                     await connector.StartAsync(def);
                     await generator.StopAsync();
+                    await crdt.StopAsync();
                     break;
             }
         }
@@ -327,6 +341,7 @@ public sealed class RegistryGrain(
         {
             await generator.StopAsync();
             await connector.StopAsync();
+            await crdt.StopAsync();
         }
     }
 

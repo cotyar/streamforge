@@ -21,6 +21,9 @@
     <ProjectReference Include="..\..\..\shared\StreamForge.Api\StreamForge.Api.csproj" />
     <ProjectReference Include="..\..\..\shared\StreamForge.Connectors.Database\StreamForge.Connectors.Database.csproj" />
     <ProjectReference Include="..\..\..\shared\StreamForge.Connectors.Fix\StreamForge.Connectors.Fix.csproj" />
+    <!-- Plan 020 wave B-2: CrdtDocGrain calls CrdtProjector.Flatten/Diff directly, the same
+         "out-of-core connector project" shape StreamForge.Connectors.Database/Fix already have here. -->
+    <ProjectReference Include="..\..\..\shared\StreamForge.Connectors.Crdt\StreamForge.Connectors.Crdt.csproj" />
     <ProjectReference Include="..\..\..\shared\StreamForge.Quant\StreamForge.Quant.csproj" />
     <ProjectReference Include="..\StreamForge.Abstractions\StreamForge.Abstractions.csproj" />
   </ItemGroup>

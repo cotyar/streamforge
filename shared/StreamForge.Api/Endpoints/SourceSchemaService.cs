@@ -338,7 +338,7 @@ public static class SourceValidation
     /// from <c>StreamForge.Connectors.Database.CdcStamp</c> because this assembly does not depend on that
     /// connector project — the two are pinned equal by <c>CrdtProjectorTests</c>.</summary>
     private static readonly HashSet<string> ReservedRowColumns =
-        new(StringComparer.Ordinal) { "_ts", "_source", "_weight", "_op" };
+        new(StringComparer.Ordinal) { "_ts", "_source", "_weight", "_op", "_retract" };
 
     private static void ValidateIngest(IngestConfig ingest, List<string> errors)
     {

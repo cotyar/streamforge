@@ -208,6 +208,15 @@ public class CrdtProjectorTests
     {
         // Plan D8/projection section + CrdtSourceConfig's own doc comment: "emit a row carrying only
         // config.KeyField plus _op = 'd' and _weight = -1L" -- deliberately no stale attribute values.
+        //
+        // DECLARED BEHAVIOUR CHANGE, wave B-2's live check: the tombstone now carries a THIRD stamp,
+        // _retract = true. The original two are not enough and the live run proved it -- deleting a
+        // document key left the table holding both the old row and a second all-null row for the same
+        // key, each at weight 1, because _weight on an INBOUND row is just a column (CdcEnvelope's class
+        // doc has always said so; a Debezium delete has the same limit). _retract is the platform's one
+        // real key retraction, honoured by the Engine's TableIngestOp, and with it a LATEST BY table
+        // genuinely frees the key -- re-verified live, table went to 0 rows. So this assertion is
+        // updated, not weakened: the count moves 3 -> 4 and the new stamp is asserted by name.
         var config = DefaultConfig();
         var before = new Dictionary<string, Dictionary<string, object?>>
         {
@@ -218,10 +227,11 @@ public class CrdtProjectorTests
         var diff = CrdtProjector.Diff(before, after, config);
 
         var tombstone = Assert.Single(diff);
-        Assert.Equal(3, tombstone.Count); // ONLY id/_op/_weight -- "name" must not leak through
+        Assert.Equal(4, tombstone.Count); // ONLY id/_op/_weight/_retract -- "name" must not leak through
         Assert.Equal("e1", tombstone["id"]);
         Assert.Equal("d", tombstone["_op"]);
         Assert.Equal(-1L, tombstone["_weight"]);
+        Assert.Equal(true, tombstone["_retract"]);
     }
 
     [Fact]

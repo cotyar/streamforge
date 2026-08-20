@@ -66,6 +66,9 @@ public static class DaprFacadesExtensions
         // always here.
         services.AddSingleton<IApprovalFacade, DaprApprovalFacade>();
         services.AddSingleton<IAuditFacade, DaprAuditFacade>();
+        // Plan 020 D9: the CRDT document runtime is Orleans-only, permanently — see
+        // DisabledCrdtFacade's own doc comment (same shape as DisabledTableShardFacade above).
+        services.AddSingleton<ICrdtFacade, DisabledCrdtFacade>();
         return services;
     }
 }

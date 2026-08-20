@@ -16,8 +16,10 @@ namespace StreamForge.Engine.Runtime.Ops;
 /// call boundary — this op's own job is purely the alias tagging.
 ///
 /// THE ONE EXCEPTION (wishlist "explicit key retraction through ingest"): a row stamped
-/// <see cref="RetractField"/> = true — set only by AppCore's <c>IngressRowAcceptance.Accept</c>, on a
-/// genuine client-pushed ingest row; no table projection ever copies it into its own output, so it
+/// <see cref="RetractField"/> = true — set by AppCore's <c>IngressRowAcceptance.Accept</c> on a genuine
+/// client-pushed ingest row, and (plan 020) by <c>StreamForge.Connectors.Crdt.CrdtProjector</c> on the
+/// tombstone it emits when a key leaves a CRDT document, which is the same request made from a source
+/// grain rather than a REST push; no table projection ever copies it into its own output, so it still
 /// cannot reappear on a table-over-table delta — asks for weight -1 instead of the assert
 /// TableExecutorImpl's OnStreamEventCore otherwise hardcodes every stream event to (see PublicApi.cs —
 /// that call site is frozen, so this is the earliest point downstream of it that still sees the raw
@@ -27,8 +29,10 @@ namespace StreamForge.Engine.Runtime.Ops;
 /// knows what "the current row for a key" is) is NOT decided here; this op has no visibility into which
 /// op sits downstream of it (TableExecutorImpl builds the chain, and its call site is frozen — see that
 /// class's EnsureInit/AddRole). That check runs before admission, at the REST ingest boundary
-/// (StreamForge.Api's SourcesEndpoints, backed by AppCore's RetractConsumerValidation) — this op
-/// unconditionally honors the flag for every shape, relying on TableLatestByOp to interpret it
+/// (StreamForge.Api's SourcesEndpoints, backed by AppCore's RetractConsumerValidation) — note that the
+/// CRDT path named above does NOT cross that boundary and so is NOT pre-validated for a LATEST BY
+/// consumer; it relies entirely on the safety described next, which is why that safety is a contract
+/// here and not an implementation detail. This op unconditionally honors the flag for every shape, relying on TableLatestByOp to interpret it
 /// correctly and on TableReduceOp's own unmatched-retraction handling to stay safe (never corrupt, at
 /// worst under-report) for any other shape a flagged row still reaches.
 ///

@@ -74,6 +74,11 @@ public static class OrleansFacadesExtensions
         services.AddSingleton<ITableShardFacade, OrleansTableShardFacade>();
         services.AddSingleton<IArrangementMetaFacade, OrleansArrangementMetaFacade>();
         services.AddSingleton<IConnectorStatusFacade, OrleansConnectorStatusFacade>();
+        // Plan 020 wave B-2: same zero-per-call-state shape as OrleansConnectorStatusFacade above — it
+        // reads EnvironmentAmbient.Current freshly INSIDE each method (never captured at construction), so
+        // a plain singleton is safe. Always Enabled: Orleans is the CRDT-capable flavour (D9); the Dapr
+        // side registers DisabledCrdtFacade instead.
+        services.AddSingleton<ICrdtFacade, OrleansCrdtFacade>();
         // Plan 008 W4: client-push ingress. SourceIngressRegistry is the host-process singleton buffer
         // registry (one SourceIngressBuffer per ingest-kind source); OrleansIngressFacade is the thin
         // Orleans-side adapter IIngressFacade callers (SourcesEndpoints, IngestGrpcService) depend on.
@@ -190,6 +195,47 @@ internal sealed class OrleansConnectorStatusFacade(IClusterClient client) : ICon
             return null;
         }
         return await client.GetGrain<IConnectorGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).GetStatusAsync();
+    }
+}
+
+/// <summary>Plan 020 wave B-2: Orleans-side <see cref="ICrdtFacade"/> — the CRDT counterpart of
+/// <see cref="OrleansConnectorStatusFacade"/> above, same "resolve, check kind, forward to the grain"
+/// shape. <see cref="ICrdtFacade.MergeAsync"/>/<see cref="ICrdtFacade.GetStatusAsync"/>'s own doc comments
+/// say null means "no source of that name exists or it is not crdt-kind" — checked HERE, once, so
+/// <see cref="CrdtDocGrain"/> itself never has to (D5: it trusts the def stamped on it at
+/// <c>StartAsync</c>, not a fresh registry read).</summary>
+internal sealed class OrleansCrdtFacade(IClusterClient client) : ICrdtFacade
+{
+    public bool Enabled => true;
+
+    public async Task<CrdtMergeResult?> MergeAsync(string sourceName, IReadOnlyList<byte[]> updates)
+    {
+        var def = await ResolveCrdtSourceAsync(sourceName);
+        if (def is null)
+        {
+            return null;
+        }
+
+        return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).MergeAsync(updates);
+    }
+
+    public async Task<CrdtDocStatus?> GetStatusAsync(string sourceName)
+    {
+        var def = await ResolveCrdtSourceAsync(sourceName);
+        if (def is null)
+        {
+            return null;
+        }
+
+        return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).GetStatusAsync();
+    }
+
+    private async Task<SourceDefinition?> ResolveCrdtSourceAsync(string sourceName)
+    {
+        // Plan 021 D4 — a facade answering one request reads the ambient.
+        var registry = client.RegistryFor(EnvironmentAmbient.Current);
+        var def = await registry.GetSourceAsync(sourceName);
+        return def is null || def.Kind != SourceKinds.Crdt ? null : def;
     }
 }
 

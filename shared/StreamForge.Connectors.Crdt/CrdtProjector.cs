@@ -73,7 +73,7 @@ public static class CrdtProjector
     /// <c>FixRowMapper.ReservedRowColumns</c>, which duplicates the identical three names for the
     /// identical reason — see that class's doc comment).</summary>
     private static readonly HashSet<string> ReservedColumns =
-        new(StringComparer.Ordinal) { "_ts", "_source", "_weight", "_op" };
+        new(StringComparer.Ordinal) { "_ts", "_source", "_weight", "_op", "_retract" };
 
     /// <summary>
     /// The tombstone convention <see cref="Diff"/> speaks — deliberately the SAME spelling
@@ -88,6 +88,28 @@ public static class CrdtProjector
     /// either file that breaks the spelling match fails a test instead of drifting silently.</summary>
     private const string OpColumn = "_op";
     private const string WeightColumn = "_weight";
+
+    /// <summary>
+    /// The platform's ONE real key retraction (<c>StreamForge.AppCore.Ingest.IngressRowAcceptance</c>'s
+    /// <c>RetractField</c>, honoured by the Engine's <c>TableIngestOp</c>). Stamped on a tombstone in
+    /// ADDITION to <see cref="OpColumn"/>/<see cref="WeightColumn"/>, and the reason is a live finding,
+    /// not a precaution.
+    ///
+    /// <para><c>_weight = -1</c> on an inbound row is <b>just a column</b>. A database sink reads it and
+    /// writes a <c>DELETE</c>; a TABLE does not — the Engine's Z-set weights are computed FROM table SQL,
+    /// not carried in from ingress, so every source event is admitted as a <c>+1</c> assert. Verified
+    /// live during wave B-2: deleting a document key left the table holding BOTH the original row and a
+    /// second, all-null row for the same key, each at weight 1. <c>CdcEnvelope</c>'s class doc states
+    /// this same limit for Debezium deletes in as many words — a CDC delete has always had it too.</para>
+    ///
+    /// <para><c>_retract</c> is the mechanism that does work: <c>TableIngestOp</c> honours it
+    /// unconditionally, for every table shape, overriding the assert with a genuine <c>-1</c>. A
+    /// <c>LATEST BY</c> table receiving one actually frees the key; other shapes fall to
+    /// <c>TableReduceOp</c>'s unmatched-retraction handling, which its own doc pins as never-corrupt,
+    /// at-worst-under-report. That is why all three are stamped rather than picking one: <c>_op</c> for
+    /// SQL to read, <c>_weight</c> for a sink to act on, <c>_retract</c> for a table to converge.</para>
+    /// </summary>
+    private const string RetractColumn = "_retract";
     private const string OpCreate = "c";
     private const string OpUpdate = "u";
     private const string OpDelete = "d";
@@ -188,6 +210,9 @@ public static class CrdtProjector
                 [config.KeyField] = beforeRow.TryGetValue(config.KeyField, out var kv) ? kv : key,
                 [OpColumn] = OpDelete,
                 [WeightColumn] = -1L,
+                // See RetractColumn's doc: without this the tombstone reaches a table as one more +1
+                // assert and the twin silently accumulates instead of converging.
+                [RetractColumn] = true,
             };
             result.Add(tombstone);
         }

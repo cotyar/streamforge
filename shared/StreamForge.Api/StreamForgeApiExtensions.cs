@@ -367,6 +367,7 @@ public static class StreamForgeApiExtensions
         app.MapAuthEndpoints();
         app.MapSourcesEndpoints();
         app.MapSourceRunEndpoints();
+        app.MapCrdtEndpoints();
         app.MapPipelinesEndpoints();
         app.MapTablesEndpoints(options);
         app.MapUsersEndpoints();

@@ -145,6 +145,16 @@ public sealed class ConnectorConfig
 /// <c>_weight = -1</c> into a <c>DELETE</c>. Removing a key from the root map therefore emits exactly what
 /// a Postgres <c>DELETE</c> emits, so one piece of downstream SQL covers a CDC feed and a CRDT document
 /// alike. Inventing a third spelling would have meant every consumer learning it.</para>
+///
+/// <para><b>Those two stamps reach a SINK. They do not, on their own, converge a TABLE</b> — found in
+/// wave B-2's live check, not reasoned about. <c>_weight</c> on an inbound row is just a column; the
+/// Engine's Z-set weights are computed FROM table SQL, never carried in from ingress, so a tombstone
+/// arrives as one more <c>+1</c> assert and the table ends up holding the old row AND an all-null row
+/// for the same key. <c>CdcEnvelope</c>'s class doc states this limit for Debezium deletes in as many
+/// words — CDC has always had it. The tombstone therefore carries a THIRD stamp, <c>_retract = true</c>
+/// (<c>IngressRowAcceptance.RetractField</c>), which the Engine's <c>TableIngestOp</c> honours
+/// unconditionally: a <c>LATEST BY</c> table receiving one genuinely frees the key. Three stamps, three
+/// readers — <c>_op</c> for SQL, <c>_weight</c> for a sink, <c>_retract</c> for a table.</para>
 /// </summary>
 [GenerateSerializer]
 public sealed class CrdtSourceConfig

@@ -299,6 +299,16 @@ public sealed record IngestKeyResponse(string Id, string Label, long CreatedAtMs
 /// mirrors the Retry-After header (which is whole seconds clamped to [1,30]).</summary>
 public sealed record IngestErrorResponse(string Error, int RetryAfterMs, IReadOnlyList<string> RowErrors);
 
+// ----- Plan 020 wave B-2: the CRDT document intake route. Response bodies are the shared-Contracts
+// CrdtMergeResult/CrdtDocStatus types (StreamForge.Abstractions) directly — no wrapper DTO, same as
+// e.g. TableMetrics elsewhere in this file, since they already carry every field the route needs to
+// answer with and duplicating their shape here would be a second copy to keep in step. -----
+
+/// <summary>POST /api/sources/{name}/crdt/updates. Each entry is one Yjs v1 update, base64-encoded — a
+/// batch, not a single update, because store-and-forward on a flaky edge naturally accumulates several
+/// before it gets a chance to flush (plan 020's whole reason for existing).</summary>
+public sealed record CrdtUpdatesRequest(List<string> Updates);
+
 /// <summary>GET /api/sources/{name}/ingest. 404 unknown source, 204 source exists but is not
 /// ingest-kind, 200 otherwise — reusing DecideStatusOutcome's existing three-way convention.
 /// <paramref name="DownstreamDropped"/> is the second loss point (the transport's own drops), exposed

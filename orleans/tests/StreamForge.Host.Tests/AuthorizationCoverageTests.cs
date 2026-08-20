@@ -156,6 +156,10 @@ public class AuthorizationCoverageTests
         new("POST", "/api/sources/schema/from-remote", Guards.Editor),
         new("POST", "/api/sources/{name}/run", Guards.Editor),
 
+        // Plan 020 wave B-2: the CRDT document intake route.
+        new("POST", "/api/sources/{name}/crdt/updates", Guards.Editor),
+        new("GET", "/api/sources/{name}/crdt", Guards.Viewer),
+
         // The one REST route that is anonymous ON PURPOSE at the metadata layer. Plan 009 A1.2: a
         // telemetry producer holds an ingest key, not a JWT, so route-level authorization cannot express
         // the requirement. The REAL gate is the manual dual check at the top of the handler in

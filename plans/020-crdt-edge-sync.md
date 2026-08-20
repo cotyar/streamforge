@@ -289,3 +289,78 @@ carries a known high-severity advisory (`NU1903`); the parity branch bumps it to
 clean. A third reason the branch pin is the right one.
 
 Gates: `dotnet build` green on both solutions; `YcsPinTests` 4/4.
+
+### Wave B · Sync core — DONE (2026-08-20)
+
+Landed in three parts: **B-0** the contract seam (orchestrator), **B-1** the projector, **B-2** the grain,
+the intake route and the Orleans dispatch wiring.
+
+**Two decisions the plan left to the implementer, made in B-0 because they are the contract:**
+
+*The document's shape.* The root `YMap`'s keys are entity keys and its values are that entity's
+attributes; one key projects to one row, carrying its key in `keyField`. The alternative — the root map
+IS one entity, whole document to a single row — was rejected because it leaves per-entity deletion
+inexpressible, and deletion is the half of this feature that goes wrong silently.
+
+*Deletion reuses the platform's vocabulary instead of the new tombstone the plan asked for.* `_op`/
+`_weight` are already spoken by CDC (`CdcStamp`) and already understood by the database sink planner. A
+third spelling would have meant every consumer learning it.
+
+**The projector** (`shared/StreamForge.Connectors.Crdt`) handles every hazard the plan's "the projection
+is the dangerous part" section names, each with its own test: reserved-column rename (`_ts` → `doc_ts`,
+never passed through, never silently dropped), recursive flattening on a dotted path, `YText` as its plain
+string, undeclared keys dropped rather than guessed, coercion through the platform's own
+`FieldValueCoercion`, and no throw on any document content.
+
+**Three things were found by looking rather than reasoning, and all three were real:**
+
+1. *A Y-type projecting its own class name.* The B-1 agent reported the bare-`YArray`-under-an-entity-key
+   path as untested and predicted it "fails coercion honestly". It does not — `FieldValueCoercion` coerces
+   any object into a String column via `ToString()`, so the row carried the literal string `"Ycs.YArray"`
+   with no diagnostic. Both the scalar path and `FlattenValue`'s fallthrough now refuse an `AbstractType`
+   by name. **"Not covered by a test" in a wave report is an address, not a footnote.**
+
+2. *A stopped document answering like a successful replay.* The grain's defensive floor returned a bare
+   `CrdtMergeResult` — "0 applied, 0 rows" — which is byte-identical to the idempotent replay D7
+   guarantees. An edge draining its store-and-forward buffer into a stopped document would have read its
+   own data loss as success. It now says so in `Diagnostics`.
+
+3. *The tombstone did not converge a table.* Live: deleting a document key left the table holding BOTH the
+   original row and a second all-null row for the same key, each at weight 1. `_weight` on an inbound row
+   **is just a column** — the Engine's Z-set weights are computed from table SQL, never carried in from
+   ingress. `CdcEnvelope`'s class doc has always said this; **a Debezium/CDC delete has exactly the same
+   limit**, so this is a platform property plan 020 walked into, not one it created. The fix is the
+   platform's own existing mechanism: the tombstone also stamps `_retract = true`
+   (`IngressRowAcceptance.RetractField`), which `TableIngestOp` honours unconditionally. Re-verified live
+   against a `LATEST BY (id)` table: the key is genuinely freed, the table goes to 0 rows. Three stamps,
+   three readers — `_op` for SQL, `_weight` for a sink, `_retract` for a table.
+
+   Note the one asymmetry this creates, recorded rather than hidden: a REST-pushed `_retract` is gated by
+   `RetractConsumerValidation` (rejected unless every running consumer is `LATEST BY`-shaped); the CRDT
+   path does not cross that boundary and so is not pre-validated. It relies on `TableIngestOp`'s stated
+   safety contract for other table shapes — never corrupt, at worst under-report. `TableIngestOp`'s doc
+   comment now names the CRDT path as its second producer.
+
+**Live check** (isolated instance, ports 74xx–77xx, temp data dir, torn down afterwards). The plan's own
+Verification asks for a document edited while the link is severed, converging after reconnect:
+
+- Three transactions made entirely offline — create `AAPL`+`MSFT`, correct `AAPL`'s quantity, delete
+  `MSFT` — then drained as one batch on "reconnect": **3 updates applied, 1 row emitted**, table holds
+  `AAPL / Apple / 250`. The corrected quantity, not the original; `MSFT` never appears downstream at all,
+  because create-then-delete inside one offline session has no net effect. An edge's whole offline session
+  costs the platform exactly its net result.
+- A second offline session deletes `AAPL`: the `LATEST BY` table goes to **0 rows**.
+- **D7 live**: both batches redelivered — `updatesApplied` 3 and 1, `rowsEmitted` **0** and **0**, table
+  `seq` unchanged.
+- **D7 across a restart**: the instance was killed and restarted; `crdtDoc.crdtdoc_twin_book.json` rehydrated,
+  status identical (`updatesMerged: 8`, `entityCount: 0`), and replaying the entire history still emitted
+  **0 rows** — which is the property that actually matters to a reconnecting edge.
+- Route refusals: unknown source **404**, non-crdt source **409**, invalid base64 **400**, no token **401**.
+
+**Known and not fixed:** a crdt source leaves an inert `connector.connector_<name>.json` (`Def: null`,
+`Running: false`, `LastStatus: "never"`) because the dispatch defensively stops the connector grain for
+every non-Connector kind. One empty file per document, no second driver running.
+
+**Not built here:** wave C's durability (the grain persists the whole document per merge — ceiling and
+upgrade path marked with a `ponytail:` comment), waves D/E/F/G. The Dapr flavor stores the kind and
+refuses to run it (D9); its gap is item D5 in `dapr/PARITY.md`.

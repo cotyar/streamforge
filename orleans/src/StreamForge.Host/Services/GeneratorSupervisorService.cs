@@ -47,11 +47,11 @@ public sealed class GeneratorSupervisorService(IClusterClient client, IHostAppli
         {
             try
             {
-                // Plan 006 D-C / plan 008 W4 / plan 009 wave D: Kind dispatch via the shared
-                // SourceKindDispatch.Classify, mirroring RegistryGrain's UpsertSourceAsync/
-                // EnsureInitializedAsync three-way split — Generator (or unset) pings
-                // IGeneratorGrain, Ingest backs onto no grain at all (rows arrive through
-                // IIngressFacade — nothing to ping), Connector pings IConnectorGrain.
+                // Plan 006 D-C / plan 008 W4 / plan 009 wave D / plan 020 wave B-2: Kind dispatch via the
+                // shared SourceKindDispatch.Classify, mirroring RegistryGrain's UpsertSourceAsync/
+                // EnsureInitializedAsync split — Generator (or unset) pings IGeneratorGrain, Ingest backs
+                // onto no grain at all (rows arrive through IIngressFacade — nothing to ping), Crdt pings
+                // ICrdtDocGrain (D3 — never IConnectorGrain), Connector pings IConnectorGrain.
                 switch (SourceKindDispatch.Classify(src.Kind))
                 {
                     case SourceKindDispatch.ActorKind.Generator:
@@ -59,6 +59,9 @@ public sealed class GeneratorSupervisorService(IClusterClient client, IHostAppli
                         break;
                     case SourceKindDispatch.ActorKind.Connector:
                         await client.GetGrain<IConnectorGrain>(EnvKeys.Qualify(env, src.Name)).PingAsync();
+                        break;
+                    case SourceKindDispatch.ActorKind.Crdt:
+                        await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(env, src.Name)).PingAsync();
                         break;
                 }
             }
