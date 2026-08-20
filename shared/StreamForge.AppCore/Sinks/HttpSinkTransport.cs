@@ -44,6 +44,7 @@ public sealed class HttpSinkTransport : ISinkTransport
     public TransportDescriptor Describe() => new()
     {
         Kind = SinkKinds.Http,
+        Version = "1.0.0", // plan 016 wave 4: explicit contract version — see TransportDescriptor.Version.
         Label = "HTTP",
         Help = "Fire-and-forget: POSTs one JSON event per row/delta. A slow or unreachable endpoint drops rather than slowing the entity down. This is the 'scenario clock' feedback loop's own transport (wishlist #9) — maxDepth bounds it.",
         ConfigProperty = "http",

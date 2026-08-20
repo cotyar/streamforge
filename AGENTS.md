@@ -106,7 +106,9 @@ whole-solution parallel load — never under `--filter` on their own): `Loopback
 `TableRetentionClusterTests`, `TablePersistenceModeClusterTests`, `TableSnapshotMirrorClusterTests`,
 `BackfillOnAttachClusterTests`, `ShardedTableClusterTests.RetentionEviction_*`, `ApprovalSweeperTests`,
 `ConnectorGrainClusterTests.GetStatusAsync_reflects_a_successful_run` (waits for a connector run's
-status to propagate before a deadline).
+status to propagate before a deadline),
+`WarmUpstreamDiagnosticClusterTests.TableStartedAfterItsTableInputAlreadyHoldsRows_*` (waits for a
+warning log line to be emitted before a deadline).
 Re-run a failure in isolation before calling it a regression — and report BOTH results, never just the
 green one. Nothing else on this list is allowed to grow without a paragraph saying why the test is
 time-bounded; a genuinely broken test hiding among "known flakes" is the failure mode this list can cause.

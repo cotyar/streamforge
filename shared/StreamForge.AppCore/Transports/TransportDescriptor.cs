@@ -65,6 +65,27 @@ public sealed record TransportDescriptor
     /// outbound half is a proxy sink kind of its own, added in wave 019-B, not this same descriptor
     /// duplicated into the other list.</summary>
     public bool Duplex { get; init; }
+
+    /// <summary>Plan 016 wave 4: the KIND's contract version — a plain <c>major.minor.patch</c> triple
+    /// (see <c>SemVerRange</c>), matched against a config document's declared
+    /// <c>ConfigDocument.Requires</c> at import.
+    ///
+    /// <para><b>What this versions, and what it deliberately does not.</b> It is the wire/behavior
+    /// contract this KIND promises — its config shape, its row mapping rules, what a caller can assume
+    /// about how it behaves — not the assembly's own <c>AssemblyVersion</c> and not the platform's
+    /// release number. Those diverge the moment a shipped connector's BEHAVIOR changes (a mapping rule
+    /// gets fixed, a default flips) without every dependent recompiling against it; only bumping THIS
+    /// number, by hand, on that kind of change is what makes a document's <c>requires</c> pin mean
+    /// anything. A field-additive change (a new optional <see cref="TransportField"/>) does not need a
+    /// bump — additive is always compatible, the same bargain <c>FieldNumberMap</c> makes for schemas.</para>
+    ///
+    /// <para><b>Default is "1.0.0"</b>, both here and on every in-tree kind's <c>Describe()</c> —
+    /// chosen, not merely defaulted-to, so a kind that declares nothing satisfies the loosest possible
+    /// requirement (<c>*</c>, or no <c>requires</c> entry at all) unchanged from before this field
+    /// existed, and so every kind that ships today starts at the same baseline rather than an arbitrary
+    /// per-kind number nobody chose on purpose.</para>
+    /// </summary>
+    public string Version { get; init; } = "1.0.0";
 }
 
 /// <summary>One editable property of a transport's config object.</summary>

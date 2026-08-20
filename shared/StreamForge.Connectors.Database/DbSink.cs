@@ -326,6 +326,7 @@ public sealed class DbSink(ISqlDialect dialect) : ISinkTransport
     public TransportDescriptor Describe() => new()
     {
         Kind = Kind,
+        Version = "1.0.0", // plan 016 wave 4: explicit contract version — see TransportDescriptor.Version.
         Label = _dialect.Label,
         Help =
             "Writes rows into an EXISTING table — this sink issues no DDL. One delivered batch is one " +

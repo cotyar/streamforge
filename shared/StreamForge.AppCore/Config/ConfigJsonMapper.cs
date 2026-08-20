@@ -248,6 +248,16 @@ internal static class ConfigJsonMapper
         doc.Sources ??= [];
         doc.Pipelines ??= [];
         doc.Tables ??= [];
+        doc.Requires ??= []; // Plan 016 wave 4 — same "explicit null -> empty default" rule as Include/etc.
+        foreach (var r in doc.Requires)
+        {
+            // A per-item explicit JSON null for these string properties survives STJ's constructor
+            // binding as an actual null despite the non-nullable CLR type and the `= ""`/`= "*"`
+            // initializers (they only apply when the property is genuinely absent) — normalize the
+            // same way PruneUnnamed's callers already assume string properties are never null.
+            r.Kind ??= "";
+            r.Version ??= "*";
+        }
 
         foreach (var s in doc.Sources)
         {
@@ -323,6 +333,15 @@ internal static class ConfigJsonMapper
             root["schemaPolicy"] = doc.SchemaPolicy;
         }
 
+        // Plan 016 wave 4: same "emitted only when the document actually declares one" rule as
+        // schemaPolicy just above — every export written before this field is byte-identical. Ordered
+        // by Kind (ordinal) for the same stable-export reason entity arrays are ordered by Name.
+        var requires = doc.Requires.OrderBy(r => r.Kind, StringComparer.Ordinal).Select(RequirementNode).ToArray();
+        if (requires.Length > 0)
+        {
+            root["requires"] = new JsonArray([.. requires.Select(n => (JsonNode?)n)]);
+        }
+
         var sources = doc.Sources.OrderBy(s => s.Name, StringComparer.Ordinal).Select(SourceNode).ToArray();
         if (sources.Length > 0)
         {
@@ -358,6 +377,17 @@ internal static class ConfigJsonMapper
             node.Remove("kind");
         }
 
+        return node;
+    }
+
+    /// <summary>Canonical node for one <see cref="ConfigPluginRequirement"/> — declaration order
+    /// (kind, version), empties/nulls pruned (in practice neither field is ever null/empty after
+    /// <see cref="NormalizeCollections"/>, so this mirrors the other *Node helpers for consistency
+    /// rather than because pruning does anything here).</summary>
+    internal static JsonObject RequirementNode(ConfigPluginRequirement r)
+    {
+        var node = JsonSerializer.SerializeToNode(r, ModelOptions)!.AsObject();
+        PruneEmpty(node);
         return node;
     }
 

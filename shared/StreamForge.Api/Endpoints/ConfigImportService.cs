@@ -5,6 +5,7 @@ using StreamForge.Abstractions;
 using StreamForge.AppCore.Config;
 using StreamForge.AppCore.Access;
 using StreamForge.AppCore.Sql;
+using StreamForge.AppCore.Transports;
 using StreamForge.Engine;
 using StreamForge.Host.Grpc.Dynamic;
 
@@ -538,6 +539,98 @@ public static class ConfigImportService
         return entries;
     }
 
+    /// <summary>
+    /// Job 3 (plan 016 wave 4) — the <c>ConfigDocument.Requires</c> gate: for every declared connector
+    /// kind + version-range pin, is that kind registered on THIS instance, and does its declared
+    /// <c>TransportDescriptor.Version</c> (or, for the six kinds with no descriptor at all, the fixed
+    /// built-in floor — see <see cref="KindVersions"/>) satisfy the range? A malformed range string is
+    /// treated as unsatisfied rather than ignored — the same fail-closed choice
+    /// <see cref="FindUnentitledChangesAsync"/>'s doc comment already makes for an unanswerable
+    /// authorization question: a requirement this method cannot even evaluate is not one it can call
+    /// satisfied.
+    ///
+    /// <para><b>Decision: FATAL, exactly like <see cref="DetectBreakingSchemaChanges"/> — not a warning
+    /// like an unresolvable <c>@endpoint</c> (plan 016 wave 6). The two precedents pull in opposite
+    /// directions and this is closer to the schema one:</b></para>
+    ///
+    /// <para>1. <b>An endpoint alias is a VALUE that is SUPPOSED to differ per environment</b> — that is
+    /// the entire feature (a catalog exported from prod imports byte-identical into dev and connects to
+    /// a different database), so refusing to import until every alias resolves would break the one thing
+    /// endpoint aliasing exists to enable. A connector kind/version requirement is not that kind of
+    /// value: "this document needs postgres-cdc ^2.0.0" does not mean something different in dev than in
+    /// prod — it means the SAME thing everywhere, a statement about what code has to be running to
+    /// interpret the document correctly, and a build either has that capability or it does not. There is
+    /// no legitimate reading under which importing it anyway and discovering the gap later is the
+    /// desired behavior — unlike an endpoint, promotion is not why this check exists.</para>
+    ///
+    /// <para>2. <b>A missing KIND fails loudly elsewhere (via <c>SourceValidation.IsKnownKind</c>'s 400
+    /// at the per-source write), but that is not the whole of what this field catches.</b> It only fires
+    /// for a source of that kind actually present in the SAME document — a <c>requires</c> entry can
+    /// name a kind the document's pipelines/tables depend on transitively (a <c>fix-duplex</c> sink
+    /// naming a session opened elsewhere) or declare a version floor with no source of that kind in this
+    /// particular document at all, and — the case that matters most — <b>a VERSION mismatch on a kind
+    /// that IS registered produces no error anywhere else in the system.</b> <c>IsKnownKind</c> only asks
+    /// "is this string registered", not "at what version" — a document authored against
+    /// <c>postgres-cdc@2.x</c>'s row mapping, imported onto an instance still running
+    /// <c>postgres-cdc@1.x</c>, creates the source successfully, compiles successfully, and behaves
+    /// differently with no error anywhere. That is precisely the "silently corrupts a consumer" category
+    /// <see cref="DetectBreakingSchemaChanges"/>'s doc comment describes for a schema break, not the
+    /// "fails loudly at start anyway" category the plan's endpoint precedent describes — so the schema
+    /// gate's reasoning is the one that transfers, not the endpoint one.</para>
+    ///
+    /// <para>3. <b>Consistency of the promise.</b> Two whole-import gates (cycle, schema) already teach
+    /// an operator "an import error here means nothing was applied, fix it and re-run." A third
+    /// silent-corruption-shaped gate that instead behaves like the endpoint warning would break that
+    /// single mental model for a reason nothing about THIS gate's failure mode justifies — it is
+    /// recoverable (bump the requirement, or upgrade/register the connector, and re-run) exactly like
+    /// the schema gate, and <c>validate</c> must agree with a real apply for the identical reason: the
+    /// entire point of a dry run is catching this before anything is written.</para>
+    /// </summary>
+    public static List<ConfigImportReportEntry> DetectUnsatisfiedPluginRequirements(
+        ConfigDocument doc, IReadOnlyDictionary<string, string> availableKindVersions)
+    {
+        var entries = new List<ConfigImportReportEntry>();
+        foreach (var req in doc.Requires.OrderBy(r => r.Kind, StringComparer.Ordinal))
+        {
+            if (!availableKindVersions.TryGetValue(req.Kind, out var installed))
+            {
+                entries.Add(new ConfigImportReportEntry
+                {
+                    Kind = "requires",
+                    Name = req.Kind,
+                    Action = "error",
+                    Diagnostics = [$"kind '{req.Kind}' is not registered on this instance (document requires version '{req.Version}')"],
+                });
+                continue;
+            }
+
+            if (!SemVerRange.TryParse(req.Version, out var range) || range is null)
+            {
+                entries.Add(new ConfigImportReportEntry
+                {
+                    Kind = "requires",
+                    Name = req.Kind,
+                    Action = "error",
+                    Diagnostics = [$"'{req.Version}' is not a supported version range for kind '{req.Kind}' (see SemVerRange for the supported subset)"],
+                });
+                continue;
+            }
+
+            if (!range.Matches(installed))
+            {
+                entries.Add(new ConfigImportReportEntry
+                {
+                    Kind = "requires",
+                    Name = req.Kind,
+                    Action = "error",
+                    Diagnostics = [$"kind '{req.Kind}' is installed at version '{installed}', which does not satisfy the required range '{req.Version}'"],
+                });
+            }
+        }
+
+        return entries;
+    }
+
     // ------------------------------------------------------------------
     // Apply pipeline (impure — reads/writes through ICatalogFacade).
     // ------------------------------------------------------------------
@@ -562,13 +655,24 @@ public static class ConfigImportService
         var pipelineByName = FirstByName(currentPipelines, p => p.Name);
         var tableByName = FirstByName(currentTables, t => t.Name);
 
-        // Plan 016 wave 3-C — both fatal, whole-import gates, BEFORE any world-schema building or the
+        // Plan 016 wave 3-C/4 — three fatal, whole-import gates, BEFORE any world-schema building or the
         // apply loop below, and identically for apply:false (mode=validate) and apply:true (a real
-        // write): see DetectTableDependencyCycle/DetectBreakingSchemaChanges above for the arguments.
+        // write): see DetectTableDependencyCycle/DetectUnsatisfiedPluginRequirements/
+        // DetectBreakingSchemaChanges above for the arguments. Order is structural (can this graph even
+        // be applied) -> capability (can THIS instance run what the document needs at all) -> shape
+        // (does applying it corrupt an existing consumer) — each gate answers a more specific question
+        // than the one before it, so checking in that order gives the earliest, most actionable error
+        // first when a document manages to trip more than one.
         var cycle = DetectTableDependencyCycle(doc, tableByName);
         if (cycle is not null)
         {
             return CycleErrorReport(mode, cycle);
+        }
+
+        var pluginEntries = DetectUnsatisfiedPluginRequirements(doc, KindVersions.All());
+        if (pluginEntries.Count > 0)
+        {
+            return new ConfigImportReport { Mode = mode, Ok = false, Entries = pluginEntries };
         }
 
         var breakingSchemaEntries = DetectBreakingSchemaChanges(doc, sourceByName);

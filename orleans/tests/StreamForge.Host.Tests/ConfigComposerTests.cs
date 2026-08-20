@@ -209,4 +209,92 @@ public class ConfigComposerTests
         Assert.Null(doc);
         Assert.Contains(diagnostics, d => d.Contains("cycle"));
     }
+
+    // ------------------------------------------------------------------
+    // Document-level carry (schemaPolicy, requires) — MergeDocs rebuilds the merged root from scratch,
+    // which is exactly what silently dropped schemaPolicy once (found live by wave 3-C, fixed by the
+    // orchestrator; nothing here regression-tested THAT fix before now). Plan 016 wave 4 gives requires
+    // the identical "reaches the merged root" guarantee, via the SAME key-keyed-map treatment
+    // sources/pipelines/tables already get (see MergeEntitiesInto's keyProperty parameter) rather than
+    // schemaPolicy's whole-scalar-wins-by-presence-or-absence rule — requires is a repeatable list keyed
+    // by kind, not a single scalar, so "does an include's declaration survive when the includer doesn't
+    // repeat it" has a real "yes" answer here that schemaPolicy's security reasoning deliberately rules
+    // out for itself.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void SchemaPolicy_survives_multi_document_composition()
+    {
+        var (doc, diagnostics) = ConfigComposer.Compose([
+            """{"version":1,"sources":[{"name":"s"}]}""",
+            """{"version":1,"schemaPolicy":"any"}""",
+        ]);
+
+        Assert.Empty(diagnostics);
+        Assert.Equal("any", doc!.SchemaPolicy);
+    }
+
+    [Fact]
+    public void Requires_survives_multi_document_composition()
+    {
+        var (doc, diagnostics) = ConfigComposer.Compose([
+            """{"version":1,"sources":[{"name":"s"}]}""",
+            """{"version":1,"requires":[{"kind":"postgres-cdc","version":"^2.0.0"}]}""",
+        ]);
+
+        Assert.Empty(diagnostics);
+        var req = Assert.Single(doc!.Requires);
+        Assert.Equal("postgres-cdc", req.Kind);
+        Assert.Equal("^2.0.0", req.Version);
+    }
+
+    [Fact]
+    public void Requires_survives_an_include_chain_when_only_the_include_declares_it()
+    {
+        var files = new Dictionary<string, string>
+        {
+            ["base.json"] = """{"version":1,"requires":[{"kind":"fix","version":"^1.0.0"}]}""",
+            ["root.json"] = """{"version":1,"include":["base.json"],"sources":[{"name":"s"}]}""",
+        };
+
+        var (doc, diagnostics) = ConfigComposer.ComposeWithIncludes("root.json", p => files.GetValueOrDefault(p));
+
+        Assert.Empty(diagnostics);
+        Assert.Equal("fix", Assert.Single(doc!.Requires).Kind);
+    }
+
+    [Fact]
+    public void Requires_from_root_and_include_merge_by_kind_when_the_kinds_differ()
+    {
+        // Same "later document wins per KEY" rule sources/pipelines/tables already follow — a shared
+        // base template's requirement for one kind and the includer's own requirement for a different
+        // kind are both real requirements of the composed document, so both must survive.
+        var files = new Dictionary<string, string>
+        {
+            ["base.json"] = """{"version":1,"requires":[{"kind":"fix","version":"^1.0.0"}]}""",
+            ["root.json"] = """{"version":1,"include":["base.json"],"requires":[{"kind":"nats","version":"*"}],"sources":[{"name":"s"}]}""",
+        };
+
+        var (doc, diagnostics) = ConfigComposer.ComposeWithIncludes("root.json", p => files.GetValueOrDefault(p));
+
+        Assert.Empty(diagnostics);
+        Assert.Equal(["fix", "nats"], doc!.Requires.Select(r => r.Kind).OrderBy(k => k, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void Requires_root_overrides_the_SAME_kind_declared_by_an_include()
+    {
+        var files = new Dictionary<string, string>
+        {
+            ["base.json"] = """{"version":1,"requires":[{"kind":"fix","version":"^1.0.0"}]}""",
+            ["root.json"] = """{"version":1,"include":["base.json"],"requires":[{"kind":"fix","version":"^2.0.0"}],"sources":[{"name":"s"}]}""",
+        };
+
+        var (doc, diagnostics) = ConfigComposer.ComposeWithIncludes("root.json", p => files.GetValueOrDefault(p));
+
+        Assert.Empty(diagnostics);
+        var req = Assert.Single(doc!.Requires); // one entry, not two -- same kind, later (root) wins whole-item.
+        Assert.Equal("fix", req.Kind);
+        Assert.Equal("^2.0.0", req.Version);
+    }
 }

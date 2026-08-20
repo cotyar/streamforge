@@ -35,6 +35,7 @@ public sealed class LoopbackSinkTransport : ISinkTransport
     public TransportDescriptor Describe() => new()
     {
         Kind = SinkKinds.Loopback,
+        Version = "1.0.0", // plan 016 wave 4: explicit contract version — see TransportDescriptor.Version.
         Label = "Loopback (in-process)",
         Help = "In-process only: writes each row/delta directly into the target source's own generator — no HTTP, no network, no serialize/parse round trip. The target must be a generator-kind source that has been started. This is the 'scenario clock' feedback loop's native transport (wishlist #9(b)) — maxDepth bounds it exactly like the HTTP sink's guard.",
         ConfigProperty = "loopback",

@@ -894,7 +894,9 @@ public sealed class RemoteSchemaResult
 [GenerateSerializer]
 public sealed class ConfigImportReportEntry
 {
-    /// <summary>"source" | "pipeline" | "table".</summary>
+    /// <summary>"source" | "pipeline" | "table" | "document" (a whole-import gate that names nothing
+    /// more specific, e.g. a table dependency cycle) | "requires" (plan 016 wave 4: an unsatisfied
+    /// <c>ConfigDocument.Requires</c> entry — Name is the connector KIND, not a catalog entity).</summary>
     [Id(0)] public string Kind { get; set; } = "";
     [Id(1)] public string Name { get; set; } = "";
     /// <summary>"created" | "updated" | "deleted" | "skipped" | "error".</summary>

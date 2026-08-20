@@ -185,6 +185,7 @@ public sealed class NatsSinkTransport : ISinkTransport
     public TransportDescriptor Describe() => new()
     {
         Kind = SinkKinds.Nats,
+        Version = "1.0.0", // plan 016 wave 4: explicit contract version — see TransportDescriptor.Version.
         Label = "NATS",
         Help = "Fire-and-forget: a slow or absent broker drops messages rather than slowing the entity down.",
         ConfigProperty = "nats",
@@ -233,6 +234,7 @@ public sealed class FileSinkTransport : ISinkTransport
     public TransportDescriptor Describe() => new()
     {
         Kind = SinkKinds.File,
+        Version = "1.0.0", // plan 016 wave 4: explicit contract version — see TransportDescriptor.Version.
         Label = "File",
         Help = "Appends to a file on the HOST's filesystem, never truncates it. In a container the path must be a mounted volume. No rotation and no size cap — the file grows until something else prunes it.",
         ConfigProperty = "file",

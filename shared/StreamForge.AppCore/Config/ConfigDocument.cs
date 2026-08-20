@@ -37,6 +37,29 @@ public sealed class ConfigDocument
     /// <c>schemaPolicy: "compatable"</c> leaves enforcement on rather than silently disabling it, the
     /// same rule <c>Auth:Mode</c> follows.</summary>
     public string? SchemaPolicy { get; set; }
+
+    /// <summary>Plan 016 wave 4 — "which connector kinds, at which versions, does this document need to
+    /// import correctly". Empty (the default) declares nothing, so a document written before this field
+    /// existed is unaffected. Checked at import by
+    /// <c>ConfigImportService.DetectUnsatisfiedPluginRequirements</c> against
+    /// <see cref="StreamForge.AppCore.Transports.KindVersions.All"/> — see that method's doc comment for
+    /// the fatal-vs-warning argument, and <see cref="StreamForge.AppCore.Transports.SemVerRange"/> for the
+    /// range grammar <see cref="ConfigPluginRequirement.Version"/> accepts.</summary>
+    public List<ConfigPluginRequirement> Requires { get; set; } = [];
+}
+
+/// <summary>One entry of <see cref="ConfigDocument.Requires"/>: "this document needs KIND at a version
+/// satisfying RANGE". Unlike <see cref="EntityPin"/> (which names a catalog ENTITY by name) this names a
+/// connector KIND — a build-time capability of the instance, not something the catalog holds — so
+/// there is no id/name-resolution question here, only "is it registered, and at what version".</summary>
+public sealed class ConfigPluginRequirement
+{
+    /// <summary>A <c>SourceDefinition.Kind</c> / <c>SinkSpec.Kind</c> value, e.g. "postgres-cdc".</summary>
+    public string Kind { get; set; } = "";
+
+    /// <summary>A <see cref="StreamForge.AppCore.Transports.SemVerRange"/> expression, e.g. "^2.0.0" or
+    /// ">=1.2.0 &lt;2.0.0". Empty or "*" (the default) means "any version — just be present".</summary>
+    public string Version { get; set; } = "*";
 }
 
 /// <summary>

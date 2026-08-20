@@ -200,6 +200,7 @@ public sealed class MsSqlCdcSource(ISqlDialect dialect) : IPolledTransport, ISch
     public TransportDescriptor Describe() => new()
     {
         Kind = Kind,
+        Version = "1.0.0", // plan 016 wave 4: explicit contract version — see TransportDescriptor.Version.
         Label = "SQL Server (CDC)",
         Help =
             "Reads SQL Server's own CDC capture tables (cdc.fn_cdc_get_all_changes_<capture instance>) — " +

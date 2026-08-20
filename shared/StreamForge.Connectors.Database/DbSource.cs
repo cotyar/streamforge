@@ -179,6 +179,7 @@ public sealed class DbSource(ISqlDialect dialect) : IPolledTransport, ISchemaPro
     public TransportDescriptor Describe() => new()
     {
         Kind = Kind,
+        Version = "1.0.0", // plan 016 wave 4: explicit contract version — see TransportDescriptor.Version.
         Label = _dialect.Label,
         Help =
             "Polls a table (or your own query) on a schedule, keeping a durable high-water mark. " +

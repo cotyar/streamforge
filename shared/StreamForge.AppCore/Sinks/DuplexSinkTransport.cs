@@ -62,6 +62,7 @@ public sealed class DuplexSinkTransport : ISinkTransport
     public TransportDescriptor Describe() => new()
     {
         Kind = SinkKinds.Duplex,
+        Version = "1.0.0", // plan 016 wave 4: explicit contract version — see TransportDescriptor.Version.
         Label = "Duplex session (proxy)",
         Help = "No connection of its own: forwards to the live session already opened by the named source (e.g. a fix source). Requires that source to be a duplex kind and currently started.",
         ConfigProperty = "duplex",

@@ -216,6 +216,7 @@ public sealed class FixDuplexTransport : IDuplexTransport
     public TransportDescriptor Describe() => new()
     {
         Kind = SourceKinds.FixDuplex,
+        Version = "1.0.0", // plan 016 wave 4: explicit contract version — see TransportDescriptor.Version.
         Label = "FIX (order entry)",
         Duplex = true,
         Help = "A live FIX session whose outbound half also accepts sends — pair this with a 'duplex' sink "

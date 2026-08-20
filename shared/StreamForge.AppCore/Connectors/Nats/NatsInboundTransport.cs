@@ -88,6 +88,9 @@ public sealed class NatsInboundTransport(Func<INatsMessageSource>? sourceFactory
     public TransportDescriptor Describe() => new()
     {
         Kind = SourceKinds.Nats,
+        // Plan 016 wave 4: every in-tree kind states its contract version explicitly, even at the
+        // "1.0.0" default, so a future behavior-changing edit here is a deliberate bump, not a silent one.
+        Version = "1.0.0",
         Label = "NATS",
         Help = "A persistent subject subscription — not a poll schedule, so this kind ignores Schedule.",
         ConfigProperty = "nats",

@@ -216,6 +216,7 @@ public sealed class PgCdcSource(ISqlDialect dialect) : IPolledTransport, ISchema
     public TransportDescriptor Describe() => new()
     {
         Kind = Kind,
+        Version = "1.0.0", // plan 016 wave 4: explicit contract version — see TransportDescriptor.Version.
         Label = "PostgreSQL (CDC)",
         Help =
             "Streams row changes from a logical replication slot instead of polling a cursor column. " +

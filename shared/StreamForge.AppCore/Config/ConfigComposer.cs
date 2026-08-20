@@ -115,16 +115,18 @@ public static class ConfigComposer
 
     /// <summary>The shared merge core for both <see cref="Compose"/> and
     /// <see cref="ComposeWithIncludes"/>: walks the already-parsed (label, node) pairs in order,
-    /// folding each document's sources/pipelines/tables into name-keyed maps (later document's
-    /// entity of the same kind+name replaces the earlier one via <see cref="ShallowMergeEntity"/>),
-    /// then deserializes the merged result through the normal <see cref="ConfigJsonMapper.NodeToDocument"/>
-    /// path (so entity-level diagnostics — missing name, etc. — apply uniformly).</summary>
+    /// folding each document's sources/pipelines/tables/requires into key-keyed maps (later document's
+    /// entry of the same key — name for the first three, kind for <c>requires</c> — replaces the
+    /// earlier one via <see cref="ShallowMergeEntity"/>), then deserializes the merged result through
+    /// the normal <see cref="ConfigJsonMapper.NodeToDocument"/> path (so per-item diagnostics — missing
+    /// name/kind, etc. — apply uniformly).</summary>
     private static (ConfigDocument? Doc, List<string> Diagnostics) MergeDocs(List<(string Label, JsonNode? Node)> docs)
     {
         var diagnostics = new List<string>();
         var sources = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
         var pipelines = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
         var tables = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        var requires = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
         var version = 1;
         string? schemaPolicy = null;
         var anySucceeded = false;
@@ -162,14 +164,28 @@ public static class ConfigComposer
                 }
             }
 
-            MergeEntitiesInto(sources, obj, "sources", label, diagnostics);
-            MergeEntitiesInto(pipelines, obj, "pipelines", label, diagnostics);
-            MergeEntitiesInto(tables, obj, "tables", label, diagnostics);
+            MergeEntitiesInto(sources, obj, "sources", "name", label, diagnostics);
+            MergeEntitiesInto(pipelines, obj, "pipelines", "name", label, diagnostics);
+            MergeEntitiesInto(tables, obj, "tables", "name", label, diagnostics);
 
-            // Plan 016 wave 3 (orchestrator fix): schemaPolicy is a document-level SCALAR, and this
-            // method rebuilds the merged root from scratch — so before this line every non-entity
-            // top-level property was dropped, and `schemaPolicy: "any"` could never reach the import
-            // gate that reads it. Found live by wave 3-C, which owns the gate but not this file.
+            // Plan 016 wave 4: requires is a LIST OF KEYED ITEMS (key = kind), not a scalar like
+            // schemaPolicy below — so unlike schemaPolicy it gets the exact same treatment as
+            // sources/pipelines/tables: later document's entry for the same kind replaces the earlier
+            // one, an include-only kind survives untouched, nothing is silently dropped just because a
+            // later document in the chain doesn't repeat it. (This still closes the bug schemaPolicy's
+            // fix addressed — every requirement reaches the merged root, which is the property that
+            // actually matters — it just doesn't ALSO import schemaPolicy's whole-scalar-wins-by-
+            // presence-or-absence behavior, which has no analog for a keyed list: there is no
+            // "explicitly clear one kind's requirement" concept here any more than there is an
+            // "explicitly delete one source via merge" concept — removal happens at apply time, not
+            // composition time, for every keyed array in this document.)
+            MergeEntitiesInto(requires, obj, "requires", "kind", label, diagnostics);
+
+            // Plan 016 wave 3 (orchestrator fix): schemaPolicy IS a document-level SCALAR — no per-item
+            // key to merge by — and this method rebuilds the merged root from scratch, so before this
+            // line every non-entity top-level property was dropped, and `schemaPolicy: "any"` could
+            // never reach the import gate that reads it. Found live by wave 3-C, which owns the gate
+            // but not this file.
             //
             // Assigned unconditionally (absent overwrites present), which makes it the ROOT document's
             // property rather than a merged one. Includes are collected depth-first BEFORE the document
@@ -197,6 +213,11 @@ public static class ConfigComposer
             root["schemaPolicy"] = schemaPolicy;
         }
 
+        if (requires.Count > 0)
+        {
+            root["requires"] = new JsonArray([.. requires.Values.Select(v => (JsonNode?)v.DeepClone())]);
+        }
+
         if (sources.Count > 0)
         {
             root["sources"] = new JsonArray([.. sources.Values.Select(v => (JsonNode?)v.DeepClone())]);
@@ -217,8 +238,12 @@ public static class ConfigComposer
         return (composedDoc, diagnostics);
     }
 
+    /// <summary>Folds one document's <paramref name="arrayKey"/> array into <paramref name="target"/>,
+    /// keyed by each item's <paramref name="keyProperty"/> ("name" for sources/pipelines/tables, "kind"
+    /// for plan 016 wave 4's <c>requires</c> — the identity property differs per array, the merge rule
+    /// does not).</summary>
     private static void MergeEntitiesInto(
-        Dictionary<string, JsonObject> target, JsonObject doc, string arrayKey, string label, List<string> diagnostics)
+        Dictionary<string, JsonObject> target, JsonObject doc, string arrayKey, string keyProperty, string label, List<string> diagnostics)
     {
         if (!doc.TryGetPropertyValue(arrayKey, out var arrNode) || arrNode is null)
         {
@@ -239,16 +264,16 @@ public static class ConfigComposer
                 continue;
             }
 
-            if (!entity.TryGetPropertyValue("name", out var nameNode) ||
-                nameNode is not JsonValue nv ||
-                !nv.TryGetValue<string>(out var name) ||
-                string.IsNullOrWhiteSpace(name))
+            if (!entity.TryGetPropertyValue(keyProperty, out var keyNode) ||
+                keyNode is not JsonValue kv ||
+                !kv.TryGetValue<string>(out var key) ||
+                string.IsNullOrWhiteSpace(key))
             {
-                diagnostics.Add($"{label}: {arrayKey}[{i}] missing name");
+                diagnostics.Add($"{label}: {arrayKey}[{i}] missing {keyProperty}");
                 continue;
             }
 
-            target[name] = target.TryGetValue(name, out var existing)
+            target[key] = target.TryGetValue(key, out var existing)
                 ? ShallowMergeEntity(existing, entity)
                 : (JsonObject)entity.DeepClone();
         }

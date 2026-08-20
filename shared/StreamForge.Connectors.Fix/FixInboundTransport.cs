@@ -114,6 +114,7 @@ public sealed class FixInboundTransport(Func<IFixMessageSource>? sourceFactory =
     public TransportDescriptor Describe() => new()
     {
         Kind = SourceKinds.Fix,
+        Version = "1.0.0", // plan 016 wave 4: explicit contract version — see TransportDescriptor.Version.
         Label = "FIX",
         Help = "A persistent FIX session — not a poll schedule, so this kind ignores Schedule. Receive-only: "
              + "there is no order-entry surface here (see plan 019 for that). Inbound messages are bridged "
