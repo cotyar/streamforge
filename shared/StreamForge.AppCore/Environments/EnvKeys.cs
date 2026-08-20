@@ -50,6 +50,7 @@ public static partial class EnvKeys
     public static readonly IReadOnlySet<string> Reserved = new HashSet<string>(StringComparer.Ordinal)
     {
         DefaultDisplayName, "catalog", "users", "access", "approvals", "audit", "events", "metrics",
+        "environments",
     };
 
     [GeneratedRegex("^[a-z0-9][a-z0-9-]{0,31}$")]

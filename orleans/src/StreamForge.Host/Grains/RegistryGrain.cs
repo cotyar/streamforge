@@ -6,6 +6,7 @@ using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.AppCore;
 using StreamForge.AppCore.Config;
+using StreamForge.AppCore.Environments;
 using StreamForge.Engine;
 using StreamForge.Host.Grpc.Dynamic;
 
@@ -44,22 +45,45 @@ public sealed class RegistryGrain(
 
     public static bool MayInterleave(IInvokable req) => InterleavableMethods.Contains(req.GetMethodName());
 
+    /// <summary>Plan 021 D1/D5 — this grain's OWN environment, learned once from its own primary key
+    /// (never re-derived per call: a grain's key never changes across one activation's lifetime). On an
+    /// instance where no environment is ever created or mentioned, this activation's key is the literal
+    /// string <see cref="StreamConstants.RegistryKey"/> ("catalog") — <see cref="EnvKeys.EnvOf"/> on a key
+    /// with no separator returns <see cref="EnvKeys.Default"/>, so <c>_env</c> is "" exactly as it always
+    /// implicitly was, and every entity this grain creates gets <c>Environment = ""</c>, which is the D2
+    /// byte-identical requirement in one field.</summary>
+    private string _env = EnvKeys.Default;
+
+    public override Task OnActivateAsync(CancellationToken cancellationToken)
+    {
+        _env = EnvKeys.EnvOf(this.GetPrimaryKeyString());
+        return Task.CompletedTask;
+    }
+
     public async Task EnsureInitializedAsync()
     {
         var dirty = false;
-        if (state.State.Sources.Count == 0)
+        // Plan 021 — SEEDING IS DEFAULT-ENVIRONMENT-ONLY, and the rest of this method is not. Boot calls
+        // this on every environment's registry so already-Running entities resume everywhere (plan 021
+        // wave 1 item 3), but the three seed blocks below fire on an EMPTY catalog — so without this
+        // guard, creating an empty `staging` and restarting would fill it with the demo catalog, and
+        // force-deleting an environment's contents would re-seed them on the next boot. Neither is
+        // something anyone asked for, and both are silent. AGENTS.md's "seeds apply only to an empty data
+        // dir" stays exactly true for the default environment and becomes "never" for any other.
+        var maySeed = _env == EnvKeys.Default;
+        if (maySeed && state.State.Sources.Count == 0)
         {
             state.State.Sources.AddRange(SeedCatalog.Sources());
             dirty = true;
         }
 
-        if (state.State.Pipelines.Count == 0)
+        if (maySeed && state.State.Pipelines.Count == 0)
         {
             state.State.Pipelines.AddRange(SeedCatalog.Pipelines());
             dirty = true;
         }
 
-        if (state.State.Tables.Count == 0)
+        if (maySeed && state.State.Tables.Count == 0)
         {
             var streamSchemas = BuildStreamSchemas();
             var tableSchemas = new Dictionary<string, SourceSchema>();
@@ -228,6 +252,10 @@ public sealed class RegistryGrain(
 
     public async Task UpsertSourceAsync(SourceDefinition def)
     {
+        // Plan 021 D3/write-path guard — checked on EVERY upsert (create AND update), same "no
+        // rename-only special case" shape ValidateUniquePipelineName gave pipeline names in plan 016.
+        ValidateQualifiableName("Source", def.Name);
+
         var idx = state.State.Sources.FindIndex(s => s.Name == def.Name);
         bool schemaChanged;
         if (idx >= 0)
@@ -238,6 +266,12 @@ public sealed class RegistryGrain(
             // CarryAndBumpSource does both halves in one call so the two flavours cannot drift.
             var existing = state.State.Sources[idx];
             CatalogRevisions.CarryAndBumpSource(existing, def);
+            // Plan 021 D5 — Environment is NEVER edited after creation, even though CarryAndBumpSource
+            // (shared/, frozen) has no notion of it and an incoming payload from a client that predates
+            // this plan carries "" by default: force the STORED value forward regardless of what `def`
+            // said, exactly like CatalogRecordMerge.CarryServerOwnedFields does for every other
+            // server-owned field on tables/pipelines.
+            def.Environment = existing.Environment;
             schemaChanged = def.SchemaRevision != existing.SchemaRevision;
             state.State.Sources[idx] = def;
         }
@@ -248,6 +282,9 @@ public sealed class RegistryGrain(
             // 0 would be indistinguishable from one whose revision was never assigned.
             def.Revision = 1;
             def.SchemaRevision = 1;
+            // Plan 021 D5 — a NEW entity belongs to the environment its OWN registry grain is activated
+            // at, never to whatever (if anything) the caller's payload said.
+            def.Environment = _env;
             state.State.Sources.Add(def);
             // A source appearing can make a table that never compiled compile — same refresh, same reason.
             schemaChanged = true;
@@ -325,6 +362,7 @@ public sealed class RegistryGrain(
         def.CreatedAtMs = now;
         def.UpdatedAtMs = now;
         def.Revision = 1; // see UpsertSourceAsync for why a fresh entity is 1 and not 0.
+        def.Environment = _env; // plan 021 D5 — belongs to this grain's own environment, never the caller's.
 
         ApplyPipelineCompileResult(def, SqlCompiler.Compile(def.Sql, BuildStreamSchemas()));
 
@@ -363,6 +401,9 @@ public sealed class RegistryGrain(
         // the server-owned fields carried over from the stored one — rather than a hand-written list of
         // editable fields copied onto the stored record.
         CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        // Plan 021 D5 — CarryServerOwnedFields (shared/, frozen) has no notion of Environment; force the
+        // STORED value forward regardless of what `def` said, same as UpsertSourceAsync does for sources.
+        def.Environment = existing.Environment;
         // Plan 016 wave 2: the carry put the STORED counter on `def`; this moves it, and only if the
         // definition actually changed by the same canonical-JSON test ImportPlanner uses for
         // "skipped" vs "updated". Before the restart block below, so a restart's Status change (which
@@ -479,6 +520,7 @@ public sealed class RegistryGrain(
     public async Task<TableDefinition> CreateTableAsync(TableDefinition def)
     {
         ValidateUniqueTableName(def.Name, excludeTableId: null);
+        ValidateQualifiableName("Table", def.Name); // plan 021 D3/write-path guard
         ValidateParallelism(def.Parallelism);
         ValidateFlushMs(def.FlushMs);
 
@@ -490,6 +532,7 @@ public sealed class RegistryGrain(
         def.UpdatedAtMs = now;
         def.Revision = 1;       // see UpsertSourceAsync for why a fresh entity is 1 and not 0.
         def.SchemaRevision = 1;
+        def.Environment = _env; // plan 021 D5 — belongs to this grain's own environment, never the caller's.
 
         var compileResult = CompileTableSql(def.Sql, excludeTableId: def.Id);
         ValidateHistoryConfig(def, compileResult);
@@ -540,6 +583,7 @@ public sealed class RegistryGrain(
         if (renamed)
         {
             ValidateUniqueTableName(def.Name, excludeTableId: existing.Id);
+            ValidateQualifiableName("Table", def.Name); // plan 021 D3/write-path guard
             ValidateTableRenameAllowed(existing);
         }
         ValidateParallelism(def.Parallelism);
@@ -605,6 +649,9 @@ public sealed class RegistryGrain(
         var previousOutputFields = existing.OutputFields;
 
         CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        // Plan 021 D5 — CarryServerOwnedFields (shared/, frozen) has no notion of Environment; force the
+        // STORED value forward regardless of what `def` said, same as UpsertSourceAsync/UpdatePipelineAsync.
+        def.Environment = existing.Environment;
         state.State.Tables[idx] = def;
 
         ApplyCompileResult(def, compileResult);
@@ -788,6 +835,23 @@ public sealed class RegistryGrain(
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         await state.WriteStateAsync();
         return existing;
+    }
+
+    /// <summary>Plan 021 D3/write-path guard — a name containing <see cref="EnvKeys.Separator"/> can never
+    /// be safely qualified into a runtime key (<see cref="EnvKeys.IsQualifiableEntityName"/> is the
+    /// predicate; see its own doc comment and <see cref="EnvKeys"/>'s class doc for why '.' was chosen and
+    /// why a dotted name is already unusable in SQL for an unrelated reason). Refused going forward only —
+    /// the same shape <see cref="ValidateUniquePipelineName"/> gave pipeline-name uniqueness in plan 016:
+    /// nothing scans the catalog at boot, and an existing entity with a dotted name (there are none in the
+    /// seeds) keeps working until the next create/rename that would introduce or keep one.</summary>
+    private static void ValidateQualifiableName(string kind, string name)
+    {
+        if (!EnvKeys.IsQualifiableEntityName(name))
+        {
+            throw new InvalidOperationException(
+                $"{kind} name '{name}' cannot contain '{EnvKeys.Separator}' — that character qualifies a " +
+                "runtime key by environment, so a name containing it could never be safely addressed once qualified.");
+        }
     }
 
     private void ValidateUniqueTableName(string name, string? excludeTableId)
@@ -1355,10 +1419,16 @@ public sealed class RegistryGrain(
         }
     }
 
+    /// <summary>Plan 021 D6 — one lifecycle stream PER ENVIRONMENT: <c>EnvKeys.Qualify(_env, ...)</c> keeps
+    /// this grain's own events on this grain's own environment's stream, so a <c>staging</c> deploy does
+    /// not wake every <c>default</c>/<c>prod</c> subscriber. On the default environment this is
+    /// <c>EnvKeys.Qualify("", "events") == "events"</c> — byte-identical to the pre-plan-021 stream id.
+    /// See <c>StreamBridgeService</c> for the subscriber half; a half-changed lifecycle stream is silent,
+    /// not loud, which is why both halves are called out explicitly in the plan.</summary>
     private async Task PublishLifecycleAsync(string pipelineId, string kind, PipelineStatus status)
     {
         var stream = this.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<LifecycleEvent>(StreamId.Create(StreamConstants.LifecycleNamespace, StreamConstants.LifecycleEventsKey));
+            .GetStream<LifecycleEvent>(StreamId.Create(StreamConstants.LifecycleNamespace, EnvKeys.Qualify(_env, StreamConstants.LifecycleEventsKey)));
         await stream.OnNextAsync(new LifecycleEvent
         {
             PipelineId = pipelineId,

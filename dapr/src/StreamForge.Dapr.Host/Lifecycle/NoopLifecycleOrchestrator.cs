@@ -21,7 +21,7 @@ public sealed class NoopLifecycleOrchestrator(ILogger<NoopLifecycleOrchestrator>
         return Task.CompletedTask;
     }
 
-    public Task NotifySourceRemovedAsync(string name)
+    public Task NotifySourceRemovedAsync(string name, string environment)
     {
         WarnNoRuntime("RemoveGenerator", name);
         return Task.CompletedTask;
@@ -45,7 +45,7 @@ public sealed class NoopLifecycleOrchestrator(ILogger<NoopLifecycleOrchestrator>
         return Task.FromResult(LifecycleOutcome.Success);
     }
 
-    public Task StopTableAsync(string tableName)
+    public Task StopTableAsync(string tableName, string environment)
     {
         WarnNoRuntime("StopTable", tableName);
         return Task.CompletedTask;
@@ -57,7 +57,7 @@ public sealed class NoopLifecycleOrchestrator(ILogger<NoopLifecycleOrchestrator>
         return Task.CompletedTask;
     }
 
-    public Task DisableTableHistoryAsync(string tableName)
+    public Task DisableTableHistoryAsync(string tableName, string environment)
     {
         WarnNoRuntime("DisableTableHistory", tableName);
         return Task.CompletedTask;

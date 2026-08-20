@@ -1,5 +1,6 @@
 using Orleans;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.AppCore.Ingest;
 using StreamForge.Host.Facades;
 
@@ -31,6 +32,18 @@ public sealed class IngestDrainPumpService(
     IHostApplicationLifetime lifetime,
     ILogger<IngestDrainPumpService> logger) : BackgroundService
 {
+    /// <summary>Plan 021 environment strategy: ITERATES EVERY ENVIRONMENT, same reasoning as
+    /// GeneratorSupervisorService's identical choice (this is a timer-driven sweep, outside any request, so
+    /// the ambient is always empty). <see cref="IEnvironmentFacade.ListAsync"/> is NOT cheap — it counts
+    /// every environment's catalog — and this pump's own default cadence is 100ms, the hot path for
+    /// buffered ingress (see the class doc above); calling it every tick would make environment discovery
+    /// itself a meaningful fraction of the sweep's own cost. So the environment list is cached and
+    /// refreshed on this TTL rather than every tick — a newly created environment's ingest sources start
+    /// draining within one TTL window, not necessarily the very next 100ms tick.</summary>
+    private static readonly TimeSpan EnvironmentListTtl = TimeSpan.FromSeconds(5);
+    private List<string> _cachedEnvironments = [EnvKeys.Default];
+    private DateTime _environmentsCachedAtUtc = DateTime.MinValue;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await StartupSignal.WaitForApplicationStartedAsync(lifetime, stoppingToken);
@@ -41,7 +54,16 @@ public sealed class IngestDrainPumpService(
         {
             try
             {
-                var sources = await client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey).GetSourcesAsync();
+                // Plan 021 — ALL environments' sources, gathered into ONE list before either static helper
+                // runs: SweepAsync's own RetainOnly call purges any buffer whose name is not in the list it
+                // is given, so calling it once PER environment with only that environment's names would
+                // have each call purge every OTHER environment's buffers out from under it mid-tick.
+                var sources = new List<SourceDefinition>();
+                foreach (var env in await GetEnvironmentsAsync())
+                {
+                    sources.AddRange(await client.RegistryFor(env).GetSourcesAsync());
+                }
+
                 await SweepAsync(sources, ingress, logger, stoppingToken);
                 await ReportStatsAsync(sources, ingress, client, statsTracker, logger, stoppingToken);
             }
@@ -50,6 +72,19 @@ public sealed class IngestDrainPumpService(
                 logger.LogDebug(ex, "IngestDrainPumpService: sweep failed — will retry next tick.");
             }
         } while (await timer.WaitForNextTickAsync(stoppingToken));
+    }
+
+    private async Task<List<string>> GetEnvironmentsAsync()
+    {
+        if (DateTime.UtcNow - _environmentsCachedAtUtc < EnvironmentListTtl)
+        {
+            return _cachedEnvironments;
+        }
+
+        var environments = await client.GetGrain<IEnvironmentRegistryGrain>(StreamConstants.EnvironmentsKey).ListAsync();
+        _cachedEnvironments = environments.Select(e => EnvKeys.Normalize(e.Name)).ToList();
+        _environmentsCachedAtUtc = DateTime.UtcNow;
+        return _cachedEnvironments;
     }
 
     /// <summary>One tick's work, split out so it is testable without a cluster: reconcile the registry

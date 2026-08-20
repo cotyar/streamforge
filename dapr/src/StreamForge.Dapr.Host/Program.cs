@@ -37,6 +37,9 @@ builder.Services.AddStreamForgeApi(builder.Configuration);
 builder.Services.AddActors(options =>
 {
     options.Actors.RegisterActor<RegistryActor>();
+    // Plan 021: the environment directory — see EnvironmentRegistryActor's own doc comment for why it is
+    // one more singleton actor registered right next to RegistryActor rather than folded into it.
+    options.Actors.RegisterActor<EnvironmentRegistryActor>();
     options.Actors.RegisterActor<UserStoreActor>();
     options.Actors.RegisterActor<AccessPolicyActor>();
     // Plan 015 W4-C. Two types, not three: AuditLogActor is BOTH the per-day shard (audit:yyyyMMdd) and

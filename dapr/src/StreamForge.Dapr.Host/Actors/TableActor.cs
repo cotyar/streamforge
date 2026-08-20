@@ -4,6 +4,7 @@ using Dapr.Actors.Runtime;
 using Dapr.Client;
 using StreamForge.Abstractions;
 using StreamForge.Abstractions.Streaming;
+using StreamForge.AppCore.Environments;
 using StreamForge.AppCore.Json;
 using StreamForge.Dapr.Host.Streaming;
 using StreamForge.Engine;
@@ -408,7 +409,11 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             int upstreamRowCount;
             try
             {
-                var upstream = ActorProxy.Create<ITableActor>(new ActorId(upstreamName), nameof(TableActor), ActorProxyDefaults.Options);
+                // Plan 021: upstreamName is BARE (TableInputs, compiled against this table's own
+                // environment's catalog — see CatalogStore.BuildTableSchemas). The plan cuts cross-
+                // environment table dependencies entirely (see plans/021-environment-isolation.md's "Cut"
+                // list), so the upstream lives in THIS table's own environment — qualify with it.
+                var upstream = ActorProxy.Create<ITableActor>(new ActorId(EnvKeys.Qualify(_def!.Environment, upstreamName)), nameof(TableActor), ActorProxyDefaults.Options);
                 upstreamRowCount = await upstream.GetRowCountAsync();
             }
             catch (Exception ex)
@@ -489,7 +494,12 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
             _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _rebuilding = false; // live traffic observed since resume (or this is a first-ever start — already false)
 
-            var deltas = _executor.OnStreamEvent(envelope.Source, evt);
+            // Plan 021 D6: envelope.Source is the QUALIFIED name (every publisher stamps its own actor id
+            // — see GeneratorActor/ConnectorActor) so the router (Streaming/TableEventRouter.cs) can
+            // dispatch cross-environment-safely, but this table's own compiled StreamInputs — and every
+            // key TableExecutor was built against — are BARE, local to THIS table's own environment's
+            // catalog. Strip the qualification back off before the Engine ever sees the name.
+            var deltas = _executor.OnStreamEvent(EnvKeys.Split(envelope.Source).Key, evt);
             if (deltas.Count > 0)
             {
                 await ApplyAndPublishAsync(deltas);
@@ -528,7 +538,9 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
 
         var deltas = envelope.Deltas.Select(d => new TableDelta(new EventRecord(d.Row), d.Weight)).ToList();
         _deltasIn += deltas.Count;
-        var outAll = _executor.OnTableDeltaBatch(envelope.Table, deltas);
+        // Plan 021 D6: same strip as ProcessSourceEventsAsync above — envelope.Table is qualified for
+        // routing, TableExecutor's own upstream-table bookkeeping is keyed bare.
+        var outAll = _executor.OnTableDeltaBatch(EnvKeys.Split(envelope.Table).Key, deltas);
         _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         _rebuilding = false;
 
@@ -730,10 +742,14 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, ILogger<Ta
 
         try
         {
+            // Plan 021 D6: Id.GetId() is this actor's own qualified name (EnvKeys.Qualify(def.Environment,
+            // def.Name) — see DaprLifecycleOrchestrator.TableActorProxy) — the envelope's entity key
+            // downstream routers/sinks (TableEventRouter, TableHistoryDeltaSink, NatsSinkPublisherService)
+            // dispatch on. Byte-identical to the pre-021 `_def.Name` for the default environment (D2).
             await daprClient.PublishEventAsync(
                 StreamingRuntimeSetup.PubsubName,
                 StreamingRuntimeSetup.TableDeltaTopic,
-                new TableDeltaEnvelope { Table = _def!.Name, Seq = _deltaSeq, Deltas = dtos });
+                new TableDeltaEnvelope { Table = Id.GetId(), Seq = _deltaSeq, Deltas = dtos });
         }
         catch (Exception ex)
         {

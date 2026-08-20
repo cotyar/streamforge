@@ -1,6 +1,7 @@
 using Orleans;
 using Orleans.Streams;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.AppCore.Ingest;
 using StreamForge.Engine;
 using StreamForge.Engine.Dataflow;
@@ -33,8 +34,24 @@ public static class OrleansFacadesExtensions
 {
     public static IServiceCollection AddOrleansFacades(this IServiceCollection services)
     {
-        services.AddSingleton<ICatalogFacade>(sp =>
-            sp.GetRequiredService<IClusterClient>().GetGrain<IRegistryGrain>(StreamConstants.RegistryKey));
+        // Plan 021 D1/D4 — MUST be per-use, not a singleton bound at container-build time: a singleton
+        // captured "catalog" (the default environment's key) forever, before any request's environment
+        // was known. AddTransient with a factory reading EnvironmentAmbient.Current re-resolves the
+        // environment on every injection, which is what a minimal-API handler parameter (resolved once
+        // per request) and every other consumer of this facade needs. Verified (this wave): nothing on the
+        // Orleans side registers a component that injects ICatalogFacade as a SINGLETON — the one
+        // constructor-injection site outside this file, IngestGrpcService, is a gRPC service class
+        // instantiated per-call by the ASP.NET Core gRPC framework, not registered via AddSingleton, so a
+        // Transient dependency resolved into its constructor is still fresh per call.
+        services.AddTransient<ICatalogFacade>(sp =>
+            sp.GetRequiredService<IClusterClient>().RegistryFor(EnvironmentAmbient.Current));
+        // Plan 021 — the environment directory itself IS a fixed-key singleton (like Access/Approvals
+        // below), unlike ICatalogFacade above: IEnvironmentRegistryGrain inherits IEnvironmentFacade, so
+        // the grain reference IS-A facade with zero adapter code, and its own key
+        // (StreamConstants.EnvironmentsKey) never depends on which environment a request selected — it is
+        // the thing that answers "which environments exist" in the first place.
+        services.AddSingleton<IEnvironmentFacade>(sp =>
+            sp.GetRequiredService<IClusterClient>().GetGrain<IEnvironmentRegistryGrain>(StreamConstants.EnvironmentsKey));
         services.AddSingleton<IUserStoreFacade>(sp =>
             sp.GetRequiredService<IClusterClient>().GetGrain<IUserStoreGrain>(StreamConstants.UsersKey));
         // Plan 015 W1: the access-policy singleton. Same zero-adapter shape as the two above —
@@ -160,7 +177,8 @@ internal sealed class OrleansConnectorStatusFacade(IClusterClient client) : ICon
 {
     public async Task<ConnectorRuntimeStatus?> GetStatusAsync(string sourceName)
     {
-        var registry = client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+        // Plan 021 D4 — a facade answering one request reads the ambient.
+        var registry = client.RegistryFor(EnvironmentAmbient.Current);
         var def = await registry.GetSourceAsync(sourceName);
         if (def is null || string.IsNullOrEmpty(def.Kind) || def.Kind is SourceKinds.Generator or SourceKinds.Ingest)
         {
@@ -321,7 +339,8 @@ internal sealed class OrleansIngressFacade(
     }
 
     private Task<SourceDefinition?> GetSourceDefAsync(string sourceName) =>
-        client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey).GetSourceAsync(sourceName);
+        // Plan 021 D4 — a facade answering one request reads the ambient.
+        client.RegistryFor(EnvironmentAmbient.Current).GetSourceAsync(sourceName);
 
     /// <summary>The drain pump handed to every <see cref="SourceIngressBuffer"/> this facade creates:
     /// one <c>OnNextAsync</c> per row, into the ingest source's own stream identity — so it fans out to
@@ -366,7 +385,8 @@ internal sealed class OrleansArrangementMetaFacade(IClusterClient client) : IArr
     // that endpoint's original doc comment (plan 003 M3) for the full "recompile-per-grain" rationale.
     public async Task<IReadOnlyList<ArrangementMetaInfo>> GetArrangementsAsync()
     {
-        var registry = client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+        // Plan 021 D4 — a facade answering one request reads the ambient.
+        var registry = client.RegistryFor(EnvironmentAmbient.Current);
         var tables = await registry.GetTablesAsync();
         var running = tables.Where(t => t.Status == PipelineStatus.Running && t.Parallelism > 1).ToList();
 

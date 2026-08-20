@@ -38,13 +38,18 @@ public class CatalogUpdateRoundTripTests
     /// file's vocabulary: it is the authenticated caller, and a client that could set it could forge the
     /// provenance of its own edit. Classifying it here is the opposite of excluding a client-owned field
     /// from the guard — the guard's whole subject is which side of that line a property is on.</para>
+    /// <para>Plan 021 added "Environment" to both lists. It is stamped once at creation from the request's
+    /// environment (<see cref="CatalogStore.Environment"/>) and carried forward explicitly on every update
+    /// (<c>CatalogStore.UpdatePipelineAsync</c>/<c>UpdateTableAsync</c>) — a client that could set it could
+    /// move an entity between environments simply by round-tripping whatever the client happened to send
+    /// back, exactly the D5 invariant this plan's whole environment-isolation guarantee depends on.</para>
     private static readonly HashSet<string> PipelineServerOwned =
         ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "UpdatedBy", "SourceNames",
-         "Revision", "StaleReason"];
+         "Revision", "StaleReason", "Environment"];
 
     private static readonly HashSet<string> TableServerOwned =
         ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "UpdatedBy", "OutputFields",
-         "StreamInputs", "TableInputs", "KeyFields", "Revision", "SchemaRevision", "StaleReason"];
+         "StreamInputs", "TableInputs", "KeyFields", "Revision", "SchemaRevision", "StaleReason", "Environment"];
 
     /// <summary>Values that would be rejected by validation if generated blindly (parallelism range,
     /// non-negative flush interval) or that must stay compilable/unique.</summary>

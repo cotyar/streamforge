@@ -3,6 +3,8 @@ using Grpc.Core;
 using Microsoft.AspNetCore.Authorization;
 using Orleans;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
+using StreamForge.Host.Facades;
 using StreamForge.Api.Auth;
 using StreamForge.Engine;
 using V1 = StreamForge.Host.Grpc.V1;
@@ -18,7 +20,8 @@ namespace StreamForge.Host.Grpc;
 /// <see cref="SourceGrpcService"/>'s class doc for why the entity is read before the check.</para></summary>
 public sealed class PipelineGrpcService(IClusterClient client, AccessGuard guard) : V1.PipelineService.PipelineServiceBase
 {
-    private IRegistryGrain Registry => client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+    // Plan 021 D4 — a facade/gRPC service answering one request reads the ambient.
+    private IRegistryGrain Registry => client.RegistryFor(EnvironmentAmbient.Current);
 
     [Authorize(Policy = "Viewer")]
     public override async Task<V1.ListPipelinesResponse> List(Empty request, ServerCallContext context)

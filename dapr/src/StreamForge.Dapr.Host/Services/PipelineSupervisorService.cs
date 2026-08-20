@@ -1,7 +1,9 @@
 using Dapr.Actors;
 using Dapr.Actors.Client;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Dapr.Host.Actors;
+using StreamForge.Dapr.Host.Facades;
 using StreamForge.Dapr.Host.Streaming;
 
 namespace StreamForge.Dapr.Host.Services;
@@ -37,11 +39,14 @@ namespace StreamForge.Dapr.Host.Services;
 /// </list></para>
 /// </summary>
 public sealed class PipelineSupervisorService(
-    ICatalogFacade catalog,
+    ICatalogFacadeFactory catalogFactory,
+    IEnvironmentFacade environments,
     PipelineEventRouter router,
     IHostApplicationLifetime lifetime,
     ILogger<PipelineSupervisorService> logger) : BackgroundService
 {
+    // Plan 021 D5: same reasoning as GeneratorSupervisorService — a boot-resume sweep must cover every
+    // environment, never just the (empty, here) ambient one.
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await WaitForApplicationStartedAsync(stoppingToken);
@@ -51,21 +56,25 @@ public sealed class PipelineSupervisorService(
         {
             try
             {
-                var pipelines = await catalog.GetPipelinesAsync();
-                foreach (var pipeline in pipelines.Where(p => p.Status == PipelineStatus.Running))
+                foreach (var env in await environments.ListAsync())
                 {
-                    try
+                    var catalog = catalogFactory.For(EnvKeys.Normalize(env.Name));
+                    var pipelines = await catalog.GetPipelinesAsync();
+                    foreach (var pipeline in pipelines.Where(p => p.Status == PipelineStatus.Running))
                     {
-                        await EnsureRunningAsync(pipeline);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Best-effort per pipeline, mirroring GeneratorSupervisorService's own per-source
-                        // try/catch — one misbehaving pipeline must never stop the sweep from reaching
-                        // the rest.
-                        logger.LogDebug(ex,
-                            "PipelineSupervisorService: failed to (re)start/repair pipeline '{PipelineId}' — will retry next sweep.",
-                            pipeline.Id);
+                        try
+                        {
+                            await EnsureRunningAsync(catalog, pipeline);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Best-effort per pipeline, mirroring GeneratorSupervisorService's own per-source
+                            // try/catch — one misbehaving pipeline must never stop the sweep from reaching
+                            // the rest.
+                            logger.LogDebug(ex,
+                                "PipelineSupervisorService: failed to (re)start/repair pipeline '{PipelineId}' — will retry next sweep.",
+                                pipeline.Id);
+                        }
                     }
                 }
             }
@@ -77,15 +86,18 @@ public sealed class PipelineSupervisorService(
         } while (await timer.WaitForNextTickAsync(stoppingToken));
     }
 
-    private async Task EnsureRunningAsync(PipelineDefinition pipeline)
+    private async Task EnsureRunningAsync(ICatalogFacade catalog, PipelineDefinition pipeline)
     {
         var actor = ActorProxy.Create<IPipelineActor>(new ActorId(pipeline.Id), nameof(PipelineActor), ActorProxyDefaults.Options);
 
         if (await actor.IsRunningAsync())
         {
             // Already self-healed (or continuously running) — repair the router only, never restart.
+            // Plan 021 D6: GetSourceNamesAsync returns BARE names (this pipeline's own compile) — qualify
+            // with its own environment before they go in the process-wide router index (same reasoning as
+            // DaprLifecycleOrchestrator.StartPipelineAsync).
             var sourceNames = await actor.GetSourceNamesAsync();
-            router.Register(pipeline.Id, sourceNames);
+            router.Register(pipeline.Id, sourceNames.Select(s => EnvKeys.Qualify(pipeline.Environment, s)).ToList());
             return;
         }
 

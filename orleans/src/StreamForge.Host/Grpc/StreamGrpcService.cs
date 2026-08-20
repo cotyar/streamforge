@@ -4,6 +4,8 @@ using Orleans;
 using Orleans.Runtime;
 using Orleans.Streams;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
+using StreamForge.Host.Facades;
 using StreamForge.Api.Auth;
 using StreamForge.AppCore;
 using StreamForge.Engine;
@@ -33,7 +35,8 @@ namespace StreamForge.Host.Grpc;
 /// the upgrade path once for both transports.</para></summary>
 public sealed class StreamGrpcService(IClusterClient client, AccessGuard guard) : V1.StreamService.StreamServiceBase
 {
-    private IRegistryGrain Registry => client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+    // Plan 021 D4 — a facade/gRPC service answering one request reads the ambient.
+    private IRegistryGrain Registry => client.RegistryFor(EnvironmentAmbient.Current);
 
     [Authorize(Policy = "Viewer")]
     public override async Task SubscribeSource(

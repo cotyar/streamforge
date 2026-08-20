@@ -1,6 +1,8 @@
 using StreamForge.Abstractions;
 using StreamForge.Abstractions.Streaming;
+using StreamForge.AppCore.Environments;
 using StreamForge.AppCore.Sinks;
+using StreamForge.Dapr.Host.Facades;
 
 namespace StreamForge.Dapr.Host.Streaming;
 
@@ -39,7 +41,8 @@ namespace StreamForge.Dapr.Host.Streaming;
 /// class never wraps a <see cref="NatsSinkClient.PublishAsync{T}"/> call in anything extra.</para>
 /// </summary>
 public sealed class NatsSinkPublisherService(
-    ICatalogFacade catalog,
+    ICatalogFacadeFactory catalogFactory,
+    IEnvironmentFacade environments,
     IHostApplicationLifetime lifetime,
     ILogger<NatsSinkPublisherService> logger) : BackgroundService, ITableDeltaSink
 {
@@ -80,20 +83,35 @@ public sealed class NatsSinkPublisherService(
         }
     }
 
+    // Plan 021 D5: iterates every environment — same reasoning as the supervisors (this is a background
+    // sweep, EnvironmentAmbient.Current is empty here). Pipeline ids are GUIDs (globally unique already,
+    // D3's exception), so _pipelineSinks needs no qualification of its OWN key — but the sweep still has
+    // to visit every environment's catalog to find every running pipeline in the first place. Table names
+    // DO need qualifying (D6): envelope.Table (OnTableDeltaAsync's lookup key, below) is the qualified
+    // name every TableActor stamps on its own published deltas.
+    //
+    // <b>All environments are flattened into ONE (id/name, sinks) sequence BEFORE calling
+    // RefreshGroupAsync</b> — that method's own "stale key" sweep (anything in the map but not in THIS
+    // call's `seen` set gets disposed) would otherwise treat environment A's still-running tables as stale
+    // the moment environment B's turn through a per-environment loop ran, and tear their sink clients down.
     private async Task RefreshAsync()
     {
-        var pipelines = await catalog.GetPipelinesAsync();
-        var tables = await catalog.GetTablesAsync();
+        var runningPipelines = new List<(string Id, List<SinkSpec> Sinks)>();
+        var runningTables = new List<(string QualifiedName, List<SinkSpec> Sinks)>();
 
-        await RefreshGroupAsync(
-            _pipelineSinks,
-            pipelines.Where(p => p.Status == PipelineStatus.Running).Select(p => (p.Id, p.Sinks)),
-            "pipeline");
+        foreach (var env in await environments.ListAsync())
+        {
+            var environment = EnvKeys.Normalize(env.Name);
+            var catalog = catalogFactory.For(environment);
+            var pipelines = await catalog.GetPipelinesAsync();
+            var tables = await catalog.GetTablesAsync();
 
-        await RefreshGroupAsync(
-            _tableSinks,
-            tables.Where(t => t.Status == PipelineStatus.Running).Select(t => (t.Name, t.Sinks)),
-            "table");
+            runningPipelines.AddRange(pipelines.Where(p => p.Status == PipelineStatus.Running).Select(p => (p.Id, p.Sinks)));
+            runningTables.AddRange(tables.Where(t => t.Status == PipelineStatus.Running).Select(t => (EnvKeys.Qualify(environment, t.Name), t.Sinks)));
+        }
+
+        await RefreshGroupAsync(_pipelineSinks, runningPipelines, "pipeline");
+        await RefreshGroupAsync(_tableSinks, runningTables, "table");
     }
 
     private async Task RefreshGroupAsync(

@@ -1,6 +1,7 @@
 using Dapr.Actors;
 using Dapr.Actors.Client;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Dapr.Host.Actors;
 
 namespace StreamForge.Dapr.Host.Facades;
@@ -47,6 +48,8 @@ internal sealed class DaprTableHistoryFacade : ITableHistoryFacade
     public Task<TableHistoryStats> GetStatsAsync(string tableName) =>
         TableHistoryActorProxy(tableName).GetStatsAsync();
 
+    /// <summary>Plan 021: same ambient-read rule as <see cref="DaprTableReadFacade.TableActorProxy"/> —
+    /// this facade backs a REST request and <paramref name="tableName"/> arrives bare.</summary>
     private static ITableHistoryActor TableHistoryActorProxy(string tableName) =>
-        ActorProxy.Create<ITableHistoryActor>(new ActorId(tableName), nameof(TableHistoryActor), ActorProxyDefaults.Options);
+        ActorProxy.Create<ITableHistoryActor>(new ActorId(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)), nameof(TableHistoryActor), ActorProxyDefaults.Options);
 }

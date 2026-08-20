@@ -245,9 +245,15 @@ public sealed class GeneratorActor(ActorHost host, DaprClient daprClient, ILogge
         foreach (var chunk in rows.Chunk(RunBatchChunkSize))
         {
             var events = chunk.Select(row => (Dictionary<string, object?>)ScenarioGenerator.ToEventRecord(row, _def.Name)).ToList();
-            var envelope = new SourceEventsEnvelope { Source = _def.Name, Events = events };
+            // Plan 021 D6: Id.GetId() IS the environment-qualified source name — this actor is only ever
+            // activated at EnvKeys.Qualify(def.Environment, def.Name) (see DaprLifecycleOrchestrator's
+            // GeneratorActorProxy) — so it doubles as both the routing key every subscriber (
+            // TableEventRouter/PipelineEventRouter) dispatches on and the egress topic suffix, with no
+            // extra Qualify call needed here. Byte-identical to the pre-021 `_def.Name` for the default
+            // environment (D2).
+            var envelope = new SourceEventsEnvelope { Source = Id.GetId(), Events = events };
             await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, StreamingRuntimeSetup.SourcesTopic, envelope);
-            await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + _def.Name, envelope);
+            await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + Id.GetId(), envelope);
         }
 
         return new ScenarioRunResult { Outcome = ScenarioRunOutcome.Accepted, Accepted = rows.Count, Rows = rows };
@@ -335,9 +341,11 @@ public sealed class GeneratorActor(ActorHost host, DaprClient daprClient, ILogge
         {
             foreach (var chunk in rows.Chunk(RunBatchChunkSize))
             {
-                var envelope = new SourceEventsEnvelope { Source = _def.Name, Events = chunk.ToList() };
+                // Plan 021 D6: Id.GetId() is already the qualified name — see the identical comment in
+                // RunAsync above.
+                var envelope = new SourceEventsEnvelope { Source = Id.GetId(), Events = chunk.ToList() };
                 await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, StreamingRuntimeSetup.SourcesTopic, envelope);
-                await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + _def.Name, envelope);
+                await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + Id.GetId(), envelope);
             }
         }
         catch (Exception ex)
@@ -379,7 +387,8 @@ public sealed class GeneratorActor(ActorHost host, DaprClient daprClient, ILogge
             events.Add(MarketDataProfiles.GenerateEvent(_def));
         }
 
-        var envelope = new SourceEventsEnvelope { Source = _def.Name, Events = events };
+        // Plan 021 D6: Id.GetId() is already the qualified name — see the identical comment in RunAsync.
+        var envelope = new SourceEventsEnvelope { Source = Id.GetId(), Events = events };
 
         try
         {
@@ -388,7 +397,7 @@ public sealed class GeneratorActor(ActorHost host, DaprClient daprClient, ILogge
             // process subscribes to it (see Streaming/Sinks.cs's class doc); both topics ride the same
             // "pubsub" component.
             await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, StreamingRuntimeSetup.SourcesTopic, envelope);
-            await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + _def.Name, envelope);
+            await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + Id.GetId(), envelope);
         }
         catch (Exception ex)
         {

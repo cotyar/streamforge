@@ -2,6 +2,7 @@ using Orleans;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
 using StreamForge.Engine.Dataflow;
+using StreamForge.Host.Facades;
 
 namespace StreamForge.Host.Grains;
 
@@ -21,7 +22,9 @@ internal static class TableDataflowFactory
 {
     public static async Task<(TableCompileResult Compile, TableDataflowPlan Dataflow)> BuildAsync(IGrainFactory grainFactory, TableDefinition def)
     {
-        var registry = grainFactory.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+        // Plan 021 D5 — def.Environment, not any ambient (see PipelineGrain.StartAsync's identical
+        // comment); every caller here already has `def` in hand.
+        var registry = grainFactory.RegistryFor(def.Environment);
         var sources = await registry.GetSourcesAsync();
         var streamSchemas = sources.ToDictionary(
             s => s.Name,

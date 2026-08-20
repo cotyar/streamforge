@@ -1,6 +1,7 @@
 using Dapr.Actors;
 using Dapr.Actors.Client;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Dapr.Host.Actors;
 
 namespace StreamForge.Dapr.Host.Facades;
@@ -38,6 +39,10 @@ public sealed class DaprTableReadFacade : ITableReadFacade
     public Task<List<TableRowDto>> SearchAsync(string tableName, string query, int limit) =>
         TableActorProxy(tableName).SearchAsync(query, limit);
 
+    /// <summary>Plan 021: <paramref name="tableName"/> arrives bare (the shared REST endpoints resolve it
+    /// from the catalog before calling here) — this facade backs a REST request, so it is one of the few
+    /// places in this track allowed to read <see cref="EnvironmentAmbient.Current"/> directly (the wave
+    /// brief's facade rule).</summary>
     private static ITableActor TableActorProxy(string tableName) =>
-        ActorProxy.Create<ITableActor>(new ActorId(tableName), nameof(TableActor), ActorProxyDefaults.Options);
+        ActorProxy.Create<ITableActor>(new ActorId(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)), nameof(TableActor), ActorProxyDefaults.Options);
 }

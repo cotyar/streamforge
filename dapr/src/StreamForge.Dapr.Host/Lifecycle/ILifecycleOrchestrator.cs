@@ -45,8 +45,15 @@ public interface ILifecycleOrchestrator
     /// through here needs no such call at all.</para></summary>
     Task NotifySourceChangedAsync(SourceDefinition def);
 
-    /// <summary>A source was deleted — stop/tear down its generator, if any.</summary>
-    Task NotifySourceRemovedAsync(string name);
+    /// <summary>A source was deleted — stop/tear down its generator, if any.
+    ///
+    /// <para><b>Plan 021 signature change</b> (added <paramref name="environment"/>): unlike
+    /// <see cref="NotifySourceChangedAsync"/>, <c>CatalogStore.DeleteSourceAsync</c> has no definition left
+    /// to read an environment off by the time it calls this — the source is already removed from
+    /// <c>state.Sources</c>. <c>CatalogStore</c> knows its OWN environment regardless (it is handed one at
+    /// construction — see that class's own doc comment), so it passes it through explicitly here instead.
+    /// </para></summary>
+    Task NotifySourceRemovedAsync(string name, string environment);
 
     /// <summary>Start (or restart) a pipeline. Mirrors PipelineGrain.StartAsync's outcome contract: success
     /// or a human-readable error CatalogStore turns into Status=Failed/Error (never throws).
@@ -79,14 +86,18 @@ public interface ILifecycleOrchestrator
     /// full at every call site, so passing them through needs no such call.</para></summary>
     Task<LifecycleOutcome> StartTableAsync(TableDefinition def, IReadOnlyList<SourceDefinition> sources, IReadOnlyList<TableDefinition> tables);
 
-    Task StopTableAsync(string tableName);
+    /// <summary>Plan 021 signature change (added <paramref name="environment"/>) — same reason as
+    /// <see cref="NotifySourceRemovedAsync"/>: every call site here passes a bare table NAME with no
+    /// definition attached, and <c>CatalogStore</c> knows its own environment regardless.</summary>
+    Task StopTableAsync(string tableName, string environment);
 
     /// <summary>Mirrors ITableHistoryGrain.ResetAsync — (re)configure row-history collection for a table
     /// that was just created, or whose SQL/history config just changed.</summary>
     Task ResetTableHistoryAsync(TableDefinition def);
 
-    /// <summary>Mirrors ITableHistoryGrain.DisableAsync — called on table delete.</summary>
-    Task DisableTableHistoryAsync(string tableName);
+    /// <summary>Mirrors ITableHistoryGrain.DisableAsync — called on table delete. Plan 021 signature
+    /// change (added <paramref name="environment"/>) — same reason as <see cref="StopTableAsync"/>.</summary>
+    Task DisableTableHistoryAsync(string tableName, string environment);
 
     /// <summary>Mirrors RegistryGrain.PublishLifecycleAsync (the Orleans "lifecycle" stream). W5 replaces
     /// this with a real publish to the sf-lifecycle pub/sub topic (decision D-D).</summary>

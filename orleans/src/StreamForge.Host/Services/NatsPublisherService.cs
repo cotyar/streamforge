@@ -1,7 +1,9 @@
 using Orleans;
 using Orleans.Streams;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.AppCore.Sinks;
+using StreamForge.Host.Facades;
 
 namespace StreamForge.Host.Services;
 
@@ -51,14 +53,12 @@ public sealed class NatsPublisherService(
     {
         await StartupSignal.WaitForApplicationStartedAsync(lifetime, stoppingToken);
 
-        var registry = client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
-
         using var timer = new PeriodicTimer(RefreshInterval);
         do
         {
             try
             {
-                await RefreshAsync(registry, stoppingToken);
+                await RefreshAsync(stoppingToken);
             }
             catch (Exception ex)
             {
@@ -81,10 +81,24 @@ public sealed class NatsPublisherService(
         }
     }
 
-    private async Task RefreshAsync(IRegistryGrain registry, CancellationToken ct)
+    /// <summary>Plan 021 environment strategy: ITERATES EVERY ENVIRONMENT (same reasoning as
+    /// GeneratorSupervisorService/IngestDrainPumpService — this is a timer-driven sweep, outside any
+    /// request, so the ambient is always empty), aggregated into ONE combined pipelines/tables list before
+    /// either Refresh*Async runs below: both methods' own stale-subscription cleanup ("remove anything not
+    /// in `seen`") assumes it is being handed the FULL catalog, the same aggregation concern
+    /// IngestDrainPumpService's SweepAsync has with its RetainOnly call.</summary>
+    private async Task RefreshAsync(CancellationToken ct)
     {
-        var pipelines = await registry.GetPipelinesAsync();
-        var tables = await registry.GetTablesAsync();
+        var environments = await client.GetGrain<IEnvironmentRegistryGrain>(StreamConstants.EnvironmentsKey).ListAsync();
+
+        var pipelines = new List<PipelineDefinition>();
+        var tables = new List<TableDefinition>();
+        foreach (var env in environments)
+        {
+            var registry = client.RegistryFor(EnvKeys.Normalize(env.Name));
+            pipelines.AddRange(await registry.GetPipelinesAsync());
+            tables.AddRange(await registry.GetTablesAsync());
+        }
 
         await RefreshPipelinesAsync(pipelines, ct);
         await RefreshTablesAsync(tables, ct);

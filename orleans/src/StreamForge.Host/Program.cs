@@ -4,6 +4,7 @@ using Orleans.Hosting;
 using StreamForge.Abstractions;
 using StreamForge.Api;
 using StreamForge.AppCore.Discovery;
+using StreamForge.AppCore.Environments;
 using StreamForge.Connectors.Database;
 using StreamForge.Connectors.Fix;
 using StreamForge.Host.Facades;
@@ -275,7 +276,18 @@ static async Task InitializeGrainsAsync(IServiceProvider services)
     {
         var client = services.GetRequiredService<IClusterClient>();
         await client.GetGrain<IUserStoreGrain>(StreamConstants.UsersKey).EnsureInitializedAsync();
-        await client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey).EnsureInitializedAsync();
+
+        // Plan 021 D1/item-3 — seeding still applies to the DEFAULT environment exactly as before (the
+        // environment directory always lists it first — see IEnvironmentRegistryGrain.ListAsync), but the
+        // boot path must also resume already-Running generators/connectors/pipelines/tables in every OTHER
+        // environment that was ever created, not just default. On an instance that has never created one,
+        // ListAsync returns exactly [default] and this loop is one call, byte-identical to the pre-021 line
+        // it replaces (EnvKeys.Qualify("", RegistryKey) == RegistryKey).
+        var environments = await client.GetGrain<IEnvironmentRegistryGrain>(StreamConstants.EnvironmentsKey).ListAsync();
+        foreach (var env in environments)
+        {
+            await client.RegistryFor(EnvKeys.Normalize(env.Name)).EnsureInitializedAsync();
+        }
     }
     catch (Exception ex)
     {

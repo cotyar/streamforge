@@ -1,5 +1,6 @@
 using StreamForge.AppCore;
 using StreamForge.AppCore.Config;
+using StreamForge.AppCore.Environments;
 using StreamForge.Abstractions;
 using StreamForge.Dapr.Host.Lifecycle;
 using StreamForge.Engine;
@@ -34,8 +35,26 @@ namespace StreamForge.Dapr.Host.Catalog;
 /// dependency at all is exactly what makes it unit-testable without a running Dapr sidecar — see
 /// dapr/tests/StreamForge.Dapr.Tests/CatalogStoreTests.cs.</para>
 /// </summary>
-public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orchestrator)
+/// <summary>
+/// <paramref name="environment"/> — plan 021, additive and defaulted so every pre-existing
+/// <c>new CatalogStore(state, orchestrator)</c> call site (this project's own tests included) keeps
+/// compiling and keeps meaning exactly what it meant before: the DEFAULT environment
+/// (<see cref="EnvKeys.Default"/>, the empty string), which is what makes <see cref="Environment"/>'s
+/// byte-identical-by-default guarantee (D2) hold without touching a single existing test. Only
+/// <see cref="Actors.RegistryActor"/> ever passes a non-default value, derived from its OWN activated
+/// actor id (<c>EnvKeys.EnvOf(Id.GetId())</c>) — this store never reads an ambient or a header itself; it
+/// is handed its environment once, at construction, the same way it is handed its
+/// <see cref="ILifecycleOrchestrator"/>.
+/// </summary>
+public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orchestrator, string environment = EnvKeys.Default)
 {
+    /// <summary>The environment this store's entire catalog belongs to — see the class doc's
+    /// <paramref name="environment"/> paragraph. Every entity this store CREATES is stamped with it
+    /// (<see cref="UpsertSourceAsync"/>/<see cref="CreatePipelineAsync"/>/<see cref="CreateTableAsync"/>);
+    /// an UPDATE never touches it (<see cref="CatalogRecordMerge.CarryServerOwnedFields"/> is what would
+    /// have to change to let a caller move an entity between environments, and it does not).</summary>
+    public string Environment => environment;
+
     /// <summary>Seeds defaults on first run (shared <see cref="SeedCatalog"/> — same demo world as the
     /// Orleans flavor). Plan 005 W4 "seed status" decision (see dapr/ARCHITECTURE.md), updated by W6 for
     /// pipelines and by W7-A for tables: neither is force-stopped anymore. <see cref="Actors.TableActor"/>
@@ -54,13 +73,23 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
         if (state.Sources.Count == 0)
         {
-            state.Sources.AddRange(SeedCatalog.Sources());
+            var seededSources = SeedCatalog.Sources();
+            // Plan 021 D5: only CatalogInitializationService ever calls this against the DEFAULT
+            // environment's RegistryActor today (StreamConstants.RegistryKey, unqualified — see that
+            // service's own doc comment), so `environment` is always "" in practice here. Stamped anyway
+            // — the same rule CreateTableAsync/UpsertSourceAsync apply — so a future caller that seeds a
+            // NAMED environment (there is none yet) inherits correct behavior for free instead of a gap
+            // nobody meant to leave.
+            foreach (var s in seededSources) s.Environment = environment;
+            state.Sources.AddRange(seededSources);
             dirty = true;
         }
 
         if (state.Pipelines.Count == 0)
         {
-            state.Pipelines.AddRange(SeedCatalog.Pipelines());
+            var seededPipelines = SeedCatalog.Pipelines();
+            foreach (var p in seededPipelines) p.Environment = environment;
+            state.Pipelines.AddRange(seededPipelines);
             dirty = true;
         }
 
@@ -71,6 +100,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             var seeds = SeedCatalog.Tables();
             foreach (var t in seeds)
             {
+                t.Environment = environment;
                 var result = SqlCompiler.CompileTable(t.Sql, streamSchemas, tableSchemas);
                 if (result.Ok && result.OutputSchema is not null)
                 {
@@ -136,13 +166,20 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             // one shared call so the two flavours cannot drift.
             var existing = state.Sources[idx];
             CatalogRevisions.CarryAndBumpSource(existing, def);
+            // Plan 021 D5: Environment is server-owned the same way — CatalogRecordMerge has no source
+            // overload to carry it for us (see the comment two lines up), so an edit here would otherwise
+            // let a caller move a source between environments just by round-tripping whatever the client
+            // happened to send back.
+            def.Environment = existing.Environment;
             schemaChanged = def.SchemaRevision != existing.SchemaRevision;
             state.Sources[idx] = def;
         }
         else
         {
+            ValidateQualifiableName(def.Name);
             def.Revision = 1;
             def.SchemaRevision = 1;
+            def.Environment = environment;
             state.Sources.Add(def);
             schemaChanged = true;
         }
@@ -165,7 +202,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         }
 
         RecomputeStaleReasons(); // a deleted source breaks every pin that named it.
-        await orchestrator.NotifySourceRemovedAsync(name);
+        await orchestrator.NotifySourceRemovedAsync(name, environment);
         return true;
     }
 
@@ -188,6 +225,10 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         def.CreatedAtMs = now;
         def.UpdatedAtMs = now;
         def.Revision = 1; // see UpsertSourceAsync for why a fresh entity is 1 and not 0.
+        // Plan 021 D5: pipelines are keyed by GUID (EnvKeys.Qualify never touches them — see that class's
+        // own doc comment), so there is no dotted-name refusal here the way sources/tables need. Stamped
+        // once at creation and never again — an update carries it forward (see UpdatePipelineAsync).
+        def.Environment = environment;
 
         ApplyPipelineCompileResult(def, SqlCompiler.Compile(def.Sql, BuildStreamSchemas()));
 
@@ -223,6 +264,10 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         // Plan 009: the incoming definition IS the new record — see CatalogRecordMerge's doc comment for
         // why this is an inversion of the old field-by-field copy, and which three fields that shape lost.
         CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        // Plan 021 D5: CatalogRecordMerge has no Environment field (it is defined here, not in the shared
+        // frozen contract) — carry it explicitly so an update can never move a pipeline between
+        // environments, same rule UpsertSourceAsync/UpdateTableAsync apply.
+        def.Environment = existing.Environment;
         // Plan 016 wave 2: mirrors RegistryGrain.UpdatePipelineAsync — the carry put the STORED counter
         // on `def`, this moves it, and only if the definition really changed by the same canonical-JSON
         // test ImportPlanner uses for "skipped" vs "updated". Before the restart block below.
@@ -321,6 +366,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
     /// identically to the Orleans flavor.</summary>
     public async Task<TableDefinition> CreateTableAsync(TableDefinition def)
     {
+        ValidateQualifiableName(def.Name);
         ValidateUniqueTableName(def.Name, excludeTableId: null);
         ValidateParallelism(def.Parallelism);
         ValidateFlushMs(def.FlushMs);
@@ -333,6 +379,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         def.UpdatedAtMs = now;
         def.Revision = 1;       // see UpsertSourceAsync for why a fresh entity is 1 and not 0.
         def.SchemaRevision = 1;
+        def.Environment = environment;
 
         var compileResult = CompileTableSql(def.Sql, excludeTableId: def.Id);
         ValidateHistoryConfig(def, compileResult);
@@ -341,7 +388,11 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
         state.Tables.Add(def);
         RecomputeStaleReasons();
-        await orchestrator.PublishLifecycleAsync(def.Name, "table-created", def.Status);
+        // Plan 021 D6: the lifecycle envelope's entity key becomes the QUALIFIED name — a subscriber
+        // dispatching on it (or a human reading the SignalR/NATS relay) must be able to tell "orders" in
+        // "staging" apart from "orders" in "default". Qualify(environment, ...) is a no-op for the default
+        // environment (D2), so this is byte-identical there.
+        await orchestrator.PublishLifecycleAsync(EnvKeys.Qualify(environment, def.Name), "table-created", def.Status);
         await orchestrator.ResetTableHistoryAsync(def);
         return def;
     }
@@ -358,6 +409,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         var renamed = !string.Equals(existing.Name, def.Name, StringComparison.Ordinal);
         if (renamed)
         {
+            ValidateQualifiableName(def.Name);
             ValidateUniqueTableName(def.Name, excludeTableId: existing.Id);
             ValidateTableRenameAllowed(existing);
         }
@@ -399,7 +451,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         {
             try
             {
-                await orchestrator.DisableTableHistoryAsync(existing.Name);
+                await orchestrator.DisableTableHistoryAsync(existing.Name, environment);
             }
             catch
             {
@@ -414,6 +466,9 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
         // Plan 009: see the note in UpdatePipelineAsync above and CatalogRecordMerge's own doc comment.
         CatalogRecordMerge.CarryServerOwnedFields(existing, def, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        // Plan 021 D5: Environment is server-owned — see UpsertSourceAsync's identical carry for why
+        // CatalogRecordMerge (frozen, shared) cannot do this for us.
+        def.Environment = existing.Environment;
         state.Tables[tableIdx] = def;
 
         ApplyCompileResult(def, compileResult);
@@ -429,7 +484,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
         if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged || retentionChanged) && wasRunning)
         {
-            await orchestrator.StopTableAsync(def.Name);
+            await orchestrator.StopTableAsync(def.Name, environment);
             var outcome = await orchestrator.StartTableAsync(def, state.Sources, state.Tables);
             if (outcome.Ok)
             {
@@ -451,7 +506,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             await orchestrator.ResetTableHistoryAsync(def);
         }
 
-        await orchestrator.PublishLifecycleAsync(def.Name, "table-updated", def.Status);
+        await orchestrator.PublishLifecycleAsync(EnvKeys.Qualify(environment, def.Name), "table-updated", def.Status);
         return def;
     }
 
@@ -467,14 +522,14 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
         if (existing.Status == PipelineStatus.Running)
         {
-            await orchestrator.StopTableAsync(existing.Name);
+            await orchestrator.StopTableAsync(existing.Name, environment);
         }
 
-        await orchestrator.DisableTableHistoryAsync(existing.Name);
+        await orchestrator.DisableTableHistoryAsync(existing.Name, environment);
 
         state.Tables.Remove(existing);
         RecomputeStaleReasons(); // a deleted table breaks every pin that named it.
-        await orchestrator.PublishLifecycleAsync(existing.Name, "table-deleted", PipelineStatus.Stopped);
+        await orchestrator.PublishLifecycleAsync(EnvKeys.Qualify(environment, existing.Name), "table-deleted", PipelineStatus.Stopped);
         return true;
     }
 
@@ -497,7 +552,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
                 existing.Status = PipelineStatus.Failed;
                 existing.Error = $"table input(s) not running: {string.Join(", ", missing)}";
                 existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                await orchestrator.PublishLifecycleAsync(existing.Name, "table-failed", existing.Status);
+                await orchestrator.PublishLifecycleAsync(EnvKeys.Qualify(environment, existing.Name), "table-failed", existing.Status);
                 return existing;
             }
 
@@ -506,23 +561,23 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             {
                 existing.Status = PipelineStatus.Running;
                 existing.Error = null;
-                await orchestrator.PublishLifecycleAsync(existing.Name, "table-started", existing.Status);
+                await orchestrator.PublishLifecycleAsync(EnvKeys.Qualify(environment, existing.Name), "table-started", existing.Status);
             }
             else
             {
                 existing.Status = PipelineStatus.Failed;
                 existing.Error = outcome.Error;
-                await orchestrator.PublishLifecycleAsync(existing.Name, "table-failed", existing.Status);
+                await orchestrator.PublishLifecycleAsync(EnvKeys.Qualify(environment, existing.Name), "table-failed", existing.Status);
             }
         }
         else
         {
             ThrowIfRunningDependents(existing.Name, "stop");
 
-            await orchestrator.StopTableAsync(existing.Name);
+            await orchestrator.StopTableAsync(existing.Name, environment);
             existing.Status = PipelineStatus.Stopped;
             existing.Error = null;
-            await orchestrator.PublishLifecycleAsync(existing.Name, "table-stopped", existing.Status);
+            await orchestrator.PublishLifecycleAsync(EnvKeys.Qualify(environment, existing.Name), "table-stopped", existing.Status);
         }
 
         existing.UpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -648,6 +703,21 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
     // Validation / helpers — ported verbatim from RegistryGrain (see that class for the extended
     // rationale in each doc comment).
     // ------------------------------------------------------------------
+
+    /// <summary>Plan 021, going-forward guard, same shape plan 016 used for pipeline-name uniqueness: a
+    /// source or table name containing <see cref="EnvKeys.Separator"/> can never be safely qualified
+    /// (<see cref="EnvKeys.IsQualifiableEntityName"/>'s own doc comment explains why — it would already be
+    /// unusable in SQL for the identical reason, so this costs nothing real). Checked at CREATE for both
+    /// kinds and at RENAME for tables (sources can never be renamed at all — plan 016). Pipelines are
+    /// keyed by GUID and never reach this.</summary>
+    private static void ValidateQualifiableName(string name)
+    {
+        if (!EnvKeys.IsQualifiableEntityName(name))
+        {
+            throw new InvalidOperationException(
+                $"'{name}' cannot be used as a name: it contains '{EnvKeys.Separator}', the character environment-qualified runtime keys are built from. Choose a name without a '{EnvKeys.Separator}' in it.");
+        }
+    }
 
     private void ValidateUniqueTableName(string name, string? excludeTableId)
     {

@@ -1,7 +1,9 @@
 using System.Runtime.CompilerServices;
 using Dapr.Client;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.AppCore.Ingest;
+using StreamForge.Dapr.Host.Facades;
 using StreamForge.Dapr.Host.Streaming;
 using StreamForge.Host.Auth;
 
@@ -41,13 +43,20 @@ namespace StreamForge.Dapr.Host.Ingest;
 /// batch... the per-row-vs-per-batch choice stays on the host side").</para>
 /// </summary>
 internal sealed class DaprIngressFacade(
-    ICatalogFacade catalog,
+    ICatalogFacadeFactory catalogFactory,
     SourceIngressRegistry registry,
     DaprClient daprClient,
     ILogger<DaprIngressFacade> logger,
     IngestIdempotencyCache? idempotency = null,
     IngestKeyUsageTracker? keyUsage = null) : IIngressFacade
 {
+    // Plan 021: this class is registered as a SINGLETON (IngestRuntimeSetup.AddServices) but every public
+    // method backs a per-request call (an ingest push/status/key-check) — the same singleton-captures-a-
+    // transient hazard the wave brief calls out. Resolved fresh on every call, per EnvironmentAmbient.
+    // Current, so a source push targets whichever environment the request selected, not whatever was
+    // ambient at container-build time (always the default).
+    private ICatalogFacade Catalog => catalogFactory.For(EnvironmentAmbient.Current);
+
     /// <summary>Same literal as <see cref="Actors.ConnectorActor"/>'s private <c>EgressTopicPrefix</c> —
     /// duplicated rather than shared for the same reason that class's own doc comment gives for ITS copy
     /// (which itself duplicates <c>GeneratorActor</c>'s): this facade and <see cref="Actors.ConnectorActor"/>
@@ -70,7 +79,7 @@ internal sealed class DaprIngressFacade(
 
     private async Task<IngestResult> PushCoreAsync(string sourceName, IReadOnlyList<Dictionary<string, object?>> events, bool partial)
     {
-        var def = await catalog.GetSourceAsync(sourceName);
+        var def = await Catalog.GetSourceAsync(sourceName);
         if (def is null)
         {
             return new IngestResult { Outcome = IngestOutcome.NotFound, Error = $"no such source \"{sourceName}\"" };
@@ -105,7 +114,13 @@ internal sealed class DaprIngressFacade(
             };
         }
 
-        var buffer = registry.GetOrCreate(sourceName, config, (rows, ct) => DrainAsync(sourceName, rows, ct));
+        // Plan 021: the registry key is the ENVIRONMENT-QUALIFIED name — SourceIngressRegistry itself has
+        // no environment concept (shared/AppCore, frozen), it just keys on whatever string this project
+        // hands it, so consistency across every caller (this method, IngestDrainPumpService's drain sweep,
+        // DaprLifecycleOrchestrator.NotifySourceChangedAsync/Removed's Remove calls) is what keeps two
+        // same-named ingest sources in two environments from sharing one buffer.
+        var qualifiedName = EnvKeys.Qualify(def.Environment, sourceName);
+        var buffer = registry.GetOrCreate(qualifiedName, config, (rows, ct) => DrainAsync(qualifiedName, rows, ct));
         buffer.RecordInvalid(batch.RowErrors.Count);
 
         // Plan 009 A1.1: row-level dedup runs AFTER coercion, BEFORE admission — a duplicate never
@@ -135,7 +150,7 @@ internal sealed class DaprIngressFacade(
             return false;
         }
 
-        var def = await catalog.GetSourceAsync(sourceName);
+        var def = await Catalog.GetSourceAsync(sourceName);
         if (def is null || def.Kind != SourceKinds.Ingest)
         {
             return false;
@@ -165,14 +180,14 @@ internal sealed class DaprIngressFacade(
     /// than null, since the source itself is real.</summary>
     public async Task<IngestStatus?> GetStatusAsync(string sourceName)
     {
-        var def = await catalog.GetSourceAsync(sourceName);
+        var def = await Catalog.GetSourceAsync(sourceName);
         if (def is null || def.Kind != SourceKinds.Ingest)
         {
             return null;
         }
 
         var config = def.Ingest ?? new IngestConfig();
-        var buffer = registry.TryGet(sourceName);
+        var buffer = registry.TryGet(EnvKeys.Qualify(def.Environment, sourceName));
         IngestStatus status;
         if (buffer is null)
         {

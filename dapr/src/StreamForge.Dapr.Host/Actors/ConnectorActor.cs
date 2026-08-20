@@ -215,7 +215,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         Task.FromResult(ConnectorBookkeeping.ToStatus(_state, Id.GetId()));
 
     public async Task RecordSubscriberBatchAsync(
-        int rowCount, string status, string? error, List<string>? dedupKeys = null, int coercionFailures = 0)
+        int rowCount, string status, string? error, List<string>? dedupKeys, int coercionFailures)
     {
         ConnectorBookkeeping.ApplySubscriberBatch(_state, rowCount, status, error, dedupKeys);
         // Plan 009 C2: the queryable half of "counted and surfaced". The subscriber kinds (grpc, nats)
@@ -353,13 +353,17 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
 
     private async Task PublishAsync(string sourceName, List<Dictionary<string, object?>> rows)
     {
-        var envelope = new SourceEventsEnvelope { Source = sourceName, Events = rows };
+        // Plan 021 D6: Id.GetId() is this actor's own qualified name (EnvKeys.Qualify(def.Environment,
+        // def.Name) — see DaprLifecycleOrchestrator's ConnectorActorProxy) — used for routing/egress
+        // instead of the bare `sourceName` parameter, which is kept only because callers already had it
+        // in scope and it's still useful in a log line if one is ever added here.
+        var envelope = new SourceEventsEnvelope { Source = Id.GetId(), Events = rows };
         try
         {
             // sf-sources: the router fans this out in-host (same as GeneratorActor). sf-source-{name}:
             // publish-only egress copy for polyglot subscribers.
             await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, StreamingRuntimeSetup.SourcesTopic, envelope);
-            await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + sourceName, envelope);
+            await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + Id.GetId(), envelope);
         }
         catch (Exception ex)
         {
@@ -459,7 +463,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
                 var coercion = ConnectorRowCoercion.Apply(def.Fields, rows.ToList(), def.OnCoercionFailure);
                 if (coercion.BatchRejected)
                 {
-                    await ConnectorActorProxy(name).RecordSubscriberBatchAsync(0, "error", $"coercion rejected batch: {coercion.RejectReason}");
+                    await SelfProxy().RecordSubscriberBatchAsync(0, "error", $"coercion rejected batch: {coercion.RejectReason}", null, 0);
                     return;
                 }
 
@@ -476,15 +480,16 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
                     stamped.Add(row);
                 }
 
-                var envelope = new SourceEventsEnvelope { Source = name, Events = stamped };
+                var envelope = new SourceEventsEnvelope { Source = Id.GetId(), Events = stamped };
                 await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, StreamingRuntimeSetup.SourcesTopic, envelope);
-                await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + name, envelope);
+                await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + Id.GetId(), envelope);
 
-                await ConnectorActorProxy(name).RecordSubscriberBatchAsync(
+                await SelfProxy().RecordSubscriberBatchAsync(
                     stamped.Count, "ok",
                     coercion.FailureCount > 0
                         ? $"{coercion.FailureCount} field coercion failure(s) this batch; policy={def.OnCoercionFailure}"
                         : null,
+                    dedupKeys: null,
                     coercionFailures: coercion.FailureCount);
             },
             onStatus: (status, error) =>
@@ -525,18 +530,18 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
                 // SubscriberCore already ran these rows through ConnectorPollCycle.Emit (parse/extract/
                 // coerce/dedup/"_source"/"_ts" stamping) — unlike gRPC above, nothing left to do here but
                 // publish and persist the dedup snapshot.
-                var envelope = new SourceEventsEnvelope { Source = name, Events = rows.ToList() };
+                var envelope = new SourceEventsEnvelope { Source = Id.GetId(), Events = rows.ToList() };
                 await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, StreamingRuntimeSetup.SourcesTopic, envelope);
-                await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + name, envelope);
+                await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + Id.GetId(), envelope);
 
-                await ConnectorActorProxy(name).RecordSubscriberBatchAsync(rows.Count, "ok", null, dedup.ToPersistable());
+                await SelfProxy().RecordSubscriberBatchAsync(rows.Count, "ok", null, dedup.ToPersistable(), 0);
             },
             onStatus: (status, error) =>
             {
                 _ = RecordStatusBestEffortAsync(name, status, error);
             },
             onCoercionFailures: n =>
-                _ = ConnectorActorProxy(name).RecordSubscriberBatchAsync(0, "ok", null, null, n));
+                _ = SelfProxy().RecordSubscriberBatchAsync(0, "ok", null, null, n));
 
         _ = Task.Run(() => core.RunAsync(cts.Token));
     }
@@ -557,7 +562,7 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
     {
         try
         {
-            await ConnectorActorProxy(sourceName).RecordSubscriberBatchAsync(0, status, error);
+            await SelfProxy().RecordSubscriberBatchAsync(0, status, error, null, 0);
         }
         catch (Exception ex)
         {
@@ -577,8 +582,15 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         _grpcCts = null;
     }
 
-    private static IConnectorActor ConnectorActorProxy(string sourceName) =>
-        ActorProxy.Create<IConnectorActor>(new ActorId(sourceName), nameof(ConnectorActor), ActorProxyDefaults.Options);
+    /// <summary>Plan 021: every call site below is a SELF-call (a background subscriber thread invoking
+    /// back into this same actor's own turn through Dapr's proxy pipeline — see the "Acyclic by
+    /// construction" doc comment above for why that indirection exists at all). Before this plan the bare
+    /// name a caller happened to have in scope (<c>def.Name</c>/<c>name</c>/<c>sourceName</c>) was
+    /// coincidentally identical to this actor's own activated id; qualification makes that coincidence
+    /// stop holding for a non-default environment, so this now addresses <see cref="Id"/> directly rather
+    /// than trusting whatever name string a caller passes.</summary>
+    private IConnectorActor SelfProxy() =>
+        ActorProxy.Create<IConnectorActor>(new ActorId(Id.GetId()), nameof(ConnectorActor), ActorProxyDefaults.Options);
 }
 
 /// <summary>Persisted shape of a <see cref="ConnectorActor"/>'s state (state name "connector") — see

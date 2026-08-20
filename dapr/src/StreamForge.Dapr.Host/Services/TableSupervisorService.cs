@@ -1,7 +1,9 @@
 using Dapr.Actors;
 using Dapr.Actors.Client;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Dapr.Host.Actors;
+using StreamForge.Dapr.Host.Facades;
 using StreamForge.Dapr.Host.Streaming;
 
 namespace StreamForge.Dapr.Host.Services;
@@ -49,11 +51,14 @@ namespace StreamForge.Dapr.Host.Services;
 /// race — so this codepath is exercised by USER-created chains, not by the shipped seed.</para>
 /// </summary>
 public sealed class TableSupervisorService(
-    ICatalogFacade catalog,
+    ICatalogFacadeFactory catalogFactory,
+    IEnvironmentFacade environments,
     TableEventRouter router,
     IHostApplicationLifetime lifetime,
     ILogger<TableSupervisorService> logger) : BackgroundService
 {
+    // Plan 021 D5: same reasoning as GeneratorSupervisorService/PipelineSupervisorService — a boot-resume
+    // sweep must cover every environment, never just the (empty, here) ambient one.
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await WaitForApplicationStartedAsync(stoppingToken);
@@ -63,22 +68,26 @@ public sealed class TableSupervisorService(
         {
             try
             {
-                var tables = await catalog.GetTablesAsync();
-                foreach (var table in tables.Where(t => t.Status == PipelineStatus.Running))
+                foreach (var env in await environments.ListAsync())
                 {
-                    try
+                    var catalog = catalogFactory.For(EnvKeys.Normalize(env.Name));
+                    var tables = await catalog.GetTablesAsync();
+                    foreach (var table in tables.Where(t => t.Status == PipelineStatus.Running))
                     {
-                        await EnsureRunningAsync(table);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Best-effort per table, mirroring PipelineSupervisorService's own per-pipeline
-                        // try/catch — one misbehaving/not-yet-startable table must never stop the sweep
-                        // from reaching the rest, and simply retries next sweep (see class doc's
-                        // topo-order paragraph).
-                        logger.LogDebug(ex,
-                            "TableSupervisorService: failed to (re)start/repair table '{TableName}' — will retry next sweep.",
-                            table.Name);
+                        try
+                        {
+                            await EnsureRunningAsync(catalog, table);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Best-effort per table, mirroring PipelineSupervisorService's own per-pipeline
+                            // try/catch — one misbehaving/not-yet-startable table must never stop the sweep
+                            // from reaching the rest, and simply retries next sweep (see class doc's
+                            // topo-order paragraph).
+                            logger.LogDebug(ex,
+                                "TableSupervisorService: failed to (re)start/repair table '{TableName}' — will retry next sweep.",
+                                table.Name);
+                        }
                     }
                 }
             }
@@ -90,15 +99,22 @@ public sealed class TableSupervisorService(
         } while (await timer.WaitForNextTickAsync(stoppingToken));
     }
 
-    private async Task EnsureRunningAsync(TableDefinition table)
+    private async Task EnsureRunningAsync(ICatalogFacade catalog, TableDefinition table)
     {
-        var actor = ActorProxy.Create<ITableActor>(new ActorId(table.Name), nameof(TableActor), ActorProxyDefaults.Options);
+        var qualifiedName = EnvKeys.Qualify(table.Environment, table.Name);
+        var actor = ActorProxy.Create<ITableActor>(new ActorId(qualifiedName), nameof(TableActor), ActorProxyDefaults.Options);
 
         if (await actor.IsRunningAsync())
         {
             // Already self-healed (or continuously running) — repair the router only, never restart.
+            // Plan 021 D6: GetInputNamesAsync returns BARE names — qualify with this table's own
+            // environment before they go in the process-wide router index (same reasoning as
+            // DaprLifecycleOrchestrator.StartTableAsync).
             var inputs = await actor.GetInputNamesAsync();
-            router.Register(table.Name, inputs.StreamInputs, inputs.TableInputs);
+            router.Register(
+                qualifiedName,
+                inputs.StreamInputs.Select(s => EnvKeys.Qualify(table.Environment, s)).ToList(),
+                inputs.TableInputs.Select(t => EnvKeys.Qualify(table.Environment, t)).ToList());
             return;
         }
 

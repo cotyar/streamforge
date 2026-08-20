@@ -1,6 +1,7 @@
 using Dapr.Actors;
 using Dapr.Actors.Client;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Dapr.Host.Actors;
 using StreamForge.Dapr.Host.Streaming;
 
@@ -34,18 +35,28 @@ public sealed partial class DaprLifecycleOrchestrator
     /// value, it never assumes "enabled".</summary>
     public async Task ResetTableHistoryAsync(TableDefinition def)
     {
-        await TableHistoryActorProxy(def.Name).ResetAsync(def);
-        TableHistoryEnabledMap.Instance.SetEnabled(def.Name, def.HistoryEnabled);
+        var qualifiedName = EnvKeys.Qualify(def.Environment, def.Name);
+        await TableHistoryActorProxy(qualifiedName).ResetAsync(def);
+        // Plan 021 D6: the enable-map's key must agree with what TableHistoryDeltaSink looks entries up
+        // by — envelope.Table, which is now the QUALIFIED name every TableActor stamps on its own
+        // published deltas (see TableActor.ApplyAndPublishAsync). Qualified here so both sides match.
+        TableHistoryEnabledMap.Instance.SetEnabled(qualifiedName, def.HistoryEnabled);
     }
 
     /// <summary>Mirrors <c>ITableHistoryGrain.DisableAsync</c>'s one call site: <c>Catalog/CatalogStore.cs</c>'s
-    /// <c>DeleteTableAsync</c>, unchanged this wave.</summary>
-    public async Task DisableTableHistoryAsync(string tableName)
+    /// <c>DeleteTableAsync</c>. Plan 021 signature change (added <paramref name="environment"/>) — same
+    /// reason as <see cref="DaprLifecycleOrchestrator.StopTableAsync"/>: no definition survives a delete
+    /// to read an environment off.</summary>
+    public async Task DisableTableHistoryAsync(string tableName, string environment)
     {
-        await TableHistoryActorProxy(tableName).DisableAsync();
-        TableHistoryEnabledMap.Instance.Remove(tableName);
+        var qualifiedName = EnvKeys.Qualify(environment, tableName);
+        await TableHistoryActorProxy(qualifiedName).DisableAsync();
+        TableHistoryEnabledMap.Instance.Remove(qualifiedName);
     }
 
-    private static ITableHistoryActor TableHistoryActorProxy(string tableName) =>
-        ActorProxy.Create<ITableHistoryActor>(new ActorId(tableName), nameof(TableHistoryActor), ActorProxyDefaults.Options);
+    /// <summary><paramref name="qualifiedTableName"/> — unlike the sibling proxy helpers in the W7-A file,
+    /// this one takes an ALREADY-qualified name (its two callers above compute it once and reuse it for
+    /// both the actor id and the enable-map key), rather than an (environment, name) pair.</summary>
+    private static ITableHistoryActor TableHistoryActorProxy(string qualifiedTableName) =>
+        ActorProxy.Create<ITableHistoryActor>(new ActorId(qualifiedTableName), nameof(TableHistoryActor), ActorProxyDefaults.Options);
 }

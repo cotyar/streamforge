@@ -8,6 +8,7 @@ using StreamForge.Abstractions;
 using StreamForge.Engine;
 using StreamForge.Engine.Dataflow;
 using StreamForge.Engine.Runtime;
+using StreamForge.Host.Facades;
 using StreamForge.Host.Search;
 
 namespace StreamForge.Host.Grains;
@@ -430,7 +431,12 @@ public sealed class TableGrain(
 
     private async Task StartClassicAsync(TableDefinition def)
     {
-        var registry = GrainFactory.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+        // Plan 021 D5 — see PipelineGrain.StartAsync's identical comment: read def.Environment, not any
+        // ambient. ITableGrain itself stays keyed by bare table name this wave (D3's own qualification of
+        // the 50 name-keyed grain kinds is a later wave's scope), so two same-named tables in two
+        // environments still collide on ONE physical grain today — a known, deliberate gap this wave
+        // leaves for that later wave to close, not something this line can fix on its own.
+        var registry = GrainFactory.RegistryFor(def.Environment);
         var sources = await registry.GetSourcesAsync();
         var streamSchemas = sources.ToDictionary(
             s => s.Name,

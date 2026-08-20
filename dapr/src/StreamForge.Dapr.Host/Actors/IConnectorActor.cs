@@ -51,6 +51,13 @@ public interface IConnectorActor : IActor
     /// <param name="coercionFailures">Plan 009 C2: field-level coercion failures in this batch, added to
     /// the cumulative counter. Additive with a zero default, so every pre-009 call site keeps its exact
     /// meaning.</param>
+    /// <para><b>No optional parameters, and that is a hard Dapr constraint, not a style preference.</b>
+    /// <c>Dapr.Actors.Description.MethodArgumentDescription.EnsureNotOutRefOptional</c> throws
+    /// <see cref="ArgumentException"/> for any <c>out</c>/<c>ref</c>/optional parameter on an actor
+    /// interface method, and it throws while <c>MapActorsHandlers</c> is building the dispatcher map — so
+    /// a default value here does not degrade one call, it prevents the entire host process from starting.
+    /// Both parameters below carried C# defaults from plan 009 until plan 021 wave 1 found the host
+    /// unbootable because of them; every call site now passes them explicitly.</para>
     Task RecordSubscriberBatchAsync(
-        int rowCount, string status, string? error, List<string>? dedupKeys = null, int coercionFailures = 0);
+        int rowCount, string status, string? error, List<string>? dedupKeys, int coercionFailures);
 }

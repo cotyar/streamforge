@@ -1,5 +1,7 @@
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.AppCore.Ingest;
+using StreamForge.Dapr.Host.Facades;
 
 namespace StreamForge.Dapr.Host.Ingest;
 
@@ -33,12 +35,15 @@ namespace StreamForge.Dapr.Host.Ingest;
 /// publish failure never stops the sweep from draining the rest.</para>
 /// </summary>
 public sealed class IngestDrainPumpService(
-    ICatalogFacade catalog,
+    ICatalogFacadeFactory catalogFactory,
+    IEnvironmentFacade environments,
     SourceIngressRegistry registry,
     IConfiguration configuration,
     IHostApplicationLifetime lifetime,
     ILogger<IngestDrainPumpService> logger) : BackgroundService
 {
+    // Plan 021 D5: same reasoning as the supervisors — this is the hot path for EVERY environment's
+    // buffered ingest sources, not just the (empty, here) ambient one's.
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await WaitForApplicationStartedAsync(stoppingToken);
@@ -49,42 +54,59 @@ public sealed class IngestDrainPumpService(
         {
             try
             {
-                var sources = await catalog.GetSourcesAsync();
+                // Plan 021: RetainOnly runs over the QUALIFIED names of every environment's ingest-kind
+                // sources in ONE call — SourceIngressRegistry has no environment concept of its own (it is
+                // shared/AppCore, frozen), so "everything not in this set is stale" has to mean "across
+                // every environment", or a source that still exists in environment B would look stale (and
+                // get its buffer dropped) purely because environment A's sweep pass ran first.
+                var qualifiedLive = new HashSet<string>(StringComparer.Ordinal);
+                var envSources = new List<(string Environment, List<SourceDefinition> Sources)>();
+                foreach (var env in await environments.ListAsync())
+                {
+                    var environment = EnvKeys.Normalize(env.Name);
+                    var sources = await catalogFactory.For(environment).GetSourcesAsync();
+                    envSources.Add((environment, sources));
+                    foreach (var s in sources.Where(s => s.Kind == SourceKinds.Ingest))
+                    {
+                        qualifiedLive.Add(EnvKeys.Qualify(environment, s.Name));
+                    }
+                }
 
                 // The lifecycle orchestrator already drops a buffer on delete and on a kind change, but
                 // not every deletion route goes through it (a replace-mode config import rewrites the
                 // catalog wholesale). Reconciling here — against the catalog we just read anyway — makes
                 // the sweep the backstop, exactly as GeneratorSupervisorService does on the Orleans side.
-                registry.RetainOnly(sources
-                    .Where(s => s.Kind == SourceKinds.Ingest)
-                    .Select(s => s.Name)
-                    .ToHashSet(StringComparer.Ordinal));
+                registry.RetainOnly(qualifiedLive);
 
-                foreach (var src in sources)
+                foreach (var (environment, sources) in envSources)
                 {
-                    if (src.Kind != SourceKinds.Ingest)
+                    foreach (var src in sources)
                     {
-                        continue;
-                    }
+                        if (src.Kind != SourceKinds.Ingest)
+                        {
+                            continue;
+                        }
 
-                    var buffer = registry.TryGet(src.Name);
-                    if (buffer is null)
-                    {
-                        continue; // never pushed to yet — nothing queued, nothing to drain
-                    }
+                        var qualifiedName = EnvKeys.Qualify(environment, src.Name);
+                        var buffer = registry.TryGet(qualifiedName);
+                        if (buffer is null)
+                        {
+                            continue; // never pushed to yet — nothing queued, nothing to drain
+                        }
 
-                    try
-                    {
-                        await buffer.DrainAsync(ct: stoppingToken);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Best-effort per source, mirroring GeneratorSupervisorService's own per-source
-                        // try/catch — one misbehaving buffer's drain must never stop the sweep from
-                        // reaching the rest.
-                        logger.LogDebug(ex,
-                            "IngestDrainPumpService: drain failed for source '{Source}' — will retry next tick.",
-                            src.Name);
+                        try
+                        {
+                            await buffer.DrainAsync(ct: stoppingToken);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Best-effort per source, mirroring GeneratorSupervisorService's own per-source
+                            // try/catch — one misbehaving buffer's drain must never stop the sweep from
+                            // reaching the rest.
+                            logger.LogDebug(ex,
+                                "IngestDrainPumpService: drain failed for source '{Source}' — will retry next tick.",
+                                qualifiedName);
+                        }
                     }
                 }
             }

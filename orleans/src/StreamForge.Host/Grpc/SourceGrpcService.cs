@@ -3,6 +3,8 @@ using Grpc.Core;
 using Microsoft.AspNetCore.Authorization;
 using Orleans;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
+using StreamForge.Host.Facades;
 using StreamForge.Api.Auth;
 using V1 = StreamForge.Host.Grpc.V1;
 
@@ -25,7 +27,8 @@ namespace StreamForge.Host.Grpc;
 /// tag-scoped entitlements working at all.</para></summary>
 public sealed class SourceGrpcService(IClusterClient client, AccessGuard guard) : V1.SourceService.SourceServiceBase
 {
-    private IRegistryGrain Registry => client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+    // Plan 021 D4 — a facade/gRPC service answering one request reads the ambient.
+    private IRegistryGrain Registry => client.RegistryFor(EnvironmentAmbient.Current);
 
     [Authorize(Policy = "Viewer")]
     public override async Task<V1.ListSourcesResponse> List(Empty request, ServerCallContext context)

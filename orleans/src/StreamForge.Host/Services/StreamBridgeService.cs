@@ -3,8 +3,10 @@ using Orleans;
 using Orleans.Runtime;
 using Orleans.Streams;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Engine;
 using StreamForge.Api.Hubs;
+using StreamForge.Host.Facades;
 
 namespace StreamForge.Host.Services;
 
@@ -48,6 +50,17 @@ public sealed class StreamBridgeService(
     private readonly Lock _tableGate = new();
     private Timer? _tableFlushTimer;
 
+    /// <summary>Plan 021 — every environment this bridge has already onboarded (subscribed its lifecycle
+    /// stream, ensured its catalog initialized, done the one-time "which pipelines/tables are already
+    /// Running" enumeration — see <see cref="DiscoverEnvironmentsAsync"/>). A HashSet, not a count: the
+    /// bootstrap work below is meant to run EXACTLY ONCE per environment, the same "established once,
+    /// lifecycle events take it from there" property <see cref="StreamBridgeServiceStartupRaceTests"/>'s own
+    /// doc comment documents for pipeline/table subscriptions — extended here from "once per instance" to
+    /// "once per environment" so a NEW environment created after boot still gets onboarded (within one 30s
+    /// discovery tick), without re-doing the one-time enumeration for environments already onboarded.</summary>
+    private readonly HashSet<string> _onboardedEnvironments = new(StringComparer.Ordinal);
+    private readonly List<IRegistryGrain> _onboardedRegistries = [];
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await StartupSignal.WaitForApplicationStartedAsync(lifetime, stoppingToken);
@@ -60,58 +73,91 @@ public sealed class StreamBridgeService(
             dueTime: TimeSpan.FromMilliseconds(TableDeltaCoalesceMs),
             period: TimeSpan.FromMilliseconds(TableDeltaCoalesceMs));
 
-        var lifecycleStream = streamProvider.GetStream<LifecycleEvent>(
-            StreamId.Create(StreamConstants.LifecycleNamespace, StreamConstants.LifecycleEventsKey));
-        await lifecycleStream.SubscribeAsync(OnLifecycleEventAsync);
-
+        // Metrics stay a SINGLE, unqualified stream — plan 021's own scope callout is the LIFECYCLE stream
+        // specifically (LifecycleNamespace/LifecycleEventsKey); PipelineMetrics (LifecycleNamespace/
+        // MetricsKey) is a separate, per-pipeline-id broadcast this wave leaves untouched.
         var metricsStream = streamProvider.GetStream<PipelineMetrics>(
             StreamId.Create(StreamConstants.LifecycleNamespace, StreamConstants.MetricsKey));
         await metricsStream.SubscribeAsync(OnMetricsAsync);
 
-        var registry = client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
-
-        // Program.cs also kicks off registry seeding (EnsureInitializedAsync) from a fire-and-forget
-        // ApplicationStarted callback, racing this service's own ApplicationStarted wait above — on a
-        // fresh boot (no persisted catalog yet) this call can easily win the race, i.e. run BEFORE that
-        // seeding has populated Sources/Pipelines/Tables and started the already-"Running" grains.
-        // EnsureInitializedAsync is idempotent (no-ops once state is non-empty) and Orleans serializes
-        // both callers' calls to it (RegistryGrain isn't [MayInterleave] for this method), so awaiting it
-        // here — instead of just trusting Program.cs got there first — makes the race harmless: whichever
-        // caller's turn runs first does the real seed+start, the other is a fast no-op, and by the time we
-        // reach RefreshSourceSubscriptionsAsync/GetPipelinesAsync/GetTablesAsync below the catalog and the
-        // Running grains are guaranteed to exist. Without this, Sources eventually self-heal via the 30s
-        // refresh loop below, but Pipelines/Tables never do (they're only enumerated once, right here) —
-        // so a losing race meant tableDelta/pipelineResult permanently never subscribed, hence never
-        // relayed, for any table/pipeline that was already Running at boot.
-        await registry.EnsureInitializedAsync();
-
-        await RefreshSourceSubscriptionsAsync(registry);
-        foreach (var pipeline in await registry.GetPipelinesAsync())
-        {
-            if (pipeline.Status == PipelineStatus.Running)
-            {
-                await SubscribeToPipelineOutputAsync(pipeline.Id);
-            }
-        }
-
-        foreach (var table in await registry.GetTablesAsync())
-        {
-            if (table.Status == PipelineStatus.Running)
-            {
-                await SubscribeToTableOutputAsync(table.Name);
-            }
-        }
+        await DiscoverEnvironmentsAsync(streamProvider);
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
         while (await timer.WaitForNextTickAsync(stoppingToken))
         {
             try
             {
-                await RefreshSourceSubscriptionsAsync(registry);
+                // Re-discovery picks up any environment created since the last tick (onboarding it fully —
+                // see DiscoverEnvironmentsAsync); already-onboarded environments' sources are then
+                // refreshed exactly as the pre-021 30s loop refreshed the one and only registry's sources.
+                await DiscoverEnvironmentsAsync(streamProvider);
+                foreach (var registry in _onboardedRegistries)
+                {
+                    await RefreshSourceSubscriptionsAsync(registry);
+                }
             }
             catch
             {
                 // best-effort; try again next tick
+            }
+        }
+    }
+
+    /// <summary>Onboards every environment <see cref="IEnvironmentRegistryGrain.ListAsync"/> currently
+    /// reports that this bridge has not already onboarded (see <see cref="_onboardedEnvironments"/>) — on a
+    /// fresh boot with no environment ever created, that is exactly the DEFAULT environment, and this does
+    /// exactly what the pre-021 startup sequence did, byte-identically (its qualified lifecycle stream id
+    /// and its registry key both degrade to the unqualified pre-021 ones — see <see cref="EnvKeys.Qualify"/>).
+    ///
+    /// <para>Plan 021 D6 — subscribes THAT environment's own lifecycle stream, so a <c>staging</c> entity's
+    /// start/stop is relayed to SignalR too, not just <c>default</c>'s.</para>
+    ///
+    /// <para>Reproduces, per environment, the exact race-safety property
+    /// <see cref="StreamBridgeServiceStartupRaceTests"/> documents for the single-environment case: awaiting
+    /// <c>EnsureInitializedAsync</c> here makes losing the race with <c>Program.cs</c>'s own seeding
+    /// harmless for THIS environment's catalog, whichever caller's turn actually does the seed+start.</para>
+    ///
+    /// <para><b>Known, deliberate gap this wave leaves</b> (same one <c>GeneratorSupervisorService</c>'s own
+    /// doc comment names): pipeline/table output streams and the SignalR groups keyed off them
+    /// (<c>OutputNamespace</c>/<c>TableDeltaNamespace</c>, <c>pipeline:{id}</c>/<c>table:{name}</c>) are
+    /// NOT environment-qualified this wave (D3's qualification of those 50 name-keyed grain kinds is a
+    /// later wave's scope) — so a same-named table in two environments still shares one physical grain and
+    /// one SignalR group, exactly as it did before this plan.</para></summary>
+    private async Task DiscoverEnvironmentsAsync(IStreamProvider streamProvider)
+    {
+        var environments = await client.GetGrain<IEnvironmentRegistryGrain>(StreamConstants.EnvironmentsKey).ListAsync();
+        foreach (var e in environments)
+        {
+            var env = EnvKeys.Normalize(e.Name);
+            if (!_onboardedEnvironments.Add(env))
+            {
+                continue; // already onboarded — nothing more to do for it here.
+            }
+
+            var lifecycleStream = streamProvider.GetStream<LifecycleEvent>(StreamId.Create(
+                StreamConstants.LifecycleNamespace, EnvKeys.Qualify(env, StreamConstants.LifecycleEventsKey)));
+            await lifecycleStream.SubscribeAsync(OnLifecycleEventAsync);
+
+            var registry = client.RegistryFor(env);
+            _onboardedRegistries.Add(registry);
+
+            await registry.EnsureInitializedAsync();
+
+            await RefreshSourceSubscriptionsAsync(registry);
+            foreach (var pipeline in await registry.GetPipelinesAsync())
+            {
+                if (pipeline.Status == PipelineStatus.Running)
+                {
+                    await SubscribeToPipelineOutputAsync(pipeline.Id);
+                }
+            }
+
+            foreach (var table in await registry.GetTablesAsync())
+            {
+                if (table.Status == PipelineStatus.Running)
+                {
+                    await SubscribeToTableOutputAsync(table.Name);
+                }
             }
         }
     }

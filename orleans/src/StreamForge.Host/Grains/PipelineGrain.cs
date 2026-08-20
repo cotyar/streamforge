@@ -3,6 +3,7 @@ using Orleans.Runtime;
 using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.Engine;
+using StreamForge.Host.Facades;
 
 namespace StreamForge.Host.Grains;
 
@@ -38,7 +39,11 @@ public sealed class PipelineGrain : Grain, IPipelineGrain
 
         _def = def;
 
-        var registry = GrainFactory.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+        // Plan 021 D5 — a grain acting on an entity it was just handed reads that entity's OWN Environment
+        // field rather than any ambient: def.Environment was stamped by the registry that created it and
+        // never edited afterwards, so it is the durable answer to "which catalog does this pipeline belong
+        // to" even though IPipelineGrain itself stays keyed by GUID (D3's one exception), not by environment.
+        var registry = GrainFactory.RegistryFor(def.Environment);
         var sources = await registry.GetSourcesAsync();
         var schemas = sources.ToDictionary(
             s => s.Name,

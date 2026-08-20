@@ -52,6 +52,7 @@ public class EnvKeysTests
     [InlineData("default")]     // reserved: it is the empty string internally
     [InlineData("catalog")]     // reserved: already a singleton key in the same key space
     [InlineData("users")]
+    [InlineData("environments")] // the directory's own key — reserved for the same reason as the rest
     [InlineData("Staging")]     // upper case would sanitize differently in a file name
     [InlineData("-lead")]       // must start alphanumeric
     [InlineData("has.dot")]

@@ -262,6 +262,15 @@ public class AuthorizationCoverageTests
         // in MetaEndpoints.cs for why the asymmetry is deliberate: this lists internal wiring
         // (hostnames/ports an operator put behind Endpoints:<name>), not a capability probe.
         new("GET", "/api/meta/endpoints", Guards.Viewer),
+        // ---- plan 021: environments -------------------------------------------------------------
+        // Create and delete are Admin twice over — the route policy AND an AccessGuard check — because
+        // D7 calls force-delete the one genuinely destructive operation that plan adds: it erases the
+        // catalog AND the runtime state of everything in the environment. There is deliberately no
+        // rename route; the name is qualified into every key an entity ever produced.
+        new("GET", "/api/environments/", Guards.Viewer),
+        new("POST", "/api/environments/", Guards.Admin),
+        new("DELETE", "/api/environments/{name}", Guards.Admin),
+
         new("GET", "/api/transports", Guards.Viewer),
         new("POST", "/api/transports/{kind}/probe", Guards.Editor),
         new("GET", "/api/sql/functions", Guards.Viewer),

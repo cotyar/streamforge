@@ -2,6 +2,7 @@ using Dapr.Client;
 using Microsoft.Extensions.Logging.Abstractions;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Ingest;
+using StreamForge.Dapr.Host.Facades;
 using StreamForge.Dapr.Host.Ingest;
 using StreamForge.Host.Auth;
 using Xunit;
@@ -16,8 +17,15 @@ namespace StreamForge.Dapr.Tests;
 /// </summary>
 public class DaprIngressHardeningTests
 {
+    // Plan 021: see DaprIngressFacadeTests' identical helper for why this wraps `catalog` in a
+    // single-environment ICatalogFacadeFactory.
     private static DaprIngressFacade NewFacade(FakeCatalogFacade catalog) =>
-        new(catalog, new SourceIngressRegistry(), new DaprClientBuilder().Build(), NullLogger<DaprIngressFacade>.Instance);
+        new(new SingleEnvironmentCatalogFacadeFactory(catalog), new SourceIngressRegistry(), new DaprClientBuilder().Build(), NullLogger<DaprIngressFacade>.Instance);
+
+    private sealed class SingleEnvironmentCatalogFacadeFactory(ICatalogFacade catalog) : ICatalogFacadeFactory
+    {
+        public ICatalogFacade For(string environment) => catalog;
+    }
 
     private static SourceDefinition IngestSource(string name, IngestConfig? config = null) => new()
     {

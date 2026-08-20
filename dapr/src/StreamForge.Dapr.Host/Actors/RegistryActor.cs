@@ -1,5 +1,6 @@
 using Dapr.Actors.Runtime;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Dapr.Host.Catalog;
 using StreamForge.Dapr.Host.Lifecycle;
 
@@ -40,7 +41,14 @@ public sealed class RegistryActor(ActorHost host, ILifecycleOrchestrator orchest
     {
         var existing = await StateManager.TryGetStateAsync<CatalogState>(StateName);
         _state = existing.HasValue ? existing.Value : new CatalogState();
-        _store = new CatalogStore(_state, orchestrator);
+        // Plan 021 D1/D3: this activation's environment is derived from its OWN actor id, never read from
+        // an ambient — EnvKeys.EnvOf("catalog") = EnvKeys.Default (the id this actor activates at when no
+        // environment is named), EnvKeys.EnvOf("staging.catalog") = "staging". No other input decides it,
+        // which is exactly what makes "activate the registry at a different key per environment" (D1)
+        // enough, on its own, to isolate name uniqueness/SQL namespace/persistence with no per-call filter
+        // anywhere in CatalogStore.
+        var environment = EnvKeys.EnvOf(Id.GetId());
+        _store = new CatalogStore(_state, orchestrator, environment);
     }
 
     private Task SaveAsync() => StateManager.SetStateAsync(StateName, _state);

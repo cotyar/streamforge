@@ -20,7 +20,7 @@ public sealed class TestLifecycleOrchestrator : ILifecycleOrchestrator
         return Task.CompletedTask;
     }
 
-    public Task NotifySourceRemovedAsync(string name)
+    public Task NotifySourceRemovedAsync(string name, string environment)
     {
         Calls.Add($"NotifySourceRemoved:{name}");
         return Task.CompletedTask;
@@ -44,7 +44,7 @@ public sealed class TestLifecycleOrchestrator : ILifecycleOrchestrator
         return Task.FromResult(FailStarts ? LifecycleOutcome.Failure(FailureMessage) : LifecycleOutcome.Success);
     }
 
-    public Task StopTableAsync(string tableName)
+    public Task StopTableAsync(string tableName, string environment)
     {
         Calls.Add($"StopTable:{tableName}");
         return Task.CompletedTask;
@@ -56,7 +56,7 @@ public sealed class TestLifecycleOrchestrator : ILifecycleOrchestrator
         return Task.CompletedTask;
     }
 
-    public Task DisableTableHistoryAsync(string tableName)
+    public Task DisableTableHistoryAsync(string tableName, string environment)
     {
         Calls.Add($"DisableTableHistory:{tableName}");
         return Task.CompletedTask;

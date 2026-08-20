@@ -5,6 +5,8 @@ using Orleans;
 using Orleans.Runtime;
 using Orleans.Streams;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
+using StreamForge.Host.Facades;
 using StreamForge.Api.Auth;
 using StreamForge.Engine;
 using V1 = StreamForge.Host.Grpc.Dynamic.V1;
@@ -37,7 +39,8 @@ namespace StreamForge.Host.Grpc.Dynamic;
 /// </summary>
 public sealed class DynamicStreamService(IClusterClient client, AccessGuard guard) : V1.DynamicStreamService.DynamicStreamServiceBase
 {
-    private IRegistryGrain Registry => client.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+    // Plan 021 D4 — a facade/gRPC service answering one request reads the ambient.
+    private IRegistryGrain Registry => client.RegistryFor(EnvironmentAmbient.Current);
 
     [Authorize(Policy = "Viewer")]
     public override async Task SubscribeEntity(

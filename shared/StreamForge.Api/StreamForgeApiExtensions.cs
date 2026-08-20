@@ -307,6 +307,14 @@ public static class StreamForgeApiExtensions
         app.UseAuthentication();
         app.UseAuthorization();
 
+        // Plan 021 wave 1 (track C, D4): the environment-selection middleware, placed AFTER
+        // authentication/authorization and BEFORE any endpoint runs. See
+        // EnvironmentSelectionMiddleware's own class remarks for why that position is load-bearing —
+        // short version: a request that fails authn/authz never reaches this middleware's 404, so an
+        // anonymous caller cannot use X-StreamForge-Environment to enumerate which environments exist on
+        // a route it was never going to be let into anyway.
+        app.UseEnvironmentSelection();
+
         app.MapOpenApi();
         app.MapScalarApiReference(o =>
         {
@@ -365,6 +373,7 @@ public static class StreamForgeApiExtensions
         app.MapAccessEndpoints();
         app.MapApprovalsEndpoints();
         app.MapAuditEndpoints();
+        app.MapEnvironmentsEndpoints();
         app.MapConfigEndpoints();
         app.MapChatEndpoints();
         app.MapMetaEndpoints(options);

@@ -2,6 +2,7 @@ using Dapr.Actors;
 using Dapr.Actors.Client;
 using Dapr.Client;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.AppCore.Ingest;
 using StreamForge.Dapr.Host.Actors;
 using StreamForge.Dapr.Host.Streaming;
@@ -91,23 +92,27 @@ public sealed partial class DaprLifecycleOrchestrator(
 
         if (kind != SourceKindDispatch.ActorKind.Generator)
         {
-            await GeneratorActorProxy(def.Name).StopAsync();
+            await GeneratorActorProxy(def.Environment, def.Name).StopAsync();
         }
 
         if (kind != SourceKindDispatch.ActorKind.Connector)
         {
-            await ConnectorActorProxy(def.Name).StopAsync();
+            await ConnectorActorProxy(def.Environment, def.Name).StopAsync();
         }
 
         if (kind != SourceKindDispatch.ActorKind.Ingest)
         {
-            ingressRegistry.Remove(def.Name);
+            // Plan 021: qualified so the registry entry a same-named source in a DIFFERENT environment
+            // holds is never touched by this one's Remove — see SourceIngressRegistry's own key contract
+            // (it is keyed by whatever string this project hands it, with no environment concept of its
+            // own).
+            ingressRegistry.Remove(EnvKeys.Qualify(def.Environment, def.Name));
         }
 
         switch (kind)
         {
             case SourceKindDispatch.ActorKind.Generator:
-                var generator = GeneratorActorProxy(def.Name);
+                var generator = GeneratorActorProxy(def.Environment, def.Name);
                 if (def.Enabled)
                 {
                     await generator.StartAsync(def);
@@ -120,7 +125,7 @@ public sealed partial class DaprLifecycleOrchestrator(
                 break;
 
             case SourceKindDispatch.ActorKind.Connector:
-                var connector = ConnectorActorProxy(def.Name);
+                var connector = ConnectorActorProxy(def.Environment, def.Name);
                 if (def.Enabled)
                 {
                     await connector.StartAsync(def);
@@ -140,18 +145,22 @@ public sealed partial class DaprLifecycleOrchestrator(
         }
     }
 
-    public async Task NotifySourceRemovedAsync(string name)
+    public async Task NotifySourceRemovedAsync(string name, string environment)
     {
-        await GeneratorActorProxy(name).StopAsync();
-        await ConnectorActorProxy(name).StopAsync();
-        ingressRegistry.Remove(name);
+        await GeneratorActorProxy(environment, name).StopAsync();
+        await ConnectorActorProxy(environment, name).StopAsync();
+        ingressRegistry.Remove(EnvKeys.Qualify(environment, name));
     }
 
-    private static IGeneratorActor GeneratorActorProxy(string sourceName) =>
-        ActorProxy.Create<IGeneratorActor>(new ActorId(sourceName), nameof(GeneratorActor), ActorProxyDefaults.Options);
+    /// <summary>Plan 021 D3: every name-keyed actor id in this class goes through
+    /// <see cref="EnvKeys.Qualify"/> — <see cref="EnvKeys.Qualify(string?,string)"/> is a no-op for the
+    /// default environment (D2), so every one of these is byte-identical to the pre-021 literal
+    /// <c>new ActorId(sourceName)</c> when no environment is in play.</summary>
+    private static IGeneratorActor GeneratorActorProxy(string environment, string sourceName) =>
+        ActorProxy.Create<IGeneratorActor>(new ActorId(EnvKeys.Qualify(environment, sourceName)), nameof(GeneratorActor), ActorProxyDefaults.Options);
 
-    private static IConnectorActor ConnectorActorProxy(string sourceName) =>
-        ActorProxy.Create<IConnectorActor>(new ActorId(sourceName), nameof(ConnectorActor), ActorProxyDefaults.Options);
+    private static IConnectorActor ConnectorActorProxy(string environment, string sourceName) =>
+        ActorProxy.Create<IConnectorActor>(new ActorId(EnvKeys.Qualify(environment, sourceName)), nameof(ConnectorActor), ActorProxyDefaults.Options);
 
     /// <summary>Compiles (inside <see cref="PipelineActor.StartAsync"/>, not here — see the class doc's
     /// "acyclic by construction" note) and starts <paramref name="def"/>'s pipeline actor, then registers
@@ -172,7 +181,14 @@ public sealed partial class DaprLifecycleOrchestrator(
             return LifecycleOutcome.Failure(result.Error ?? "pipeline failed to start");
         }
 
-        pipelineRouter.Register(def.Id, result.Value ?? []);
+        // Plan 021 D6: the compiled source names PipelineActor.StartAsync resolved are BARE (compiled
+        // against this pipeline's own environment's catalog — see CatalogStore.BuildStreamSchemas, which
+        // never needs qualification itself because each RegistryActor's state is already one environment's
+        // whole catalog, D1). The ROUTER's index is shared process-wide across every environment's
+        // generators publishing on the same five fixed topics (D6), so its keys — and the envelope.Source
+        // every publisher stamps — have to be qualified here, at the boundary, or two same-named sources
+        // in two environments would collide in one dictionary entry and cross-route each other's events.
+        pipelineRouter.Register(def.Id, (result.Value ?? []).Select(s => EnvKeys.Qualify(def.Environment, s)).ToList());
         return LifecycleOutcome.Success;
     }
 
@@ -200,26 +216,34 @@ public sealed partial class DaprLifecycleOrchestrator(
     /// exception-free actor-boundary contract.</summary>
     public async Task<LifecycleOutcome> StartTableAsync(TableDefinition def, IReadOnlyList<SourceDefinition> sources, IReadOnlyList<TableDefinition> tables)
     {
-        var actor = TableActorProxy(def.Name);
+        var actor = TableActorProxy(def.Environment, def.Name);
+        var qualifiedName = EnvKeys.Qualify(def.Environment, def.Name);
         var result = await actor.StartAsync(new TableStartRequest(def, sources.ToList(), tables.ToList()));
         if (!result.Ok)
         {
-            tableRouter.Unregister(def.Name);
+            tableRouter.Unregister(qualifiedName);
             return LifecycleOutcome.Failure(result.Error ?? "table failed to start");
         }
 
-        tableRouter.Register(def.Name, result.Value!.StreamInputs, result.Value.TableInputs);
+        // Plan 021 D6: same reasoning as StartPipelineAsync above — StreamInputs/TableInputs are BARE
+        // (this table's own environment's catalog), the router is shared process-wide, so both the
+        // router's own key (this table's qualified name) and every input it fans in from must be
+        // qualified with THIS table's environment before they go in the index.
+        tableRouter.Register(
+            qualifiedName,
+            result.Value!.StreamInputs.Select(s => EnvKeys.Qualify(def.Environment, s)).ToList(),
+            result.Value.TableInputs.Select(t => EnvKeys.Qualify(def.Environment, t)).ToList());
         return LifecycleOutcome.Success;
     }
 
-    public async Task StopTableAsync(string tableName)
+    public async Task StopTableAsync(string tableName, string environment)
     {
-        await TableActorProxy(tableName).StopAsync();
-        tableRouter.Unregister(tableName);
+        await TableActorProxy(environment, tableName).StopAsync();
+        tableRouter.Unregister(EnvKeys.Qualify(environment, tableName));
     }
 
-    private static ITableActor TableActorProxy(string tableName) =>
-        ActorProxy.Create<ITableActor>(new ActorId(tableName), nameof(TableActor), ActorProxyDefaults.Options);
+    private static ITableActor TableActorProxy(string environment, string tableName) =>
+        ActorProxy.Create<ITableActor>(new ActorId(EnvKeys.Qualify(environment, tableName)), nameof(TableActor), ActorProxyDefaults.Options);
 
     private void WarnNoRuntime(string action, string id) =>
         logger.LogWarning("{Action}({Id}): no runtime yet (W7-B) — catalog status updated, no process started.", action, id);

@@ -18,9 +18,14 @@ namespace StreamForge.Dapr.Host.Actors;
 /// <c>catch (InvalidOperationException)</c> → 409 pathway fires identically on both flavors, guaranteed
 /// by this project's own code rather than by an SDK implementation detail.</para>
 /// </summary>
-public sealed record ActorResult<T>(bool Ok, T? Value, string? Error)
+public sealed record ActorResult<T>(bool Ok, T? Value, string? Error, bool BadRequest = false)
 {
     public static ActorResult<T> Success(T value) => new(true, value, null);
 
-    public static ActorResult<T> Failure(string error) => new(false, default, error);
+    /// <summary>Plan 021: <paramref name="badRequest"/> defaults to false, so every pre-existing
+    /// <c>Failure(message)</c> call site (all of them 409-style <see cref="InvalidOperationException"/>
+    /// today) keeps compiling and behaving unchanged. <see cref="Actors.EnvironmentRegistryActor"/> is the
+    /// first caller that needs the 400-style distinction (an invalid environment name is
+    /// <see cref="ArgumentException"/>, not a collision) — see its own doc comment.</summary>
+    public static ActorResult<T> Failure(string error, bool badRequest = false) => new(false, default, error, badRequest);
 }

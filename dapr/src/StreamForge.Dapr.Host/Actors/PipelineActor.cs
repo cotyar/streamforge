@@ -2,6 +2,7 @@ using Dapr.Actors.Runtime;
 using Dapr.Client;
 using StreamForge.Abstractions;
 using StreamForge.Abstractions.Streaming;
+using StreamForge.AppCore.Environments;
 using StreamForge.AppCore.Json;
 using StreamForge.Dapr.Host.Streaming;
 using StreamForge.Engine;
@@ -166,7 +167,11 @@ public sealed class PipelineActor(ActorHost host, DaprClient daprClient, ILogger
             _totalEventsIn++;
             _lastEventTsMs = evt.Timestamp;
 
-            var rows = _executor.OnEvent(envelope.Source, evt);
+            // Plan 021 D6: envelope.Source is qualified for routing (see PipelineEventRouter/
+            // GeneratorActor/ConnectorActor); this pipeline's own compiled SourceNames are bare, local to
+            // its own environment's catalog — strip before the Engine sees the name (mirrors TableActor's
+            // identical ProcessSourceEventsAsync treatment).
+            var rows = _executor.OnEvent(EnvKeys.Split(envelope.Source).Key, evt);
             if (rows.Count > 0)
             {
                 await PublishRowsAsync(rows);

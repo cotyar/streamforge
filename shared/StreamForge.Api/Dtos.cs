@@ -107,6 +107,10 @@ public sealed record ValidateResponse(bool Ok, IReadOnlyList<SqlDiagnosticDto> D
 
 public sealed record ErrorResponse(string Error);
 
+/// <summary>POST /api/environments body. <c>Name</c> is validated and normalized (trimmed) by
+/// <c>EnvironmentsEndpoints</c>/<c>EnvKeys.IsValidName</c>, never trusted verbatim.</summary>
+public sealed record CreateEnvironmentRequest(string Name, string? Description = null);
+
 /// <summary>Plan 016 wave 2-B: the 409 body for <c>PUT /api/sources/{name}?allowBreaking=false</c> when
 /// the field change IS breaking. <paramref name="BreakingReasons"/> is
 /// <c>SchemaCompatibility.Compare(...).BreakingReasons</c> verbatim — one human-readable line per removed

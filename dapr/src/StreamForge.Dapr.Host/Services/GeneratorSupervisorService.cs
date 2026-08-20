@@ -1,7 +1,9 @@
 using Dapr.Actors;
 using Dapr.Actors.Client;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Dapr.Host.Actors;
+using StreamForge.Dapr.Host.Facades;
 using StreamForge.Dapr.Host.Lifecycle;
 
 namespace StreamForge.Dapr.Host.Services;
@@ -44,10 +46,16 @@ namespace StreamForge.Dapr.Host.Services;
 /// dapr/tests/StreamForge.Dapr.Tests/ConnectorSupervisorSweepTests.cs.</para>
 /// </summary>
 public sealed class GeneratorSupervisorService(
-    ICatalogFacade catalog,
+    ICatalogFacadeFactory catalogFactory,
+    IEnvironmentFacade environments,
     IHostApplicationLifetime lifetime,
     ILogger<GeneratorSupervisorService> logger) : BackgroundService
 {
+    // Plan 021 D5: this is a background sweep, not a request — EnvironmentAmbient.Current is empty here
+    // (D4/D5), and empty would silently mean "only the default environment ever gets resumed". So it
+    // iterates EVERY environment's catalog via ICatalogFacadeFactory, keyed off IEnvironmentFacade.
+    // ListAsync — the ONLY correct choice for a boot-resume safety net whose whole job is "every enabled
+    // source everywhere keeps a live timer", not just the default environment's.
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await WaitForApplicationStartedAsync(stoppingToken);
@@ -57,42 +65,47 @@ public sealed class GeneratorSupervisorService(
         {
             try
             {
-                var sources = await catalog.GetSourcesAsync();
-
-                foreach (var src in sources.Where(s => s.Enabled && SourceKindDispatch.Classify(s.Kind) == SourceKindDispatch.ActorKind.Generator))
+                foreach (var env in await environments.ListAsync())
                 {
-                    try
-                    {
-                        var actor = ActorProxy.Create<IGeneratorActor>(
-                            new ActorId(src.Name), nameof(GeneratorActor), ActorProxyDefaults.Options);
-                        await actor.StartAsync(src);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Best-effort per source, mirroring the Orleans supervisor's per-grain try/catch —
-                        // one misbehaving generator must never stop the sweep from reaching the rest.
-                        logger.LogDebug(ex,
-                            "GeneratorSupervisorService: failed to (re)start generator for source '{Source}' — will retry next sweep.",
-                            src.Name);
-                    }
-                }
+                    var environment = EnvKeys.Normalize(env.Name);
+                    var catalog = catalogFactory.For(environment);
+                    var sources = await catalog.GetSourcesAsync();
 
-                foreach (var src in ConnectorSourceSweep.SelectConnectorSources(sources))
-                {
-                    try
+                    foreach (var src in sources.Where(s => s.Enabled && SourceKindDispatch.Classify(s.Kind) == SourceKindDispatch.ActorKind.Generator))
                     {
-                        var actor = ActorProxy.Create<IConnectorActor>(
-                            new ActorId(src.Name), nameof(ConnectorActor), ActorProxyDefaults.Options);
-                        if (!await actor.IsRunningAsync())
+                        try
                         {
+                            var actor = ActorProxy.Create<IGeneratorActor>(
+                                new ActorId(EnvKeys.Qualify(src.Environment, src.Name)), nameof(GeneratorActor), ActorProxyDefaults.Options);
                             await actor.StartAsync(src);
                         }
+                        catch (Exception ex)
+                        {
+                            // Best-effort per source, mirroring the Orleans supervisor's per-grain try/catch —
+                            // one misbehaving generator must never stop the sweep from reaching the rest.
+                            logger.LogDebug(ex,
+                                "GeneratorSupervisorService: failed to (re)start generator for source '{Source}' in environment '{Environment}' — will retry next sweep.",
+                                src.Name, environment);
+                        }
                     }
-                    catch (Exception ex)
+
+                    foreach (var src in ConnectorSourceSweep.SelectConnectorSources(sources))
                     {
-                        logger.LogDebug(ex,
-                            "GeneratorSupervisorService: failed to (re)start connector for source '{Source}' — will retry next sweep.",
-                            src.Name);
+                        try
+                        {
+                            var actor = ActorProxy.Create<IConnectorActor>(
+                                new ActorId(EnvKeys.Qualify(src.Environment, src.Name)), nameof(ConnectorActor), ActorProxyDefaults.Options);
+                            if (!await actor.IsRunningAsync())
+                            {
+                                await actor.StartAsync(src);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            logger.LogDebug(ex,
+                                "GeneratorSupervisorService: failed to (re)start connector for source '{Source}' in environment '{Environment}' — will retry next sweep.",
+                                src.Name, environment);
+                        }
                     }
                 }
             }

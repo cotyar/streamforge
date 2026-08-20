@@ -1,6 +1,7 @@
 using Dapr.Actors;
 using Dapr.Actors.Client;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Dapr.Host.Access;
 using StreamForge.Dapr.Host.Actors;
 
@@ -32,7 +33,21 @@ public static class DaprFacadesExtensions
 {
     public static IServiceCollection AddDaprFacades(this IServiceCollection services)
     {
-        services.AddSingleton<ICatalogFacade, DaprCatalogFacade>();
+        // Plan 021: ICatalogFacade stops being a singleton that resolves ONE registry actor proxy at
+        // container-build time (that resolved to the default environment forever, no matter what a later
+        // request's X-StreamForge-Environment header said). ICatalogFacadeFactory is the singleton now —
+        // it holds no per-environment state — and THIS registration is what makes every request-scoped
+        // consumer (an endpoint handler, or anything else that resolves ICatalogFacade fresh per request)
+        // see the environment ITS OWN request selected: AddTransient means a fresh resolution reads
+        // EnvironmentAmbient.Current every time, not once. See CatalogFacadeFactory.cs's class doc for the
+        // other half — background services that must act on every environment, not the (empty outside a
+        // request) ambient one, inject ICatalogFacadeFactory directly instead of ICatalogFacade.
+        services.AddSingleton<ICatalogFacadeFactory, DaprCatalogFacadeFactory>();
+        services.AddTransient<ICatalogFacade>(sp => sp.GetRequiredService<ICatalogFacadeFactory>().For(EnvironmentAmbient.Current));
+        // Plan 021: the environment directory itself — never environment-qualified (StreamConstants.
+        // EnvironmentsKey's own doc comment), so a single actor-proxy adapter, cached like the user-store/
+        // access-policy singletons below, is enough.
+        services.AddSingleton<IEnvironmentFacade, DaprEnvironmentFacade>();
         services.AddSingleton<IUserStoreFacade, DaprUserStoreFacade>();
         services.AddSingleton<IPipelineReadFacade, DaprPipelineReadFacade>();
         services.AddSingleton<ITableReadFacade, StubTableReadFacade>();
@@ -55,10 +70,16 @@ public static class DaprFacadesExtensions
     }
 }
 
-internal sealed class DaprCatalogFacade : ICatalogFacade
+/// <summary>Plan 021: takes its environment explicitly at construction — <see cref="ICatalogFacadeFactory"/>
+/// is the only thing that constructs one now (see that interface's class doc for the two call shapes,
+/// ambient-per-request and enumerate-every-environment, that both funnel through it). The actor id is
+/// <c>EnvKeys.Qualify(environment, StreamConstants.RegistryKey)</c> — for <see cref="EnvKeys.Default"/>
+/// (the empty string) that is byte-identical to the pre-021 literal <c>StreamConstants.RegistryKey</c>,
+/// which is D2's whole point.</summary>
+internal sealed class DaprCatalogFacade(string environment) : ICatalogFacade
 {
     private readonly IRegistryActor _actor =
-        ActorProxy.Create<IRegistryActor>(new ActorId(StreamConstants.RegistryKey), nameof(RegistryActor), ActorProxyDefaults.Options);
+        ActorProxy.Create<IRegistryActor>(new ActorId(EnvKeys.Qualify(environment, StreamConstants.RegistryKey)), nameof(RegistryActor), ActorProxyDefaults.Options);
 
     public Task<List<SourceDefinition>> GetSourcesAsync() => _actor.GetSourcesAsync();
 
@@ -76,7 +97,7 @@ internal sealed class DaprCatalogFacade : ICatalogFacade
             return new ScenarioRunResult { Outcome = ScenarioRunOutcome.NotFound };
         }
 
-        var generator = ActorProxy.Create<IGeneratorActor>(new ActorId(name), nameof(GeneratorActor), ActorProxyDefaults.Options);
+        var generator = ActorProxy.Create<IGeneratorActor>(new ActorId(EnvKeys.Qualify(environment, name)), nameof(GeneratorActor), ActorProxyDefaults.Options);
         return await generator.RunAsync(request);
     }
 
@@ -167,18 +188,29 @@ internal sealed class DaprPipelineReadFacade : IPipelineReadFacade
 /// starts an ingest-kind source's connector actor). Now that <see cref="SourceKindDispatch.Classify"/>
 /// is a real three-way (plan 008 W4c), this checks for <see cref="SourceKindDispatch.ActorKind.Connector"/>
 /// specifically — Generator and Ingest both correctly return null (no connector status exists for either)
-/// without ever resolving an actor proxy.</para></summary>
-internal sealed class DaprConnectorStatusFacade(ICatalogFacade catalog) : IConnectorStatusFacade
+/// without ever resolving an actor proxy.</para>
+///
+/// <para><b>Plan 021:</b> registered as a SINGLETON (<c>ConnectorRuntimeSetup.AddServices</c>) but backs a
+/// per-request read (<c>GET /api/sources/{name}/status</c>) — exactly the singleton-captures-a-transient
+/// hazard <c>ICatalogFacadeFactory</c>'s own class doc warns about, so this takes the FACTORY, not
+/// <see cref="ICatalogFacade"/> directly, and reads <see cref="EnvironmentAmbient.Current"/> fresh on every
+/// call (the one thing this class is allowed to do — it serves a REST request, see the wave brief's facade
+/// rule). The environment that matters is the SOURCE's own, once found (<c>def.Environment</c>), not
+/// necessarily the ambient — but the ambient is what selects WHICH environment's catalog to look the source
+/// up in in the first place, so both are needed: ambient to find <paramref name="sourceName"/>, then the
+/// resolved definition's own <c>Environment</c> to address its <see cref="ConnectorActor"/>.</para></summary>
+internal sealed class DaprConnectorStatusFacade(ICatalogFacadeFactory catalogFactory) : IConnectorStatusFacade
 {
     public async Task<ConnectorRuntimeStatus?> GetStatusAsync(string sourceName)
     {
+        var catalog = catalogFactory.For(EnvironmentAmbient.Current);
         var def = await catalog.GetSourceAsync(sourceName);
         if (def is null || SourceKindDispatch.Classify(def.Kind) != SourceKindDispatch.ActorKind.Connector)
         {
             return null;
         }
 
-        var actor = ActorProxy.Create<IConnectorActor>(new ActorId(sourceName), nameof(ConnectorActor), ActorProxyDefaults.Options);
+        var actor = ActorProxy.Create<IConnectorActor>(new ActorId(EnvKeys.Qualify(def.Environment, sourceName)), nameof(ConnectorActor), ActorProxyDefaults.Options);
         return await actor.GetStatusAsync();
     }
 }
@@ -315,4 +347,44 @@ internal sealed class DaprAuditFacade : IAuditFacade
 
     private static IAuditLogActor Day(string actorId) =>
         ActorProxy.Create<IAuditLogActor>(new ActorId(actorId), nameof(AuditLogActor), ActorProxyDefaults.Options);
+}
+
+/// <summary>Plan 021: <see cref="IEnvironmentFacade"/> over the "environments" singleton actor — one
+/// cached proxy, like <see cref="DaprUserStoreFacade"/>/<see cref="DaprAccessPolicyFacade"/> and for the
+/// same reason (the id never varies — <c>StreamConstants.EnvironmentsKey</c> is NEVER itself qualified,
+/// see that constant's own doc comment). <see cref="Actors.EnvironmentRegistryActor"/> returns
+/// <see cref="ActorResult{T}"/> for the two mutating members, unwrapped here into the exact exception
+/// types <see cref="IEnvironmentFacade.CreateAsync"/>/<see cref="IEnvironmentFacade.DeleteAsync"/>'s own
+/// doc comments promise — <see cref="ActorResult{T}.BadRequest"/> is what tells this adapter which one to
+/// throw (see that record's own doc comment for why the field exists at all).</summary>
+internal sealed class DaprEnvironmentFacade : IEnvironmentFacade
+{
+    private readonly IEnvironmentRegistryActor _actor = ActorProxy.Create<IEnvironmentRegistryActor>(
+        new ActorId(StreamConstants.EnvironmentsKey), nameof(EnvironmentRegistryActor), ActorProxyDefaults.Options);
+
+    public Task<List<EnvironmentRecord>> ListAsync() => _actor.ListAsync();
+
+    public Task<bool> ExistsAsync(string name) => _actor.ExistsAsync(name);
+
+    public async Task<EnvironmentRecord> CreateAsync(string name, string description, string createdBy)
+    {
+        var result = await _actor.CreateAsync(new CreateEnvironmentRequest(name, description, createdBy));
+        if (result.Ok)
+        {
+            return result.Value!;
+        }
+
+        throw result.BadRequest ? new ArgumentException(result.Error) : new InvalidOperationException(result.Error);
+    }
+
+    public async Task<bool> DeleteAsync(string name, bool force)
+    {
+        var result = await _actor.DeleteAsync(new DeleteEnvironmentRequest(name, force));
+        if (result.Ok)
+        {
+            return result.Value;
+        }
+
+        throw result.BadRequest ? new ArgumentException(result.Error) : new InvalidOperationException(result.Error);
+    }
 }
