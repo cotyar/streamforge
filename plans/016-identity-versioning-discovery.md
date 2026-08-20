@@ -171,3 +171,56 @@ wave that can regress a live catalog and must never share a wave with anything e
 cascading auto-restart on upstream schema change · case-insensitive/fuzzy name matching · namespaced or
 multi-tenant names · endpoint failover, health checking and weighted routing · push-updates to running
 connectors (a change takes effect on next reconnect, the rule schema snapshots already follow).
+
+---
+
+## What actually landed (waves 0–4)
+
+Recorded as the waves went in, because a plan document that only says what was *intended* is the
+half nobody can act on later.
+
+| Wave | Commit | What it actually did |
+|---|---|---|
+| 0 | `7c0a459` | Contract pre-build: the additive `[Id(n)]` fields, `Discovery.cs`, optional `types.ts` fields. Also uncovered and fixed a live `[Id(26)]` collision on `TableDefinition` (`8d1a4d6`) — Orleans codegen silently drops a duplicated id, so `UpdatedBy` was being written over `RetentionMaxRows`. A permanent `ContractFieldNumberTests` guard now fails the build instead. |
+| 1 | `296b6d1` | `EntityRef` + the two transport adapters; one resolver replacing four hand-rolled sites; rename policy; pipeline-name uniqueness (which first shipped as a 500 and was fixed to 409 in the same wave). |
+| 2-A | `80650d2` | `SchemaCompatibility` (reuses `FieldNumberMap`, does not extend it); `Revision`/`SchemaRevision` real in both flavours; **dependent tables' persisted `OutputFields` and field numbers refresh on an upstream schema change**, so `/proto` stops serving a schema the table no longer produces; `StaleReason` set and cleared. |
+| 2-B | `312fe82` | `dependsOn` reaches the registry over REST (it reached nothing before, so pinning was dead on the API surface); `?allowBreaking` on the source PUT; source create/update stops echoing `revision: 0`; SPA badges. |
+| 3-A | `2eafe61` | `SqlCompiler.ExtractReferences` — Engine-exclusive, additive on `PublicApi.cs`, 947 → 994 tests. |
+| 3-B | `e778d39` | Planner uses the compiler for NEW entities and persisted inputs for existing ones; missing-dependency diagnostics; `dependsOn` through export/import mapping. |
+| 3-C | `113d444` | Fatal cycles naming the full chain; the `schemaPolicy` gate; the `dependsOn` mapping the import service was missing; and `ConfigComposer.MergeDocs` carrying document-level scalars at all. |
+| — | `7b83410` | Follow-up: the FROM-regex fallback deleted and the unparseable `"TABLE AS SELECT …"` fixtures fixed. A declared behaviour change — those expectations were not testing the behaviour they claimed to. |
+
+## Found and deliberately not fixed
+
+Each of these was seen, argued about, and left. They are written down so the next person inherits the
+argument rather than rediscovering the symptom.
+
+- **`PUT`/`DELETE`/`start`/`stop` resolve by exact id, not id-or-name.** A name-based `PUT` 404s where a
+  name-based `GET` works. Wave 1 scoped id-or-name to READ routes on purpose; extending it to writes
+  means deciding what an ambiguous name does on a mutation, which deserves its own decision.
+- **A refused import returns HTTP 200 with `ok:false`.** Consistent with this file's per-entity
+  convention, inconsistent with the document-error path, which serves the very same report shape via
+  `BadRequest`. So `curl -f` reads a refused import as applied. Changing it is an API-convention
+  decision, not a bug fix; the CLI already honours `ok`.
+- **`ConfigTable`/`ConfigPipeline` do not carry `Persistence`/`FlushMs`/`JournalMaxEntries`**, so an edit
+  to only those does not move `Revision`. Follows directly from reusing the config-canonical predicate;
+  widening the projection is an export-contract change.
+- **`RefreshTableSchemas` sweeps every table, not the changed closure.** Cheap at catalog scale and only
+  runs when a schema actually moved, but it is a write to entities the caller did not name.
+- **A `Json` parent that loses its children leaks field numbers.** `FieldNumberMap.Assign` never walks a
+  vanished scope, so it reserves nothing for the child paths and re-adding the parent can reuse a retired
+  number. Pre-existing, and the compatibility gate is strict about it even though the wire is not.
+- **The missing-dependency diagnostic is masked for freshly-broken entities** — `ErrorEntry` replaces
+  diagnostics with compile output, so the diagnostic's real value is quietly-stale entities, not
+  obviously-broken ones.
+- **The missing-dependency check is kind-blind**: a pipeline naming a table is not flagged even though it
+  can never resolve. A false negative, mirroring the regex it replaced.
+- **Exports carry `revision`/`schemaRevision` on sources** — harmless (comparison strips them) but visible
+  to a document reader.
+
+## Environment note, corrected
+
+An agent reported that the documented `--Http:Port` isolated-instance recipe "reliably crashes Kestrel
+after the first connection" on this machine and switched to `--urls`. **Not reproducible** — 12/12
+sequential requests succeeded against an instance started exactly the documented way, and every other
+live check in this plan used it without incident. The documented recipe stands.
