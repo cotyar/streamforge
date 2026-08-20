@@ -25,10 +25,23 @@ namespace StreamForge.Api;
 /// GET /healthz endpoint (plan 007 W0) so the admin app, compose healthchecks, and Cloud Run
 /// startup probes can tell instances apart. Optional (additive evolution) — defaults keep
 /// pre-007 construction sites compiling unchanged.</param>
+/// <param name="DataDir">Plan 016 wave 5: where this instance persists its identity
+/// (<c>{DataDir}/instance.json</c>, see <c>InstanceIdentity</c>). Host-specific because the two flavors
+/// disagree about what durable local state even means — Orleans keeps its grain storage here, the Dapr
+/// flavor keeps its state in Redis and uses this directory for nothing else. Empty = the working
+/// directory, which keeps every pre-016 construction site compiling and still yields a stable id.</param>
+/// <param name="InstanceName">Operator-chosen display name reported by <c>GET /api/meta/instance</c> and
+/// the name a peer is addressed by. NOT unique by construction — the instance id is the identity. Empty
+/// = the machine name, so an unconfigured instance still says something a human recognises.</param>
+/// <param name="Version">Build version reported by <c>GET /api/meta/instance</c>. Empty = the API
+/// assembly's informational version, which is what a host that stamps no version of its own has.</param>
 public sealed record StreamForgeApiOptions(
     string ProtosDir,
     int GrpcPort,
     IReadOnlyList<string> GrpcStaticServices,
     string? DocsFilePath,
     string? SpaDistPath,
-    string Flavor = "unknown");
+    string Flavor = "unknown",
+    string DataDir = "",
+    string InstanceName = "",
+    string Version = "");

@@ -109,6 +109,9 @@ export interface GrpcSubConfig {
   schemaSource: string
   protoText?: string | null
   restAddress?: string | null
+  /** Name of a configured peer to take `address`/`restAddress` from. When set it WINS over both —
+   *  a source naming a peer must never silently fall back to a stale literal address. */
+  peer?: string | null
 }
 
 /** JSONPath-lite subset for paths: $ .name ['name'] [n] [*] — nothing else. */

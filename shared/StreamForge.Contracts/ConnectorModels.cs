@@ -724,6 +724,19 @@ public sealed class GrpcSubConfig
     /// <summary>Remote REST base for login when it differs from the gRPC address,
     /// e.g. "http://localhost:5199".</summary>
     [Id(7)] public string? RestAddress { get; set; }
+
+    /// <summary>Plan 016 wave 5: the name of a configured peer to take <see cref="Address"/> and
+    /// <see cref="RestAddress"/> from, instead of hardcoding either. Resolved at each (re)connect —
+    /// the cadence this subscriber already uses for its schema snapshot and login — so a peer whose
+    /// address moved is fixed by reconfiguring the host, with no catalog edit and no restart of the
+    /// source. Null/empty = the pre-016 behaviour, byte for byte: the two addresses are used as
+    /// authored.
+    ///
+    /// <para>When set, it WINS over both address fields rather than filling them in when blank: a
+    /// source that names a peer and also carries a stale literal address must not silently connect to
+    /// the stale one. An unresolvable peer takes the existing status-error path at the existing
+    /// backoff.</para></summary>
+    [Id(8)] public string? Peer { get; set; }
 }
 
 /// <summary>Response-structure mapping (the "mapping document" deserializes into this; JSON or
