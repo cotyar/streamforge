@@ -261,6 +261,19 @@ internal sealed class OrleansCrdtFacade(IClusterClient client) : ICrdtFacade
     public CrdtUpdateInspection Inspect(SourceDefinition source, byte[] update) =>
         CrdtUpdateInspector.Inspect(update, source.Connector?.Crdt ?? new CrdtSourceConfig());
 
+    /// <summary>Plan 020 wave F — same "resolve, check kind, forward" shape as <see cref="MergeAsync"/>,
+    /// forwarding to <see cref="ICrdtDocGrain.RebalanceAsync"/> instead.</summary>
+    public async Task<EscrowRebalanceResult?> RebalanceAsync(string sourceName, string from, string to, long amount)
+    {
+        var def = await ResolveCrdtSourceAsync(sourceName);
+        if (def is null)
+        {
+            return null;
+        }
+
+        return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).RebalanceAsync(from, to, amount);
+    }
+
     private async Task<SourceDefinition?> ResolveCrdtSourceAsync(string sourceName)
     {
         // Plan 021 D4 — a facade answering one request reads the ambient.

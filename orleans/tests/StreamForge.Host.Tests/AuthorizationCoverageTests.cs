@@ -163,6 +163,10 @@ public class AuthorizationCoverageTests
         // cannot change the document, but it PUBLISHES the whole projection onto the source's stream,
         // which is a write to every table and sink downstream.
         new("POST", "/api/sources/{name}/crdt/replay", Guards.Editor),
+        // Plan 020 wave F: the escrow rebalance route. Editor, not Viewer — same "writes to the document
+        // (or, here, to its escrow counter) even though it can never touch entity content" reasoning as
+        // /crdt/replay above.
+        new("POST", "/api/sources/{name}/crdt/escrow/rebalance", Guards.Editor),
 
         // The one REST route that is anonymous ON PURPOSE at the metadata layer. Plan 009 A1.2: a
         // telemetry producer holds an ingest key, not a JWT, so route-level authorization cannot express

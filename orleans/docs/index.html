@@ -249,6 +249,7 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#crdt-offline" class="sub">Offline convergence</a>
   <a href="#crdt-authz" class="sub">Per-entity authorization</a>
   <a href="#crdt-reconcile" class="sub">Reconciliation pattern</a>
+  <a href="#crdt-escrow" class="sub">Escrow: bounded counters</a>
   <a href="#discovery">Instance discovery &amp; federation</a>
   <a href="#discovery-instance" class="sub">Instance identity</a>
   <a href="#discovery-peers" class="sub">Peer directory</a>
@@ -912,7 +913,66 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 <p><code>_source</code> reads <code>inventory_exceptions</code>, which is the chain saying so in the row itself. From here compensation leaves the platform the ordinary way — a <a href="#tables">sink</a> on the compensation table — because issuing the replenishment is somebody else&#39;s system&#39;s job, not this one&#39;s.</p>
 <div class="callout warn"><b>Chain with a table, not a pipeline.</b> A StreamForge <i>pipeline</i> is a continuous query <b>over sources</b> — the Engine resolves a pipeline&#39;s <code>FROM</code> against sources only, and only a <i>table</i> carries <code>tableInputs</code> and may <code>FROM</code>/<code>JOIN</code> another table (see <a href="#tables">Materialized tables</a>). Pointing a compensation <i>pipeline</i> at the exceptions table by name fails live with <code>Unknown source &#39;inventory_exceptions&#39;</code>. If you want the compensation to be a pipeline anyway — to feed a pipeline-only consumer — it has to re-state the detection predicate over the document, and you then own keeping two copies of that predicate in step. The chained table above does not have that problem, which is why it is the default shown here.</div>
 <p><b>What this pattern does not give you.</b> It is <b>eventual</b> — there is a real window, between the merge and whatever SQL cycle notices it, during which the invalid state is live and queryable by anyone reading the projection. It is <b>after-the-fact</b> — detection and compensation both run once the bad state already exists; nothing in this pattern, or in the CRDT layer beneath it, can refuse the merge that produced it. And compensating a state does not erase that it existed — the exceptions table is a permanent record, by design, not a queue that drains to empty.</p>
-<p>The one case that <i>can</i> be prevented rather than merely compensated is a one-sided numeric bound — "this counter never goes negative," not general domain invariants. That's <b>bounded counters on a plain <code>YMap</code></b> (Balegas et al., 2015): pre-allocate an allowance across named replicas so each can only ever spend what it locally holds, at the cost of the rebalance itself being an online, pairwise operation (a node that has spent its share stops until it reconnects) and a key count of O(replicas²) — a mechanism for named sites, not thousands of browser tabs. It's a distinct, narrower answer to a distinct, narrower problem, described in the plan's own Escrow section — not yet built in this repository (a later wave), and worth knowing about precisely because it's easy to reach for it where this section's pattern is what's actually called for, or vice versa.</p>
+<p>The one case that <i>can</i> be prevented rather than merely compensated is a one-sided numeric bound — "this counter never goes negative," not general domain invariants. That's <a href="#crdt-escrow">bounded counters on a plain <code>YMap</code></a> (Balegas et al., 2015): pre-allocate an allowance across named replicas so each can only ever spend what it locally holds, at the cost of the rebalance itself being an online, pairwise operation (a node that has spent its share stops until it reconnects) and a key count of O(replicas²) — a mechanism for named sites, not thousands of browser tabs. It's a distinct, narrower answer to a distinct, narrower problem, and worth knowing about precisely because it's easy to reach for it where this section's pattern is what's actually called for, or vice versa.</p>
+
+<h3 id="crdt-escrow">Escrow: bounded counters</h3>
+<p>A bounded counter (Balegas et al., 2015) recovers exactly one property without synchronous coordination: replica <code>i</code> may only ever spend what it locally holds, so the <b>sum across every replica can never breach the bound</b> <code>K</code>, even when every replica spends at once, entirely in ignorance of the others. State is two monotone maps — <code>T[i][j]</code>, the allowance transferred from <code>i</code> to <code>j</code>, and <code>D[i]</code>, what <code>i</code> has spent — with local allowance <code>initial<sub>i</sub> + &Sigma;<sub>j</sub> T[j][i] &minus; &Sigma;<sub>j</sub> T[i][j] &minus; D[i]</code>.</p>
+<p><b>No new Ycs type.</b> Every key here has exactly one writer — replica <code>i</code> for its own <code>d:i</code>, and, for <code>t:i:j</code>, whoever owns <code>i</code>'s allowance (see <a href="#crdt-escrow">Rebalancing</a> below) — so a plain <code>YMap</code>'s last-writer-wins is never actually exercised: two replicas spending concurrently write to two <i>different</i> keys (<code>d:a</code>, <code>d:b</code>), and Yjs merges a map with two new keys by keeping both, never picking one. The counter lives as ordinary <code>YMap</code> keys — <code>d:&lt;replica&gt;</code> and <code>t:&lt;from&gt;:&lt;to&gt;</code> — inside a map named by <code>connector.crdt.escrow.counterMap</code> (default <code>"escrow"</code>), a <b>sibling</b> of <code>rootMap</code>: it is bookkeeping, not an entity, and never enumerates as a projected row.</p>
+<pre><code>{
+  "connector": {
+    "crdt": {
+      "rootMap": "root",
+      "keyField": "sku",
+      "escrow": {
+        "counterMap": "escrow",
+        "reserveReplica": "reserve",
+        "initialAllowance": { "reserve": 30, "dock-a": 40, "dock-b": 40, "dock-c": 40 }
+      }
+    }
+  }
+}</code></pre>
+<p><code>initialAllowance</code> is the <b>whole allocation policy</b> — which replicas exist and what each starts with — and it is configured, never inferred: a replica name absent from it is not a silent zero, every operation naming an undeclared replica is refused. The bound <code>K</code> is not a separate field: it is exactly what <code>initialAllowance</code> sums to, because a transfer only ever moves allowance between replicas (see below), it never creates or destroys it.</p>
+
+<h4>Spending — offline, like any other edit</h4>
+<p>A spend is <b>not</b> a new route. It is an ordinary content edit — increment <code>d:&lt;replica&gt;</code> on the edge's own local document — shipped to the platform as Yjs update bytes through the existing <code>POST /api/sources/{name}/crdt/updates</code>, exactly like any other change. The edge decides <i>locally</i>, from whatever allowance its own (possibly stale) copy of the document currently shows, whether a spend is allowed at all — refusing it itself, before ever producing bytes to send, when it is not. Staleness only ever makes this <i>more</i> conservative: a transfer the edge hasn't yet seen simply isn't available to it yet, never the reverse. This is the whole mechanism that keeps the global sum bounded with <b>zero</b> synchronous coordination between replicas.</p>
+<div class="callout warn"><b>A node that has spent its share stops until it reconnects.</b> That is the correct failure mode — refuse rather than oversell — and it is visible, not silent: <code>GET /api/sources/{name}/crdt</code>'s response carries an <code>escrow</code> object with one entry per declared replica, each showing <code>localAllowance</code> and an explicit <code>exhausted</code> boolean (true exactly when <code>localAllowance &le; 0</code>). An operator reads this the same place they already read <code>entityCount</code>/<code>updatesMerged</code> — nothing new to learn.</div>
+<pre><code>{
+  "entityCount": 3,
+  "updatesMerged": 9,
+  "rowsEmitted": 6,
+  "escrow": {
+    "bound": 150,
+    "totalSpent": 100,
+    "replicas": [
+      { "replica": "dock-a", "initialAllowance": 50, "spent": 50, "localAllowance": 0,  "exhausted": true  },
+      { "replica": "dock-b", "initialAllowance": 50, "spent": 30, "localAllowance": 20, "exhausted": false },
+      { "replica": "dock-c", "initialAllowance": 50, "spent": 20, "localAllowance": 30, "exhausted": false }
+    ]
+  }
+}</code></pre>
+
+<h4>Rebalancing — the online half</h4>
+<p>Moving allowance between two named replicas is <b>pairwise coordination and cannot happen offline</b> the way a spend can: deciding it honestly needs the <i>current</i> merged state of both replicas, which an edge working from its own last-synced copy cannot answer for a peer it hasn't seen. So it is the one operation in this feature with a route of its own:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Route</th><th>Guard</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>POST /api/sources/{name}/crdt/escrow/rebalance</code></td><td>Editor</td><td>Body <code>{ "from": "reserve", "to": "dock-b", "amount": 10 }</code> → <code>{ ok, reason, fromAllowance, toAllowance }</code>. <code>from</code> must be the declared <code>reserveReplica</code> — see the callout below.</td></tr>
+</tbody></table></div>
+<p>Same <b>501 → guard → 404 → 409</b> ordering as the other two CRDT routes. Past that, a refusal — no escrow counter configured on this source, an undeclared replica name, a non-positive amount, or (the ordinary case) <code>from</code> not currently holding enough to give away what was asked — is a <b>200</b> with <code>ok: false</code> and a <code>reason</code>, the same "business refusal, not a protocol error" distinction <code>/crdt/updates</code>' own per-update diagnostics already draw. A refusal writes nothing to the document.</p>
+<div class="callout warn"><b>A coordinator may only give from the reserve, and that restriction is the safety property.</b> Moving allowance <i>out of</i> a replica is sound only when that replica has already deducted it from its own view. A coordinating document cannot know what a disconnected replica has spent, so an unrestricted coordinator transfer breaches the bound this whole feature exists to hold — with every caller behaving correctly and using only these routes: <code>a</code> holds 10, goes offline and spends all 10 locally; the coordinator still sees 10 and transfers 6 to <code>b</code>; <code>b</code> spends its 6; everything converges at <b>16 spent against a bound of 10</b>. That sequence was reproduced live during this feature's development and is now pinned as a refusal.
+<br><br>Hence <code>reserveReplica</code>: a declared replica that exists only to hold unallocated allowance and <b>may never spend</b> (a spend naming it is refused). No spends means no unsynced spends, so the coordinating document's view of it is never stale. A counter that declares no reserve simply has no usable rebalance route — refused with a reason, rather than offered unsafely.</div>
+<p><b>Moving allowance between two spending replicas is the giver's own operation, not the coordinator's.</b> The giving replica performs the transfer on its <i>own</i> document and ships the result through <code>POST /api/sources/{name}/crdt/updates</code> like any other edit. That is sound for the same reason a spend is: the giver deducts before anyone else can use the allowance, so it can never later spend what it gave away. This is exactly what plan 020's escrow section means by "only replica <code>i</code> writes <code>T[i][*]</code>".</p>
+<p>Rebalancing does not create or destroy allowance: within one converged document the bound <code>K</code> is unchanged by any transfer amount, because what is subtracted from <code>from</code>'s formula is exactly what is added to <code>to</code>'s. <b>That algebra is not on its own a safety argument</b> — it holds for the converged state, while a replica spends against its <i>own</i> view, which is precisely the gap the reserve rule above closes. The refusal above exists anyway, because an unchecked transfer <i>would</i> still let <code>from</code>'s own local allowance go negative — a permanent local wrong answer (every future spend for that replica refuses, even once nothing more is asked of it) with no offsetting benefit. Refused for the same "refuse rather than oversell" reason a spend past allowance is.</p>
+
+<h4>The four limits</h4>
+<div class="tablewrap"><table>
+<thead><tr><th>Limit</th><th>What it means here</th></tr></thead>
+<tbody>
+<tr><td>One-sided numeric bounds only</td><td>"Total across these three fields stays consistent" is a <i>different</i> mechanism — <a href="#crdt-reconcile">reconciliation</a>, above. This answers exactly one question: can replica <i>i</i> spend <i>N</i> more without the global sum ever breaching <code>K</code>.</td></tr>
+<tr><td>Rebalancing is an online operation</td><td>No offline rebalance exists, and none is planned. The coordinator route gives only from the reserve; a spending replica moves its own allowance from its own document, online or not.</td></tr>
+<tr><td>Key count is O(replicas&sup2;)</td><td>One <code>t:</code> key per ordered pair that has ever transferred. A mechanism for a handful of named sites — a warehouse, a shop floor, a vessel — not thousands of browser tabs.</td></tr>
+<tr><td>The allocation policy is configured, never inferred</td><td><code>initialAllowance</code> is the entire policy. An undeclared replica name is refused everywhere it could appear — spend, transfer, or a direct status read — never silently treated as zero.</td></tr>
+</tbody></table></div>
 </section>
 
 <section id="discovery">

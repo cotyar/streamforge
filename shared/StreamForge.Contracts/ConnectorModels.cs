@@ -234,6 +234,83 @@ public sealed class CrdtSourceConfig
     /// <c>CrdtAttributionTests</c> for the empirical check that pins this exact gap rather than assuming
     /// it.</para></summary>
     [Id(3)] public bool AttributeChanges { get; set; }
+
+    /// <summary>Plan 020 wave F. <c>null</c> (the default) means this document carries no bounded
+    /// counter at all — every escrow route/field on this document answers accordingly ("no escrow
+    /// counter configured"), and an existing document's behaviour is completely unaffected by this
+    /// wave landing. See <see cref="CrdtEscrowConfig"/> for the shape and the four limits it exists to
+    /// keep visible rather than let an operator discover the hard way.</summary>
+    [Id(4)] public CrdtEscrowConfig? Escrow { get; set; }
+}
+
+/// <summary>
+/// Plan 020 wave F — a bounded counter (Balegas et al., 2015) over a set of NAMED replicas (a
+/// warehouse, a shop floor, a vessel — see the class's own limit below on what this is NOT for),
+/// living inside the SAME document as an ordinary <c>YMap</c>. No new Ycs type: the plan's own
+/// observation is that under single-writer-per-key discipline (only replica <c>i</c> ever writes
+/// <c>d:i</c> or <c>t:i:*</c>) a <c>YMap</c>'s last-writer-wins is never actually exercised, so the
+/// counter needs nothing beyond keys on a map real Yjs can already read — see
+/// <c>EscrowCounter</c> (<c>StreamForge.Connectors.Crdt</c>) for the key scheme (<c>d:&lt;replica&gt;</c>,
+/// <c>t:&lt;from&gt;:&lt;to&gt;</c>) and the local-allowance formula this class's own doc references.
+///
+/// <para><b>The four limits, restated here because they are what an operator reads before turning this
+/// on, not a footnote:</b></para>
+/// <list type="number">
+///   <item><b>One-sided numeric bounds only.</b> "Total across these three fields stays consistent" is
+///   a DIFFERENT mechanism — plan 020 wave E's reconciliation (<c>orleans/docs/index.html#crdt-reconcile</c>),
+///   already shipped. This class answers exactly one question: can replica <paramref name="Replica"/> —
+///   see <see cref="EscrowCounter"/> — spend <c>N</c> more without the GLOBAL sum ever breaching
+///   <see cref="InitialAllowance"/>'s total.</item>
+///   <item><b>Rebalancing is pairwise coordination — an ONLINE operation.</b> A replica that has spent
+///   its whole share stops (every further spend is refused, visibly — see <c>EscrowSpendResult</c>)
+///   until allowance is moved to it, which can only happen through <c>ICrdtFacade.RebalanceAsync</c> /
+///   <c>POST /api/sources/{name}/crdt/escrow/rebalance</c> while the document is reachable. There is no
+///   offline rebalance: unlike an ordinary content edit, a transfer needs the CURRENT merged state of
+///   both replicas (how much <c>from</c> actually holds right now) to decide honestly, which an edge
+///   working from its own last-synced copy cannot answer for a peer it has not seen.</item>
+///   <item><b>Key count is O(replicas²)</b> (one <c>t:</c> key per ordered pair that has ever
+///   transferred). This is a mechanism for a HANDFUL of named sites, not thousands of browser tabs —
+///   <see cref="InitialAllowance"/> is a small, operator-typed dictionary, not something generated per
+///   session.</item>
+///   <item><b>The allocation policy is domain knowledge and is configured, never inferred.</b>
+///   <see cref="InitialAllowance"/> is the whole policy: which replicas exist and what each starts
+///   with. A replica name absent from it is not a silent zero — every operation naming an undeclared
+///   replica is refused, the same "loud and refused beats plausible and wrong" standard
+///   <c>CrdtProjector</c> already holds itself to for an unrecognized Y-type.</item>
+/// </list>
+/// </summary>
+[GenerateSerializer]
+public sealed class CrdtEscrowConfig
+{
+    /// <summary>Name of the top-level <c>YMap</c> holding this counter's <c>d:</c>/<c>t:</c> entries.
+    /// Deliberately a SIBLING of <see cref="CrdtSourceConfig.RootMap"/>, never nested inside it: the
+    /// counter's bookkeeping keys are not an entity and must never enumerate as a projected row (see
+    /// <c>CrdtProjector.Flatten</c>, which only ever reads <see cref="CrdtSourceConfig.RootMap"/>).</summary>
+    [Id(0)] public string CounterMap { get; set; } = "escrow";
+
+    /// <summary>Replica name -&gt; the allowance it holds before any transfer. The bound <c>K</c> is the
+    /// SUM of these values — not a separate field, because a transfer only ever moves allowance between
+    /// replicas (see <c>EscrowCounter.Transfer</c>'s own doc comment for why the sum is transfer-invariant),
+    /// it never creates or destroys it, so <c>K</c> is exactly what this dictionary adds up to on day
+    /// one and stays that way for the life of the counter. Configured, never inferred (limit 4 above):
+    /// an operator names every site this counter will ever cover before the first spend, and the
+    /// bound this whole feature exists to protect is nothing more than what they wrote down.</summary>
+    [Id(1)] public Dictionary<string, long> InitialAllowance { get; set; } = new();
+
+    /// <summary>Plan 020 wave F — the name of a declared replica that exists ONLY to hold unallocated
+    /// allowance and <b>never spends</b>. Empty (the default) means there is none, and the coordinator
+    /// rebalance RPC is then unusable: see <c>EscrowCounter.TryCoordinatorTransfer</c> for why that is a
+    /// safety rule and not an inconvenience.
+    ///
+    /// <para><b>The reason this field exists at all.</b> Moving allowance OUT of a replica is only sound
+    /// if that replica has already deducted it from its own view — otherwise it can still spend what it
+    /// no longer has, and the merged result breaches the bound. A replica that never spends cannot have
+    /// an unsynced spend, so the coordinating document's view of the reserve is never stale, and a
+    /// transfer out of it is safe for the coordinator to write. Transfers between two SPENDING replicas
+    /// are not the coordinator's to make; the giver performs them on its own document (
+    /// <c>EscrowCounter.TryTransfer</c>) and ships the result as an ordinary update, which deducts first
+    /// and can therefore never oversell.</para></summary>
+    [Id(2)] public string ReserveReplica { get; set; } = "";
 }
 
 /// <summary>Plan 009 B1: NATS subject subscription. Credentials follow the secrets-lite convention

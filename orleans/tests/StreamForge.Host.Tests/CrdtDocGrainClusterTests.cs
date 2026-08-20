@@ -473,6 +473,185 @@ public sealed class CrdtDocGrainClusterTests : IAsyncLifetime
         }
     }
 
+    // ------------------------------------------------------------------
+    // 7 — Plan 020 wave F: escrow rebalance, against a real grain. The concurrent-overspend proof
+    // itself (several YDocs that never see each other, spending past their own allowance in mutual
+    // ignorance, merged only afterward) is EscrowCounterTests' job in Connectors.Crdt.Tests — that is
+    // where "no synchronous coordination" is actually exercised, since a single grain here is one
+    // coordinator by construction. What THIS file proves is the WIRING: RebalanceAsync reaches
+    // EscrowCounter.TryTransfer correctly, GetStatusAsync's Escrow field reflects it (limit 2's
+    // "visible, not silent"), a refusal writes nothing, and the transfer survives a real restart —
+    // exactly the same restart proof test 5 above already gives the plain merge path.
+    // ------------------------------------------------------------------
+
+    private static SourceDefinition MakeEscrowCrdtSource(string name) => new()
+    {
+        Name = name,
+        Kind = SourceKinds.Crdt,
+        Enabled = true,
+        Fields = [new FieldDef("id", FieldType.String), new FieldDef("name", FieldType.String)],
+        Connector = new ConnectorConfig
+        {
+            Crdt = new CrdtSourceConfig
+            {
+                RootMap = "root",
+                KeyField = "id",
+                Escrow = new CrdtEscrowConfig
+                {
+                    CounterMap = "escrow",
+                    // DECLARED BEHAVIOUR CHANGE, made during review of this same (unlanded) wave: the
+                    // rebalance RPC originally moved allowance between two SPENDING replicas, and that was
+                    // shown live to breach the bound — 16 spent against a bound of 10, with every caller
+                    // behaving correctly (EscrowCounterTests' own
+                    // ACoordinatorMayNotTransferOutOfASpendingReplica_TheSequenceThatBreachedTheBound
+                    // pins the sequence). A coordinator may only give from the non-spending reserve, so
+                    // these tests declare one; replica-to-replica transfers are the giver's own to make.
+                    ReserveReplica = "reserve",
+                    InitialAllowance = new Dictionary<string, long>
+                    {
+                        ["reserve"] = 3, ["site-a"] = 3, ["site-b"] = 3,
+                    },
+                },
+            },
+        },
+    };
+
+    [Fact]
+    public async Task RebalanceMovesAllowanceAndStatusReflectsItIncludingTheExhaustedFlag()
+    {
+        var name = "crdt_escrow_reb_" + Guid.NewGuid().ToString("n")[..8];
+        var grain = _cluster.GrainFactory.GetGrain<ICrdtDocGrain>(name);
+        try
+        {
+            await grain.StartAsync(MakeEscrowCrdtSource(name));
+
+            // site-a spends its whole share via an ordinary content edit carrying no escrow keys at
+            // all — this file's OTHER tests already prove content merges; the point here is only that
+            // site-a is now exhausted (0 of 3 remaining).
+            var edge = new YDoc();
+            var counter = edge.GetMap("escrow");
+            counter.Set("d:site-a", 3L);
+            await grain.MergeAsync([edge.EncodeStateAsUpdateV1()]);
+
+            var beforeStatus = await grain.GetStatusAsync();
+            Assert.NotNull(beforeStatus.Escrow);
+            var siteA = beforeStatus.Escrow!.Replicas.Single(r => r.Replica == "site-a");
+            Assert.Equal(0, siteA.LocalAllowance);
+            Assert.True(siteA.Exhausted);
+
+            // Rebalance: the reserve (which never spends, and is therefore the only replica a
+            // coordinator may safely give from) transfers 2 to the exhausted site-a.
+            var rebalance = await grain.RebalanceAsync("reserve", "site-a", 2);
+            Assert.True(rebalance.Ok);
+            Assert.Equal(1, rebalance.FromAllowance); // reserve: 3 - 2
+            Assert.Equal(2, rebalance.ToAllowance);   // site-a: 0 + 2
+
+            var afterStatus = await grain.GetStatusAsync();
+            var siteAAfter = afterStatus.Escrow!.Replicas.Single(r => r.Replica == "site-a");
+            Assert.Equal(2, siteAAfter.LocalAllowance);
+            Assert.False(siteAAfter.Exhausted); // reconnecting/rebalancing is what un-sticks it
+
+            // The global bound is untouched by the transfer — it only ever moves allowance around.
+            Assert.Equal(9, afterStatus.Escrow.Bound); // reserve 3 + site-a 3 + site-b 3
+            Assert.Equal(3, afterStatus.Escrow.TotalSpent); // only site-a's original spend
+        }
+        finally
+        {
+            await grain.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task RebalanceRefusesToTransferMoreThanTheSenderCurrentlyHoldsAndWritesNothing()
+    {
+        var name = "crdt_escrow_over_" + Guid.NewGuid().ToString("n")[..8];
+        var grain = _cluster.GrainFactory.GetGrain<ICrdtDocGrain>(name);
+        try
+        {
+            await grain.StartAsync(MakeEscrowCrdtSource(name));
+
+            var before = await grain.GetStatusAsync();
+
+            var rebalance = await grain.RebalanceAsync("reserve", "site-b", 999); // only 3 in the reserve
+            Assert.False(rebalance.Ok);
+            Assert.Contains("holds only 3", rebalance.Reason);
+
+            var after = await grain.GetStatusAsync();
+            // Nothing moved — same allowances before and after the refused call.
+            Assert.Equal(
+                before.Escrow!.Replicas.Select(r => r.LocalAllowance).ToArray(),
+                after.Escrow!.Replicas.Select(r => r.LocalAllowance).ToArray());
+        }
+        finally
+        {
+            await grain.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task RebalanceOnASourceWithNoEscrowConfiguredIsRefusedNotSilent()
+    {
+        var name = "crdt_escrow_none_" + Guid.NewGuid().ToString("n")[..8];
+        var grain = _cluster.GrainFactory.GetGrain<ICrdtDocGrain>(name);
+        try
+        {
+            await grain.StartAsync(MakeCrdtSource(name)); // no Escrow set
+
+            var result = await grain.RebalanceAsync("a", "b", 1);
+            Assert.False(result.Ok);
+            Assert.Contains("no escrow counter configured", result.Reason);
+
+            var status = await grain.GetStatusAsync();
+            Assert.Null(status.Escrow); // ordinary documents are unaffected by this wave
+        }
+        finally
+        {
+            await grain.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task RebalanceOnAStoppedDocumentIsRefusedNotAnEmptyIndistinguishableFromSuccess()
+    {
+        var name = "crdt_escrow_stopped_" + Guid.NewGuid().ToString("n")[..8];
+        var grain = _cluster.GrainFactory.GetGrain<ICrdtDocGrain>(name);
+
+        await grain.StartAsync(MakeEscrowCrdtSource(name));
+        await grain.StopAsync();
+
+        var result = await grain.RebalanceAsync("site-a", "site-b", 1);
+        Assert.False(result.Ok);
+        Assert.Contains("not running", result.Reason);
+    }
+
+    [Fact]
+    public async Task ARebalanceSurvivesARealRestartLikeAnyOtherAcceptedUpdate()
+    {
+        var name = "crdt_escrow_resume_" + Guid.NewGuid().ToString("n")[..8];
+        var grain = _cluster.GrainFactory.GetGrain<ICrdtDocGrain>(name);
+        try
+        {
+            await grain.StartAsync(MakeEscrowCrdtSource(name));
+
+            var rebalance = await grain.RebalanceAsync("reserve", "site-a", 2);
+            Assert.True(rebalance.Ok);
+
+            // Deactivate for real — the same mechanism test 5 above uses to prove OnActivateAsync's
+            // resume path, not just a warm in-memory field surviving.
+            await _cluster.Client.GetGrain<IManagementGrain>(0).ForceActivationCollection(TimeSpan.Zero);
+
+            var status = await grain.GetStatusAsync();
+            var siteA = status.Escrow!.Replicas.Single(r => r.Replica == "site-a");
+            var reserve = status.Escrow.Replicas.Single(r => r.Replica == "reserve");
+            Assert.Equal(5, siteA.LocalAllowance);  // 3 initial + 2 received
+            Assert.Equal(1, reserve.LocalAllowance); // 3 initial - 2 given away
+        }
+        finally
+        {
+            await grain.StopAsync();
+        }
+    }
+
     private static List<EventRecord> Snapshot(List<EventRecord> list)
     {
         lock (list) return [.. list];

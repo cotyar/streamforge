@@ -111,6 +111,21 @@ public sealed class CrdtEndpointsTests : IAsyncDisposable
         // links the connector has no such constraint.
         public CrdtUpdateInspection Inspect(SourceDefinition source, byte[] update) =>
             CrdtUpdateInspector.Inspect(update, source.Connector?.Crdt ?? new CrdtSourceConfig());
+
+        // Plan 020 wave F — the rebalance route's fake. Records the args it was called with so a test can
+        // assert on what reached the facade without a real grain (this file is about the ROUTE, per its
+        // own class doc); RebalanceRefuses toggles a canned refusal so the route's "business refusal is a
+        // 200 with Ok:false" behavior is testable without a real EscrowCounter.
+        public (string From, string To, long Amount)? LastRebalanceArgs { get; private set; }
+        public bool RebalanceRefuses { get; set; }
+
+        public Task<EscrowRebalanceResult?> RebalanceAsync(string sourceName, string from, string to, long amount)
+        {
+            LastRebalanceArgs = (from, to, amount);
+            return Task.FromResult<EscrowRebalanceResult?>(RebalanceRefuses
+                ? new EscrowRebalanceResult { Ok = false, Reason = "canned refusal", FromAllowance = 1, ToAllowance = 2 }
+                : new EscrowRebalanceResult { Ok = true, FromAllowance = 3, ToAllowance = 4 });
+        }
     }
 
     private sealed class FakeUserStoreFacade : IUserStoreFacade
@@ -473,5 +488,123 @@ public sealed class CrdtEndpointsTests : IAsyncDisposable
         var result = await response.Content.ReadFromJsonAsync<CrdtMergeResult>();
         Assert.Equal(1, result!.UpdatesApplied);
         Assert.Empty(result.Diagnostics);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Plan 020 wave F — /crdt/escrow/rebalance. Same 501/404/409 shape as the other two routes
+    // (proven once here rather than duplicating every status-code test — the ordering is identical
+    // code in CrdtEndpoints.cs); what is specific to this route is the 200-with-Ok:false business
+    // refusal, the Editor floor, and the "executed" audit row for BOTH outcomes.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Rebalance_disabled_facade_answers_501()
+    {
+        _crdt.Enabled = false;
+        using var client = await StartAsync();
+
+        var response = await client.SendAsync(AuthedRequest(
+            HttpMethod.Post, "/api/sources/whatever/crdt/escrow/rebalance", "Editor",
+            new EscrowRebalanceRequest("a", "b", 1)));
+        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Rebalance_unknown_source_is_404()
+    {
+        using var client = await StartAsync();
+
+        var response = await client.SendAsync(AuthedRequest(
+            HttpMethod.Post, "/api/sources/nope/crdt/escrow/rebalance", "Editor",
+            new EscrowRebalanceRequest("a", "b", 1)));
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Rebalance_wrong_kind_source_is_409()
+    {
+        _catalog.Sources["notcrdt"] = new SourceDefinition { Name = "notcrdt", Kind = SourceKinds.Generator };
+        using var client = await StartAsync();
+
+        var response = await client.SendAsync(AuthedRequest(
+            HttpMethod.Post, "/api/sources/notcrdt/crdt/escrow/rebalance", "Editor",
+            new EscrowRebalanceRequest("a", "b", 1)));
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Rebalance_viewer_is_forbidden()
+    {
+        _catalog.Sources["doc1"] = CrdtSource("doc1");
+        using var client = await StartAsync();
+
+        var response = await client.SendAsync(AuthedRequest(
+            HttpMethod.Post, "/api/sources/doc1/crdt/escrow/rebalance", "Viewer",
+            new EscrowRebalanceRequest("a", "b", 1)));
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Rebalance_success_is_200_with_Ok_true_and_the_facade_sees_the_exact_args()
+    {
+        _catalog.Sources["doc1"] = CrdtSource("doc1");
+        using var client = await StartAsync();
+
+        var response = await client.SendAsync(AuthedRequest(
+            HttpMethod.Post, "/api/sources/doc1/crdt/escrow/rebalance", "Editor",
+            new EscrowRebalanceRequest("site-a", "site-b", 5)));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<EscrowRebalanceResult>();
+        Assert.True(result!.Ok);
+        Assert.Equal(3, result.FromAllowance);
+        Assert.Equal(4, result.ToAllowance);
+        Assert.Equal(("site-a", "site-b", 5L), _crdt.LastRebalanceArgs);
+    }
+
+    [Fact]
+    public async Task Rebalance_refusal_is_200_with_Ok_false_and_a_reason_not_an_HTTP_error()
+    {
+        _catalog.Sources["doc1"] = CrdtSource("doc1");
+        _crdt.RebalanceRefuses = true;
+        using var client = await StartAsync();
+
+        var response = await client.SendAsync(AuthedRequest(
+            HttpMethod.Post, "/api/sources/doc1/crdt/escrow/rebalance", "Editor",
+            new EscrowRebalanceRequest("site-a", "site-b", 999)));
+
+        // A business refusal (insufficient allowance, unknown replica, ...) is reported IN the body,
+        // exactly like a per-update merge diagnostic is — never an HTTP error status.
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<EscrowRebalanceResult>();
+        Assert.False(result!.Ok);
+        Assert.Equal("canned refusal", result.Reason);
+    }
+
+    [Fact]
+    public async Task Rebalance_writes_an_executed_audit_row_on_success_and_on_refusal()
+    {
+        _catalog.Sources["doc1"] = CrdtSource("doc1");
+        using var client = await StartAsync();
+
+        var ok = await client.SendAsync(AuthedRequest(
+            HttpMethod.Post, "/api/sources/doc1/crdt/escrow/rebalance", "Editor",
+            new EscrowRebalanceRequest("site-a", "site-b", 5)));
+        Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+
+        var executedOk = Assert.Single(_audit.Entries, e => e.Outcome == "executed" && e.Scope == "doc1");
+        Assert.Contains("escrow rebalance:", executedOk.Detail);
+        Assert.Contains("'site-a' -> 'site-b'", executedOk.Detail);
+
+        _audit.Entries.Clear();
+        _crdt.RebalanceRefuses = true;
+        var refused = await client.SendAsync(AuthedRequest(
+            HttpMethod.Post, "/api/sources/doc1/crdt/escrow/rebalance", "Editor",
+            new EscrowRebalanceRequest("site-a", "site-b", 999)));
+        Assert.Equal(HttpStatusCode.OK, refused.StatusCode);
+
+        var executedRefused = Assert.Single(_audit.Entries, e => e.Outcome == "executed" && e.Scope == "doc1");
+        Assert.Contains("REFUSED", executedRefused.Detail);
+        Assert.Contains("canned refusal", executedRefused.Detail);
     }
 }

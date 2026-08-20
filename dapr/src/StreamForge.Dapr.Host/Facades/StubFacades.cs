@@ -102,4 +102,8 @@ public sealed class DisabledCrdtFacade : ICrdtFacade
     // asking), so this is purely about which way a future wiring mistake falls.
     public CrdtUpdateInspection Inspect(SourceDefinition source, byte[] update) =>
         new() { Undecidable = true, UndecidableReason = "this build has no CRDT document runtime" };
+
+    // Plan 020 wave F — same "no runtime here" null as every other member above.
+    public Task<EscrowRebalanceResult?> RebalanceAsync(string sourceName, string from, string to, long amount) =>
+        Task.FromResult<EscrowRebalanceResult?>(null);
 }

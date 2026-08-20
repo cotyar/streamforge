@@ -61,4 +61,13 @@ public interface ICrdtDocGrain : IGrainWithStringKey
     /// <summary>Never null, for the same reason as <see cref="MergeAsync"/> — see
     /// <see cref="CrdtDocStatus.Error"/> for how "not currently running" is represented instead.</summary>
     Task<CrdtDocStatus> GetStatusAsync();
+
+    /// <summary>Plan 020 wave F — the online half of a bounded counter. See
+    /// <c>EscrowCounter.TryTransfer</c> (<c>StreamForge.Connectors.Crdt</c>) for the arithmetic
+    /// and refusal rule this delegates to, and <see cref="CrdtEscrowConfig"/> for the four limits. Never
+    /// null, same reasoning as <see cref="MergeAsync"/>: a source with no <see cref="CrdtSourceConfig.Escrow"/>
+    /// configured, or a document that is not running, answers with <see cref="EscrowRebalanceResult.Ok"/>
+    /// false and a reason — never a bare null this grain has no channel to distinguish from "the RPC
+    /// itself failed".</summary>
+    Task<EscrowRebalanceResult> RebalanceAsync(string from, string to, long amount);
 }

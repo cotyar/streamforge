@@ -349,6 +349,17 @@ public interface ICrdtFacade
     /// <summary>Counters for the console and for an operator asking "did my updates land". <c>null</c>
     /// under the same conditions as <see cref="MergeAsync"/>.</summary>
     Task<CrdtDocStatus?> GetStatusAsync(string sourceName);
+
+    /// <summary>Plan 020 wave F — the online half of a bounded counter (<see cref="CrdtEscrowConfig"/>'s
+    /// limit 2). Moves <paramref name="amount"/> of allowance from <paramref name="from"/> to
+    /// <paramref name="to"/> inside the named document's escrow counter, refusing rather than allowing
+    /// <paramref name="from"/>'s own local allowance to go negative. <c>null</c> under the same
+    /// conditions as <see cref="MergeAsync"/> (no such source, or not <see cref="SourceKinds.Crdt"/>
+    /// kind); a non-null <see cref="EscrowRebalanceResult"/> with <see cref="EscrowRebalanceResult.Ok"/>
+    /// false for every OTHER refusal (no escrow counter configured, an undeclared replica name, a
+    /// non-positive amount, or insufficient allowance) — a business refusal, not a protocol error, the
+    /// same distinction <see cref="MergeAsync"/>'s per-update diagnostics already draw.</summary>
+    Task<EscrowRebalanceResult?> RebalanceAsync(string sourceName, string from, string to, long amount);
 }
 
 /// <summary>Plan 020 wave D. These two live in Contracts, not in StreamForge.Connectors.Crdt where the
@@ -410,4 +421,90 @@ public sealed class CrdtDocStatus
 
     /// <summary>Set when the document is not running and why.</summary>
     [Id(3)] public string? Error { get; set; }
+
+    /// <summary>Plan 020 wave F. <c>null</c> when <see cref="CrdtSourceConfig.Escrow"/> is unset for
+    /// this document — the ordinary case, and the reason this field costs an existing document nothing.
+    /// Non-null whenever it IS set, populated even when nothing has ever been spent, because "the
+    /// counter exists and every replica is at full allowance" is itself the answer to "is anything
+    /// exhausted" — see this wave's own limit 2: an exhausted replica must be VISIBLE, not silent, and
+    /// this is where an operator (or the console) looks to see it, on the same route that already
+    /// answers every other "did my updates land" question about this document.</summary>
+    [Id(4)] public EscrowStatus? Escrow { get; set; }
+}
+
+/// <summary>Plan 020 wave F. One bounded counter's full state, computed fresh from the live document on
+/// every <c>GetStatusAsync</c> call (nothing here is separately persisted — the <c>d:</c>/<c>t:</c> keys
+/// on the document ARE the state, this is just read back out of them). See <see cref="CrdtEscrowConfig"/>
+/// for the four limits this exists to keep visible.</summary>
+[GenerateSerializer]
+public sealed class EscrowStatus
+{
+    /// <summary>The sum of <see cref="CrdtEscrowConfig.InitialAllowance"/> — the one number this whole
+    /// mechanism exists to keep <see cref="TotalSpent"/> at or under, without any replica needing to ask
+    /// another one first.</summary>
+    [Id(0)] public long Bound { get; set; }
+
+    /// <summary>Sum of every replica's own spend. Never greater than <see cref="Bound"/> — that
+    /// invariant is what <c>EscrowCounterTests</c>' concurrent-overspend test proves against replicas
+    /// that never saw each other's updates before merging, which is the only case a CRDT makes hard.</summary>
+    [Id(1)] public long TotalSpent { get; set; }
+
+    /// <summary>One entry per replica named in <see cref="CrdtEscrowConfig.InitialAllowance"/>, sorted by
+    /// replica name for a stable read (the config is a <c>Dictionary</c>, whose enumeration order is not
+    /// itself a contract). A replica that has never spent still appears here — full allowance, not
+    /// exhausted, present rather than merely absent-and-assumed-fine.</summary>
+    [Id(2)] public List<EscrowReplicaStatus> Replicas { get; set; } = [];
+}
+
+/// <summary>One named replica's share of a bounded counter, as of the moment it was read.</summary>
+[GenerateSerializer]
+public sealed class EscrowReplicaStatus
+{
+    [Id(0)] public string Replica { get; set; } = "";
+
+    /// <summary>What <see cref="CrdtEscrowConfig.InitialAllowance"/> declared for this replica before
+    /// any transfer — the starting point <see cref="LocalAllowance"/> is computed relative to.</summary>
+    [Id(1)] public long InitialAllowance { get; set; }
+
+    [Id(2)] public long Spent { get; set; }
+
+    /// <summary>The plan's own formula: <c>initial + received transfers - sent transfers - spent</c>.
+    /// Zero or negative means this replica cannot spend anything more right now — see
+    /// <see cref="Exhausted"/>.</summary>
+    [Id(3)] public long LocalAllowance { get; set; }
+
+    /// <summary>Plan 020 wave F, limit 2, made concrete: <c>true</c> exactly when
+    /// <see cref="LocalAllowance"/> is zero or less. This is the field that turns "a node that has spent
+    /// its share stops until it reconnects" from a behavior an operator has to infer from a pattern of
+    /// refusals into one bit they can read directly, on the same status route every other CRDT document
+    /// counter already answers from.</summary>
+    [Id(4)] public bool Exhausted { get; set; }
+}
+
+/// <summary>Plan 020 wave F — the online half of a bounded counter (see <see cref="CrdtEscrowConfig"/>'s
+/// limit 2: rebalancing is pairwise coordination and cannot happen offline the way an ordinary content
+/// edit can). What one <c>POST /api/sources/{name}/crdt/escrow/rebalance</c> / <c>ICrdtFacade.RebalanceAsync</c>
+/// call did — <see cref="Ok"/> false is a REFUSAL, reported here exactly like a spend refusal is
+/// reported by <c>EscrowCounter.TrySpend</c>'s own result type, never a bare no-op that looks like
+/// success.</summary>
+[GenerateSerializer]
+public sealed class EscrowRebalanceResult
+{
+    [Id(0)] public bool Ok { get; set; }
+
+    /// <summary>Set exactly when <see cref="Ok"/> is <c>false</c> — unknown replica, non-positive
+    /// amount, no escrow counter configured on this source, or (the ordinary refusal) <c>from</c> does
+    /// not currently hold enough to transfer away what was asked. A rebalance is refused rather than
+    /// allowed to push a replica's own local allowance negative — see <c>EscrowCounter.TryTransfer</c>'s
+    /// own doc comment for why that is a real (if bookkeeping-only) hazard even though the GLOBAL bound
+    /// cannot be breached by any transfer amount.</summary>
+    [Id(1)] public string? Reason { get; set; }
+
+    /// <summary><c>from</c>'s local allowance AFTER a successful transfer, or its allowance AS OF the
+    /// refusal when <see cref="Ok"/> is <c>false</c> — either way, the true current number, not a stale
+    /// echo of what the caller asked for.</summary>
+    [Id(2)] public long FromAllowance { get; set; }
+
+    /// <summary><c>to</c>'s local allowance, same convention as <see cref="FromAllowance"/>.</summary>
+    [Id(3)] public long ToAllowance { get; set; }
 }

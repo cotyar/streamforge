@@ -485,6 +485,99 @@ public sealed class CrdtDocGrain(
             EntityCount = _doc.GetMap(rootMapName).Count,
             UpdatesMerged = state.State.UpdatesMerged,
             RowsEmitted = state.State.RowsEmittedTotal,
+            // Plan 020 wave F, limit 2: an exhausted replica must be VISIBLE, not silent. Null when the
+            // source has no Escrow configured at all — an existing document's status is byte-identical
+            // to before this wave landed.
+            Escrow = config.Escrow is { } escrow ? EscrowCounter.Status(_doc, escrow) : null,
         });
+    }
+
+    /// <summary>Plan 020 wave F — see <see cref="ICrdtDocGrain.RebalanceAsync"/> for the contract and
+    /// <see cref="EscrowCounter.TryCoordinatorTransfer"/> for the arithmetic, the refusal rule, and the reserve restriction that makes a coordinator-written transfer sound. This method's own job
+    /// is everything <see cref="EscrowCounter"/> itself cannot do without a grain: the "not running"
+    /// defensive floor (same reasoning as <see cref="MergeAsync"/>'s), the "no escrow counter configured"
+    /// refusal, capturing the bytes the transfer's own local write produces so it survives a restart
+    /// (the same <c>doc.UpdateV1</c> subscription pattern <see cref="AttributeAcceptedUpdates"/> uses for
+    /// exactly the same reason — a local <c>YMap.Set</c> is not <see cref="YDoc.ApplyUpdateV1"/> and so
+    /// never lands in <c>acceptedUpdates</c> on its own), and the same generation guard every other method
+    /// here documents (the persist below awaits, so a concurrent <see cref="StartAsync"/>/<see cref="StopAsync"/>
+    /// can land underneath it).</summary>
+    public async Task<EscrowRebalanceResult> RebalanceAsync(string from, string to, long amount)
+    {
+        var def = state.State.Def;
+        if (def is null || !state.State.Running || _doc is null)
+        {
+            return new EscrowRebalanceResult
+            {
+                Ok = false,
+                Reason = $"document '{state.State.Def?.Name ?? this.GetPrimaryKeyString()}' is not running — "
+                    + "nothing was transferred; start the source and re-issue the rebalance.",
+            };
+        }
+
+        var config = def.Connector?.Crdt?.Escrow;
+        if (config is null)
+        {
+            return new EscrowRebalanceResult
+            {
+                Ok = false,
+                Reason = $"source '{def.Name}' has no escrow counter configured "
+                    + "(SourceDefinition.Connector.Crdt.Escrow is null)",
+            };
+        }
+
+        var generation = _generation;
+        var doc = _doc;
+
+        var produced = new List<byte[]>();
+        void OnUpdate(object? _, (byte[] data, object origin, Transaction transaction) e) => produced.Add(e.data);
+
+        doc.UpdateV1 += OnUpdate;
+        EscrowRebalanceResult result;
+        try
+        {
+            // Plan 020 wave F, corrected after the unrestricted version was shown live to breach the
+            // bound (16 spent against a bound of 10, every caller behaving correctly): a coordinator may
+            // only transfer OUT OF the reserve. See TryCoordinatorTransfer's own doc comment for the
+            // four-step sequence and why replica-to-replica transfers belong to the giver.
+            result = EscrowCounter.TryCoordinatorTransfer(doc, config, from, to, amount);
+        }
+        finally
+        {
+            doc.UpdateV1 -= OnUpdate;
+        }
+
+        if (!result.Ok || produced.Count == 0)
+        {
+            // A refusal writes nothing (EscrowCounter.TryTransfer's own contract) — nothing to persist,
+            // and reporting the refusal is the whole point, exactly like MergeAsync's per-update
+            // diagnostics never abort the caller with an exception.
+            return result;
+        }
+
+        if (generation != _generation)
+        {
+            // Same reasoning as MergeCoreAsync's own check: a StartAsync/StopAsync ran underneath this
+            // await. The transfer already reached _doc (not undoable), but persisting it over whatever a
+            // fresher activation already wrote would be the stale-clobbers-fresh bug that check exists to
+            // prevent. Report what happened; skip the persist — matches MergeAsync's own choice here.
+            return result;
+        }
+
+        state.State.PendingUpdates.AddRange(produced);
+        var logBytes = 0L;
+        foreach (var u in state.State.PendingUpdates)
+        {
+            logBytes += u.Length;
+        }
+
+        if (state.State.PendingUpdates.Count >= CompactionEntryThreshold || logBytes >= CompactionByteThreshold)
+        {
+            CompactLog();
+        }
+
+        await state.WriteStateAsync();
+
+        return result;
     }
 }

@@ -196,6 +196,56 @@ public static class CrdtEndpoints
             return Results.Ok(result);
         }).RequireAuthorization("Editor");
 
+        // Plan 020 wave F — the online half of a bounded counter (CrdtEscrowConfig's limit 2:
+        // rebalancing is pairwise coordination and cannot happen offline the way an ordinary content
+        // edit can, so — unlike a spend, which travels as ordinary update bytes through the /updates
+        // route above — this is a route of its own). Same 501 -> guard -> 404 -> 409 ordering as every
+        // other route in this file; a REFUSED rebalance (no escrow configured, unknown replica,
+        // non-positive amount, insufficient allowance) is a business outcome reported in the 200 body's
+        // EscrowRebalanceResult.Ok/Reason, not an HTTP error — the same distinction /crdt/updates already
+        // draws between a per-update diagnostic and a request-level status code.
+        group.MapPost("/{name}/crdt/escrow/rebalance", async (
+            string name, EscrowRebalanceRequest req, ClaimsPrincipal principal, AccessGuard guard,
+            ICatalogFacade registry, ICrdtFacade crdt, IAuditSink audit) =>
+        {
+            if (!crdt.Enabled)
+            {
+                return Results.Json(
+                    new ErrorResponse("this build has no CRDT document runtime"),
+                    statusCode: StatusCodes.Status501NotImplemented);
+            }
+
+            var src = await registry.GetSourceAsync(name);
+            if (await RefuseAsync(guard, principal, Actions.SourceWrite, src?.Name ?? name, src?.Tags) is { } refusal)
+            {
+                return refusal;
+            }
+
+            if (src is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (src.Kind != SourceKinds.Crdt)
+            {
+                return Results.Json(
+                    new ErrorResponse($"source '{name}' is not crdt-kind"),
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+
+            var result = await crdt.RebalanceAsync(name, req.From, req.To, req.Amount);
+            if (result is null)
+            {
+                // Existence + kind were just checked above — same "checked, then gone" race reading as
+                // every other one in this file: 404, not a surfaced null turning into a 500.
+                return Results.NotFound();
+            }
+
+            RecordExecutedRebalanceAudit(audit, principal, name, req, result);
+
+            return Results.Ok(result);
+        }).RequireAuthorization("Editor");
+
         group.MapGet("/{name}/crdt", async (
             string name, ClaimsPrincipal principal, AccessGuard guard, ICatalogFacade registry, ICrdtFacade crdt) =>
         {
@@ -313,4 +363,36 @@ public static class CrdtEndpoints
             // sees.
         }
     }
+
+    /// <summary>Plan 020 wave F's own "executed" row — same convention as
+    /// <see cref="RecordExecutedAudit"/> (a separate method, not an overload with more optional
+    /// parameters, because the result type is different and a rebalance has no diagnostics list to fold
+    /// in). Written on every call the facade actually answered, INCLUDING a refusal — a refused rebalance
+    /// is still something that was decided about this document, and <see cref="AccessGuard.CheckAsync"/>'s
+    /// own allow/deny row (written unconditionally above, before this ever runs) only ever answers "was
+    /// the caller permitted to ask", not "what did asking produce".</summary>
+    private static void RecordExecutedRebalanceAudit(
+        IAuditSink audit, ClaimsPrincipal principal, string sourceName, EscrowRebalanceRequest req, EscrowRebalanceResult result)
+    {
+        try
+        {
+            var row = CatalogChangeAudit.RestRow(principal, Actions.SourceWrite, sourceName);
+            row.Detail = result.Ok
+                ? $"crdt escrow rebalance: {req.Amount} transferred '{req.From}' -> '{req.To}' "
+                    + $"(from now {result.FromAllowance}, to now {result.ToAllowance})"
+                : $"crdt escrow rebalance REFUSED: {req.Amount} '{req.From}' -> '{req.To}' — {result.Reason}";
+            audit.Record(row);
+        }
+        catch (Exception)
+        {
+            // Same "audit must never make a request fail or slow" contract as RecordExecutedAudit.
+        }
+    }
 }
+
+/// <summary>Plan 020 wave F. Body for <c>POST /api/sources/{name}/crdt/escrow/rebalance</c> — kept here
+/// rather than in <c>shared/StreamForge.Api/Dtos.cs</c> (where <see cref="CrdtUpdatesRequest"/> lives)
+/// because that file is shared across every endpoints file in this project and is not part of this
+/// wave's file ownership; a request record needs no home beyond "somewhere this route's handler can see
+/// it".</summary>
+public sealed record EscrowRebalanceRequest(string From, string To, long Amount);

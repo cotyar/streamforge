@@ -547,3 +547,66 @@ open. That process was **not** killed. Verification used `-p:EnableDefaultConten
 copying those live state files into `bin/` and changes nothing about compilation.
 
 **Remaining in plan 020:** wave F (escrow / bounded counters) and wave G (awareness, off by default).
+
+### Wave F · Escrow / bounded counters — DONE (2026-08-20)
+
+The counter is an ordinary `YMap` exactly as the plan's escrow section specifies — `d:<replica>` is
+`D[replica]`, `t:<from>:<to>` is `T[from][to]`, `LocalAllowance` is the plan's formula verbatim, the map is
+a **sibling** of `RootMap` so bookkeeping keys never enumerate as a projected row, and **no new Ycs type
+was added**. `CrdtEscrowConfig` is additive `[Id(4)]` on `CrdtSourceConfig`; `K` is not a field, it is what
+`InitialAllowance` sums to. A spend is not a route: it is an ordinary content edit an edge makes offline on
+its own document and ships through the existing `/crdt/updates`.
+
+**The wave shipped with its central guarantee broken, and the review caught it.** The implementation had
+the *coordinating grain* write `t:i:j` for any replica `i`, and defended that in three places as a
+"stricter, not different" single-writer discipline — stricter because the key still has one writer and two
+rebalances cannot race on it. That argument is true and is about the wrong property. Reproduced as a test:
+
+> `a` holds 10, goes offline, spends all 10 on its own document. The coordinator still sees `a` holding 10
+> and transfers 6 to `b`. `b` spends its 6. Everything converges: **16 spent against a bound of 10.**
+
+Every caller behaved correctly and used only sanctioned APIs. This is why plan 020's escrow section says
+only replica `i` writes `T[i][*]`: **the giver must deduct in its own view before anyone else can spend it.**
+
+Note this is strictly worse than the wave's own honestly-documented caveat that a *fabricated* update
+(setting `d:x = 999` directly, bypassing `TrySpend`) breaches the bound. That one needs a bad actor and is
+inherent to a CRDT — the merge always succeeds — and it remains documented as a cooperative protocol. The
+one above needs nobody.
+
+**The fix is a rule, not a warning label.** A transfer *into* a replica is always safe; a transfer *out of*
+one is safe only when that replica wrote it. Hence `CrdtEscrowConfig.ReserveReplica` (additive `[Id(2)]`):
+a declared replica that holds unallocated allowance and **never spends** — `TrySpend` refuses it outright,
+so it can have no unsynced spend and the coordinator's view of it is never stale.
+`EscrowCounter.TryCoordinatorTransfer` is the only entry point the grain uses and refuses any `from` that
+is not the reserve; a counter declaring no reserve has no usable rebalance route at all, refused with a
+reason rather than offered unsafely. Replica-to-replica transfers remain available and remain sound: the
+giver calls `TryTransfer` on its **own** document and ships the result as an ordinary update.
+
+Three cluster tests asserted the unsafe behaviour. They belong to this same unlanded wave, so they were
+rewritten onto a reserve as a **declared behaviour change, commented in place**. Five new tests pin the
+fix: the breaching sequence as a refusal, reserve→site as safe, the reserve refusing to spend,
+giver-initiated site→site under an offline spend, and the no-reserve refusal.
+
+Also corrected: the refusal returned `fromAllowance: 0, toAllowance: 0` — the struct default, not real
+numbers, and a `0` reads as "this replica holds nothing", which answers a different question wrongly.
+
+**Live** (isolated instance 7480–7780, torn down): `from: "truck-2"` → refused naming the reserve rule;
+`from: "reserve"` → `{"ok":true,"fromAllowance":2,"toAllowance":14}`; over-transfer → refused, nothing
+written; refusal now reports `from=10, to=10`. An exhausted replica is visible where an operator already
+looks — `GET /api/sources/{name}/crdt` carries `escrow.replicas[].exhausted`.
+
+**Carried forward, found by the wave agent and NOT fixed** (an interaction between wave D and wave F, not a
+one-line patch): `CrdtUpdateInspector` resolves an item's parent chain to a root type name and returns
+"not our root, nothing to authorize" for anything else. The escrow counter lives in a **sibling** map, so
+`d:`/`t:` writes are never inspected by `RequireEntityAuthorization`. The coarse `source.write` grant still
+gates them, so this is not an open door — but an operator enabling per-entity authorization believing it
+restricts *which entities* a granted caller may touch is wrong about escrow spends. Whether the inspector
+should resolve `CounterMap` writes, and to what scope string, is a design question.
+
+**Gates:** Orleans 1553 host tests with 1 failure — `LoopbackCycleTests`, on AGENTS.md's known-flake list,
+**3/3 under `--filter`** (both results reported). Every other Orleans project green, including
+`Connectors.Crdt.Tests` 52/52. Dapr solution fully green: 20 + 514 + 122 + 437 + 373 (+52 Docker-gated) +
+52, zero failures. Docs gained `#crdt-escrow` including the reserve rule, the breaching sequence, and the
+four limits.
+
+**Remaining in plan 020:** wave G (awareness, off by default) only.
