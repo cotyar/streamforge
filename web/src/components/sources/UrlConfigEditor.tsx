@@ -7,6 +7,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { EndpointRefHint } from '@/components/EndpointRefHint'
 import { Plus, Trash2 } from 'lucide-react'
 
 export interface UrlFormState {
@@ -119,6 +120,11 @@ export function UrlConfigEditor({
           disabled={disabled}
           className="font-mono"
         />
+        {/* Plan 016 wave 6: a value that is ENTIRELY "@name" (e.g. "@primary-oltp") resolves at
+            connect time from this instance's Endpoints:<name> configuration instead of being read
+            literally — see NamedEndpoints.cs. This is the one field in the source editor wired to
+            say whether the name is known HERE; see EndpointRefHint's own doc for the rest. */}
+        <EndpointRefHint value={value.url} />
       </Field>
 
       <Field>

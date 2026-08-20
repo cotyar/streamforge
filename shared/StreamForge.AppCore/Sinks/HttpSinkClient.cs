@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Discovery;
 
 namespace StreamForge.AppCore.Sinks;
 
@@ -90,7 +91,13 @@ public sealed class HttpSinkClient : ISinkClient
     {
         ArgumentNullException.ThrowIfNull(config);
         _config = config;
-        _url = config.Url.Replace("{name}", entityName, StringComparison.Ordinal);
+        // Plan 016 wave 6: resolved BEFORE the {name} template expansion, since a named endpoint stands in
+        // for a whole host, never for a name-templated path segment. A sink client is rebuilt on every
+        // config-edit teardown (SinkSelection.Signature — every ~30s per the class doc) and whenever the
+        // entity's driver reconnects, so resolving here IS resolving at connect time, every connect — no
+        // caching survives past one client's lifetime. An unresolvable @name throws here, out of the
+        // constructor, which is exactly where a bad literal URL would already surface downstream.
+        _url = NamedEndpoints.Resolve(config.Url)!.Replace("{name}", entityName, StringComparison.Ordinal);
         _timeout = config.TimeoutMs > 0 ? TimeSpan.FromMilliseconds(config.TimeoutMs) : DefaultTimeout;
         _onFailure = onFailure;
         EntityName = entityName;

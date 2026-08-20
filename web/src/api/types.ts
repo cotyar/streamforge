@@ -1224,3 +1224,13 @@ export interface PeerRecord {
   lastError?: string | null
   info?: InstanceInfo | null
 }
+
+/** Plan 016 wave 6 — one row of `GET /api/meta/endpoints`: a name this instance's `Endpoints:<name>`
+ *  configuration declares, and the literal host/URL a `@name` reference in a connector config resolves
+ *  to at connect time. `value` is not a secret in itself (same class of thing a source's own config
+ *  already shows — see MetaEndpoints.cs's note on this route), but the route sits behind Viewer +
+ *  catalog.read, unlike `/api/meta/instance`. */
+export interface NamedEndpoint {
+  name: string
+  value: string
+}

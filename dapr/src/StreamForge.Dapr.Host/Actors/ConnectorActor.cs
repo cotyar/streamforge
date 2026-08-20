@@ -7,6 +7,7 @@ using StreamForge.Abstractions;
 using StreamForge.Abstractions.Streaming;
 using StreamForge.AppCore.Connectors;
 using StreamForge.AppCore.Connectors.Grpc;
+using StreamForge.AppCore.Discovery;
 using StreamForge.AppCore.Transports;
 using StreamForge.AppCore.Connectors.Polling;
 using StreamForge.AppCore.Connectors.Scheduling;
@@ -384,7 +385,12 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
 
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, cfg.Url);
+            // Plan 016 wave 6: resolved fresh on every poll cycle, inside this try — an unresolvable @name
+            // throws InvalidOperationException, already one of the types the catch below folds into this
+            // cycle's PollCycleResult.Error (the connector's own status), same as a malformed literal URL.
+            var url = NamedEndpoints.Resolve(cfg.Url);
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
             foreach (var (key, value) in cfg.Headers)
             {
                 request.Headers.TryAddWithoutValidation(key, value);

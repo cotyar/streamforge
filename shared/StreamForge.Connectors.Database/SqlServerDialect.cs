@@ -78,6 +78,10 @@ public sealed class SqlServerDialect : ISqlDialect
 
     public DbConnection CreateConnection(DbEndpoint endpoint)
     {
+        // Plan 016 wave 6: resolved HERE, at the actual connect site — see DbEndpoint.Resolved's doc (and
+        // PostgresDialect.CreateConnection's identical comment) for why not earlier and not cached.
+        endpoint = endpoint.Resolved();
+
         if (!string.IsNullOrWhiteSpace(endpoint.ConnectionString))
         {
             return new SqlConnection(endpoint.ConnectionString);

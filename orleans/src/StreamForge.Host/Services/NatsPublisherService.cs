@@ -135,7 +135,7 @@ public sealed class NatsPublisherService(
 
     private async Task<PipelineSinkState> SubscribePipelineAsync(string pipelineId, List<SinkSpec> active, string signature)
     {
-        var clients = active.Select(s => NewClient(s, "pipeline", pipelineId)).ToList();
+        var clients = active.Select(s => NewClient(s, "pipeline", pipelineId)).OfType<ISinkClient>().ToList();
 
         var stream = client.GetStreamProvider(StreamConstants.ProviderName)
             .GetStream<List<ResultEnvelope>>(StreamId.Create(StreamConstants.OutputNamespace, pipelineId));
@@ -220,7 +220,7 @@ public sealed class NatsPublisherService(
 
     private async Task<TableSinkState> SubscribeTableAsync(string tableName, List<SinkSpec> active, string signature)
     {
-        var clients = active.Select(s => NewClient(s, "table", tableName)).ToList();
+        var clients = active.Select(s => NewClient(s, "table", tableName)).OfType<ISinkClient>().ToList();
 
         var stream = client.GetStreamProvider(StreamConstants.ProviderName)
             .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, tableName));
@@ -271,12 +271,39 @@ public sealed class NatsPublisherService(
     // ------------------------------------------------------------------
 
     /// <summary>Plan 010: the sink's KIND decides which client type this is — SinkSelection.Active only
-    /// returns specs a registered transport claims, so the lookup below cannot miss.</summary>
-    private ISinkClient NewClient(SinkSpec spec, string entityKind, string entityName) =>
-        SinkTransports.Find(spec.Kind)!.Create(spec, entityKind, entityName, (destination, ex) => logger.LogWarning(
-            ex,
-            "{Kind} sink publish failed for {EntityKind} '{EntityName}' destination '{Destination}' — the {EntityKind} itself keeps running; this sink is dropping messages until the broker/credentials/destination are fixed.",
-            spec.Kind, entityKind, entityName, destination, entityKind));
+    /// returns specs a registered transport claims, so the lookup below cannot miss.
+    ///
+    /// <para>Plan 016 wave 6: <c>Create</c> can now throw SYNCHRONOUSLY — an <c>@name</c> endpoint
+    /// reference this instance has no mapping for (<see cref="StreamForge.AppCore.Discovery.NamedEndpoints.Resolve"/>,
+    /// reached from <see cref="HttpSinkClient"/>'s/<see cref="NatsSinkClient"/>'s constructors). Before this
+    /// wave nothing here could throw, so <c>RefreshPipelinesAsync</c>/<c>RefreshTablesAsync</c> called this
+    /// inside a bare <c>.Select(...).ToList()</c>: an uncaught throw there would abort the WHOLE refresh
+    /// sweep (every other entity's sinks too, not just this one), landing only on this service's own
+    /// debug-level "sweep failed, will retry next tick" log — nowhere near this entity's own status. That
+    /// is a materially worse outcome than "a broken sink must not break the entity" (this class's own class
+    /// doc), so a resolution failure is caught HERE, at the exact same log line and throttling contract as
+    /// every other sink failure, and null instead propagates out — the two call sites above filter it with
+    /// <c>OfType&lt;ISinkClient&gt;()</c>, so ONE misconfigured sink drops out of an entity's client list
+    /// rather than taking the rest of the sweep down with it.
+    /// Retried every refresh cycle, same as before.</para></summary>
+    private ISinkClient? NewClient(SinkSpec spec, string entityKind, string entityName)
+    {
+        try
+        {
+            return SinkTransports.Find(spec.Kind)!.Create(spec, entityKind, entityName, (destination, ex) => logger.LogWarning(
+                ex,
+                "{Kind} sink publish failed for {EntityKind} '{EntityName}' destination '{Destination}' — the {EntityKind} itself keeps running; this sink is dropping messages until the broker/credentials/destination are fixed.",
+                spec.Kind, entityKind, entityName, destination, entityKind));
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "{Kind} sink could not be constructed for {EntityKind} '{EntityName}' — the {EntityKind} itself keeps running without this sink; it is retried on the next refresh sweep.",
+                spec.Kind, entityKind, entityName, entityKind);
+            return null;
+        }
+    }
 
     private static async Task TeardownAsync(IEnumerable<ISinkClient> clients)
     {

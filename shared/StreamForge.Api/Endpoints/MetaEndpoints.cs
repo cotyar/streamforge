@@ -180,6 +180,26 @@ public static class MetaEndpoints
             return Results.Ok(PeerDirectory.Find(name));
         }).RequireAuthorization("Viewer");
 
+        // Plan 016 wave 6. Viewer + AccessGuard(catalog.read, *) — same two-gate pattern as every other
+        // route in this file EXCEPT /instance immediately above, and the asymmetry with THAT route is a
+        // decision, not an oversight: /instance is anonymous because a peer has to be able to probe it
+        // before it holds any credential at all (see plan 016 wave 5). This route answers a different
+        // question — not "what is this deployment" but "what does this deployment's config wire to" —
+        // and the answer is internal wiring: hostnames, ports, possibly internal DNS names an operator
+        // put behind Endpoints:<name> specifically so a catalog document never has to carry them. Nothing
+        // needs that unauthenticated; an import (ConfigImportService) only ever asks NamedEndpoints
+        // whether a name resolves, never what it resolves TO, so this is the one place that value is
+        // ever handed to a caller at all — same reasoning /peers already applies to peer addresses.
+        group.MapGet("/endpoints", async (ClaimsPrincipal principal, AccessGuard guard) =>
+        {
+            if (await RefuseAsync(guard, principal) is { } refusal)
+            {
+                return refusal;
+            }
+
+            return Results.Ok(NamedEndpoints.All().Select(kv => new { name = kv.Key, value = kv.Value }));
+        }).RequireAuthorization("Viewer");
+
         // Raw text of the two static .proto files, resolved from options.ProtosDir (host-specific —
         // Protos/ lives directly under the Orleans host project; a future Dapr host can point
         // elsewhere or supply an empty directory).

@@ -724,12 +724,53 @@ public static class ConfigImportService
             entries.Add(entry);
         }
 
+        // Plan 016 wave 6 — non-fatal, unlike the three gates above: an unresolvable @name reference is
+        // a WARNING folded onto the entity that carries it, never an "error" entry and never a reason to
+        // refuse the import. Runs after the apply loop (so it sees every entity's final Action) and
+        // identically for apply:true and apply:false (mode=validate) — same reason DetectTableDependencyCycle
+        // et al. run identically for both: validate is a dry run of the SAME import, and a dry run that
+        // stays silent about something the real run would flag is a worse dry run than none.
+        AttachEndpointWarnings(entries, doc);
+
         return new ConfigImportReport
         {
             Mode = mode,
             Entries = entries,
             Ok = entries.All(e => e.Action != "error"),
         };
+    }
+
+    /// <summary>Folds <see cref="EndpointReferenceWarnings.Scan"/>'s findings into the matching report
+    /// entry's <c>Diagnostics</c>, by exact (Kind, Name) match. Skipped for a "deleted" entity (its
+    /// connector config is on its way out of the catalog, not something that will ever connect) and for
+    /// an "error" entry (it never applied — SQL that failed to compile is not a value being asked to
+    /// resolve). "created"/"updated"/"skipped" all get it: "skipped" means the document restates the
+    /// entity byte-identically, and its endpoint references are just as real as a changed entity's —
+    /// mode=validate answering "will this land here" should say so.</summary>
+    private static void AttachEndpointWarnings(List<ConfigImportReportEntry> entries, ConfigDocument doc)
+    {
+        var warnings = EndpointReferenceWarnings.Scan(doc);
+        if (warnings.Count == 0)
+        {
+            return;
+        }
+
+        var byEntity = warnings
+            .GroupBy(w => (w.Kind, w.Name), EqualityComparer<(string, string)>.Default)
+            .ToDictionary(g => g.Key, g => g.Select(w => w.Message).ToList());
+
+        foreach (var entry in entries)
+        {
+            if (entry.Action is "deleted" or "error")
+            {
+                continue;
+            }
+
+            if (byEntity.TryGetValue((entry.Kind, entry.Name), out var messages))
+            {
+                entry.Diagnostics = [.. entry.Diagnostics, .. messages];
+            }
+        }
     }
 
     private static Dictionary<string, T> FirstByName<T>(IEnumerable<T> items, Func<T, string> nameOf)

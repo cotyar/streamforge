@@ -121,7 +121,7 @@ public sealed class NatsSinkPublisherService(
                 }
             }
 
-            var clients = active.Select(s => NewClient(s, entityKind, key)).ToList();
+            var clients = active.Select(s => NewClient(s, entityKind, key)).OfType<ISinkClient>().ToList();
             lock (_gate)
             {
                 if (map.TryGetValue(key, out var stale))
@@ -149,12 +149,31 @@ public sealed class NatsSinkPublisherService(
     }
 
     /// <summary>Plan 010: see the Orleans twin — the sink's KIND selects the client implementation, and
-    /// SinkSelection.Active guarantees a registered transport exists for it.</summary>
-    private ISinkClient NewClient(SinkSpec spec, string entityKind, string entityName) =>
-        SinkTransports.Find(spec.Kind)!.Create(spec, entityKind, entityName, (destination, ex) => logger.LogWarning(
-            ex,
-            "{Kind} sink publish failed for {EntityKind} '{EntityName}' destination '{Destination}' — the {EntityKindRepeat} itself keeps running; this sink is dropping messages until the broker/credentials/destination are fixed.",
-            spec.Kind, entityKind, entityName, destination, entityKind));
+    /// SinkSelection.Active guarantees a registered transport exists for it.
+    ///
+    /// <para>Plan 016 wave 6: see the Orleans twin's identical doc paragraph — <c>Create</c> can now throw
+    /// synchronously for an unresolvable <c>@name</c> endpoint reference, and letting that propagate out of
+    /// the bare <c>.Select(...).ToList()</c> below would abort this whole entity-group's refresh instead of
+    /// just dropping the one misconfigured sink. Caught here, logged the same way every other sink failure
+    /// is, and null filtered out by the caller.</para></summary>
+    private ISinkClient? NewClient(SinkSpec spec, string entityKind, string entityName)
+    {
+        try
+        {
+            return SinkTransports.Find(spec.Kind)!.Create(spec, entityKind, entityName, (destination, ex) => logger.LogWarning(
+                ex,
+                "{Kind} sink publish failed for {EntityKind} '{EntityName}' destination '{Destination}' — the {EntityKindRepeat} itself keeps running; this sink is dropping messages until the broker/credentials/destination are fixed.",
+                spec.Kind, entityKind, entityName, destination, entityKind));
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "{Kind} sink could not be constructed for {EntityKind} '{EntityName}' — the {EntityKindRepeat} itself keeps running without this sink; it is retried on the next refresh sweep.",
+                spec.Kind, entityKind, entityName, entityKind);
+            return null;
+        }
+    }
 
     // ------------------------------------------------------------------
     // Topic dispatch (called from StreamingRuntimeSetup — see this class's own doc for why the two

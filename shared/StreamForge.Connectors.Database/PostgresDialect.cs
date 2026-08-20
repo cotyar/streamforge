@@ -72,6 +72,11 @@ public sealed class PostgresDialect : ISqlDialect
 
     public DbConnection CreateConnection(DbEndpoint endpoint)
     {
+        // Plan 016 wave 6: resolved HERE, at the actual connect site — see DbEndpoint.Resolved's doc for
+        // why not earlier (Validate/IsConfigured must not resolve) and not cached (every call opens a
+        // fresh connection, so this is "every connect", not just the first).
+        endpoint = endpoint.Resolved();
+
         if (!string.IsNullOrWhiteSpace(endpoint.ConnectionString))
         {
             return new NpgsqlConnection(endpoint.ConnectionString);

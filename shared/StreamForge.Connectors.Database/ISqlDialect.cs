@@ -1,5 +1,6 @@
 using System.Data.Common;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Discovery;
 
 namespace StreamForge.Connectors.Database;
 
@@ -9,7 +10,15 @@ namespace StreamForge.Connectors.Database;
 /// <see cref="ISqlDialect"/> from taking a union of two contract types, or from being implemented twice.
 ///
 /// <para><see cref="ConnectionString"/> WINS over every other field when set, which is the contract's
-/// own rule restated where it is enforced rather than only where it is declared.</para></summary>
+/// own rule restated where it is enforced rather than only where it is declared.</para>
+///
+/// <para><b>Plan 016 wave 6:</b> <see cref="From(DbSourceConfig)"/>/<see cref="From(DbSinkConfig)"/>
+/// copy <see cref="Host"/>/<see cref="ConnectionString"/> RAW, unresolved — this type is also what
+/// <c>Validate</c>/<c>IsConfigured</c> checks build <see cref="Addressable"/> from, and those run at
+/// SAVE time, never at connect time, so they must accept a bare <c>@name</c> as "present" without ever
+/// resolving it (which is exactly what a plain non-blank-string check already does — no change needed
+/// there). <see cref="Resolved"/> is the separate, explicit opt-in for the two dialects' own
+/// <c>CreateConnection</c> — the actual connect sites — to call.</para></summary>
 public sealed record DbEndpoint(
     string Host,
     int Port,
@@ -27,10 +36,27 @@ public sealed record DbEndpoint(
 
     /// <summary>True when there is enough here to attempt a connection at all — the
     /// <c>ISinkTransport.IsConfigured</c> half of the question, shared so the source's validation and the
-    /// sink's configured-check cannot drift apart.</summary>
+    /// sink's configured-check cannot drift apart. Deliberately NOT resolved (see this record's class
+    /// doc): a plain non-blank check already treats <c>@name</c> as present without needing to know
+    /// whether this environment can resolve it.</summary>
     public bool Addressable =>
         !string.IsNullOrWhiteSpace(ConnectionString) ||
         (!string.IsNullOrWhiteSpace(Host) && !string.IsNullOrWhiteSpace(Database));
+
+    /// <summary>Plan 016 wave 6: <see cref="Host"/> and <see cref="ConnectionString"/> run through
+    /// <see cref="NamedEndpoints.Resolve"/> — the two fields that can carry an endpoint-shaped value.
+    /// Called ONLY from <see cref="PostgresDialect.CreateConnection"/>/<see cref="SqlServerDialect.CreateConnection"/>,
+    /// the two places a <see cref="DbEndpoint"/> actually becomes a dialed connection, so a literal is
+    /// unaffected and an unresolvable <c>@name</c> throws exactly there — every caller of
+    /// <c>CreateConnection</c> in this project (a poll cycle, a sink batch, a CDC preflight/source) already
+    /// opens the returned connection inside code whose failure path turns any exception into that entity's
+    /// own status/counter, so the resolver's message reaches the operator the same way a bad literal host
+    /// or a refused login already would.</summary>
+    public DbEndpoint Resolved() => this with
+    {
+        Host = NamedEndpoints.Resolve(Host) ?? "",
+        ConnectionString = NamedEndpoints.Resolve(ConnectionString),
+    };
 }
 
 /// <summary>A column's mapped platform type, plus what mapping it cost. <see cref="Note"/> is non-null

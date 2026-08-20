@@ -7,6 +7,7 @@ using QuickFix.Logger;
 using QuickFix.Store;
 using QuickFix.Transport;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Discovery;
 
 namespace StreamForge.Connectors.Fix;
 
@@ -102,9 +103,22 @@ public sealed class QuickFixMessageSource : IFixMessageSource
 
     /// <summary>Builds a QuickFIX/n ini-style config string in code — see this class's doc comment for
     /// why no file ever touches disk for this. One [DEFAULT] + one [SESSION] section is enough for a
-    /// single always-on (<c>StartTime</c>=<c>EndTime</c>=00:00:00) initiator session.</summary>
+    /// single always-on (<c>StartTime</c>=<c>EndTime</c>=00:00:00) initiator session.
+    ///
+    /// <para>Plan 016 wave 6: <see cref="FixSourceConfig.Host"/> is resolved through
+    /// <see cref="NamedEndpoints.Resolve"/> right here, before it reaches the ini text — the ONE place
+    /// both the receive-only <c>fix</c> kind (<see cref="QuickFixMessageSource.SubscribeAsync"/>) and the
+    /// duplex <c>fix-duplex</c> kind (<c>FixDuplexSession</c>, which calls this same method) build their
+    /// settings from. Both callers call this fresh at the top of every (re)connect attempt — a brand new
+    /// <see cref="SocketInitiator"/> per attempt, never reused — so resolving here IS resolving at connect
+    /// time, every connect. An unresolvable <c>@name</c> throws before <c>SessionSettings</c> is even
+    /// constructed, which both callers let propagate out of their own <c>SubscribeAsync</c>/connect method
+    /// to <c>SubscriberCore</c>'s existing reconnect/backoff/status-error path — the same one a bad literal
+    /// host already takes (QuickFIX/n itself would only fail asynchronously, on the socket).</para></summary>
     internal static string BuildSettingsText(FixSourceConfig config)
     {
+        var host = NamedEndpoints.Resolve(config.Host);
+
         var sb = new StringBuilder();
         sb.AppendLine("[DEFAULT]");
         sb.AppendLine("ConnectionType=initiator");
@@ -122,7 +136,7 @@ public sealed class QuickFixMessageSource : IFixMessageSource
         sb.AppendLine($"BeginString={config.BeginString}");
         sb.AppendLine($"SenderCompID={config.SenderCompId}");
         sb.AppendLine($"TargetCompID={config.TargetCompId}");
-        sb.AppendLine($"SocketConnectHost={config.Host}");
+        sb.AppendLine($"SocketConnectHost={host}");
         sb.AppendLine($"SocketConnectPort={config.Port}");
         sb.AppendLine($"HeartBtInt={Math.Max(1, config.HeartBtIntSeconds)}");
         sb.AppendLine($"ResetOnLogon={(config.ResetOnLogon ? "Y" : "N")}");

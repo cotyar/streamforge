@@ -4,6 +4,7 @@ using Orleans.Streams;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Connectors;
 using StreamForge.AppCore.Connectors.Grpc;
+using StreamForge.AppCore.Discovery;
 using StreamForge.AppCore.Transports;
 using StreamForge.AppCore.Connectors.Polling;
 using StreamForge.AppCore.Connectors.Scheduling;
@@ -718,7 +719,14 @@ public sealed class ConnectorGrain(
         var cfg = def.Connector?.Url
             ?? throw new InvalidOperationException($"source '{def.Name}' has kind 'url' but no url config");
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, cfg.Url);
+        // Plan 016 wave 6: resolved fresh on every poll cycle — this method is invoked once per cycle
+        // (ArmTimer re-arms it), so there is no caching to go stale. NamedEndpoints.Resolve throws for an
+        // unresolvable @name; the exception propagates out of this method uncaught, same as a malformed
+        // literal URL already would, and lands on this grain's existing poll-cycle failure path (see the
+        // caller, which folds any exception here into the source's own LastError/status).
+        var url = NamedEndpoints.Resolve(cfg.Url);
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
         foreach (var (name, value) in cfg.Headers)
         {
             request.Headers.TryAddWithoutValidation(name, value);

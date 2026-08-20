@@ -24,6 +24,19 @@ namespace StreamForge.AppCore.Connectors.Grpc;
 /// actually need REST (login, id/name-to-display-name resolution) require it, and they name the peer
 /// themselves when it's missing — a peer wired for reflection-only federation (no login, a
 /// <c>"source:{name}"</c> entity key) needs no REST endpoint at all.</para>
+///
+/// <para><b>Plan 016 wave 6, precedence with <c>@name</c> named endpoints.</b> <c>Peer</c> is checked
+/// FIRST, exactly as wave 5 left it: when it is set it wins outright, and neither address field is even
+/// looked at — so an <c>Address</c>/<c>RestAddress</c> of the form <c>@name</c> alongside a set
+/// <c>Peer</c> is simply never read, the same as a stale literal would be. Only in the "Peer unset" branch
+/// — the byte-identical-to-pre-016 branch — are the two address fields run through
+/// <see cref="NamedEndpoints.Resolve"/>, one call each, so a literal (including one with an embedded
+/// <c>@</c>, e.g. <c>http://user@host:5299</c>, which <see cref="NamedEndpoints.IsReference"/> does not
+/// recognize as a reference) passes through unchanged and a bare <c>@name</c> is replaced. This makes the
+/// two mechanisms strict alternatives rather than something that could "fight": a source names EITHER a
+/// peer OR (optionally, on each address field independently) a named endpoint, never both at once, because
+/// naming a peer makes the address fields unreachable by construction. An unresolvable <c>@name</c> throws
+/// here too, landing on the exact same status-error path as an unresolvable peer.</para>
 /// </summary>
 public static class GrpcPeerResolver
 {
@@ -31,7 +44,8 @@ public static class GrpcPeerResolver
     {
         if (string.IsNullOrEmpty(config.Peer))
         {
-            return new ResolvedGrpcEndpoints(config.Address, config.RestAddress, PeerName: null);
+            return new ResolvedGrpcEndpoints(
+                NamedEndpoints.Resolve(config.Address)!, NamedEndpoints.Resolve(config.RestAddress), PeerName: null);
         }
 
         var peer = PeerDirectory.Find(config.Peer);

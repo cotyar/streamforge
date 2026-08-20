@@ -258,6 +258,10 @@ public class AuthorizationCoverageTests
         // A POST that writes only this instance's own bookkeeping ABOUT a peer — not the peer, not this
         // catalog — so it carries the same catalog.read a caller already needed to list peers at all.
         new("POST", "/api/meta/peers/{name}/probe", Guards.Viewer),
+        // Plan 016 wave 6. NOT anonymous, unlike /instance two lines up — see the comment on this route
+        // in MetaEndpoints.cs for why the asymmetry is deliberate: this lists internal wiring
+        // (hostnames/ports an operator put behind Endpoints:<name>), not a capability probe.
+        new("GET", "/api/meta/endpoints", Guards.Viewer),
         new("GET", "/api/transports", Guards.Viewer),
         new("POST", "/api/transports/{kind}/probe", Guards.Editor),
         new("GET", "/api/sql/functions", Guards.Viewer),
