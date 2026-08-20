@@ -1,6 +1,6 @@
 # Plan 016 — Name resolution, versioning &amp; dependencies, service discovery
 
-**Status: PLANNED.**
+**Status: DONE** — waves 0–7. What actually landed, and what was deliberately left, are recorded at the end of this document.
 
 ## Why
 
