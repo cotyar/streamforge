@@ -241,6 +241,15 @@ public sealed class CrdtSourceConfig
     /// wave landing. See <see cref="CrdtEscrowConfig"/> for the shape and the four limits it exists to
     /// keep visible rather than let an operator discover the hard way.</summary>
     [Id(4)] public CrdtEscrowConfig? Escrow { get; set; }
+
+    /// <summary>Plan 020 wave G. <c>null</c> (the default) means awareness is OFF for this document —
+    /// <c>StreamHub.SubscribeAwareness</c> refuses to join anybody to it, and an existing document's
+    /// behaviour is completely unaffected by this wave landing. Awareness never reaches this class's
+    /// document at all — it lives entirely in a host-process registry (<c>AwarenessRegistry</c>,
+    /// <c>shared/StreamForge.Api/Hubs/</c>), never in <c>CrdtDocGrainState</c> — this field only
+    /// carries the two numbers an operator has to decide before turning it on. See
+    /// <see cref="CrdtAwarenessConfig"/> for what they mean.</summary>
+    [Id(5)] public CrdtAwarenessConfig? Awareness { get; set; }
 }
 
 /// <summary>
@@ -311,6 +320,48 @@ public sealed class CrdtEscrowConfig
     /// <c>EscrowCounter.TryTransfer</c>) and ships the result as an ordinary update, which deducts first
     /// and can therefore never oversell.</para></summary>
     [Id(2)] public string ReserveReplica { get; set; } = "";
+}
+
+/// <summary>
+/// Plan 020 wave G — turns on ephemeral presence/liveness ("who is looking at this document right now")
+/// for one CRDT source. Non-null is the opt-in itself; there is no separate boolean, matching
+/// <see cref="CrdtEscrowConfig"/>'s own "presence of config IS the flag" idiom two fields up.
+///
+/// <para><b>What this does NOT configure, on purpose.</b> There is no field here for WHO may join —
+/// that is <c>StreamHub.SubscribeAwareness</c> asking <c>AccessGuard</c> for
+/// <see cref="Actions.SourceRead"/> at this source's own name/tags, the exact
+/// action and scope a REST read of this source already asks for (plan 015's grant model, unmodified —
+/// see <c>CrdtEndpoints</c>' own "Finding 1, verified rather than rebuilt" for why a second ACL
+/// mechanism is not what a wave like this should add). This class only carries the two numbers that
+/// decide what an authorized presence entry looks like once it exists.</para>
+///
+/// <para><b>Both numbers are mandatory operator decisions, not defaults to leave alone.</b> The plan's
+/// own framing for this wave: awareness is "the thing most likely to flood a link", so turning it on at
+/// all is meant to be a deliberate act against a measurement, not a config toggle with harmless-looking
+/// defaults. <see cref="TtlSeconds"/> and <see cref="MaxEntries"/> both still carry sane defaults (30s,
+/// 50) so a minimal `{"ttlSeconds":30,"maxEntries":50}` — or, once the SPA/console grows a form for this,
+/// accepting the shown defaults — is a real, working choice, not a landmine; but the class stays
+/// non-null-to-opt-in specifically so an operator has to write the two numbers down at least once.</para>
+/// </summary>
+[GenerateSerializer]
+public sealed class CrdtAwarenessConfig
+{
+    /// <summary>Seconds a presence entry survives without a heartbeat. A connection that stops calling
+    /// <c>Heartbeat</c> (tab closed without a clean disconnect, laptop asleep, link dropped) disappears
+    /// from every other client's view within roughly one more heartbeat interval of ANY still-live
+    /// member of the same document — see <c>AwarenessRegistry</c>'s own doc comment for why that needs
+    /// no background timer. Default 30.</summary>
+    [Id(0)] public int TtlSeconds { get; set; } = 30;
+
+    /// <summary>Hard cap on LIVE (non-expired) entries per document. The (N+1)th distinct connection to
+    /// join a document already at this cap is refused outright — <c>AwarenessRegistry.Join</c> returns a
+    /// refusal naming the cap and the current count, and <c>StreamHub.SubscribeAwareness</c> turns that
+    /// into a <c>HubException</c> the caller can show a human, rather
+    /// than silently dropping the join or silently evicting somebody already present. This is a
+    /// mechanism for a bounded set of live editors/viewers on ONE document, not a general presence
+    /// service — see the class's own remarks on why the numbers here are operator decisions rather than
+    /// defaults to leave alone. Default 50.</summary>
+    [Id(1)] public int MaxEntries { get; set; } = 50;
 }
 
 /// <summary>Plan 009 B1: NATS subject subscription. Credentials follow the secrets-lite convention

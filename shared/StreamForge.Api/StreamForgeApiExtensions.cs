@@ -167,6 +167,11 @@ public static class StreamForgeApiExtensions
             approvalOptions,
             sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ApprovalSweeperService>>()));
 
+        // Plan 020 wave G — host-process singleton for ephemeral CRDT presence/liveness, resolved per
+        // call from StreamHub (see that class's own remarks). No config here: TTL/cap are per-source
+        // (CrdtSourceConfig.Awareness), read fresh on every SubscribeAwareness join.
+        services.AddSingleton<AwarenessRegistry>();
+
         services.AddSingleton(sp => new AccessGuard(
             sp.GetRequiredService<PermissionResolver>(),
             entitlementsEnabled,

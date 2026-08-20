@@ -31,6 +31,15 @@ export const LATEST_TABLE = "sf_ts_client_latest_trade";
 export const AGG_TABLE = "sf_ts_client_desk_totals";
 export const GLOBAL_AGG_TABLE = "sf_ts_client_all_totals";
 
+/** Plan 020 wave G fixture: a crdt-kind source with awareness turned ON (TtlSeconds/MaxEntries
+ * both deliberately small -- see awareness.test.ts for why -- MaxEntries=2 in particular so the
+ * cap refusal is reachable with two real connections rather than needing dozens). Reuses the SAME
+ * engine boot as the transport contract tests (one more `config/import` entry, no extra publish or
+ * process) -- awareness is orthogonal to which live-table transport is chosen. */
+export const CRDT_AWARENESS_SOURCE = "sf_ts_client_crdt_doc";
+export const CRDT_AWARENESS_TTL_SECONDS = 20;
+export const CRDT_AWARENESS_MAX_ENTRIES = 2;
+
 /** Last-N-lines buffer for a spawned process's combined stdout/stderr -- see bootEngine()'s
  * stream-draining comment for why lines must be read continuously regardless of whether anyone
  * ends up wanting them. */
@@ -124,6 +133,23 @@ async function importFixtureConfig(): Promise<void> {
         ingest: {},
         enabled: true,
       },
+      {
+        name: CRDT_AWARENESS_SOURCE,
+        description: "TypeScript client awareness fixture (plan 020 wave G)",
+        kind: "crdt",
+        fields: [
+          { name: "id", type: "String" },
+          { name: "value", type: "String" },
+        ],
+        connector: {
+          crdt: {
+            rootMap: "root",
+            keyField: "id",
+            awareness: { ttlSeconds: CRDT_AWARENESS_TTL_SECONDS, maxEntries: CRDT_AWARENESS_MAX_ENTRIES },
+          },
+        },
+        enabled: true,
+      },
     ],
     pipelines: [],
     tables: [
@@ -182,6 +208,7 @@ export interface Engine {
   latestTable: string;
   aggTable: string;
   globalAggTable: string;
+  crdtAwarenessSource: string;
   stop: () => Promise<void>;
 }
 
@@ -252,6 +279,7 @@ export async function bootEngine(): Promise<Engine> {
     latestTable: LATEST_TABLE,
     aggTable: AGG_TABLE,
     globalAggTable: GLOBAL_AGG_TABLE,
+    crdtAwarenessSource: CRDT_AWARENESS_SOURCE,
     stop,
   };
 }

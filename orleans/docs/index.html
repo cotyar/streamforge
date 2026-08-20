@@ -250,6 +250,7 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#crdt-authz" class="sub">Per-entity authorization</a>
   <a href="#crdt-reconcile" class="sub">Reconciliation pattern</a>
   <a href="#crdt-escrow" class="sub">Escrow: bounded counters</a>
+  <a href="#crdt-awareness" class="sub">Awareness: presence/liveness</a>
   <a href="#discovery">Instance discovery &amp; federation</a>
   <a href="#discovery-instance" class="sub">Instance identity</a>
   <a href="#discovery-peers" class="sub">Peer directory</a>
@@ -973,6 +974,52 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 <tr><td>Key count is O(replicas&sup2;)</td><td>One <code>t:</code> key per ordered pair that has ever transferred. A mechanism for a handful of named sites — a warehouse, a shop floor, a vessel — not thousands of browser tabs.</td></tr>
 <tr><td>The allocation policy is configured, never inferred</td><td><code>initialAllowance</code> is the entire policy. An undeclared replica name is refused everywhere it could appear — spend, transfer, or a direct status read — never silently treated as zero.</td></tr>
 </tbody></table></div>
+
+<h3 id="crdt-awareness">Awareness: presence/liveness</h3>
+<p>Awareness answers a different question than the rest of this section: not "what does the document say", but <b>"who is looking at it right now"</b>. It is ephemeral by definition — a viewer's cursor, or simply the fact that someone has this document open, is not part of the document and must never become part of it. It lives entirely in a host-process registry (<code>AwarenessRegistry</code>, <code>shared/StreamForge.Api/Hubs/</code>) and never reaches <code>CrdtDocGrain</code>, <code>PendingUpdates</code>, the delta journal, or any persisted state — restarting the host clears every presence entry, by design, the same way closing every browser tab would.</p>
+<p><b>Off by default, and reached over SignalR only</b> — there is no REST route for this feature at all. Setting <code>connector.crdt.awareness</code> is the opt-in itself (no separate boolean); its absence means <code>StreamHub.SubscribeAwareness</code> refuses to join anyone to the document's presence group.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Field</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>connector.crdt.awareness.ttlSeconds</code></td><td><code>30</code></td><td>Seconds a presence entry survives without a heartbeat.</td></tr>
+<tr><td><code>connector.crdt.awareness.maxEntries</code></td><td><code>50</code></td><td>Hard cap on live entries per document — see below for what happens at the cap.</td></tr>
+</tbody></table></div>
+<pre><code>{
+  "connector": {
+    "crdt": {
+      "rootMap": "root",
+      "keyField": "sku",
+      "awareness": { "ttlSeconds": 30, "maxEntries": 50 }
+    }
+  }
+}</code></pre>
+<p>Both numbers are deliberate operator decisions, not defaults to leave unexamined — this is the plan's own framing for the whole wave: awareness is "the thing most likely to flood a link", precisely because presence traffic scales with how many viewers a document has and how chatty their heartbeats are, not with anything the document's own content does.</p>
+
+<h4>The hub surface — not REST</h4>
+<p>Three <code>StreamHub</code> methods (<code>shared/StreamForge.Api/Hubs/StreamHub.cs</code>), invoked over the same SignalR connection <a href="#realtime">table/pipeline/source subscriptions</a> already use:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Method</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>SubscribeAwareness(sourceName, clientId, label)</code></td><td>Joins this connection's presence entry and returns <code>{ ttlSeconds, maxEntries, peers }</code> — the current membership, including the caller's own new entry. <code>clientId</code> distinguishes two tabs/connections under one identity; <code>label</code> is arbitrary cosmetic detail (a cursor color, a display variant).</td></tr>
+<tr><td><code>Heartbeat(sourceName)</code></td><td>Refreshes the caller's own entry. Deliberately ungated — see below.</td></tr>
+<tr><td><code>UnsubscribeAwareness(sourceName)</code></td><td>Leaves. Ungated, same reason every other unsubscribe in this hub is.</td></tr>
+</tbody></table></div>
+<p>Membership changes push as an <code>awarenessUpdate</code> event — <code>(sourceName, peers[])</code> — to every other connection in the document's group: on join, on leave, on disconnect, and on any heartbeat whose own eviction pass discovered a stale peer. An ordinary heartbeat that only refreshes the caller's own expiry broadcasts nothing, which is what keeps steady-state traffic at roughly one small message per heartbeat interval per member rather than one per member per member.</p>
+
+<h4>Authorization: the same read grant a REST read would need</h4>
+<p><code>SubscribeAwareness</code> asks <code>AccessGuard</code> for <code>source.read</code> at the exact scope a REST read of that source already asks for — presence reveals who is working on which document, so it is gated exactly like reading the document's own rows is. See <code>StreamHub</code>'s own class doc (plan 015 wave 3-B) for why every subscribe method in this hub checks its own entitlement rather than relying on the class-level policy alone.</p>
+<div class="callout warn"><b>Refuses loudly, not silently — a deliberate departure from the other subscribe methods.</b> <code>SubscribeSource</code>/<code>SubscribeTable</code> tolerate subscribing before the entity exists (the group simply stays quiet until it does). <code>SubscribeAwareness</code> does not extend that tolerance to a missing source, a non-<code>crdt</code>-kind source, or a <code>crdt</code> source with no <code>awareness</code> configured — each throws immediately, because a group nothing will <i>ever</i> publish to is a caller misconfiguration worth surfacing at once, not a race worth waiting out.</div>
+<p><code>Heartbeat</code> and <code>UnsubscribeAwareness</code> check nothing of their own — the same "checked at subscribe time only" rule the rest of this hub follows. That is safe specifically because <code>AwarenessRegistry.Heartbeat</code> can only refresh an entry <code>SubscribeAwareness</code> already created under a guard check; it can never create one, so calling it without ever having subscribed is a no-op, not a back door.</p>
+
+<h4>The cap: visible, not silent</h4>
+<p>The <code>(maxEntries + 1)</code>th distinct connection to join an already-full document is refused outright, naming the cap and the current count — never a silent drop, and never an eviction of someone already present to make room. Re-subscribing a connection that already holds an entry never counts against its own slot. This mechanism is sized for a bounded set of live editors/viewers on one document — tens, not thousands of browser tabs, the same scale <a href="#crdt-escrow">escrow</a>'s own <code>initialAllowance</code> is sized for.</p>
+
+<h4>The TTL needs no background timer, and that is deliberate</h4>
+<p>Every call that touches a document's live set — join, heartbeat, leave, disconnect — evicts every expired entry in that document first, under the same lock, before doing anything else. So as long as at least one connection keeps heartbeating (which every live participant must do to keep its own entry alive), every other connection's expiry is discovered — and broadcast — within roughly one more heartbeat interval of that live participant. No hosted service, no per-document scheduled work sitting idle between calls.</p>
+
+<div class="callout warn"><b>Presence is per HOST PROCESS, not per cluster — a stated scope, not a bug.</b> This platform registers SignalR with <code>.AddSignalR().AddJsonProtocol(...)</code> and nothing else — no Redis (or any other) backplane, anywhere, for SignalR specifically (both flavors' Redis usage is catalog/actor state, a separate concern). A SignalR group is therefore already scoped to one host process, and <code>AwarenessRegistry</code> inherits exactly that: two clients connected to two different host processes — two Orleans silos behind a load balancer, or an Orleans instance and a Dapr one — never see each other's presence, even on the identical document. Building a backplane was explicitly out of scope for this wave; if it matters for a deployment, it is the next thing to measure before reaching for.</div>
+
+<p>The one typed client this wave ships is TypeScript's <code>AwarenessSession</code> (<code>clients/typescript/src/awareness.ts</code>), over its own dedicated SignalR connection — independent of whichever transport <code>connect()</code> chose for table deltas, since awareness has no gRPC equivalent in this platform. <code>Client.awareness(sourceName, opts)</code> returns a joined session exposing <code>.peers</code> and <code>.onUpdate(listener)</code>; it runs its own heartbeat loop internally (roughly a third of the server's <code>ttlSeconds</code>, floored at 5s) and <code>.close()</code> leaves cleanly. The Python, Kotlin, .NET and React clients are unchanged by this wave — see the plan's own cut list for why awareness was scoped to one client rather than four.</p>
 </section>
 
 <section id="discovery">

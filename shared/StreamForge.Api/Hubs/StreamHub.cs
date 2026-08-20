@@ -61,6 +61,24 @@ namespace StreamForge.Api.Hubs;
 /// (<see cref="StreamForge.Api.EnvironmentSelectionMiddleware.HttpContextItemKey"/>) rather than the
 /// ambient. The <c>"metrics"</c> group stays unqualified — it names no entity, it is cluster-wide by
 /// design (see <see cref="SubscribeMetrics"/>).</para>
+///
+/// <para><b>Plan 020 wave G — awareness follows every rule above, plus one more of its own.</b>
+/// <see cref="SubscribeAwareness"/> asks <see cref="AccessGuard"/> for
+/// <see cref="StreamForge.Abstractions.Actions.SourceRead"/> at the SAME scope
+/// <see cref="SubscribeSource"/> already asks for that source — presence reveals who is working on which
+/// document, so it is gated exactly like reading the document's own rows is. It ALSO refuses — visibly,
+/// with a <see cref="HubException"/>, never a silent empty group — when the named source does not exist,
+/// is not <see cref="StreamForge.Abstractions.SourceKinds.Crdt"/>-kind, or has no
+/// <see cref="StreamForge.Abstractions.CrdtAwarenessConfig"/> configured, which is a deliberate departure
+/// from <see cref="SubscribeSource"/>/<see cref="SubscribeTable"/>'s own "subscribing before the entity
+/// exists has always been legal here" tolerance: those groups eventually receive real frames once the
+/// entity exists, but a group nothing will EVER publish to (awareness off, or off by default and never
+/// turned on) is a caller misconfiguration worth surfacing immediately rather than a race to tolerate.
+/// State lives in <see cref="AwarenessRegistry"/>, a host-process singleton resolved per call from
+/// <paramref name="services"/> exactly like <see cref="ReadCatalogAsync{T}"/> resolves
+/// <see cref="ICatalogFacade"/> — see that registry's own class doc for the TTL/cap mechanics and the
+/// per-host scope this inherits from SignalR having no configured backplane anywhere in this
+/// platform.</para>
 /// </summary>
 [Authorize(Policy = "Viewer")]
 public sealed class StreamHub(AccessGuard guard, IServiceProvider services) : Hub
@@ -172,6 +190,112 @@ public sealed class StreamHub(AccessGuard guard, IServiceProvider services) : Hu
 
     public Task UnsubscribeTable(string name) =>
         Groups.RemoveFromGroupAsync(Context.ConnectionId, $"table:{EnvKeys.Qualify(ConnectionEnv, name)}");
+
+    // -------------------------------------------------------------------------------------------------
+    // Plan 020 wave G — awareness. See this class's own remarks for the authorization rule and
+    // AwarenessRegistry's for the TTL/cap mechanics and the per-host scope.
+    // -------------------------------------------------------------------------------------------------
+
+    private string AwarenessGroup(string sourceName) => $"crdt-awareness:{EnvKeys.Qualify(ConnectionEnv, sourceName)}";
+
+    /// <summary>Joins this connection's presence entry to <paramref name="sourceName"/>'s awareness group
+    /// and returns the current membership (including this entry) plus the two numbers
+    /// <see cref="Heartbeat"/>'s caller needs to behave itself. <paramref name="clientId"/> distinguishes
+    /// two tabs/connections from the same authenticated identity; <paramref name="label"/> is arbitrary
+    /// client-chosen cosmetic detail (a cursor color, a display variant) — see
+    /// <see cref="AwarenessEntry"/>'s own doc comment for why neither is trusted as the identity itself.
+    ///
+    /// <para>Refuses (never a silent empty group) when: the guard denies
+    /// <see cref="Actions.SourceRead"/> at this source; the source does not exist; the source is not
+    /// <see cref="SourceKinds.Crdt"/>-kind; the source has no <see cref="CrdtAwarenessConfig"/> (awareness
+    /// is off — the default); or the document is already at its configured cap and this connection is not
+    /// already a member of it.</para></summary>
+    public async Task<AwarenessSnapshot> SubscribeAwareness(string sourceName, string clientId, string? label)
+    {
+        if (string.IsNullOrWhiteSpace(clientId))
+        {
+            throw new HubException("clientId is required");
+        }
+
+        var src = await ReadCatalogAsync(c => c.GetSourceAsync(sourceName));
+        await EnsureAsync(Actions.SourceRead, src?.Name ?? sourceName, src?.Tags);
+
+        if (src is null)
+        {
+            throw new HubException($"source '{sourceName}' not found");
+        }
+        if (src.Kind != SourceKinds.Crdt)
+        {
+            throw new HubException($"source '{sourceName}' is not crdt-kind");
+        }
+        var awareness = src.Connector?.Crdt?.Awareness;
+        if (awareness is null)
+        {
+            throw new HubException($"awareness is not enabled for source '{sourceName}' (CrdtSourceConfig.Awareness is unset)");
+        }
+
+        var registry = services.GetRequiredService<AwarenessRegistry>();
+        var group = AwarenessGroup(src.Name);
+        var identity = Context.User?.Identity?.Name ?? "(anonymous)";
+        var ttl = TimeSpan.FromSeconds(Math.Max(1, awareness.TtlSeconds));
+
+        var joined = registry.Join(group, Context.ConnectionId, clientId, identity, label, ttl, awareness.MaxEntries);
+        if (!joined.Ok)
+        {
+            throw new HubException(joined.Reason!);
+        }
+
+        await Groups.AddToGroupAsync(Context.ConnectionId, group);
+        await Clients.OthersInGroup(group).SendAsync("awarenessUpdate", src.Name, joined.Peers);
+
+        return new AwarenessSnapshot(awareness.TtlSeconds, awareness.MaxEntries, joined.Peers);
+    }
+
+    /// <summary>Refreshes this connection's own presence entry. Deliberately UNGATED — see
+    /// <see cref="UnsubscribeTable"/>'s own precedent and <see cref="AwarenessRegistry.Heartbeat"/>'s doc
+    /// comment for why that is safe: it can only refresh an entry <see cref="SubscribeAwareness"/> already
+    /// created under a guard check, never create one itself. Broadcasts the refreshed membership to the
+    /// group only when this call's own eviction pass actually removed a stale peer — an ordinary heartbeat
+    /// that changes nothing observable sends nothing, which is what keeps steady-state traffic bounded to
+    /// roughly one small message per heartbeat interval per member instead of one per member per
+    /// member.</summary>
+    public async Task Heartbeat(string sourceName)
+    {
+        var registry = services.GetRequiredService<AwarenessRegistry>();
+        var group = AwarenessGroup(sourceName);
+        var result = registry.Heartbeat(group, Context.ConnectionId);
+        if (result.MembershipChanged)
+        {
+            await Clients.Group(group).SendAsync("awarenessUpdate", sourceName, result.Peers);
+        }
+    }
+
+    /// <summary>Leaves this connection's presence entry. Ungated for the same reason
+    /// <see cref="UnsubscribeTable"/> is: leaving takes nothing away from anybody.</summary>
+    public async Task UnsubscribeAwareness(string sourceName)
+    {
+        var registry = services.GetRequiredService<AwarenessRegistry>();
+        var group = AwarenessGroup(sourceName);
+        var peers = registry.Leave(group, Context.ConnectionId);
+        await Groups.RemoveFromGroupAsync(Context.ConnectionId, group);
+        if (peers is not null)
+        {
+            await Clients.Group(group).SendAsync("awarenessUpdate", sourceName, peers);
+        }
+    }
+
+    /// <summary>A dropped connection never gets to call <see cref="UnsubscribeAwareness"/> for whatever it
+    /// had joined, so this is where that cleanup happens instead — for every awareness document this
+    /// connection was a member of, not just one.</summary>
+    public override async Task OnDisconnectedAsync(Exception? exception)
+    {
+        var registry = services.GetRequiredService<AwarenessRegistry>();
+        foreach (var (group, sourceName, peers) in registry.RemoveConnection(Context.ConnectionId))
+        {
+            await Clients.Group(group).SendAsync("awarenessUpdate", sourceName, peers);
+        }
+        await base.OnDisconnectedAsync(exception);
+    }
 
     /// <summary>Returns normally when the caller may subscribe; throws the one exception type SignalR
     /// relays verbatim otherwise.

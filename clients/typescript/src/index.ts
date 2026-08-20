@@ -24,6 +24,7 @@ import { LiveTable } from "./live-table.js";
 import * as sqlModule from "./sql.js";
 import * as tablesModule from "./tables.js";
 import { SignalRTransport, probeSignalRMode, type SignalRMode } from "./signalr-transport.js";
+import { AwarenessSession, type AwarenessOptions } from "./awareness.js";
 import type { Transport } from "./transport.js";
 import type { Row } from "./zset.js";
 import type { ConfigImportReport, TableDefinitionDto, TableValidateResponse } from "./types.js";
@@ -34,6 +35,7 @@ export { ZSet, canonicalKey, groupKeyOf, type Row, type Delta, type Entry } from
 export type { Transport } from "./transport.js";
 export { ADHOC_PREFIX, adhocTableName } from "./sql.js";
 export type { ConfigImportReport, TableDefinitionDto, TableValidateResponse } from "./types.js";
+export { AwarenessSession, type AwarenessPeer, type AwarenessOptions, type AwarenessListener } from "./awareness.js";
 
 export type TransportName = "grpc" | "signalr" | "signalr:ws" | "signalr:sse" | "signalr:lp" | "auto";
 
@@ -159,6 +161,18 @@ export class Client {
 
   push(source: string, rows: Row[], opts: PushOptions = {}): Promise<unknown> {
     return ingestModule.push({ http: this.http, grpc: this.grpcTransport, ingestKey: this.ingestKey }, source, rows, opts);
+  }
+
+  // ---- CRDT awareness (plan 020 wave G) ----
+
+  /** Joins presence on a `crdt`-kind source that has opted into `CrdtSourceConfig.Awareness` --
+   * see `AwarenessSession.join`'s own doc comment for the refusal cases. Always over its own
+   * SignalR connection, independent of whichever transport this `Client` chose for table deltas
+   * (that class's own doc comment explains why). Caller owns the returned session's lifetime --
+   * call `.close()` (or use `await using`) when done with it; this `Client` does not track or
+   * close sessions it handed out. */
+  awareness(sourceName: string, opts: AwarenessOptions = {}): Promise<AwarenessSession> {
+    return AwarenessSession.join(this.http, sourceName, opts);
   }
 
   async close(): Promise<void> {

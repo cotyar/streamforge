@@ -610,3 +610,77 @@ should resolve `CounterMap` writes, and to what scope string, is a design questi
 four limits.
 
 **Remaining in plan 020:** wave G (awareness, off by default) only.
+
+### Wave G · Awareness — DONE (2026-08-20) · plan 020 COMPLETE on Orleans
+
+Ephemeral presence, **off by default**, opt-in per source via an additive `CrdtSourceConfig.Awareness`
+(`[Id(5)]`, next free after wave F's `Escrow`). Three hub methods on the existing `StreamHub`
+(`SubscribeAwareness`/`Heartbeat`/`UnsubscribeAwareness`) plus an `OnDisconnectedAsync` override; state in
+`AwarenessRegistry`, a host-process singleton modelled on `SourceIngressRegistry`. One client:
+`clients/typescript`. **No new HTTP route**, so `AuthorizationCoverageTests` needed no new row — confirmed
+still green unmodified.
+
+**The line this wave existed to draw held.** Awareness never reaches `CrdtDocGrain`, `PendingUpdates`, the
+delta journal or any persisted state — verified by grep, whose only hit is the comment saying so. TTL 30s
+default, cap 50 entries default; expired entries are evicted **before** the cap is tested, so a cap is
+never hit by stale members, and the refusal names both the cap and the live count rather than returning a
+silently-empty group. No background timer: eviction rides on the calls that already happen.
+
+**Authorization follows plan 015 wave 3-B's precedent, which is the reason that precedent is written
+down.** Presence reveals who is working on which document, so joining asks `AccessGuard` for
+`source.read` at the same scope a REST read of that source asks for, **before** anything is joined, and a
+refusal is a `HubException` carrying the same reason string the REST 403 carries. Groups are qualified by
+`ConnectionEnv`, never the ambient. The wave also refuses loudly for an unknown / non-crdt / awareness-off
+source — stricter than every other `Subscribe*` in this hub, and flagged by the agent as its own
+extrapolation of "visible, not silent" rather than something the plan dictated. Kept: a group nothing will
+ever publish to is a misconfiguration, not a race to tolerate.
+
+**A stated limit, not a discovered one:** there is no SignalR backplane anywhere in this repository (the
+only Redis registrations are the Dapr flavour's catalog/actor state), so awareness is scoped to one host
+process — two clients on two hosts never see each other. Verified independently. Recorded in the registry's
+class doc, the hub's class doc and a `callout warn` in the manual. Building a backplane was explicitly out
+of scope.
+
+**The one claim that needed checking, and what checking it found.** The agent reported the TypeScript
+client's contract suite failing and attributed it to machine load. It had also modified
+`test/engine-fixture.ts` — the fixture those tests boot from — which is a direct confound. Reverted the
+fixture: identical failure. Reverted `src/index.ts` and removed both new client files: **pristine, 6 pass /
+8 fail, byte-identical.** So wave G is not the cause, established rather than assumed.
+
+Going further than the agent did: the failures include **transport-agnostic REST** tests, not just the
+SignalR ones, so it is the fixture's engine lifecycle rather than a transport bug. The server is fine — the
+host published and run exactly as the fixture does came up healthy in 2s, stayed up, and answered
+`POST /hubs/stream/negotiate` with a normal 200. Ports 8199/8299 were free and only that one file was run,
+so it is not a cross-file collision (the fixture's port guard correctly SKIPs when they are taken).
+
+**Precisely what is NOT established:** the "pristine" baseline was HEAD, which already contains waves A–F.
+Wave G is proven innocent; plan 020 as a whole is not. Waves A–F should be inert for a fixture whose
+catalog declares no `crdt` source, but that is reasoning, not a measurement — running the same suite at a
+pre-020 commit is the one datum that decides it, and it is filed as follow-up work rather than done here.
+
+**Consequently unverified:** `clients/typescript/test/awareness.test.ts` has never run against a real
+server. It typechecks and builds; the server logic it would exercise is separately covered by
+`StreamHubAwarenessTests` (11 tests, hub driven directly), but the wire format between them is inference
+from SignalR's documented `JsonHubProtocol` defaults, not a captured payload. Stated plainly rather than
+counted as covered.
+
+**Gates:** Orleans solution **1564/1564 host tests, zero failures**, and every other project green
+(Quant 20, Connectors.Crdt 52, AppCore 515, Connectors.Fix 122, Engine 994, Connectors.Database 373 +52
+Docker-gated) — which also closes the agent's own reported gap: the three failures it saw mid-run
+(`ApprovalSweeperTests`, `LoopbackCycleTests`, `TablePersistenceModeClusterTests`, all on AGENTS.md's list)
+were load-induced and do not reproduce in a clean run. Dapr solution green: 20 + 515 + 52 + 437 + 122 + 373
+(+52 skipped), zero failures.
+
+---
+
+## Plan status
+
+Waves A–G are **DONE on Orleans**. Dapr stores the `crdt` kind and refuses to start it (D9); its gap is
+item D5 in `dapr/PARITY.md`. Two things are carried forward rather than closed:
+
+1. **Escrow writes are invisible to wave D's per-entity authorization** — the counter lives in a sibling
+   map, and `CrdtUpdateInspector` returns "not our root, nothing to authorize" for it. The coarse
+   `source.write` grant still gates them, so it is not an open door, but an operator enabling
+   `requireEntityAuthorization` to restrict which entities a caller may touch is wrong about escrow spends.
+2. **The TypeScript client's contract suite is red on master** (8 of 14), independently of wave G, and is
+   not one of AGENTS.md's per-wave gates — which may be why it went unnoticed.
