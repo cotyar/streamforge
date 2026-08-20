@@ -14,6 +14,12 @@ public static class StreamConstants
     public const string RegistryKey = "catalog";
     public const string UsersKey = "users";
 
+    /// <summary>Plan 021 — the environment directory singleton (Orleans EnvironmentRegistryGrain / Dapr
+    /// EnvironmentRegistryActor). NEVER environment-qualified: it is the thing that says which
+    /// environments exist, so one per server is the whole point. See EnvKeys for the qualification rule
+    /// every OTHER key in this file is subject to.</summary>
+    public const string EnvironmentsKey = "environments";
+
     // Plan 015. AccessKey is the access-policy singleton (Orleans AccessPolicyGrain / Dapr
     // AccessPolicyActor) — a SEPARATE store from UsersKey on purpose: policy is read on every request
     // and cached hard, credentials are rewritten on every password change and never cached.
