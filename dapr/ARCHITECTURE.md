@@ -699,7 +699,9 @@ construction.
 
 Every wave through W8 has landed (Generators W5, Pipelines W6, Tables W7-A, Row history W7-B,
 polyglot processors W8 — see `../dapr/POLYGLOT.md` and `../plans/005-dapr-port.md`'s parity matrix).
-What remains unbuilt on this flavor is, as of W9, a short, deliberate, permanent list — not a backlog:
+What remains unbuilt on this flavor is, as of W9, a short, deliberate, permanent list — not a backlog.
+(The *other* two lists — what is genuinely owed to this flavor, and which of its "verified live" claims
+were never actually run — live in [`PARITY.md`](PARITY.md), added 2026-08-20.)
 
 - **Partitioned table execution** (`Parallelism 2–16`, frontier-consistent reads, shared
   arrangements): **Orleans-only forever**, decision D-F — sidecar hops invert the economics of the

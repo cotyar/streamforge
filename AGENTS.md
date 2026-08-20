@@ -1,11 +1,14 @@
 # crates-foundation — Agent Instructions
 
-Streaming-SQL platform ("StreamForge") in two runtime flavors: `orleans/` (complete — Microsoft
-Orleans 10) and `dapr/` (complete — Dapr, for polyglot processing and runtime comparison). Both
+Streaming-SQL platform ("StreamForge") in two runtime flavors: `orleans/` (**primary**, complete —
+Microsoft Orleans 10) and `dapr/` (Dapr, for polyglot processing and runtime comparison — feature-complete
+in code, but behind on live verification: read [`dapr/PARITY.md`](dapr/PARITY.md) before claiming anything
+about it, and land new work on Orleans first). Both
 flavors share one runtime-agnostic core (`shared/`): Engine, Contracts, AppCore, Api, and the `web/`
 SPA. Execution plans with acceptance criteria: [`plans/`](plans/README.md). Adding an ingress/egress transport
 (NATS + a `file` sink today; the recipe is one class + one registry line): [`TRANSPORTS.md`](TRANSPORTS.md). Architecture:
 [`orleans/ARCHITECTURE.md`](orleans/ARCHITECTURE.md) · [`dapr/ARCHITECTURE.md`](dapr/ARCHITECTURE.md)
+· Dapr's descoped/owed/unverified list: [`dapr/PARITY.md`](dapr/PARITY.md)
 · rationale: [`orleans/DESIGN.md`](orleans/DESIGN.md) · runtime comparison + measured latency:
 [`orleans/docs/comparison.html`](orleans/docs/comparison.html) (opened directly from the repo — see
 its own note on why `/docs` doesn't serve it automatically).

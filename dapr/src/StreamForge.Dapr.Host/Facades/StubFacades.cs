@@ -37,9 +37,12 @@ public sealed class StubTableHistoryFacade : ITableHistoryFacade
 }
 
 /// <summary>Plan 011 D1: key sharding is Orleans-only, and permanently so on this flavor — not a stub
-/// awaiting a later wave. <see cref="Catalog.CatalogStore.CreateTableAsync"/> refuses a non-empty
-/// <see cref="TableDefinition.ShardBy"/> at upsert (the same way it refuses Parallelism &gt; 1), so no
-/// table on this flavor can ever BE sharded and every member here reports a disabled tier rather than an
+/// awaiting a later wave. A non-empty <see cref="TableDefinition.ShardBy"/> is refused at START, NOT at
+/// upsert — deliberately, so the field round-trips and the definition can be promoted back to an Orleans
+/// instance without loss — the long "WHERE KEY SHARDING IS REFUSED ON THIS FLAVOR" note in
+/// <c>Catalog/CatalogStore.cs</c> gives the reason. This is the one way it differs from the
+/// Parallelism &gt; 1 refusal, which DOES happen at upsert. So no table on
+/// this flavor can ever RUN sharded and every member here reports a disabled tier rather than an
 /// error. The endpoints reach the same conclusion before they get here — they short-circuit on
 /// <c>def.ShardBy.Count == 0</c> — so this exists to satisfy DI and to stay honest if that ever changes.</summary>
 public sealed class DisabledTableShardFacade : ITableShardFacade
