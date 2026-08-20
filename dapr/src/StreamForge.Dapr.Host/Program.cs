@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using StreamForge.Abstractions;
 using StreamForge.Api;
+using StreamForge.AppCore.Discovery;
 using StreamForge.Connectors.Database;
 using StreamForge.Connectors.Fix;
 using StreamForge.Dapr.Host.Actors;
@@ -83,6 +84,14 @@ FixConnectors.RegisterAll();
 // never links a pricing library. Must precede anything that compiles SQL.
 StreamForge.Quant.QuantFunctions.RegisterAll();
 
+// Plan 016 wave 5: same shape, same config keys as the Orleans host's Program.cs — see that file's
+// comment for why "Discovery:Peers" is a section (binds as an array from appsettings.json, CLI
+// `--Discovery:Peers:0:Name ...`, or `DISCOVERY__PEERS__0__NAME` env vars alike) and why binding
+// straight onto PeerRecord is enough. PeerDirectory is process-static, so this line is the whole of
+// this flavor's peer wiring; the federated `grpc` source's driver (ConnectorActor) reads it the same
+// way ConnectorGrain does on the other flavor.
+PeerDirectory.Configure(builder.Configuration.GetSection("Discovery:Peers").Get<List<PeerRecord>>() ?? []);
+
 var app = builder.Build();
 
 // Host-specific facts StreamForgeApiOptions carries so the shared endpoints stay byte-identical across
@@ -90,7 +99,9 @@ var app = builder.Build();
 //   - ProtosDir points at a directory that doesn't exist — /api/meta/protos/static already guards each
 //     file with File.Exists and returns an empty list, so the response SHAPE is unchanged, just empty.
 //   - GrpcStaticServices is empty (gRPC serving is phase 2 here); GrpcPort is still reported (5499,
-//     reserved) so the API Explorer UI can show it as "not yet serving" rather than omitting it.
+//     reserved) so the API Explorer UI can show it as "not yet serving" rather than omitting it. Plan
+//     016 wave 5's GET /api/meta/instance reads GrpcStaticServices being empty as "omit the grpc
+//     endpoint key entirely" for exactly this reason — see MetaEndpoints' comment on servesGrpc.
 //   - DocsFilePath serves the SAME flavor-aware docs the Orleans host serves (orleans/docs/ covers both
 //     runtimes since plan 006's docs sync — the original W4 "no /docs here" descope is obsolete), so the
 //     SPA's Documentation link works on :5399 too. Sibling pages (comparison.html) come along for free.
@@ -104,7 +115,14 @@ var apiOptions = new StreamForgeApiOptions(
     SpaDistPath: Path.GetFullPath(Path.Combine(
         app.Environment.ContentRootPath,
         app.Configuration["Web:Dist"] ?? Path.Combine("..", "..", "..", "web", "dist"))),
-    Flavor: "dapr");
+    Flavor: "dapr",
+    // Plan 016 wave 5: same config key, same default as the Orleans host — this flavor keeps its
+    // catalog/actor state in Redis, not here, but still needs somewhere to persist its one identity
+    // file (see StreamForgeApiOptions.DataDir's own doc comment for why that is honest even though the
+    // directory otherwise does nothing for this flavor).
+    DataDir: app.Configuration["DataDir"] ?? "./data",
+    InstanceName: app.Configuration["InstanceName"] ?? "",
+    Version: app.Configuration["Version"] ?? "");
 
 app.MapStreamForgeApi(apiOptions);
 

@@ -250,6 +250,14 @@ public class AuthorizationCoverageTests
         new("GET", "/api/meta/protos/static", Guards.Viewer),
         new("GET", "/api/meta/grpc", Guards.Viewer),
         new("GET", "/api/meta/arrangements", Guards.Viewer),
+        // Plan 016 wave 5. /instance is anonymous ON PURPOSE, for the same reason /healthz is: it is
+        // what a peer probes and what an operator curls before they hold any credential. That is why
+        // its body is counts and kind names — never entity names; DiscoveryEndpointsTests pins that.
+        new("GET", "/api/meta/instance", Guards.Anonymous),
+        new("GET", "/api/meta/peers", Guards.Viewer),
+        // A POST that writes only this instance's own bookkeeping ABOUT a peer — not the peer, not this
+        // catalog — so it carries the same catalog.read a caller already needed to list peers at all.
+        new("POST", "/api/meta/peers/{name}/probe", Guards.Viewer),
         new("GET", "/api/transports", Guards.Viewer),
         new("POST", "/api/transports/{kind}/probe", Guards.Editor),
         new("GET", "/api/sql/functions", Guards.Viewer),

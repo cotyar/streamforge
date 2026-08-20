@@ -41,6 +41,10 @@ public class LegacyEquivalenceMatrixTests
         new("rest", "GET /api/auth/me", "Viewer", null, "*"),
         new("rest", "GET /healthz", "anonymous", null, "*"),
         new("rest", "GET /api/healthz", "anonymous", null, "*"),
+        // Plan 016 wave 5: anonymous like /healthz, on purpose — the endpoint a peer probes and an
+        // operator curls before they have any credential. See MetaEndpoints' own doc comment on this
+        // route for why that is safe (counts, not names; kind names, not connector configuration).
+        new("rest", "GET /api/meta/instance", "anonymous", null, "*"),
 
         // ---- sources ---------------------------------------------------------------------------
         new("rest", "GET /api/sources", "Viewer", Actions.SourceRead, "*"),
@@ -112,6 +116,12 @@ public class LegacyEquivalenceMatrixTests
         new("rest", "GET /api/meta/protos/static", "Viewer", Actions.CatalogRead, "*"),
         new("rest", "GET /api/meta/grpc", "Viewer", Actions.CatalogRead, "*"),
         new("rest", "GET /api/meta/arrangements", "Viewer", Actions.CatalogRead, "*"),
+        // Plan 016 wave 5: a directory listing/probe is read-only catalog metadata about THIS instance's
+        // own configuration, not about any one entity — catalog.read at * fits it the same way it fits
+        // the three routes above. See MetaEndpoints' doc comment on the probe route for why a nominally
+        // mutating POST is gated no more strictly than the read it augments.
+        new("rest", "GET /api/meta/peers", "Viewer", Actions.CatalogRead, "*"),
+        new("rest", "POST /api/meta/peers/{name}/probe", "Viewer", Actions.CatalogRead, "*"),
         new("rest", "GET /api/sql/functions", "Viewer", Actions.CatalogRead, "*"),
         new("rest", "GET /api/transports", "Viewer", Actions.CatalogRead, "*"),
         new("rest", "POST /api/transports/{kind}/probe", "Editor", Actions.CatalogWrite, "*"),

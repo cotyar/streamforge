@@ -246,7 +246,13 @@ public static class SourceValidation
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(grpc.Address))
+        // Plan 016 wave 5: a named peer (GrpcSubConfig.Peer) resolves BOTH the gRPC address and the REST
+        // address at each (re)connect — see that property's own doc comment — so naming one is a
+        // legitimate alternative to hardcoding either address, and the two "is required" rules below
+        // must not fire against a source that has done exactly that.
+        var hasPeer = !string.IsNullOrWhiteSpace(grpc.Peer);
+
+        if (string.IsNullOrWhiteSpace(grpc.Address) && !hasPeer)
         {
             errors.Add("connector.grpc.address is required");
         }
@@ -268,7 +274,7 @@ public static class SourceValidation
         // GrpcSubscriberCore's own doc comment: it will not guess a REST port from the gRPC
         // Address (they need not be related at all) — surface a missing RestAddress here, at
         // config-save time, rather than as a runtime "error" status after the first connect.
-        if (!string.IsNullOrEmpty(grpc.Username) && string.IsNullOrEmpty(grpc.RestAddress))
+        if (!string.IsNullOrEmpty(grpc.Username) && string.IsNullOrEmpty(grpc.RestAddress) && !hasPeer)
         {
             errors.Add("connector.grpc.restAddress is required when username/password are set (needed to POST /api/auth/login)");
         }

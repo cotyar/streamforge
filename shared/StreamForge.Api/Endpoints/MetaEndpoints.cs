@@ -1,8 +1,11 @@
+using System.Reflection;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
 using StreamForge.Api.Auth;
+using StreamForge.AppCore.Discovery;
+using StreamForge.AppCore.Transports;
 using StreamForge.Host.Grpc.Dynamic;
 
 namespace StreamForge.Api;
@@ -56,6 +59,126 @@ public static class MetaEndpoints
     public static void MapMetaEndpoints(this WebApplication app, StreamForgeApiOptions options)
     {
         var group = app.MapGroup("/api/meta");
+
+        // Plan 016 wave 5: computed ONCE here (this method runs once at host startup, when the route
+        // table is built, not per request) rather than inside the /instance handler below — an id that
+        // changed request-to-request would defeat the entire point of a persisted instance identity, and
+        // re-reading {DataDir}/instance.json on every probe is pointless I/O for a value that cannot
+        // change without a restart.
+        var instanceId = InstanceIdentity.LoadOrCreate(options.DataDir);
+        var startedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // "The API assembly's informational version" per the wave brief — this file lives in
+        // StreamForge.Api, so GetExecutingAssembly() here IS that assembly, unlike ProtoFileBuilder's
+        // same-shaped fallback (StreamForge.AppCore) which answers a different question.
+        var assemblyVersion =
+            Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString()
+            ?? "dev";
+        // Plan 016 wave 5: honest capability signalling — this instance serves gRPC iff it maps static
+        // gRPC services at all (GrpcStaticServices is how StreamForgeApiOptions already tells the two
+        // flavors apart: Orleans populates six services, the Dapr host's own Program.cs comment says
+        // gRPC serving there is "phase 2" and leaves the list empty). No other capability string is
+        // invented here — ponytail: grow this list one real feature-detection need at a time rather than
+        // enumerating everything this build happens to support.
+        var servesGrpc = options.GrpcStaticServices.Count > 0;
+
+        // Anonymous, like /healthz — the endpoint a peer probes and an operator curls before they have
+        // any credential. Must therefore leak nothing sensitive: entity COUNTS, not entity names;
+        // registered kind NAMES, not connector configuration.
+        group.MapGet("/instance", async (HttpRequest request, ICatalogFacade registry) =>
+        {
+            var endpoints = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["rest"] = $"{request.Scheme}://{request.Host}",
+            };
+            if (servesGrpc)
+            {
+                // gRPC is h2c cleartext on this flavor (see the Host Program.cs Kestrel setup) — same
+                // host as the REST request, options.GrpcPort instead of the REST port. Omitted entirely
+                // on a flavor that does not actually serve it (see servesGrpc above) rather than
+                // reporting a port nothing is listening on.
+                endpoints["grpc"] = $"{request.Scheme}://{request.Host.Host}:{options.GrpcPort}";
+            }
+
+            var capabilities = new List<string>();
+            if (servesGrpc)
+            {
+                capabilities.Add("grpc");
+            }
+
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            var warnings = new List<string>();
+            try
+            {
+                // Plan 016: this route's whole job is being answerable, so a catalog read failure must
+                // not fail the response — identity/flavor/version below are still worth having with
+                // empty counts rather than a 500 from the one endpoint documented as always up.
+                var sources = await registry.GetSourcesAsync();
+                var pipelines = await registry.GetPipelinesAsync();
+                var tables = await registry.GetTablesAsync();
+
+                counts["sources"] = sources.Count;
+                counts["pipelines"] = pipelines.Count;
+                counts["tables"] = tables.Count;
+
+                CollectCatalogWarnings(sources, pipelines, tables, warnings);
+            }
+            catch
+            {
+                // Swallowed deliberately — see the comment above the try. Counts/warnings stay empty;
+                // everything else in the response is unaffected.
+            }
+
+            return Results.Ok(new InstanceInfo
+            {
+                InstanceId = instanceId,
+                Name = string.IsNullOrWhiteSpace(options.InstanceName) ? Environment.MachineName : options.InstanceName,
+                Flavor = options.Flavor,
+                Version = string.IsNullOrWhiteSpace(options.Version) ? assemblyVersion : options.Version,
+                Endpoints = endpoints,
+                Capabilities = capabilities,
+                Plugins = [.. KindVersions.All().Keys],
+                CatalogCounts = counts,
+                CatalogWarnings = warnings,
+                StartedAtMs = startedAtMs,
+            });
+        }).AllowAnonymous();
+
+        // Viewer + AccessGuard(catalog.read, *) — same two-gate pattern every other route in this file
+        // uses. A directory listing is read-only catalog metadata about this instance's configuration,
+        // not about any one entity, so catalog.read at * is the right fit (see the class doc's note on
+        // why these three pre-existing routes fold onto catalog.read rather than an invented meta.read).
+        group.MapGet("/peers", async (ClaimsPrincipal principal, AccessGuard guard) =>
+        {
+            if (await RefuseAsync(guard, principal) is { } refusal)
+            {
+                return refusal;
+            }
+
+            return Results.Ok(PeerDirectory.All());
+        }).RequireAuthorization("Viewer");
+
+        // Gated at least as strictly as the read above, even though it is nominally a GET-shaped action
+        // over HTTP POST: probing writes the outcome into PeerDirectory, a process-wide registry, so it
+        // is a mutation in the honest sense. catalog.read (not catalog.write) because what it MUTATES is
+        // this instance's own bookkeeping about a peer, not the peer or this instance's catalog — the
+        // same action a caller already needed to LIST peers, which is the operation this augments.
+        group.MapPost("/peers/{name}/probe", async (string name, ClaimsPrincipal principal, AccessGuard guard) =>
+        {
+            if (await RefuseAsync(guard, principal) is { } refusal)
+            {
+                return refusal;
+            }
+
+            var peer = PeerDirectory.Find(name);
+            if (peer is null)
+            {
+                return Results.NotFound(new { error = $"no peer named '{name}' is configured" });
+            }
+
+            await PeerProbe.ProbeAsync(peer);
+            return Results.Ok(PeerDirectory.Find(name));
+        }).RequireAuthorization("Viewer");
 
         // Raw text of the two static .proto files, resolved from options.ProtosDir (host-specific —
         // Protos/ lives directly under the Orleans host project; a future Dapr host can point
@@ -176,5 +299,82 @@ public static class MetaEndpoints
     {
         var result = await guard.CheckAsync(principal, Actions.CatalogRead, "*");
         return result.IsAllowed ? null : AccessGuard.Deny(result);
+    }
+
+    /// <summary>Plan 016's three <c>GET /api/meta/instance</c> catalogWarnings, computed cheaply from the
+    /// three catalog lists this route already reads — no extra facade calls, no re-derivation of anything
+    /// a wave 2/3 agent already maintains.
+    ///
+    /// <para><b>Counts and kind names, never entity names.</b> This route is ANONYMOUS, and the rule it
+    /// states for itself two screens up is "entity COUNTS, not entity names". A warning reading
+    /// <c>pipeline 'fx_desk_pnl' pin is stale</c> would hand an unauthenticated caller the catalog's
+    /// contents through the back door — the thing <c>GET /api/pipelines</c> requires a Viewer grant for.
+    /// So each condition is reported as a count, and the operator who needs to know WHICH entity reads it
+    /// off the catalog routes they are already authorised for. A kind name is not redacted: it names a
+    /// connector type, not a business entity, and it is the actionable half of that particular
+    /// warning.</para>
+    ///
+    /// <list type="bullet">
+    /// <item>Duplicate pipeline names: pipelines are the one entity NOT unique-checked at the write path
+    /// (that guard is against sources+tables only — see the plan's rename-policy section), so this is
+    /// the one live symptom worth surfacing.</item>
+    /// <item>Broken pins: <see cref="PipelineDefinition.StaleReason"/> / <see cref="TableDefinition.StaleReason"/>
+    /// are already maintained by the wave-2 recompile-on-upstream-change path; this reads them, it does
+    /// not recompute anything.</item>
+    /// <item>Entities referencing an unregistered kind: every <see cref="SourceDefinition.Kind"/> plus
+    /// every <see cref="SinkSpec.Kind"/> on every pipeline/table's <c>Sinks</c> list, checked against
+    /// <see cref="KindVersions.All"/> — the same live registry snapshot <c>ConfigImportService</c>'s
+    /// plugin-requirement gate uses, so an entity counted here is counted for the identical reason an
+    /// import of it would be refused.</item>
+    /// </list></summary>
+    private static void CollectCatalogWarnings(
+        List<SourceDefinition> sources, List<PipelineDefinition> pipelines, List<TableDefinition> tables, List<string> warnings)
+    {
+        var duplicated = pipelines.GroupBy(p => p.Name, StringComparer.Ordinal).Where(g => g.Count() > 1).ToList();
+        if (duplicated.Count > 0)
+        {
+            warnings.Add(
+                $"{duplicated.Count} pipeline name(s) are used by more than one pipeline " +
+                $"({duplicated.Sum(g => g.Count())} pipelines affected)");
+        }
+
+        var stalePipelines = pipelines.Count(p => !string.IsNullOrEmpty(p.StaleReason));
+        if (stalePipelines > 0)
+        {
+            warnings.Add($"{stalePipelines} pipeline(s) have a stale pin");
+        }
+
+        var staleTables = tables.Count(t => !string.IsNullOrEmpty(t.StaleReason));
+        if (staleTables > 0)
+        {
+            warnings.Add($"{staleTables} table(s) have a stale pin");
+        }
+
+        // One line per unrecognised kind rather than per entity: the count is what an operator acts on,
+        // and it bounds this list at the number of distinct kinds no matter how large the catalog is.
+        var knownKinds = KindVersions.All();
+        var unregistered = new Dictionary<string, int>(StringComparer.Ordinal);
+        void Note(string? kind)
+        {
+            if (!string.IsNullOrEmpty(kind) && !knownKinds.ContainsKey(kind))
+            {
+                unregistered[kind] = unregistered.GetValueOrDefault(kind) + 1;
+            }
+        }
+
+        foreach (var s in sources)
+        {
+            Note(s.Kind);
+        }
+
+        foreach (var sink in pipelines.SelectMany(p => p.Sinks).Concat(tables.SelectMany(t => t.Sinks)))
+        {
+            Note(sink.Kind);
+        }
+
+        foreach (var (kind, count) in unregistered.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+        {
+            warnings.Add($"{count} entit(ies) use kind '{kind}', which this instance has no connector registered for");
+        }
     }
 }

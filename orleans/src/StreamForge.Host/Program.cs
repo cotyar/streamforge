@@ -3,6 +3,7 @@ using Orleans;
 using Orleans.Hosting;
 using StreamForge.Abstractions;
 using StreamForge.Api;
+using StreamForge.AppCore.Discovery;
 using StreamForge.Connectors.Database;
 using StreamForge.Connectors.Fix;
 using StreamForge.Host.Facades;
@@ -197,6 +198,18 @@ FixConnectors.RegisterAll();
 // never links a pricing library. Must precede anything that compiles SQL.
 StreamForge.Quant.QuantFunctions.RegisterAll();
 
+// Plan 016 wave 5: this instance's directory of known peers, read from config and installed into the
+// process-wide PeerDirectory before the host starts serving. "Discovery:Peers" (a section, not a flat
+// key) so it binds as an ARRAY — the shape .NET configuration gives every provider for free, including
+// the one every live check in this repo actually uses: `--Discovery:Peers:0:Name foo
+// --Discovery:Peers:0:RestEndpoint http://host:port` on the command line, or DISCOVERY__PEERS__0__NAME /
+// DISCOVERY__PEERS__0__RESTENDPOINT as env vars, bind identically to the equivalent appsettings.json
+// `{ "Discovery": { "Peers": [ { "Name": "...", "RestEndpoint": "...", "GrpcEndpoint": "..." } ] } }`.
+// Binding straight onto PeerRecord (not a separate DTO) keeps this a one-liner; the registry-owned
+// fields (InstanceId/LastSeenAtMs/LastError/Info) simply stay at their zero values unless a probe sets
+// them later, which is exactly the "configured but never seen" state PeerRecord already documents.
+PeerDirectory.Configure(builder.Configuration.GetSection("Discovery:Peers").Get<List<PeerRecord>>() ?? []);
+
 var app = builder.Build();
 
 // Host-specific facts StreamForgeApiOptions carries so the shared endpoints stay byte-identical
@@ -215,7 +228,13 @@ var apiOptions = new StreamForgeApiOptions(
     SpaDistPath: Path.GetFullPath(Path.Combine(
         app.Environment.ContentRootPath,
         app.Configuration["Web:Dist"] ?? Path.Combine("..", "..", "..", "web", "dist"))),
-    Flavor: "orleans");
+    Flavor: "orleans",
+    // Plan 016 wave 5: same config key JsonFileGrainStorage already reads (see that class's
+    // AddJsonFileGrainStorage extension) — one DataDir, one identity file living next to the grain state
+    // it is already the default for, not a second directory setting nobody would think to keep in sync.
+    DataDir: app.Configuration["DataDir"] ?? "./data",
+    InstanceName: app.Configuration["InstanceName"] ?? "",
+    Version: app.Configuration["Version"] ?? "");
 
 app.MapStreamForgeApi(apiOptions);
 
