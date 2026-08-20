@@ -12,14 +12,18 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.*" />
   </ItemGroup>
   <ItemGroup>
-    <!-- Plan 020 wave A — THE PIN. Ycs is a git submodule at external/ycs, held at the
-         `parity-yjs-13.6.32` branch, NOT at `main`: main is v2-encoding-only and has no
-         UpdateOperations (MergeUpdates/DiffUpdate/EncodeStateVectorFromUpdate/DecodeUpdate) and no
-         PermanentUserData, which waves C and D are built on. YcsPinTests asserts that, so a submodule
-         bumped onto the wrong branch fails HERE rather than three waves later.
-
-         Wave B adds shared/StreamForge.Connectors.Crdt and this reference moves behind it. Until then
-         the test project references Ycs directly rather than creating an empty library to hold it. -->
-    <ProjectReference Include="..\..\external\ycs\src\Ycs\Ycs.csproj" />
+    <!-- Plan 020 wave A pinned the submodule branch here directly (see YcsPinTests's own doc comment
+         for why parity-yjs-13.6.32, not main, matters). Wave B adds shared/StreamForge.Connectors.Crdt,
+         which itself references Ycs.csproj — so this project references THAT instead of Ycs.csproj
+         directly, and gets Ycs (and Contracts/AppCore) transitively. YcsPinTests is untouched and stays
+         green: it only needs the `Ycs` namespace, which still resolves transitively. -->
+    <ProjectReference Include="..\StreamForge.Connectors.Crdt\StreamForge.Connectors.Crdt.csproj" />
+    <!-- TEST-ONLY. CrdtProjector deliberately does NOT reference this project (see its class doc: a
+         database connector has no business being a dependency of a CRDT document, and it would drag
+         Npgsql + Microsoft.Data.SqlClient in for four string constants). The TEST references it so
+         DiffOpAndWeightLiteralsMatchCdcStampsSpelling can assert against CdcStamp's real declared
+         values instead of a copy of them — a pin that says "keep these in step" without reading the
+         other side is a comment, not a test. -->
+    <ProjectReference Include="..\StreamForge.Connectors.Database\StreamForge.Connectors.Database.csproj" />
   </ItemGroup>
 </Project>
