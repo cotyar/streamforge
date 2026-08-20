@@ -136,8 +136,8 @@ public class ImportPlannerDuplicateNameTests
         var sources = new List<SourceDefinition> { new() { Name = "s" }, new() { Name = "s" } };
         var tables = new List<TableDefinition>
         {
-            new() { Id = "t1", Name = "t", Sql = "TABLE AS SELECT 1" },
-            new() { Id = "t2", Name = "t", Sql = "TABLE AS SELECT 1" },
+            new() { Id = "t1", Name = "t", Sql = "SELECT 1" },
+            new() { Id = "t2", Name = "t", Sql = "SELECT 1" },
         };
 
         var actions = ImportPlanner.Plan(new ConfigDocument(), sources, [], tables, "merge");

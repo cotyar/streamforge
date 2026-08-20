@@ -23,7 +23,7 @@ public class ImportPlannerTests
     {
         Id = name,
         Name = name,
-        Sql = "TABLE AS SELECT 1",
+        Sql = "SELECT 1",
         Status = status,
         TableInputs = inputs ?? [],
     };
@@ -156,7 +156,7 @@ public class ImportPlannerTests
         var doc = new ConfigDocument
         {
             Sources = [CatalogSource("s")],
-            Tables = [new ConfigTable { Name = "t", Sql = "TABLE AS SELECT 1" }],
+            Tables = [new ConfigTable { Name = "t", Sql = "SELECT 1" }],
             Pipelines = [new ConfigPipeline { Name = "p", Sql = "SELECT 1" }],
         };
 
@@ -175,8 +175,8 @@ public class ImportPlannerTests
         {
             Tables =
             [
-                new ConfigTable { Name = "B", Sql = "TABLE AS SELECT 2 FROM A" }, // listed first in the doc, differs -> updated
-                new ConfigTable { Name = "A", Sql = "TABLE AS SELECT 2" },        // differs -> updated
+                new ConfigTable { Name = "B", Sql = "SELECT 2 FROM A" }, // listed first in the doc, differs -> updated
+                new ConfigTable { Name = "A", Sql = "SELECT 2" },        // differs -> updated
             ],
         };
 
@@ -193,8 +193,8 @@ public class ImportPlannerTests
         {
             Tables =
             [
-                new ConfigTable { Name = "downstream", Sql = "TABLE AS SELECT * FROM upstream" },
-                new ConfigTable { Name = "upstream", Sql = "TABLE AS SELECT 1" },
+                new ConfigTable { Name = "downstream", Sql = "SELECT * FROM upstream" },
+                new ConfigTable { Name = "upstream", Sql = "SELECT 1" },
             ],
         };
 
@@ -211,8 +211,8 @@ public class ImportPlannerTests
         {
             Tables =
             [
-                new ConfigTable { Name = "x", Sql = "TABLE AS SELECT * FROM y" },
-                new ConfigTable { Name = "y", Sql = "TABLE AS SELECT * FROM x" },
+                new ConfigTable { Name = "x", Sql = "SELECT * FROM y" },
+                new ConfigTable { Name = "y", Sql = "SELECT * FROM x" },
             ],
         };
 

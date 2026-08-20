@@ -36,7 +36,7 @@ public class ConfigSerializerTests
         Id = name,
         Name = name,
         Description = "",
-        Sql = $"TABLE AS SELECT * FROM {name}_src",
+        Sql = $"SELECT * FROM {name}_src",
         Status = status,
     };
 
@@ -51,7 +51,7 @@ public class ConfigSerializerTests
         {
             Sources = [Source("trades")],
             Pipelines = [new ConfigPipeline { Name = "p1", Sql = "SELECT * FROM trades", Running = true }],
-            Tables = [new ConfigTable { Name = "t1", Sql = "TABLE AS SELECT * FROM trades", SearchMode = "Fuzzy" }],
+            Tables = [new ConfigTable { Name = "t1", Sql = "SELECT * FROM trades", SearchMode = "Fuzzy" }],
         };
         var json = ConfigSerializer.ToCanonicalJson(doc);
         var yaml = ConfigSerializer.ToYaml(doc);
@@ -135,7 +135,7 @@ public class ConfigSerializerTests
                 Mapping = new MappingSpec { ItemsPath = "$.data[*]", Fields = [new FieldMapEntry { Field = new FieldDef("v", FieldType.Double) }] },
             })],
             Pipelines = [new ConfigPipeline { Name = "p", Sql = "SELECT 1", Running = true, Tags = ["x"] }],
-            Tables = [new ConfigTable { Name = "t", Sql = "TABLE AS SELECT 1", HistoryEnabled = true, HistoryMode = "MaxBy", HistoryByField = "ts" }],
+            Tables = [new ConfigTable { Name = "t", Sql = "SELECT 1", HistoryEnabled = true, HistoryMode = "MaxBy", HistoryByField = "ts" }],
         };
 
         var json1 = ConfigSerializer.ToCanonicalJson(doc);

@@ -1,6 +1,5 @@
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Config;
@@ -381,8 +380,8 @@ public static class ConfigImportService
     /// was first written — see <see cref="ScanNewEntityReferences"/> below, a same-behavior copy rather
     /// than a cross-assembly call: that method is <c>internal</c> to <c>StreamForge.AppCore</c>, a file
     /// this wave does not own, and there is no <c>InternalsVisibleTo</c> making it reachable from here):
-    /// desugar <c>INSERT INTO &lt;sink&gt;</c> first (the Engine has no INSERT production), extract via
-    /// the real compiler, and fall back to a FROM-only regex only on a genuine parse failure. Returns
+    /// desugar <c>INSERT INTO &lt;sink&gt;</c> first (the Engine has no INSERT production) and extract via
+    /// the real compiler, with no regex fallback — an unparseable statement contributes no edges. Returns
     /// null when the graph is acyclic.</para>
     /// </summary>
     public static string? DetectTableDependencyCycle(
@@ -450,34 +449,16 @@ public static class ConfigImportService
         return cycle;
     }
 
-    private static readonly Regex FromReferenceRegex = new(@"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
     /// <summary>Same-behavior copy of <c>ImportPlanner.ScanNewEntityReferences</c> (wave 3-B) — desugar
     /// <c>INSERT INTO &lt;sink&gt;</c> first (the Engine has no INSERT production, so a still-sugared
     /// statement is a parse error to <see cref="SqlCompiler.ExtractReferences"/> and would otherwise
-    /// lose every dependency of the commonest authored form), extract via the real compiler, and fall
-    /// back to a FROM-only regex only when the compiler could not parse the statement at all — see that
-    /// method's doc comment (in a file this wave does not own) for why the fallback exists and when it
-    /// fires. Kept in sync by hand, the same "mirrors, does not share" rule
-    /// <see cref="ProcessTableAsync"/>'s doc comment already states for the reason
-    /// (<c>ImportPlanner.cs</c> and this file have different owners this wave).</summary>
-    private static List<string> ScanNewEntityReferences(string sql)
-    {
-        var desugared = SinkSugar.Desugar(sql ?? "").Sql;
-        var compiled = SqlCompiler.ExtractReferences(desugared);
-        if (compiled.Count > 0)
-        {
-            return [.. compiled];
-        }
-
-        var names = new List<string>();
-        foreach (Match m in FromReferenceRegex.Matches(desugared ?? ""))
-        {
-            names.Add(m.Groups[1].Value);
-        }
-
-        return names;
-    }
+    /// lose every dependency of the commonest authored form), then extract via the real compiler and
+    /// trust it — an unparseable statement contributes no edges, no regex fallback. Kept in sync by hand,
+    /// the same "mirrors, does not share" rule <see cref="ProcessTableAsync"/>'s doc comment already
+    /// states for the reason (<c>ImportPlanner.cs</c> and this file have different owners this
+    /// wave).</summary>
+    private static List<string> ScanNewEntityReferences(string sql) =>
+        [.. SqlCompiler.ExtractReferences(SinkSugar.Desugar(sql ?? "").Sql)];
 
     /// <summary>The document-level, 200-with-<c>Ok:false</c> report for a fatal cycle — the same shape
     /// <see cref="DocumentErrorReport"/> uses for a composition failure (Kind="document"), because it is

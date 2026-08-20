@@ -33,7 +33,7 @@ public class ImportPlannerSinksTests
     {
         Id = "t1",
         Name = "tbl",
-        Sql = "TABLE AS SELECT 1",
+        Sql = "SELECT 1",
         Status = PipelineStatus.Running,
         Sinks = [Nats(token)],
     };

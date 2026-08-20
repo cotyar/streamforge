@@ -1,5 +1,4 @@
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 using StreamForge.Abstractions;
 using StreamForge.AppCore.Sql;
 using StreamForge.Engine;
@@ -25,8 +24,6 @@ public sealed record PlannedAction(string Kind, string Name, string Action, IRea
 /// </summary>
 public static class ImportPlanner
 {
-    private static readonly Regex FromReferenceRegex = new(@"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
     public static List<PlannedAction> Plan(
         ConfigDocument doc,
         IReadOnlyList<SourceDefinition> sources,
@@ -336,32 +333,16 @@ public static class ImportPlanner
     /// still-sugared statement is a parse error to <c>ExtractReferences</c> and would otherwise lose
     /// every dependency of the commonest authored form.</para>
     ///
-    /// <para><b>ponytail: falls back to the old FROM-only regex ONLY when the compiler could not parse
-    /// the statement at all.</b> Found live while wiring this up, not guessed: <c>ImportPlannerTests</c>,
-    /// <c>ImportPlannerDuplicateNameTests</c>, <c>ImportPlannerSinksTests</c> and <c>ConfigSerializerTests</c>
-    /// — none of them mine to edit — author every table's SQL as <c>"TABLE AS SELECT …"</c>, a prefix this
-    /// dialect's grammar has never accepted (real <c>TableDefinition.Sql</c> text is a bare
-    /// <c>SELECT</c>/<c>WITH</c>, confirmed against <c>CatalogRevisionsTests</c> and every live compile
-    /// call site). <c>ExtractReferences</c> therefore returns <c>[]</c> for every one of those fixtures —
-    /// not because they reference nothing, but because "TABLE AS" fails to parse — and
-    /// <c>ExtractReferences</c>' contract makes those two cases deliberately indistinguishable. Trusting
-    /// the compiler unconditionally would silently drop the dependency those tests assert on
-    /// (<c>New_table_dependency_is_inferred_from_sql_from_reference</c>,
-    /// <c>Table_dependency_cycle_is_diagnosed_not_crashed</c>) and reorder every table apply in this repo's
-    /// own test suite. The regex fallback only ever fires on a genuine parse failure — a CTE, a JOIN, a
-    /// subquery all parse fine and never reach it — so it costs nothing on well-formed SQL and exists
-    /// purely as the safety net documented above. Ceiling: a table whose SQL is BOTH invalid AND written
-    /// with an unsupported prefix like "TABLE AS" gets the pre-016 FROM-only answer instead of one derived
-    /// from a real parse — no worse than today, since today IS that answer for everything. Upgrade path:
-    /// none needed unless a future SQL-authoring convention reintroduces a non-parsing prefix on purpose,
-    /// at which point desugar it the way <see cref="SinkSugar"/> already handles INSERT INTO.</para>
+    /// <para>The compiler is trusted unconditionally: there is no regex fallback for a statement it
+    /// cannot parse. An unparseable table SQL therefore contributes NO dependency edges, which is the
+    /// honest answer — the downstream compile refuses that entity anyway, so guessing an apply order for
+    /// it buys nothing. (Wave 3-B shipped with such a fallback, kept alive solely by fixtures in
+    /// <c>ImportPlannerTests</c> and friends that authored table SQL as <c>"TABLE AS SELECT …"</c>, a
+    /// prefix this dialect's grammar never accepted and no production <c>TableDefinition.Sql</c> ever
+    /// holds. Those fixtures were rewritten to parseable SQL and the fallback deleted with them.)</para>
     /// </summary>
-    internal static List<string> ScanNewEntityReferences(string sql)
-    {
-        var desugared = SinkSugar.Desugar(sql ?? "").Sql;
-        var compiled = SqlCompiler.ExtractReferences(desugared);
-        return compiled.Count > 0 ? [.. compiled] : ScanFromReferences(desugared);
-    }
+    internal static List<string> ScanNewEntityReferences(string sql) =>
+        [.. SqlCompiler.ExtractReferences(SinkSugar.Desugar(sql ?? "").Sql)];
 
     /// <summary>Plan 016 wave 3-B: the diagnostic half of <see cref="ScanNewEntityReferences"/> — every
     /// relation NAME a document entity's SQL reads that resolves to nothing in <paramref name="known"/>
@@ -375,19 +356,6 @@ public static class ImportPlanner
     {
         var missing = ScanNewEntityReferences(sql).Where(n => !known.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
         return [.. missing.Select(n => $"references '{n}', which does not exist in this document or the current catalog")];
-    }
-
-    /// <summary>ponytail: the FROM-only regex <see cref="ScanNewEntityReferences"/> now falls back to —
-    /// see its doc comment for exactly when and why. No longer the primary dependency scan.</summary>
-    private static List<string> ScanFromReferences(string sql)
-    {
-        var names = new List<string>();
-        foreach (Match m in FromReferenceRegex.Matches(sql ?? ""))
-        {
-            names.Add(m.Groups[1].Value);
-        }
-
-        return names;
     }
 
     /// <summary>Post-order DFS topological sort: a name's dependencies (per <paramref name="deps"/>,
