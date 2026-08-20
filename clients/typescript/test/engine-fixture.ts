@@ -209,6 +209,9 @@ export interface Engine {
   aggTable: string;
   globalAggTable: string;
   crdtAwarenessSource: string;
+  /** Last ~200 lines of the engine's combined stdout/stderr, for a test to print on its own
+   * failure (e.g. a hang/deadlock that never triggers the process-exit tail above). */
+  tail: () => string;
   stop: () => Promise<void>;
 }
 
@@ -245,7 +248,26 @@ export async function bootEngine(): Promise<Engine> {
   proc.stdout.on("data", (d: Buffer) => tail.push(d.toString()));
   proc.stderr.on("data", (d: Buffer) => tail.push(d.toString()));
 
+  // The original version of this fixture only printed `tail` from the catch block around
+  // waitHealthy()/importFixtureConfig() -- i.e. only a failure during BOOT. A crash mid-suite
+  // (the engine dies between two tests, or between two requests inside one test) produced no
+  // catch here at all: the test just sees `ECONNREFUSED`/"socket closed unexpectedly" with the
+  // engine's own explanation of why it died silently discarded. Print the tail the moment the
+  // process exits for any reason we didn't ourselves request via stop() -- this is the only place
+  // that reliably fires exactly once, exactly when it's needed, regardless of which test (or
+  // which transport's beforeAll) happens to be running at the time.
+  let stopRequested = false;
+  proc.on("exit", (code, signal) => {
+    if (stopRequested) return;
+    console.error(
+      `engine process exited UNEXPECTEDLY (code ${code}, signal ${signal}) -- this almost always means a test is ` +
+        `about to fail with ECONNREFUSED/"socket closed unexpectedly" right after this. Engine output (tail):\n` +
+        tail.text(),
+    );
+  });
+
   const stop = async () => {
+    stopRequested = true;
     proc.kill("SIGTERM");
     await new Promise<void>((resolve) => {
       const t = setTimeout(() => {
@@ -280,6 +302,7 @@ export async function bootEngine(): Promise<Engine> {
     aggTable: AGG_TABLE,
     globalAggTable: GLOBAL_AGG_TABLE,
     crdtAwarenessSource: CRDT_AWARENESS_SOURCE,
+    tail: () => tail.text(),
     stop,
   };
 }
