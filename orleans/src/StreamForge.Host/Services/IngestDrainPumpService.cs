@@ -95,7 +95,13 @@ public sealed class IngestDrainPumpService(
         ILogger logger,
         CancellationToken ct)
     {
-        var ingestNames = sources.Where(s => SourceKindDispatch.Classify(s.Kind) == SourceKindDispatch.ActorKind.Ingest).Select(s => s.Name).ToList();
+        // Plan 021 D3/item 3 — the buffer key is EnvKeys.Qualify(s.Environment, s.Name), not the bare
+        // name: sources was gathered across EVERY environment (see ExecuteAsync's own comment), so two
+        // environments' same-named ingest source would otherwise share one buffer — the exact leak this
+        // wave exists to close. A SourceDefinition's own Environment field is the source of truth here
+        // (D5 — this is background work, never the ambient).
+        var ingestNames = sources.Where(s => SourceKindDispatch.Classify(s.Kind) == SourceKindDispatch.ActorKind.Ingest)
+            .Select(s => EnvKeys.Qualify(s.Environment, s.Name)).ToList();
         ingress.RetainOnly(ingestNames.ToHashSet(StringComparer.Ordinal));
 
         foreach (var name in ingestNames)
@@ -134,8 +140,12 @@ public sealed class IngestDrainPumpService(
         ILogger logger,
         CancellationToken ct)
     {
-        foreach (var name in sources.Where(s => SourceKindDispatch.Classify(s.Kind) == SourceKindDispatch.ActorKind.Ingest).Select(s => s.Name))
+        // Plan 021 D3/item 3 — same qualified key as SweepAsync (s.Environment, not the ambient — this is
+        // background work), so the buffer lookup, the IIngressStatsGrain address, and the baseline tracker
+        // all agree on identity across environments.
+        foreach (var s in sources.Where(s => SourceKindDispatch.Classify(s.Kind) == SourceKindDispatch.ActorKind.Ingest))
         {
+            var name = EnvKeys.Qualify(s.Environment, s.Name);
             var buffer = ingress.TryGet(name);
             if (buffer is null)
             {

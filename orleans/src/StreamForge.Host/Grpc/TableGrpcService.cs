@@ -177,7 +177,7 @@ public sealed class TableGrpcService(IClusterClient client, AccessGuard guard) :
 
         await GrpcAccess.EnsureAsync(guard, context, Actions.TableRead, def.Name, def.Tags);
 
-        var grain = client.GetGrain<ITableGrain>(def.Name);
+        var grain = client.GetGrain<ITableGrain>(EnvKeys.Qualify(def.Environment, def.Name));
         var limit = request.Limit > 0 ? request.Limit : 100;
         var rows = await grain.GetRowsAsync(limit, request.Offset);
         var total = await grain.GetRowCountAsync();
@@ -208,7 +208,7 @@ public sealed class TableGrpcService(IClusterClient client, AccessGuard guard) :
         var limit = request.Limit > 0 ? request.Limit : 100;
         List<TableRowDto> rows = string.IsNullOrWhiteSpace(request.Query)
             ? []
-            : await client.GetGrain<ITableGrain>(def.Name).SearchAsync(request.Query, limit);
+            : await client.GetGrain<ITableGrain>(EnvKeys.Qualify(def.Environment, def.Name)).SearchAsync(request.Query, limit);
 
         var response = new V1.SearchTableResponse
         {

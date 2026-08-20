@@ -37,6 +37,21 @@ namespace StreamForge.Api;
 /// with no credentials. Putting this middleware ahead of authentication would hand out that oracle;
 /// putting it here means a 404 from this middleware is only ever seen by someone who already cleared
 /// authn/authz for the route they asked for.</para>
+///
+/// <para><b>Wave 2 addition — <see cref="HttpContextItemKey"/>, for a caller that is not inside an HTTP
+/// request when it needs to know the environment.</b> A SignalR hub method runs over an already-established
+/// WebSocket, not through this middleware, so <c>EnvironmentAmbient</c> (an <c>AsyncLocal</c>) is empty
+/// there — reading it from <c>StreamHub</c> would silently group every subscriber under the default
+/// environment. What DID go through this middleware is the HTTP request that established the connection
+/// (SignalR's negotiate/connect request), and ASP.NET Core keeps that request's <see cref="HttpContext"/>
+/// reachable for the life of the connection via <c>HubCallerContext.GetHttpContext()</c>. So this
+/// middleware also stamps the resolved environment onto <c>HttpContext.Items[HttpContextItemKey]</c>, and
+/// <c>StreamHub</c> reads it from there instead of from the ambient. It is stamped on BOTH the default
+/// path and the named-environment path — a value of <see cref="EnvKeys.Default"/> and a missing key both
+/// mean "no environment was selected" as far as any other reader is concerned, but only the stamped value
+/// lets <c>StreamHub</c> tell "this connection is on default" apart from "this connection's HttpContext
+/// never went through this middleware at all" (which would be a bug worth being loud about, not one to
+/// paper over by treating a missing key as default too).</para>
 /// </summary>
 public static class EnvironmentSelectionMiddleware
 {
@@ -48,6 +63,11 @@ public static class EnvironmentSelectionMiddleware
     /// a plain browser address-bar hit).</summary>
     public const string QueryParam = "env";
 
+    /// <summary><c>HttpContext.Items</c> key this middleware stores the resolved environment under —
+    /// see the class remarks. Public so <c>StreamHub</c> (and any future non-HTTP reader of a request's
+    /// resolved environment) can read it without depending on this middleware's internals.</summary>
+    public const string HttpContextItemKey = "sf.environment";
+
     /// <summary>Routes this middleware does not touch at all — it calls <c>next()</c> immediately,
     /// before even reading the header. <c>/healthz</c>/<c>/api/healthz</c> are anonymous liveness probes
     /// with no catalog behind them; <c>/api/meta/instance</c> is anonymous and describes THIS SERVER
@@ -56,6 +76,15 @@ public static class EnvironmentSelectionMiddleware
     /// global and not partitioned by environment — a caller should never need to guess an environment
     /// just to log in or to read their own profile.</summary>
     private static readonly string[] ExactExclusions = ["/healthz", "/api/healthz", "/api/meta/instance"];
+
+    /// <summary>Plan 021 wave 2 — <c>/api/environments</c> is excluded, and the reason is recovery, not
+    /// convenience. Its handlers never consult the ambient (they go to <see cref="IEnvironmentFacade"/>,
+    /// a fixed singleton that is the thing answering "which environments exist"), so selection has
+    /// nothing to do there. But leaving it gated created a deadlock: a client still pointing at an
+    /// environment somebody force-deleted got a 404 on EVERY route — including the one route it would use
+    /// to discover that its selection is gone and fall back. The SPA found this the hard way; a curl user
+    /// or the admin CLI would have had no way out but to unset the header by hand.</summary>
+    private const string EnvironmentsPrefix = "/api/environments";
 
     private const string AuthPrefix = "/api/auth/";
 
@@ -77,8 +106,12 @@ public static class EnvironmentSelectionMiddleware
 
             if (env == EnvKeys.Default)
             {
-                // D2: the untouched path. No facade, no ambient write, no round trip — see the class
-                // remarks for why this branch has to stay exactly this cheap.
+                // D2: the untouched path. No facade call, no ambient write, no round trip — see the
+                // class remarks for why this branch has to stay exactly this cheap. The Items write
+                // below is a plain dictionary write (no I/O, no round trip) and is NOT the thing D2
+                // protects — it is what lets StreamHub tell "this connection resolved to default"
+                // apart from "this connection's HttpContext never reached this middleware".
+                context.Items[HttpContextItemKey] = EnvKeys.Default;
                 await next(context);
                 return;
             }
@@ -94,6 +127,7 @@ public static class EnvironmentSelectionMiddleware
             }
 
             EnvironmentAmbient.Set(env);
+            context.Items[HttpContextItemKey] = env;
             try
             {
                 await next(context);
@@ -111,5 +145,7 @@ public static class EnvironmentSelectionMiddleware
 
     private static bool IsExcluded(string path) =>
         ExactExclusions.Contains(path, StringComparer.OrdinalIgnoreCase) ||
-        path.StartsWith(AuthPrefix, StringComparison.OrdinalIgnoreCase);
+        path.StartsWith(AuthPrefix, StringComparison.OrdinalIgnoreCase) ||
+        path.Equals(EnvironmentsPrefix, StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith(EnvironmentsPrefix + "/", StringComparison.OrdinalIgnoreCase);
 }

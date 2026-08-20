@@ -1,7 +1,7 @@
 // Plan 012: CSV downloads (GET /api/tables/{id}/rows.csv, /api/pipelines/{id}/results.csv). Outside the
 // shared `api` helper (client.ts) for the same reason config export is: those endpoints return a file
 // with a Content-Disposition filename, not JSON.
-import { ApiError, getStoredToken } from './client'
+import { ApiError, environmentHeader, getStoredToken } from './client'
 
 function filenameFrom(header: string | null, fallback: string): string {
   if (!header) return fallback
@@ -13,7 +13,9 @@ function filenameFrom(header: string | null, fallback: string): string {
  * download. A plain <a href> can't be used: these routes require the Authorization header. */
 export async function downloadCsv(path: string, fallbackFilename: string): Promise<void> {
   const token = getStoredToken()
-  const res = await fetch(path, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+  const headers: Record<string, string> = { ...environmentHeader() }
+  if (token) headers.Authorization = `Bearer ${token}`
+  const res = await fetch(path, { headers })
   if (!res.ok) {
     throw new ApiError(res.status, res.statusText || `Request failed with status ${res.status}`)
   }

@@ -50,7 +50,7 @@ public sealed class StreamGrpcService(IClusterClient client, AccessGuard guard) 
 
         var streamProvider = client.GetStreamProvider(StreamConstants.ProviderName);
         var stream = streamProvider.GetStream<EventRecord>(
-            StreamId.Create(StreamConstants.SourcesNamespace, request.Name));
+            StreamId.Create(StreamConstants.SourcesNamespace, EnvKeys.Qualify(EnvironmentAmbient.Current, request.Name)));
 
         long seq = 0;
         var handle = await stream.SubscribeAsync(async (evt, _) =>
@@ -96,7 +96,7 @@ public sealed class StreamGrpcService(IClusterClient client, AccessGuard guard) 
 
         var streamProvider = client.GetStreamProvider(StreamConstants.ProviderName);
         var stream = streamProvider.GetStream<List<ResultEnvelope>>(
-            StreamId.Create(StreamConstants.OutputNamespace, pipelineId));
+            StreamId.Create(StreamConstants.OutputNamespace, EnvKeys.Qualify(subscribed?.Environment ?? EnvironmentAmbient.Current, pipelineId)));
 
         var handle = await stream.SubscribeAsync(async (rows, _) =>
         {
@@ -139,7 +139,7 @@ public sealed class StreamGrpcService(IClusterClient client, AccessGuard guard) 
 
         var streamProvider = client.GetStreamProvider(StreamConstants.ProviderName);
         var stream = streamProvider.GetStream<List<TableDeltaDto>>(
-            StreamId.Create(StreamConstants.TableDeltaNamespace, tableName));
+            StreamId.Create(StreamConstants.TableDeltaNamespace, EnvKeys.Qualify(table?.Environment ?? EnvironmentAmbient.Current, tableName)));
 
         long seq = 0;
         var handle = await stream.SubscribeAsync(async (deltas, _) =>

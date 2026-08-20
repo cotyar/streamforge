@@ -5,6 +5,7 @@
 import * as signalR from '@microsoft/signalr'
 import type { PipelineMetrics, PipelineStatus, ResultEnvelope, ResultRow, TableRowDto } from '../api/types'
 import { getStoredToken } from '../api/client'
+import { getStoredEnvironment, needsEnvironmentSelector } from '../lib/environment'
 
 type RowsHandler = (rows: ResultEnvelope[]) => void
 type StatusHandler = (status: PipelineStatus) => void
@@ -118,6 +119,19 @@ function resolveTransport(): signalR.HttpTransportType | undefined {
   }
 }
 
+/** Plan 021 wave 2 (021-F): a WebSocket/SSE connection cannot carry the `X-StreamForge-Environment`
+ * header (see client.ts), so the hub takes `?env=<name>` instead — the same override
+ * EnvironmentSelectionMiddleware.cs documents for "a browser navigation or any other caller that
+ * cannot set a header on the request that matters", and the one the middleware stamps onto
+ * HttpContext.Items for StreamHub to read (the negotiate/connect request IS an HTTP request, so it
+ * still goes through the middleware even though the long-lived connection built on top of it does
+ * not). Read fresh on every (re)connect, not cached, so a switch that tears the connection down (see
+ * EnvironmentPicker's switchTo()) reconnects against whichever environment is current at that moment. */
+function hubUrl(): string {
+  const env = getStoredEnvironment()
+  return needsEnvironmentSelector(env) ? `/hubs/stream?env=${encodeURIComponent(env)}` : '/hubs/stream'
+}
+
 function getConnection(): Promise<signalR.HubConnection> {
   if (connection) return Promise.resolve(connection)
   if (connectPromise) return connectPromise
@@ -128,7 +142,7 @@ function getConnection(): Promise<signalR.HubConnection> {
   }
 
   const conn = new signalR.HubConnectionBuilder()
-    .withUrl('/hubs/stream', {
+    .withUrl(hubUrl(), {
       accessTokenFactory: () => getStoredToken() ?? '',
       ...(forcedTransport !== undefined ? { transport: forcedTransport } : {}),
     })
@@ -156,7 +170,15 @@ function getConnection(): Promise<signalR.HubConnection> {
   return connectPromise
 }
 
-/** Stops the connection (if any) and clears all subscription state. Call on logout. */
+/** Stops the connection (if any) and clears all subscription state. Call on logout, and — plan 021
+ * wave 2 — call on an environment switch too: `connection = null` runs synchronously (before the
+ * `await conn.stop()`), so by the time this call returns to its caller the next getConnection() is
+ * already guaranteed to build a brand new connection against hubUrl()'s then-current environment,
+ * rather than reusing one negotiated against the environment being left. EnvironmentPicker.tsx calls
+ * this and only then persists the new selection (setStoredEnvironment), so hubUrl() reads the new name
+ * on that fresh connection. Subscribers that unmount as part of the same switch (TablesPage etc.,
+ * remounted via Layout keying its routed content on the environment) see `connection` already null in
+ * their cleanup and skip the now-pointless `invoke('Unsubscribe...')` — no error, just a no-op. */
 export async function disconnectHub(): Promise<void> {
   const conn = connection
   connection = null

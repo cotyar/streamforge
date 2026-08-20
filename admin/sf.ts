@@ -28,6 +28,9 @@ const USAGE = `sf — StreamForge admin CLI
   sf logout                                  remove THIS instance's stored token (others untouched)
   sf instance                                this instance's identity (anonymous — no login needed)
   sf peers                                   this instance's configured federation peers
+  sf environments ls                         every environment this instance knows about (plan 021)
+  sf environments create <name> [--description D]
+  sf environments rm <name> [--force] [--yes]
   sf ls <${KINDS.join("|")}>            one line per entity (--json for the raw array)
   sf get <kind> <id>                         one entity's full definition
   sf start|stop <pipelines|tables> <id>      lifecycle
@@ -54,8 +57,9 @@ Plan 015 — entitlements, approvals, audit (all Admin-gated except \`approvals\
   sf audit days                              which days hold entries
   sf audit day <yyyyMMdd> [--actor A] [--action prefix] [--limit N] [--offset N] [--changes]
 
-Environment: SF_URL (default http://localhost:5199), SF_TOKEN, SF_USER, SF_PASSWORD.
-Global flags: --url URL, --token T, --json.
+Environment: SF_URL (default http://localhost:5199), SF_TOKEN, SF_USER, SF_PASSWORD,
+             SF_ENV (plan 021 — which environment's catalog this addresses; default = "default").
+Global flags: --url URL, --token T, --env NAME, --json.
 `;
 
 interface Args {
@@ -125,6 +129,18 @@ function printInstance(info: Record<string, any>): void {
     console.log(`  WARNING: ${warnings.length} catalog warning(s) this instance tolerates but somebody should see:`);
     for (const w of warnings) console.log(`    - ${w}`);
   }
+}
+
+// --- plan 021: environments -----------------------------------------------------------------------
+
+function summarizeEnvironment(e: Record<string, any>): string {
+  const created = e.createdAtMs ? new Date(Number(e.createdAtMs)).toISOString() : "?";
+  return [
+    String(e.name ?? "").padEnd(20),
+    `by ${e.createdBy ?? "?"}`.padEnd(16),
+    created,
+    e.description ? `  ${e.description}` : "",
+  ].join(" ").trimEnd();
 }
 
 /** 'configured' (never reached) vs 'seen' (probed at least once) is exactly what an EMPTY
@@ -342,6 +358,7 @@ async function main(argv: string[]): Promise<number> {
     url: typeof flags.url === "string" ? flags.url : undefined,
     token: typeof flags.token === "string" ? flags.token : undefined,
     user: typeof flags.user === "string" ? flags.user : undefined,
+    env: typeof flags.env === "string" ? flags.env : undefined,
   });
 
   switch (command) {
@@ -392,6 +409,45 @@ async function main(argv: string[]): Promise<number> {
       if (list.length === 0) console.log("(no peers configured)");
       for (const p of list) console.log(summarizePeer(p));
       return 0;
+    }
+
+    // Plan 021 — every environment this instance knows about (default is never listed; it always
+    // exists and cannot be created/deleted/renamed — see EnvKeys/EnvironmentsEndpoints).
+    case "environments": {
+      const sub = positional[1];
+
+      if (sub === "ls" || sub === undefined) {
+        const list = (await client.listEnvironments()) as Record<string, any>[];
+        if (json) return out(list, true), 0;
+        if (list.length === 0) console.log("(no environments besides default)");
+        for (const e of list) console.log(summarizeEnvironment(e));
+        return 0;
+      }
+
+      if (sub === "create") {
+        const name = required(positional[2], "name");
+        const description = typeof flags.description === "string" ? flags.description : "";
+        out(await client.createEnvironment(name, description), json);
+        return 0;
+      }
+
+      if (sub === "rm" || sub === "delete") {
+        const name = required(positional[2], "name");
+        const force = flags.force === true;
+        if (flags.yes !== true && !(await confirm(
+          force
+            ? `FORCE delete environment '${name}' and ALL its catalog + runtime state?`
+            : `delete environment '${name}'? (refuses if not empty; use --force to delete everything in it)`,
+        ))) {
+          console.log("aborted");
+          return 1;
+        }
+        await client.deleteEnvironment(name, force);
+        console.log(`deleted environment '${name}'`);
+        return 0;
+      }
+
+      throw new SfError("expected `environments ls|create <name>|rm <name>`");
     }
 
     case "ls": {

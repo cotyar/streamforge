@@ -178,7 +178,7 @@ public sealed class TableHistoryGrain(
         _flushTimer = null;
         if (def.HistoryEnabled)
         {
-            await SubscribeAsync(def.Name);
+            await SubscribeAsync(this.GetPrimaryKeyString());
             // MemoryOnly registers no flush timer at all — see class doc's persistence-mode paragraph.
             if (_persistenceMode != TablePersistenceMode.MemoryOnly)
             {
@@ -232,7 +232,7 @@ public sealed class TableHistoryGrain(
         await state.WriteStateAsync();
 
         await UnsubscribeAsync();
-        await SubscribeAsync(def.Name);
+        await SubscribeAsync(this.GetPrimaryKeyString());
         _flushTimer?.Dispose();
         _flushTimer = null;
         // MemoryOnly registers no flush timer at all — see class doc's persistence-mode paragraph.

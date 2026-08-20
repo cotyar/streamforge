@@ -6,7 +6,7 @@ kept since plan 007):
 | Surface | Entry point | What it administers |
 |---|---|---|
 | Cluster app (plan 007) | `bun main.ts` → :5599 | The containerized stacks / Cloud Run services — start, health, stop, logs |
-| `sf` CLI (plan 013) | `bun sf.ts <command>` | A **running instance**: catalog, lifecycle, SQL, rows, config, and (plan 015) access, approvals, audit |
+| `sf` CLI (plan 013) | `bun sf.ts <command>` | A **running instance**: catalog, lifecycle, SQL, rows, config, (plan 015) access/approvals/audit, and (plan 021) which environment |
 | MCP server (plan 013) | `bun mcp.ts` (stdio) | The same, as tools an agent can call — minus the ones an agent should not hold (see below) |
 
 The CLI and the MCP server share one REST client (`sfclient.ts`), so they cannot drift about what a
@@ -110,6 +110,9 @@ SF_URL=http://localhost:5399 bun admin/sf.ts ls tables    # the Dapr flavor, sam
 | `sf logout` | Removes **this URL's** stored token only — every other logged-in instance is untouched |
 | `sf instance` | This instance's identity — id, flavor, version, endpoints, capabilities, plugins, catalog counts/warnings. **Anonymous**, like `/healthz`: works with no login and no stored token at all |
 | `sf peers` | This instance's configured federation peers, each with its last probe result (`configured` = never reached, `seen` = probed at least once) |
+| `sf environments ls` | Every environment this instance knows about (plan 021) — `default` always exists and is never listed |
+| `sf environments create <name> [--description D]` | Admin-gated; a typo here is a 404 elsewhere, on purpose (D7 — no implicit creation) |
+| `sf environments rm <name> [--force] [--yes]` | Refuses a non-empty environment unless `--force`, which then deletes catalog AND runtime state for everything in it |
 | `sf ls <sources\|pipelines\|tables>` | One line per entity (`--json` for the raw array) |
 | `sf get <kind> <id>` | One entity's full definition |
 | `sf start\|stop <pipelines\|tables> <id>` | Lifecycle |
@@ -161,6 +164,16 @@ URL matches the one being addressed — a token from another host is not silentl
 with `SF_USER`/`SF_PASSWORD`. Only the JWT is ever written to disk, and only by an explicit
 `sf login`; no credential is. There are no default credentials in the code.
 
+### Environments (plan 021)
+
+Every command takes `--env <name>`, falling back to `SF_ENV`, falling back to the default
+environment — resolved the same way `--url`/`SF_URL` are. The default environment sends **no**
+`X-StreamForge-Environment` header at all (not even the literal string `"default"`): plan 021 D2 says
+the default path costs nothing on the server, and that includes not making it look one up. Naming an
+environment that does not exist is a 404 on every route it touches — `sf` does not create one
+implicitly; use `sf environments create` first. `/api/auth/*` (login, logout, `me`) carries no
+environment header regardless of `--env` — accounts are global, not partitioned by environment.
+
 ### The token file holds one entry PER INSTANCE (plan 016 wave 5)
 
 `~/.streamforge/token.json` used to be a single `{ url, token, username, role }` object, so logging
@@ -195,19 +208,29 @@ that matters is pinned by `mcp.test.ts` rather than assumed.
     "streamforge": {
       "command": "bun",
       "args": ["/abs/path/to/crates-foundation/admin/mcp.ts"],
-      "env": { "SF_URL": "http://localhost:5199", "SF_USER": "admin", "SF_PASSWORD": "…" }
+      "env": { "SF_URL": "http://localhost:5199", "SF_USER": "admin", "SF_PASSWORD": "…", "SF_ENV": "staging" }
     }
   }
 }
 ```
 
-**Tools** — `health`, `get_instance`, `list_peers` (plan 016 wave 5), `list_entities`, `get_entity`,
-`get_metrics`, `validate_sql`, `get_rows`, `get_results`, `create_entity`, `start_entity`,
-`stop_entity`, `delete_entity`, `export_config`, `import_config`, and plan 015's
-`get_access_policy`, `get_effective_permissions`, `list_approvals`, `get_approval`,
+**Tools** — `health`, `get_instance`, `list_peers` (plan 016 wave 5), `list_environments` (plan 021),
+`list_entities`, `get_entity`, `get_metrics`, `validate_sql`, `get_rows`, `get_results`,
+`create_entity`, `start_entity`, `stop_entity`, `delete_entity`, `export_config`, `import_config`, and
+plan 015's `get_access_policy`, `get_effective_permissions`, `list_approvals`, `get_approval`,
 `request_approval`, `get_audit_days`, `get_audit_day`. Read-only tools carry `readOnlyHint`;
 `delete_entity` and `import_config` carry `destructiveHint`. `get_instance` is anonymous — it works
 even when this server is configured with no credentials at all.
+
+**`SF_ENV` (plan 021), server-level, not a per-tool argument.** This server is one process bound to
+one `SfClient` for its whole session, exactly like `SF_URL`/`SF_USER`/`SF_PASSWORD` — so the
+environment it operates in is configured the same way, once, at launch, unset meaning the default
+environment. A per-tool `env` argument was considered and declined: it would have to be threaded
+through every tool, it would let a model point a single call at a DIFFERENT environment than the one
+its dedicated account (see below) was actually set up for, and nothing here asks for mid-session
+environment-hopping — a deployment that wants an agent to reach two environments runs two configured
+servers, exactly as it would run two for two instances. The `health` tool's response names the bound
+environment; `list_environments` answers what else exists.
 
 Four deliberate omissions, all about what an agent should be handed:
 
@@ -251,9 +274,14 @@ asserts it.
 bun test admin/
 ```
 
-54 tests: protocol conformance driven against the server as a real subprocess over pipes (handshake,
+67 tests: protocol conformance driven against the server as a real subprocess over pipes (handshake,
 version negotiation, notifications never answered, parse errors survivable, batches refused, stdout
 purity), the plan-015 tool boundary above, the shared client's auth and error handling against a stub
-instance, plan 016 wave 5's `get_instance`/`list_peers` tools, and the token-store migration (old
-shape → new, two instances coexisting, logout disturbing nobody else, a corrupt file surviving both a
-read and a write) driven both directly and through real `sf login`/`sf logout` subprocesses.
+instance, plan 016 wave 5's `get_instance`/`list_peers` tools, plan 021's `--env`/`SF_ENV` (no header
+on the default environment, a named one sent on every request, `SF_ENV` picked up like `SF_URL`,
+`/api/auth/*` staying environment-free, `sf environments ls/create/rm`, and the MCP server's `SF_ENV`
+binding its whole session — all driven both against `SfClient` directly and through real `sf`/`mcp.ts`
+subprocesses talking to the SAME stub, so what is proven is what the real binaries put on the wire),
+and the token-store migration (old shape → new, two instances coexisting, logout disturbing nobody
+else, a corrupt file surviving both a read and a write) driven both directly and through real
+`sf login`/`sf logout` subprocesses.

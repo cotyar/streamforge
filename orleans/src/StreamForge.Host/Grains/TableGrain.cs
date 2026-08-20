@@ -5,6 +5,7 @@ using Orleans.Runtime;
 using Orleans.Serialization.Invocation;
 using Orleans.Streams;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Engine;
 using StreamForge.Engine.Dataflow;
 using StreamForge.Engine.Runtime;
@@ -491,7 +492,7 @@ public sealed class TableGrain(
         var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
         foreach (var name in compileResult.StreamInputs.Distinct())
         {
-            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, name));
+            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, EnvKeys.Qualify(def.Environment, name)));
             var handle = await stream.SubscribeAsync((evt, _) => OnStreamEventAsync(name, evt));
             _streamSubs.Add(handle);
         }
@@ -499,7 +500,7 @@ public sealed class TableGrain(
         // subscribe-then-attach protocol this replaces WarnIfTableInputsAlreadyHoldRowsAsync with.
         foreach (var name in compileResult.TableInputs.Distinct())
         {
-            await AttachToTableInputAsync(streamProvider, def.Name, name);
+            await AttachToTableInputAsync(streamProvider, def.Environment, def.Name, name);
         }
 
         // MemoryOnly registers no flush timer at all — see class doc's persistence-mode paragraph.
@@ -547,21 +548,26 @@ public sealed class TableGrain(
     /// driven by the SAME atomic read the backfill itself uses (the old best-effort GetRowCountAsync probe,
     /// which could itself race the subscription it described, is gone).
     /// </summary>
-    private async Task AttachToTableInputAsync(IStreamProvider streamProvider, string tableName, string upstreamName)
+    private async Task AttachToTableInputAsync(IStreamProvider streamProvider, string env, string tableName, string upstreamName)
     {
         // A table cannot legitimately depend on itself (the SQL compiler has no recursive-table feature to
         // produce one) — skip defensively rather than ever calling back into this same not-yet-finished
         // StartAsync turn, which would deadlock.
         if (upstreamName == tableName) return;
 
-        var stream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, upstreamName));
+        // Plan 021 D3/D5 — upstreamName is a bare table name off this table's own compiled TableInputs; the
+        // upstream table lives in THIS table's own environment (a table can only ever read another table by
+        // bare name within its own catalog), so it is qualified with `env` (this table's own
+        // TableDefinition.Environment — a background/definition-driven call, never the ambient).
+        var qualifiedUpstream = EnvKeys.Qualify(env, upstreamName);
+        var stream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, qualifiedUpstream));
         var handle = await stream.SubscribeAsync((deltas, _) => OnTableDeltaBatchAsync(upstreamName, deltas));
         _tableSubs.Add(handle);
 
         TableAttachSnapshot snapshot;
         try
         {
-            snapshot = await GrainFactory.GetGrain<ITableGrain>(upstreamName).AttachSnapshotAsync();
+            snapshot = await GrainFactory.GetGrain<ITableGrain>(qualifiedUpstream).AttachSnapshotAsync();
         }
         catch (Exception ex)
         {
@@ -653,7 +659,11 @@ public sealed class TableGrain(
         _outputBuffer = new EpochBuffer();
         _snapshotFrontierEpoch = null;
 
-        await GrainFactory.GetGrain<ITableOutputGrain>(def.Name).StartAsync(def);
+        // Plan 021 D3 — every sibling grain below belongs to THIS table (same entity), so it addresses them
+        // through this.GetPrimaryKeyString() (already D3-qualified) rather than re-deriving anything from
+        // def.Name/def.Environment.
+        var ownKey = this.GetPrimaryKeyString();
+        await GrainFactory.GetGrain<ITableOutputGrain>(ownKey).StartAsync(def);
 
         _deployedStages = dataflow.Stages
             .Where(s => s.Kind != TableStageKind.Ingest)
@@ -663,7 +673,7 @@ public sealed class TableGrain(
         {
             for (int p = 0; p < partitionCount; p++)
             {
-                await GrainFactory.GetGrain<ITableStageGrain>($"{def.Name}:{stageId}:{p}").StartAsync(def, stageId, p);
+                await GrainFactory.GetGrain<ITableStageGrain>($"{ownKey}:{stageId}:{p}").StartAsync(def, stageId, p);
             }
         }
 
@@ -682,9 +692,13 @@ public sealed class TableGrain(
 
             for (int p = 0; p < pcount; p++)
             {
-                var arrangementKey = $"{inputName}:{hash}:{p}";
-                var consumerId = $"{def.Name}:{edge.EdgeId.Value}:{p}";
-                var targetGrainKey = $"{def.Name}:{edge.ToStageId}:{p}";
+                // Plan 021 D3 — inputName is a bare external input name (a source or another table this
+                // table's SQL reads from); qualifying only that component keeps the composite key shape
+                // ("{env}.{inputName}:{hash}:{p}") intact and matches OrleansArrangementMetaFacade's own
+                // composition of the SAME key for GET /api/meta/arrangements to read.
+                var arrangementKey = $"{EnvKeys.Qualify(def.Environment, inputName)}:{hash}:{p}";
+                var consumerId = $"{ownKey}:{edge.EdgeId.Value}:{p}";
+                var targetGrainKey = $"{ownKey}:{edge.ToStageId}:{p}";
                 await GrainFactory.GetGrain<IArrangementGrain>(arrangementKey).AttachAsync(new ArrangementAttachRequest
                 {
                     ConsumerId = consumerId,
@@ -707,7 +721,7 @@ public sealed class TableGrain(
             .ToList();
         foreach (var inputName in _deployedInputs)
         {
-            await GrainFactory.GetGrain<ITableIngestGrain>($"{def.Name}:{inputName}").StartAsync(def, inputName);
+            await GrainFactory.GetGrain<ITableIngestGrain>($"{ownKey}:{inputName}").StartAsync(def, inputName);
         }
 
         // MemoryOnly registers no flush timer at all — see class doc's persistence-mode paragraph.
@@ -752,18 +766,19 @@ public sealed class TableGrain(
             {
                 try { await GrainFactory.GetGrain<IArrangementGrain>(arrangementKey).DetachAsync(consumerId); } catch { /* best-effort */ }
             }
+            var ownKey = this.GetPrimaryKeyString();
             foreach (var inputName in _deployedInputs)
             {
-                try { await GrainFactory.GetGrain<ITableIngestGrain>($"{_def.Name}:{inputName}").StopAsync(); } catch { /* best-effort */ }
+                try { await GrainFactory.GetGrain<ITableIngestGrain>($"{ownKey}:{inputName}").StopAsync(); } catch { /* best-effort */ }
             }
             foreach (var (stageId, partitionCount) in _deployedStages)
             {
                 for (int p = 0; p < partitionCount; p++)
                 {
-                    try { await GrainFactory.GetGrain<ITableStageGrain>($"{_def.Name}:{stageId}:{p}").StopAsync(); } catch { /* best-effort */ }
+                    try { await GrainFactory.GetGrain<ITableStageGrain>($"{ownKey}:{stageId}:{p}").StopAsync(); } catch { /* best-effort */ }
                 }
             }
-            try { await GrainFactory.GetGrain<ITableOutputGrain>(_def.Name).StopAsync(); } catch { /* best-effort */ }
+            try { await GrainFactory.GetGrain<ITableOutputGrain>(ownKey).StopAsync(); } catch { /* best-effort */ }
             _deployedArrangements = [];
             _deployedInputs = [];
             _deployedStages = [];
@@ -895,9 +910,10 @@ public sealed class TableGrain(
         List<string>? arrangedInputs = null;
         if (_coordinatorMode && _def is not null)
         {
+            var ownKey = this.GetPrimaryKeyString();
             var tasks = _deployedStages
                 .SelectMany(s => Enumerable.Range(0, s.PartitionCount)
-                    .Select(p => GrainFactory.GetGrain<ITableStageGrain>($"{_def.Name}:{s.StageId}:{p}").GetMetricsAsync()));
+                    .Select(p => GrainFactory.GetGrain<ITableStageGrain>($"{ownKey}:{s.StageId}:{p}").GetMetricsAsync()));
             partitions = (await Task.WhenAll(tasks)).ToList();
 
             if (_deployedArrangements.Count > 0)
@@ -910,7 +926,11 @@ public sealed class TableGrain(
                 var infoTasks = _deployedArrangements.Select(a => GrainFactory.GetGrain<IArrangementGrain>(a.ArrangementKey).GetInfoAsync());
                 var infos = await Task.WhenAll(infoTasks);
                 arrangementsRebuilding = infos.Any(i => i.Rebuilding);
-                arrangedInputs = _deployedArrangements.Select(a => a.ArrangementKey.Split(':')[0]).Distinct().ToList();
+                // Plan 021 D3 — ArrangementKey's first component is the ENV-QUALIFIED input name (see the
+                // attach loop above); strip it back to the bare display name for TableMetrics.ArrangedInputs
+                // so a default-environment table still reports byte-identical names (D2) and a non-default
+                // one reports the same bare name a user would recognize rather than "{env}.{name}".
+                arrangedInputs = _deployedArrangements.Select(a => EnvKeys.Split(a.ArrangementKey.Split(':')[0]).Key).Distinct().ToList();
             }
         }
 
@@ -1267,7 +1287,7 @@ public sealed class TableGrain(
         var epoch = _executor!.LastEpoch;
         var dtos = deltas.Select(d => new TableDeltaDto { Row = new Dictionary<string, object?>(d.Row), Weight = d.Weight, Evicted = d.Retention, Epoch = epoch }).ToList();
         var stream = this.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, _def!.Name));
+            .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, this.GetPrimaryKeyString()));
         await stream.OnNextAsync(dtos);
     }
 

@@ -59,7 +59,7 @@ public sealed class StreamBridgeService(
     /// "once per environment" so a NEW environment created after boot still gets onboarded (within one 30s
     /// discovery tick), without re-doing the one-time enumeration for environments already onboarded.</summary>
     private readonly HashSet<string> _onboardedEnvironments = new(StringComparer.Ordinal);
-    private readonly List<IRegistryGrain> _onboardedRegistries = [];
+    private readonly List<(string Env, IRegistryGrain Registry)> _onboardedRegistries = [];
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -91,9 +91,9 @@ public sealed class StreamBridgeService(
                 // see DiscoverEnvironmentsAsync); already-onboarded environments' sources are then
                 // refreshed exactly as the pre-021 30s loop refreshed the one and only registry's sources.
                 await DiscoverEnvironmentsAsync(streamProvider);
-                foreach (var registry in _onboardedRegistries)
+                foreach (var (env, registry) in _onboardedRegistries)
                 {
-                    await RefreshSourceSubscriptionsAsync(registry);
+                    await RefreshSourceSubscriptionsAsync(env, registry);
                 }
             }
             catch
@@ -117,12 +117,14 @@ public sealed class StreamBridgeService(
     /// <c>EnsureInitializedAsync</c> here makes losing the race with <c>Program.cs</c>'s own seeding
     /// harmless for THIS environment's catalog, whichever caller's turn actually does the seed+start.</para>
     ///
-    /// <para><b>Known, deliberate gap this wave leaves</b> (same one <c>GeneratorSupervisorService</c>'s own
-    /// doc comment names): pipeline/table output streams and the SignalR groups keyed off them
-    /// (<c>OutputNamespace</c>/<c>TableDeltaNamespace</c>, <c>pipeline:{id}</c>/<c>table:{name}</c>) are
-    /// NOT environment-qualified this wave (D3's qualification of those 50 name-keyed grain kinds is a
-    /// later wave's scope) — so a same-named table in two environments still shares one physical grain and
-    /// one SignalR group, exactly as it did before this plan.</para></summary>
+    /// <para>Plan 021 D3/item 4 wave 2 — pipeline/table output streams AND the SignalR groups keyed off
+    /// them (<c>OutputNamespace</c>/<c>TableDeltaNamespace</c>/<c>SourcesNamespace</c>,
+    /// <c>pipeline:{id}</c>/<c>table:{name}</c>/<c>source:{name}</c>) are now D3-qualified with THIS
+    /// environment (<c>env</c>, captured below and threaded through every subscribe/unsubscribe call, never
+    /// the ambient — this is background work outside any request), closing the gap
+    /// <c>GeneratorSupervisorService</c>'s own doc comment named for the equivalent grain-addressing
+    /// problem. The <c>"metrics"</c> group (see <see cref="OnMetricsAsync"/>) is the one deliberate
+    /// exception — it is not per-entity, so it stays a single unqualified broadcast.</para></summary>
     private async Task DiscoverEnvironmentsAsync(IStreamProvider streamProvider)
     {
         var environments = await client.GetGrain<IEnvironmentRegistryGrain>(StreamConstants.EnvironmentsKey).ListAsync();
@@ -136,19 +138,21 @@ public sealed class StreamBridgeService(
 
             var lifecycleStream = streamProvider.GetStream<LifecycleEvent>(StreamId.Create(
                 StreamConstants.LifecycleNamespace, EnvKeys.Qualify(env, StreamConstants.LifecycleEventsKey)));
-            await lifecycleStream.SubscribeAsync(OnLifecycleEventAsync);
+            // env is captured here so every downstream subscribe/unsubscribe/group-name call this callback
+            // makes qualifies with the SAME environment this particular lifecycle stream belongs to.
+            await lifecycleStream.SubscribeAsync((evt, token) => OnLifecycleEventAsync(env, evt, token));
 
             var registry = client.RegistryFor(env);
-            _onboardedRegistries.Add(registry);
+            _onboardedRegistries.Add((env, registry));
 
             await registry.EnsureInitializedAsync();
 
-            await RefreshSourceSubscriptionsAsync(registry);
+            await RefreshSourceSubscriptionsAsync(env, registry);
             foreach (var pipeline in await registry.GetPipelinesAsync())
             {
                 if (pipeline.Status == PipelineStatus.Running)
                 {
-                    await SubscribeToPipelineOutputAsync(pipeline.Id);
+                    await SubscribeToPipelineOutputAsync(env, pipeline.Id);
                 }
             }
 
@@ -156,58 +160,62 @@ public sealed class StreamBridgeService(
             {
                 if (table.Status == PipelineStatus.Running)
                 {
-                    await SubscribeToTableOutputAsync(table.Name);
+                    await SubscribeToTableOutputAsync(env, table.Name);
                 }
             }
         }
     }
 
-    private async Task RefreshSourceSubscriptionsAsync(IRegistryGrain registry)
+    private async Task RefreshSourceSubscriptionsAsync(string env, IRegistryGrain registry)
     {
         var sources = await registry.GetSourcesAsync();
         foreach (var src in sources)
         {
-            await SubscribeToSourceAsync(src.Name);
+            await SubscribeToSourceAsync(env, src.Name);
         }
     }
 
-    private async Task OnLifecycleEventAsync(LifecycleEvent evt, StreamSequenceToken? token)
+    private async Task OnLifecycleEventAsync(string env, LifecycleEvent evt, StreamSequenceToken? token)
     {
         // Table lifecycle events reuse this same stream/type — LifecycleEvent.PipelineId holds the
         // table's Name (its grain key) in that case, not an Id. Kind is prefixed "table-" to disambiguate.
         if (evt.Kind.StartsWith("table-", StringComparison.Ordinal))
         {
-            await OnTableLifecycleEventAsync(evt);
+            await OnTableLifecycleEventAsync(env, evt);
             return;
         }
 
-        await hub.Clients.Group($"pipeline:{evt.PipelineId}").SendAsync("pipelineStatus", evt.PipelineId, evt.Status);
+        // Plan 021 D3/item 4 — the SignalR group is qualified; the payload's own PipelineId stays the bare
+        // id the client already knows (it never sees an internal qualified key).
+        var qualifiedId = EnvKeys.Qualify(env, evt.PipelineId);
+        await hub.Clients.Group($"pipeline:{qualifiedId}").SendAsync("pipelineStatus", evt.PipelineId, evt.Status);
 
         switch (evt.Kind)
         {
             case "started":
-                await SubscribeToPipelineOutputAsync(evt.PipelineId);
+                await SubscribeToPipelineOutputAsync(env, evt.PipelineId);
                 break;
             case "stopped":
             case "deleted":
-                await UnsubscribeFromPipelineOutputAsync(evt.PipelineId);
+                await UnsubscribeFromPipelineOutputAsync(env, evt.PipelineId);
                 break;
         }
     }
 
-    private async Task OnTableLifecycleEventAsync(LifecycleEvent evt)
+    private async Task OnTableLifecycleEventAsync(string env, LifecycleEvent evt)
     {
         var tableName = evt.PipelineId;
-        await hub.Clients.Group($"table:{tableName}").SendAsync("tableStatus", tableName, evt.Status);
+        var qualifiedTableName = EnvKeys.Qualify(env, tableName);
+        await hub.Clients.Group($"table:{qualifiedTableName}").SendAsync("tableStatus", tableName, evt.Status);
 
         switch (evt.Kind)
         {
             case "table-started":
-                await SubscribeToTableOutputAsync(tableName);
+                await SubscribeToTableOutputAsync(env, tableName);
                 break;
             case "table-stopped":
             case "table-deleted":
-                await UnsubscribeFromTableOutputAsync(tableName);
+                await UnsubscribeFromTableOutputAsync(env, tableName);
                 break;
         }
     }
@@ -217,25 +225,29 @@ public sealed class StreamBridgeService(
         await hub.Clients.Group("metrics").SendAsync("pipelineMetrics", metrics);
     }
 
-    private async Task SubscribeToPipelineOutputAsync(string pipelineId)
+    private async Task SubscribeToPipelineOutputAsync(string env, string pipelineId)
     {
-        if (_pipelineSubs.ContainsKey(pipelineId))
+        var qualifiedId = EnvKeys.Qualify(env, pipelineId);
+        if (_pipelineSubs.ContainsKey(qualifiedId))
         {
             return;
         }
 
+        // Plan 021 D6 — MUST match PipelineGrain's own publish key (this.GetPrimaryKeyString()).
         var stream = client.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<List<ResultEnvelope>>(StreamId.Create(StreamConstants.OutputNamespace, pipelineId));
+            .GetStream<List<ResultEnvelope>>(StreamId.Create(StreamConstants.OutputNamespace, qualifiedId));
 
+        // The SignalR group is qualified; "pipelineResult"'s own pipelineId argument stays bare — the
+        // client already addresses this pipeline by its plain id.
         var handle = await stream.SubscribeAsync(async (rows, _) =>
-            await hub.Clients.Group($"pipeline:{pipelineId}").SendAsync("pipelineResult", pipelineId, rows));
+            await hub.Clients.Group($"pipeline:{qualifiedId}").SendAsync("pipelineResult", pipelineId, rows));
 
-        _pipelineSubs[pipelineId] = handle;
+        _pipelineSubs[qualifiedId] = handle;
     }
 
-    private async Task UnsubscribeFromPipelineOutputAsync(string pipelineId)
+    private async Task UnsubscribeFromPipelineOutputAsync(string env, string pipelineId)
     {
-        if (!_pipelineSubs.Remove(pipelineId, out var handle))
+        if (!_pipelineSubs.Remove(EnvKeys.Qualify(env, pipelineId), out var handle))
         {
             return;
         }
@@ -250,57 +262,63 @@ public sealed class StreamBridgeService(
         }
     }
 
-    private async Task SubscribeToSourceAsync(string name)
+    private async Task SubscribeToSourceAsync(string env, string name)
     {
-        if (_sourceSubs.ContainsKey(name))
+        var qualifiedName = EnvKeys.Qualify(env, name);
+        if (_sourceSubs.ContainsKey(qualifiedName))
         {
             return;
         }
 
+        // Plan 021 D6 — MUST match GeneratorGrain/ConnectorGrain's own publish key
+        // (this.GetPrimaryKeyString()) and OrleansIngressFacade's DrainAsync qualified key.
         var stream = client.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, name));
+            .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, qualifiedName));
 
         var handle = await stream.SubscribeAsync(async (evt, _) =>
         {
             var now = DateTime.UtcNow;
-            if (_lastSourceSend.TryGetValue(name, out var last) &&
+            if (_lastSourceSend.TryGetValue(qualifiedName, out var last) &&
                 (now - last).TotalMilliseconds < SourceRelayMinIntervalMs)
             {
                 return;
             }
 
-            _lastSourceSend[name] = now;
-            await hub.Clients.Group($"source:{name}").SendAsync("sourceEvent", name, evt);
+            _lastSourceSend[qualifiedName] = now;
+            // The SignalR group is qualified; "sourceEvent"'s own name argument stays bare.
+            await hub.Clients.Group($"source:{qualifiedName}").SendAsync("sourceEvent", name, evt);
         });
 
-        _sourceSubs[name] = handle;
+        _sourceSubs[qualifiedName] = handle;
     }
 
-    private async Task SubscribeToTableOutputAsync(string tableName)
+    private async Task SubscribeToTableOutputAsync(string env, string tableName)
     {
-        if (_tableSubs.ContainsKey(tableName))
+        var qualifiedTableName = EnvKeys.Qualify(env, tableName);
+        if (_tableSubs.ContainsKey(qualifiedTableName))
         {
             return;
         }
 
+        // Plan 021 D6 — MUST match TableGrain's own publish key (this.GetPrimaryKeyString()).
         var stream = client.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, tableName));
+            .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, qualifiedTableName));
 
         var handle = await stream.SubscribeAsync(async (deltas, _) =>
         {
             List<TableDeltaDto>? sendNow = null;
             lock (_tableGate)
             {
-                if (!_tablePending.TryGetValue(tableName, out var pending))
+                if (!_tablePending.TryGetValue(qualifiedTableName, out var pending))
                 {
                     pending = [];
-                    _tablePending[tableName] = pending;
+                    _tablePending[qualifiedTableName] = pending;
                 }
                 pending.AddRange(deltas);
                 if (pending.Count >= TableDeltaCoalesceMaxPending)
                 {
                     sendNow = pending;
-                    _tablePending.Remove(tableName);
+                    _tablePending.Remove(qualifiedTableName);
                 }
             }
 
@@ -308,11 +326,11 @@ public sealed class StreamBridgeService(
             // that sends from this callback at all, and by then the batch is already detached.
             if (sendNow is not null)
             {
-                await SendTableDeltasAsync(tableName, sendNow);
+                await SendTableDeltasAsync(qualifiedTableName, tableName, sendNow);
             }
         });
 
-        _tableSubs[tableName] = handle;
+        _tableSubs[qualifiedTableName] = handle;
     }
 
     /// <summary>Stops the coalescing timer and drains whatever it was holding, so a shutdown does not
@@ -340,7 +358,7 @@ public sealed class StreamBridgeService(
     /// the failure mode a coalescing layer must never introduce. A batch that nets to nothing (every key's
     /// weight cancelled across the window) sends NOTHING — see <see cref="NetByRowIdentity"/>'s own
     /// call site below.</summary>
-    private async Task SendTableDeltasAsync(string tableName, List<TableDeltaDto> deltas)
+    private async Task SendTableDeltasAsync(string qualifiedTableName, string tableName, List<TableDeltaDto> deltas)
     {
         var netted = NetByRowIdentity(deltas);
         if (netted.Count == 0)
@@ -358,9 +376,10 @@ public sealed class StreamBridgeService(
         long seq;
         lock (_tableGate)
         {
-            seq = _tableSeq[tableName] = _tableSeq.GetValueOrDefault(tableName) + 1;
+            seq = _tableSeq[qualifiedTableName] = _tableSeq.GetValueOrDefault(qualifiedTableName) + 1;
         }
-        await hub.Clients.Group($"table:{tableName}").SendAsync("tableDelta", tableName, netted, seq);
+        // The SignalR group is qualified; "tableDelta"'s own tableName argument stays bare.
+        await hub.Clients.Group($"table:{qualifiedTableName}").SendAsync("tableDelta", tableName, netted, seq);
     }
 
     /// <summary>Wishlist item 16's netting half. Collapses same-canonical-row entries within ONE flush
@@ -440,7 +459,9 @@ public sealed class StreamBridgeService(
         {
             try
             {
-                await SendTableDeltasAsync(table, deltas);
+                // `table` here is the qualified key _tablePending is keyed by; recover the bare display
+                // name for the payload the same way every other bare-vs-qualified split in this file does.
+                await SendTableDeltasAsync(table, EnvKeys.Split(table).Key, deltas);
             }
             catch (Exception)
             {
@@ -451,9 +472,9 @@ public sealed class StreamBridgeService(
         }
     }
 
-    private async Task UnsubscribeFromTableOutputAsync(string tableName)
+    private async Task UnsubscribeFromTableOutputAsync(string env, string tableName)
     {
-        if (!_tableSubs.Remove(tableName, out var handle))
+        if (!_tableSubs.Remove(EnvKeys.Qualify(env, tableName), out var handle))
         {
             return;
         }

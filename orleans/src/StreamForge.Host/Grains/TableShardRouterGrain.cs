@@ -121,7 +121,7 @@ public sealed class TableShardRouterGrain(
 
         _config = BuildConfig(def);
         await ReserveSeqBlockAsync();
-        await SubscribeAsync(def.Name);
+        await SubscribeAsync(this.GetPrimaryKeyString());
         this.DelayDeactivation(TimeSpan.FromDays(365));
     }
 
@@ -138,7 +138,7 @@ public sealed class TableShardRouterGrain(
         await ReserveSeqBlockAsync();
 
         await UnsubscribeAsync();
-        await SubscribeAsync(def.Name);
+        await SubscribeAsync(this.GetPrimaryKeyString());
         this.DelayDeactivation(TimeSpan.FromDays(365));
     }
 

@@ -11,12 +11,10 @@ namespace StreamForge.Host.Services;
 /// <para><b>Plan 021 environment strategy: ITERATES EVERY ENVIRONMENT</b> (re-listed every tick, so a
 /// newly created environment is picked up within one 15s cycle) rather than reading an ambient — this
 /// service runs on a timer, outside any request, where the ambient is always empty (see
-/// <c>EnvironmentAmbient</c>'s own doc on why background work must never read it). <b>Known, deliberate
-/// gap this wave leaves</b>: <c>IGeneratorGrain</c>/<c>IConnectorGrain</c> are still keyed by bare source
-/// name (D3's qualification of the 50 name-keyed grain kinds is a later wave's scope), so two environments
-/// that happen to share a source name ping the SAME physical grain twice per tick — redundant but harmless
-/// (PingAsync is idempotent), and no worse than what a single shared catalog already did before this
-/// plan.</para></summary>
+/// <c>EnvironmentAmbient</c>'s own doc on why background work must never read it). <c>IGeneratorGrain</c>/
+/// <c>IConnectorGrain</c> are D3-qualified with the environment being iterated (<c>PingEnvironmentAsync</c>'s
+/// own <c>env</c> parameter, not the ambient), so two environments sharing a source name now ping two
+/// distinct grains, closing the gap wave 1 left open here.</para></summary>
 public sealed class GeneratorSupervisorService(IClusterClient client, IHostApplicationLifetime lifetime) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -57,10 +55,10 @@ public sealed class GeneratorSupervisorService(IClusterClient client, IHostAppli
                 switch (SourceKindDispatch.Classify(src.Kind))
                 {
                     case SourceKindDispatch.ActorKind.Generator:
-                        await client.GetGrain<IGeneratorGrain>(src.Name).PingAsync();
+                        await client.GetGrain<IGeneratorGrain>(EnvKeys.Qualify(env, src.Name)).PingAsync();
                         break;
                     case SourceKindDispatch.ActorKind.Connector:
-                        await client.GetGrain<IConnectorGrain>(src.Name).PingAsync();
+                        await client.GetGrain<IConnectorGrain>(EnvKeys.Qualify(env, src.Name)).PingAsync();
                         break;
                 }
             }

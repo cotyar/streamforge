@@ -5,11 +5,11 @@
 // to a single message string, and the console's test-push affordance needs those fields to render
 // an honest outcome. Mirrors config.ts's raw-fetch approach. The status GET has no such need (its
 // only non-200 outcomes are 404/204, both "hide the card"), so it reuses `api.get` directly.
-import { api, ApiError, getStoredToken } from './client'
+import { api, ApiError, environmentHeader, getStoredToken } from './client'
 import type { IngestAcceptedResponse, IngestErrorResponse, IngestEventsRequest, IngestStatusResponse } from './types'
 
 function authHeaders(extra?: Record<string, string>): Record<string, string> {
-  const headers: Record<string, string> = { Accept: 'application/json', ...extra }
+  const headers: Record<string, string> = { Accept: 'application/json', ...extra, ...environmentHeader() }
   const token = getStoredToken()
   if (token) headers.Authorization = `Bearer ${token}`
   return headers

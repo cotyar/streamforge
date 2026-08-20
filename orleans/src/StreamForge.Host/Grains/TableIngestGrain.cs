@@ -1,6 +1,7 @@
 using Orleans;
 using Orleans.Streams;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Engine;
 using StreamForge.Engine.Dataflow;
 
@@ -57,7 +58,13 @@ public sealed class TableIngestGrain : Grain, ITableIngestGrain
     {
         await StopAsync();
 
-        _tableName = def.Name;
+        // Plan 021 D3 — _tableName is the QUALIFIED table name (used only to compose this table's OWN
+        // sibling ITableStageGrain keys below — never crosses into the Engine); _inputName stays BARE
+        // (compileResult.TableInputs/StreamInputs are bare — see class doc — and it is compared against
+        // the compiled TableDataflowPlan's own bare edge/input names, e.g. `edge.ExternalInputNames.
+        // IndexOf(_inputName)` in FlushAsync, an Engine-boundary comparison that a qualified string would
+        // simply never match).
+        _tableName = EnvKeys.Qualify(def.Environment, def.Name);
         _inputName = inputName;
         var (compile, dataflow) = await TableDataflowFactory.BuildAsync(GrainFactory, def);
         _dataflow = dataflow;
@@ -74,15 +81,19 @@ public sealed class TableIngestGrain : Grain, ITableIngestGrain
             .Where(e => e.Mode == TableEdgeMode.Broadcast || dataflow.OutEdgeOf(e.ToStageId).ArrangeKeyFields is null)
             .ToList();
 
+        // The input's own stream is qualified with THIS table's environment (an input can only ever be
+        // another entity in the same catalog) — env-qualified for the subscription, distinct from the
+        // bare _inputName kept above for Engine-facing comparisons.
+        var qualifiedInputName = EnvKeys.Qualify(def.Environment, inputName);
         var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
         if (_isTableInput)
         {
-            var stream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, inputName));
+            var stream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, qualifiedInputName));
             _tableSub = await stream.SubscribeAsync((batch, _) => OnTableDeltaBatchAsync(batch));
         }
         else
         {
-            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, inputName));
+            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, qualifiedInputName));
             _streamSub = await stream.SubscribeAsync((evt, _) => OnStreamEventAsync(evt));
         }
 

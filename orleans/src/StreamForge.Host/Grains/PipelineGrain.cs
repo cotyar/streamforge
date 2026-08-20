@@ -2,6 +2,7 @@ using Orleans;
 using Orleans.Runtime;
 using Orleans.Streams;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Engine;
 using StreamForge.Host.Facades;
 
@@ -62,7 +63,7 @@ public sealed class PipelineGrain : Grain, IPipelineGrain
         var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
         foreach (var sourceName in compileResult.SourceNames.Distinct())
         {
-            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, sourceName));
+            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, EnvKeys.Qualify(def.Environment, sourceName)));
             var handle = await stream.SubscribeAsync((evt, _) => OnSourceEventAsync(sourceName, evt));
             _subscriptions.Add(handle);
         }
@@ -186,8 +187,11 @@ public sealed class PipelineGrain : Grain, IPipelineGrain
             _recentResults.RemoveRange(0, _recentResults.Count - RecentResultsCapacity);
         }
 
+        // Plan 021 D6 — self-publish onto THIS pipeline's own output stream: this.GetPrimaryKeyString() is
+        // already the D3-qualified key (IPipelineGrain is qualified uniformly like every other name/id-keyed
+        // grain kind), so it is correct here without re-deriving anything from _def.
         var stream = this.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<List<ResultEnvelope>>(StreamId.Create(StreamConstants.OutputNamespace, _def!.Id));
+            .GetStream<List<ResultEnvelope>>(StreamId.Create(StreamConstants.OutputNamespace, this.GetPrimaryKeyString()));
         await stream.OnNextAsync(batch);
     }
 

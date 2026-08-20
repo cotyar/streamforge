@@ -136,7 +136,7 @@ public sealed class NatsPublisherService(
                 await TeardownPipelineAsync(existing);
             }
 
-            _pipelineSinks[p.Id] = await SubscribePipelineAsync(p.Id, active, signature);
+            _pipelineSinks[p.Id] = await SubscribePipelineAsync(p.Environment, p.Id, active, signature);
         }
 
         foreach (var staleId in _pipelineSinks.Keys.Where(id => !seen.Contains(id)).ToList())
@@ -147,12 +147,18 @@ public sealed class NatsPublisherService(
         }
     }
 
-    private async Task<PipelineSinkState> SubscribePipelineAsync(string pipelineId, List<SinkSpec> active, string signature)
+    private async Task<PipelineSinkState> SubscribePipelineAsync(string env, string pipelineId, List<SinkSpec> active, string signature)
     {
-        var clients = active.Select(s => NewClient(s, "pipeline", pipelineId)).OfType<ISinkClient>().ToList();
+        // Plan 021 wave 2 — loopback/duplex sinks name a CATALOG ENTITY, so they are read in the
+        // environment that authored them; see SinkEnvironmentScoping's class doc for the leak this closes.
+        var clients = active.Select(s => NewClient(SinkEnvironmentScoping.Scope(s, env), "pipeline", pipelineId))
+            .OfType<ISinkClient>().ToList();
 
+        // Plan 021 D6 — MUST match PipelineGrain's own publish key (this.GetPrimaryKeyString(), i.e.
+        // EnvKeys.Qualify(def.Environment, id)) or a non-default environment's pipeline would publish onto
+        // a stream this second subscriber never hears.
         var stream = client.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<List<ResultEnvelope>>(StreamId.Create(StreamConstants.OutputNamespace, pipelineId));
+            .GetStream<List<ResultEnvelope>>(StreamId.Create(StreamConstants.OutputNamespace, EnvKeys.Qualify(env, pipelineId)));
 
         var handle = await stream.SubscribeAsync(async (rows, _) =>
         {
@@ -209,9 +215,14 @@ public sealed class NatsPublisherService(
                 continue;
             }
 
-            seen.Add(t.Name);
+            // Plan 021 D3 — unlike a pipeline's GUID id, a table NAME is not globally unique across
+            // environments, so the _tableSinks dictionary (and the sweep's `seen` set) must key on the
+            // D3-qualified name, or two environments' same-named table would collide on one dictionary
+            // entry and one subscription.
+            var qualifiedName = EnvKeys.Qualify(t.Environment, t.Name);
+            seen.Add(qualifiedName);
             var signature = SinkSelection.Signature(active);
-            if (_tableSinks.TryGetValue(t.Name, out var existing))
+            if (_tableSinks.TryGetValue(qualifiedName, out var existing))
             {
                 if (existing.Signature == signature)
                 {
@@ -221,7 +232,7 @@ public sealed class NatsPublisherService(
                 await TeardownTableAsync(existing);
             }
 
-            _tableSinks[t.Name] = await SubscribeTableAsync(t.Name, active, signature);
+            _tableSinks[qualifiedName] = await SubscribeTableAsync(qualifiedName, t.Name, active, signature);
         }
 
         foreach (var staleName in _tableSinks.Keys.Where(name => !seen.Contains(name)).ToList())
@@ -232,12 +243,18 @@ public sealed class NatsPublisherService(
         }
     }
 
-    private async Task<TableSinkState> SubscribeTableAsync(string tableName, List<SinkSpec> active, string signature)
+    private async Task<TableSinkState> SubscribeTableAsync(string qualifiedTableName, string tableName, List<SinkSpec> active, string signature)
     {
-        var clients = active.Select(s => NewClient(s, "table", tableName)).OfType<ISinkClient>().ToList();
+        // Plan 021 wave 2 — see the identical call in SubscribePipelineAsync. The environment comes from
+        // the qualified key rather than a second parameter: it IS the environment this table lives in.
+        var env = EnvKeys.EnvOf(qualifiedTableName);
+        var clients = active.Select(s => NewClient(SinkEnvironmentScoping.Scope(s, env), "table", tableName))
+            .OfType<ISinkClient>().ToList();
 
+        // Plan 021 D6 — MUST match TableGrain's own publish key (this.GetPrimaryKeyString()) or a
+        // non-default environment's table would publish onto a stream this second subscriber never hears.
         var stream = client.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, tableName));
+            .GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, qualifiedTableName));
 
         // Orleans' table-delta stream item carries no batch sequence number of its own (unlike the Dapr
         // flavor's TableDeltaEnvelope.Seq) — StreamBridgeService invents one client-side per subscription

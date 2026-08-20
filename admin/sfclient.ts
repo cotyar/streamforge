@@ -10,6 +10,10 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export const DEFAULT_URL = "http://localhost:5199";
+/** Plan 021 — the header `EnvironmentSelectionMiddleware` reads
+ * (`shared/StreamForge.Api/Environments/EnvironmentSelectionMiddleware.cs`), duplicated here as a
+ * string literal for the same "no cross-language sharing in this folder" reason `normalizeEnv` is. */
+export const ENV_HEADER = "X-StreamForge-Environment";
 // SF_TOKEN_FILE is a TEST-ONLY knob, same family as SF_URL/SF_TOKEN/SF_USER/SF_PASSWORD: it lets a
 // `sf` subprocess (or an in-process SfClient) point its token store at a temp path instead of a
 // developer's real ~/.streamforge/token.json — the requirement plan 016 wave 5's prerequisite fix
@@ -96,6 +100,20 @@ export interface ClientOptions {
   /** Credentials for an on-the-spot login when no token is available. */
   user?: string;
   password?: string;
+  /** Plan 021 — which environment's catalog this client addresses. `""`/`undefined`/the literal
+   * `"default"` all mean the default environment, exactly like the server's own `EnvKeys.Normalize`
+   * (`shared/StreamForge.AppCore/Environments/EnvKeys.cs`) — this client does not import that file (no
+   * npm deps, no cross-language sharing), so the three spellings are normalized here, independently,
+   * to the same effect. */
+  env?: string;
+}
+
+/** `""`/`undefined`/`"default"` (case-insensitive) all mean the default environment — see
+ * `ClientOptions.env`. Exported so `sf.ts` can validate/echo an `--env` flag with the same rule the
+ * client applies internally, rather than inventing a second one. */
+export function normalizeEnv(raw: string | undefined): string {
+  const trimmed = (raw ?? "").trim();
+  return trimmed === "" || trimmed.toLowerCase() === "default" ? "" : trimmed;
 }
 
 export interface StoredToken {
@@ -185,12 +203,16 @@ export function removeStoredToken(url: string, filePath: string = TOKEN_FILE): b
 
 export class SfClient {
   readonly url: string;
+  /** Plan 021 — `""` means the default environment, exactly like the server's own `EnvKeys.Default`.
+   * Public (read-only) so a caller can print/log which catalog a client is pointed at. */
+  readonly env: string;
   private token: string | null;
   private readonly user?: string;
   private readonly password?: string;
 
   constructor(opts: ClientOptions = {}) {
     this.url = (opts.url ?? process.env.SF_URL ?? DEFAULT_URL).replace(/\/+$/, "");
+    this.env = normalizeEnv(opts.env ?? process.env.SF_ENV);
     this.token = opts.token ?? process.env.SF_TOKEN ?? readStoredToken(this.url)?.token ?? null;
     this.user = opts.user ?? process.env.SF_USER;
     this.password = opts.password ?? process.env.SF_PASSWORD;
@@ -245,6 +267,12 @@ export class SfClient {
     opts: { body?: unknown; raw?: boolean; contentType?: string } = {},
   ): Promise<T> {
     const headers: Record<string, string> = { accept: "application/json", ...(await this.authorize()) };
+    // Plan 021, D2: the default environment sends NO header at all — matching the server's own "the
+    // default path costs nothing" rule (EnvironmentSelectionMiddleware) rather than sending the literal
+    // string "default" and making the server look it up for free every time.
+    if (this.env !== "") {
+      headers[ENV_HEADER] = this.env;
+    }
     let body: string | undefined;
     if (opts.body !== undefined) {
       headers["content-type"] = opts.contentType ?? "application/json";
@@ -288,6 +316,30 @@ export class SfClient {
    * the last probe result rather than a live one (see PeerRecord in web/src/api/types.ts). */
   peers(): Promise<unknown[]> {
     return this.request<unknown[]>("GET", "/api/meta/peers");
+  }
+
+  // ---- plan 021: environments --------------------------------------------------------------------
+
+  /** Every environment this instance knows about, `default` included implicitly by the server (it is
+   * never stored, never listed) — see `IEnvironmentFacade.ListAsync`'s own doc comment for why `default`
+   * itself does not appear in this array. */
+  listEnvironments(): Promise<unknown[]> {
+    return this.request<unknown[]>("GET", "/api/environments");
+  }
+
+  /** Admin-gated on the server (D7: creating an environment is deliberate, never implicit). */
+  createEnvironment(name: string, description = ""): Promise<unknown> {
+    return this.request("POST", "/api/environments", { body: { name, description } });
+  }
+
+  /** Admin-gated; `force` deletes catalog AND runtime state for everything in it (D7's one genuinely
+   * destructive operation this plan adds) — `sf environments rm` asks first unless `--yes`, same as
+   * every other delete in this CLI. */
+  deleteEnvironment(name: string, force = false): Promise<void> {
+    return this.request<void>(
+      "DELETE",
+      `/api/environments/${encodeURIComponent(name)}${force ? "?force=true" : ""}`,
+    );
   }
 
   list(kind: Kind): Promise<unknown[]> {

@@ -145,11 +145,11 @@ public sealed class RegistryGrain(
                 var kind = SourceKindDispatch.Classify(src.Kind);
                 if (kind == SourceKindDispatch.ActorKind.Generator)
                 {
-                    await GrainFactory.GetGrain<IGeneratorGrain>(src.Name).StartAsync(src);
+                    await GrainFactory.GetGrain<IGeneratorGrain>(EnvKeys.Qualify(_env, src.Name)).StartAsync(src);
                 }
                 else if (kind != SourceKindDispatch.ActorKind.Ingest)
                 {
-                    await GrainFactory.GetGrain<IConnectorGrain>(src.Name).StartAsync(src);
+                    await GrainFactory.GetGrain<IConnectorGrain>(EnvKeys.Qualify(_env, src.Name)).StartAsync(src);
                 }
             }
             catch
@@ -163,7 +163,7 @@ public sealed class RegistryGrain(
         {
             try
             {
-                await GrainFactory.GetGrain<IPipelineGrain>(pipeline.Id).StartAsync(pipeline);
+                await GrainFactory.GetGrain<IPipelineGrain>(EnvKeys.Qualify(_env, pipeline.Id)).StartAsync(pipeline);
             }
             catch (Exception ex)
             {
@@ -180,7 +180,7 @@ public sealed class RegistryGrain(
         {
             try
             {
-                await GrainFactory.GetGrain<ITableGrain>(table.Name).StartAsync(table);
+                await GrainFactory.GetGrain<ITableGrain>(EnvKeys.Qualify(_env, table.Name)).StartAsync(table);
             }
             catch (Exception ex)
             {
@@ -203,7 +203,7 @@ public sealed class RegistryGrain(
         {
             try
             {
-                await GrainFactory.GetGrain<ITableHistoryGrain>(table.Name).ResumeAsync(table);
+                await GrainFactory.GetGrain<ITableHistoryGrain>(EnvKeys.Qualify(_env, table.Name)).ResumeAsync(table);
             }
             catch
             {
@@ -220,7 +220,7 @@ public sealed class RegistryGrain(
         {
             try
             {
-                await GrainFactory.GetGrain<ITableShardRouterGrain>(table.Name).ResumeAsync(table);
+                await GrainFactory.GetGrain<ITableShardRouterGrain>(EnvKeys.Qualify(_env, table.Name)).ResumeAsync(table);
             }
             catch
             {
@@ -247,7 +247,7 @@ public sealed class RegistryGrain(
             return new ScenarioRunResult { Outcome = ScenarioRunOutcome.NotFound };
         }
 
-        return await GrainFactory.GetGrain<IGeneratorGrain>(name).RunAsync(request);
+        return await GrainFactory.GetGrain<IGeneratorGrain>(EnvKeys.Qualify(_env, name)).RunAsync(request);
     }
 
     public async Task UpsertSourceAsync(SourceDefinition def)
@@ -303,8 +303,8 @@ public sealed class RegistryGrain(
         // and would otherwise keep polling/ticking forever — so both StopAsync calls always run (cheap/
         // idempotent no-ops on whichever kind wasn't actually running) rather than tracking the previous
         // Kind separately just to target one Stop call.
-        var generator = GrainFactory.GetGrain<IGeneratorGrain>(def.Name);
-        var connector = GrainFactory.GetGrain<IConnectorGrain>(def.Name);
+        var generator = GrainFactory.GetGrain<IGeneratorGrain>(EnvKeys.Qualify(_env, def.Name));
+        var connector = GrainFactory.GetGrain<IConnectorGrain>(EnvKeys.Qualify(_env, def.Name));
         if (def.Enabled)
         {
             switch (SourceKindDispatch.Classify(def.Kind))
@@ -341,8 +341,8 @@ public sealed class RegistryGrain(
         RecomputeStaleReasons(); // a deleted source breaks every pin that named it.
         await state.WriteStateAsync();
         // Stop both kinds unconditionally — see UpsertSourceAsync's dispatch comment (cheap/idempotent).
-        await GrainFactory.GetGrain<IGeneratorGrain>(name).StopAsync();
-        await GrainFactory.GetGrain<IConnectorGrain>(name).StopAsync();
+        await GrainFactory.GetGrain<IGeneratorGrain>(EnvKeys.Qualify(_env, name)).StopAsync();
+        await GrainFactory.GetGrain<IConnectorGrain>(EnvKeys.Qualify(_env, name)).StopAsync();
         return true;
     }
 
@@ -416,7 +416,7 @@ public sealed class RegistryGrain(
 
         if (sqlChanged && wasRunning)
         {
-            var pipelineGrain = GrainFactory.GetGrain<IPipelineGrain>(def.Id);
+            var pipelineGrain = GrainFactory.GetGrain<IPipelineGrain>(EnvKeys.Qualify(_env, def.Id));
             try
             {
                 await pipelineGrain.StopAsync();
@@ -448,7 +448,7 @@ public sealed class RegistryGrain(
         {
             try
             {
-                await GrainFactory.GetGrain<IPipelineGrain>(id).StopAsync();
+                await GrainFactory.GetGrain<IPipelineGrain>(EnvKeys.Qualify(_env, id)).StopAsync();
             }
             catch
             {
@@ -470,7 +470,7 @@ public sealed class RegistryGrain(
             return null;
         }
 
-        var grain = GrainFactory.GetGrain<IPipelineGrain>(id);
+        var grain = GrainFactory.GetGrain<IPipelineGrain>(EnvKeys.Qualify(_env, id));
         if (status == PipelineStatus.Running)
         {
             try
@@ -561,13 +561,13 @@ public sealed class RegistryGrain(
     {
         if (def.ShardBy.Count > 0)
         {
-            await GrainFactory.GetGrain<ITableHistoryGrain>(def.Name).DisableAsync();
+            await GrainFactory.GetGrain<ITableHistoryGrain>(EnvKeys.Qualify(_env, def.Name)).DisableAsync();
         }
         else
         {
-            await GrainFactory.GetGrain<ITableHistoryGrain>(def.Name).ResetAsync(def);
+            await GrainFactory.GetGrain<ITableHistoryGrain>(EnvKeys.Qualify(_env, def.Name)).ResetAsync(def);
         }
-        await GrainFactory.GetGrain<ITableShardRouterGrain>(def.Name).ResetAsync(def);
+        await GrainFactory.GetGrain<ITableShardRouterGrain>(EnvKeys.Qualify(_env, def.Name)).ResetAsync(def);
     }
 
     public async Task<TableDefinition?> UpdateTableAsync(TableDefinition def)
@@ -675,7 +675,7 @@ public sealed class RegistryGrain(
         // Running table takes effect immediately instead of only on the next manual stop/start.
         if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged || retentionChanged || shardByChanged) && wasRunning)
         {
-            var tableGrain = GrainFactory.GetGrain<ITableGrain>(def.Name);
+            var tableGrain = GrainFactory.GetGrain<ITableGrain>(EnvKeys.Qualify(_env, def.Name));
             try
             {
                 await tableGrain.StopAsync();
@@ -707,7 +707,7 @@ public sealed class RegistryGrain(
             // distinction the history grain draws below — ResumeAsync re-derives the TableShardConfig
             // (which carries Persistence/FlushMs down to every shard on the next routed batch) and leaves
             // the existing shards on disk untouched.
-            await GrainFactory.GetGrain<ITableShardRouterGrain>(def.Name).ResumeAsync(def);
+            await GrainFactory.GetGrain<ITableShardRouterGrain>(EnvKeys.Qualify(_env, def.Name)).ResumeAsync(def);
         }
         else if (persistenceChanged && def.HistoryEnabled)
         {
@@ -716,7 +716,7 @@ public sealed class RegistryGrain(
             // from the updated definition and re-registers the flush timer with the new interval/mode, but (unlike
             // ResetAsync) deliberately leaves Entries/Seq untouched, so accumulated history survives a mode
             // tweak the same way it survives a silo restart.
-            await GrainFactory.GetGrain<ITableHistoryGrain>(def.Name).ResumeAsync(def);
+            await GrainFactory.GetGrain<ITableHistoryGrain>(EnvKeys.Qualify(_env, def.Name)).ResumeAsync(def);
         }
 
         await state.WriteStateAsync();
@@ -738,7 +738,7 @@ public sealed class RegistryGrain(
         {
             try
             {
-                await GrainFactory.GetGrain<ITableGrain>(existing.Name).StopAsync();
+                await GrainFactory.GetGrain<ITableGrain>(EnvKeys.Qualify(_env, existing.Name)).StopAsync();
             }
             catch
             {
@@ -748,7 +748,7 @@ public sealed class RegistryGrain(
 
         try
         {
-            await GrainFactory.GetGrain<ITableHistoryGrain>(existing.Name).DisableAsync();
+            await GrainFactory.GetGrain<ITableHistoryGrain>(EnvKeys.Qualify(_env, existing.Name)).DisableAsync();
         }
         catch
         {
@@ -761,7 +761,7 @@ public sealed class RegistryGrain(
         // exactly the wrong one for a read (see TableShardRouterGrain.PurgeShardsAsync).
         try
         {
-            await GrainFactory.GetGrain<ITableShardRouterGrain>(existing.Name).DisableAsync();
+            await GrainFactory.GetGrain<ITableShardRouterGrain>(EnvKeys.Qualify(_env, existing.Name)).DisableAsync();
         }
         catch
         {
@@ -783,7 +783,7 @@ public sealed class RegistryGrain(
             return null;
         }
 
-        var grain = GrainFactory.GetGrain<ITableGrain>(existing.Name);
+        var grain = GrainFactory.GetGrain<ITableGrain>(EnvKeys.Qualify(_env, existing.Name));
         if (status == PipelineStatus.Running)
         {
             var missing = existing.TableInputs
@@ -1118,7 +1118,7 @@ public sealed class RegistryGrain(
     {
         try
         {
-            await GrainFactory.GetGrain<ITableHistoryGrain>(oldName).DisableAsync();
+            await GrainFactory.GetGrain<ITableHistoryGrain>(EnvKeys.Qualify(_env, oldName)).DisableAsync();
         }
         catch
         {
@@ -1127,7 +1127,7 @@ public sealed class RegistryGrain(
 
         try
         {
-            await GrainFactory.GetGrain<ITableShardRouterGrain>(oldName).DisableAsync();
+            await GrainFactory.GetGrain<ITableShardRouterGrain>(EnvKeys.Qualify(_env, oldName)).DisableAsync();
         }
         catch
         {

@@ -5,6 +5,7 @@ using StreamForge.Abstractions;
 using StreamForge.AppCore.Connectors;
 using StreamForge.AppCore.Connectors.Grpc;
 using StreamForge.AppCore.Discovery;
+using StreamForge.AppCore.Environments;
 using StreamForge.AppCore.Transports;
 using StreamForge.AppCore.Connectors.Polling;
 using StreamForge.AppCore.Connectors.Scheduling;
@@ -220,7 +221,8 @@ public sealed class ConnectorGrain(
             return (null, null);
         }
 
-        var session = DuplexSessions.Find(def.Name);
+        // Plan 021 wave 2: same key FixDuplexTransport.OpenDuplex published under — see its comment.
+        var session = DuplexSessions.Find(EnvKeys.Qualify(def.Environment, def.Name));
         return (session?.IsReady ?? false, session);
     }
 
@@ -240,7 +242,7 @@ public sealed class ConnectorGrain(
         if (rows.Count > 0)
         {
             var stream = this.GetStreamProvider(StreamConstants.ProviderName)
-                .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, def.Name));
+                .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, this.GetPrimaryKeyString()));
             foreach (var row in rows)
             {
                 row.TryAdd("_source", def.Name);
@@ -655,7 +657,7 @@ public sealed class ConnectorGrain(
             if (result.Rows.Count > 0)
             {
                 var stream = this.GetStreamProvider(StreamConstants.ProviderName)
-                    .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, def.Name));
+                    .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, this.GetPrimaryKeyString()));
                 foreach (var row in result.Rows)
                 {
                     await stream.OnNextAsync(new EventRecord(row));

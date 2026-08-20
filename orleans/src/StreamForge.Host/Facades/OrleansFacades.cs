@@ -90,43 +90,47 @@ public static class OrleansFacadesExtensions
     }
 }
 
+// Plan 021 D3/D4 — every method below answers ONE REST request for a bare NAME/id the shared endpoints
+// already resolved (TablesEndpoints/PipelinesEndpoints resolve {id-or-name} against the ambient-qualified
+// ICatalogFacade and pass this facade the entity's bare Name/Id) — so it is exactly the "facade answering a
+// request" case: qualify with EnvironmentAmbient.Current, never with anything read off an entity.
 internal sealed class OrleansPipelineReadFacade(IClusterClient client) : IPipelineReadFacade
 {
     public Task<List<ResultEnvelope>> GetRecentResultsAsync(string pipelineId, int limit) =>
-        client.GetGrain<IPipelineGrain>(pipelineId).GetRecentResultsAsync(limit);
+        client.GetGrain<IPipelineGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, pipelineId)).GetRecentResultsAsync(limit);
 
     public Task<PipelineMetrics> GetMetricsAsync(string pipelineId) =>
-        client.GetGrain<IPipelineGrain>(pipelineId).GetMetricsAsync();
+        client.GetGrain<IPipelineGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, pipelineId)).GetMetricsAsync();
 }
 
 internal sealed class OrleansTableReadFacade(IClusterClient client) : ITableReadFacade
 {
     public Task<List<TableRowDto>> GetRowsAsync(string tableName, int limit, int offset) =>
-        client.GetGrain<ITableGrain>(tableName).GetRowsAsync(limit, offset);
+        client.GetGrain<ITableGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)).GetRowsAsync(limit, offset);
 
     public Task<int> GetRowCountAsync(string tableName) =>
-        client.GetGrain<ITableGrain>(tableName).GetRowCountAsync();
+        client.GetGrain<ITableGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)).GetRowCountAsync();
 
     public Task<long> GetSeqAsync(string tableName) =>
-        client.GetGrain<ITableGrain>(tableName).GetSeqAsync();
+        client.GetGrain<ITableGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)).GetSeqAsync();
 
     public Task<long?> GetSnapshotFrontierEpochAsync(string tableName) =>
-        client.GetGrain<ITableGrain>(tableName).GetSnapshotFrontierEpochAsync();
+        client.GetGrain<ITableGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)).GetSnapshotFrontierEpochAsync();
 
     public Task<TableMetrics> GetMetricsAsync(string tableName) =>
-        client.GetGrain<ITableGrain>(tableName).GetMetricsAsync();
+        client.GetGrain<ITableGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)).GetMetricsAsync();
 
     public Task<List<TableRowDto>> SearchAsync(string tableName, string query, int limit) =>
-        client.GetGrain<ITableGrain>(tableName).SearchAsync(query, limit);
+        client.GetGrain<ITableGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)).SearchAsync(query, limit);
 }
 
 internal sealed class OrleansTableHistoryFacade(IClusterClient client) : ITableHistoryFacade
 {
     public Task<TableHistoryQueryResult> GetHistoryAsync(string tableName, string key, int limit) =>
-        client.GetGrain<ITableHistoryGrain>(tableName).GetHistoryAsync(key, limit);
+        client.GetGrain<ITableHistoryGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)).GetHistoryAsync(key, limit);
 
     public Task<TableHistoryStats> GetStatsAsync(string tableName) =>
-        client.GetGrain<ITableHistoryGrain>(tableName).GetStatsAsync();
+        client.GetGrain<ITableHistoryGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)).GetStatsAsync();
 }
 
 /// <summary>Plan 011 D1: the shard tier's read surface. Three of its four members deliberately never
@@ -137,24 +141,25 @@ internal sealed class OrleansTableHistoryFacade(IClusterClient client) : ITableH
 internal sealed class OrleansTableShardFacade(IClusterClient client) : ITableShardFacade
 {
     public Task<TableShardView> GetShardAsync(string tableName, string shardKey, int historyLimitPerKey) =>
-        client.GetGrain<ITableShardGrain>(TableShardKeys.GrainKey(tableName, shardKey)).GetViewAsync(historyLimitPerKey);
+        client.GetGrain<ITableShardGrain>(TableShardKeys.GrainKey(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName), shardKey)).GetViewAsync(historyLimitPerKey);
 
     public Task<TableShardingInfo> GetInfoAsync(string tableName) =>
-        client.GetGrain<ITableShardRouterGrain>(tableName).GetInfoAsync();
+        client.GetGrain<ITableShardRouterGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)).GetInfoAsync();
 
     public Task<List<string>> GetKeysAsync(string tableName, int limit, int offset) =>
-        client.GetGrain<ITableShardDirectoryGrain>(tableName).GetKeysAsync(limit, offset);
+        client.GetGrain<ITableShardDirectoryGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)).GetKeysAsync(limit, offset);
 
     public async Task<List<TableShardStats>> ScanAsync(string tableName, int limit, int offset)
     {
-        var keys = await client.GetGrain<ITableShardDirectoryGrain>(tableName).GetKeysAsync(limit, offset);
+        var qualifiedTableName = EnvKeys.Qualify(EnvironmentAmbient.Current, tableName);
+        var keys = await client.GetGrain<ITableShardDirectoryGrain>(qualifiedTableName).GetKeysAsync(limit, offset);
         var stats = new List<TableShardStats>(keys.Count);
         // Chunked rather than one WhenAll over the whole page: a scan is the one call that deliberately
         // activates shards, and activating a few hundred at once is a load spike worth not creating.
         foreach (var chunk in keys.Chunk(32))
         {
             stats.AddRange(await Task.WhenAll(chunk.Select(k =>
-                client.GetGrain<ITableShardGrain>(TableShardKeys.GrainKey(tableName, k)).GetStatsAsync())));
+                client.GetGrain<ITableShardGrain>(TableShardKeys.GrainKey(qualifiedTableName, k)).GetStatsAsync())));
         }
         return stats;
     }
@@ -164,7 +169,7 @@ internal sealed class OrleansTableShardFacade(IClusterClient client) : ITableSha
     /// from outside the cluster, would read shards while the router kept forwarding — which is exactly the
     /// unfenced scan above.</summary>
     public Task<TableShardScanResult> ScanFencedAsync(string tableName, int limit, int offset) =>
-        client.GetGrain<ITableShardRouterGrain>(tableName).FencedScanAsync(limit, offset);
+        client.GetGrain<ITableShardRouterGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, tableName)).FencedScanAsync(limit, offset);
 }
 
 /// <summary>Plan 006, D-C: connector runtime status. Generator-kind sources (Kind unset/"generator"),
@@ -184,7 +189,7 @@ internal sealed class OrleansConnectorStatusFacade(IClusterClient client) : ICon
         {
             return null;
         }
-        return await client.GetGrain<IConnectorGrain>(sourceName).GetStatusAsync();
+        return await client.GetGrain<IConnectorGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).GetStatusAsync();
     }
 }
 
@@ -244,7 +249,13 @@ internal sealed class OrleansIngressFacade(
             };
         }
 
-        var buffer = registry.GetOrCreate(sourceName, config, (rows, ct) => DrainAsync(sourceName, rows, ct));
+        // Plan 021 D3/item 3 — the buffer/grain/tracker key is EnvKeys.Qualify(def.Environment, sourceName),
+        // not the bare name: two environments' same-named ingest source must not share one buffer. `def`
+        // is already in hand (rule B — a definition-carried environment, not the ambient re-read), and the
+        // SAME qualified key is what IngestDrainPumpService.SweepAsync/ReportStatsAsync compute from the
+        // identical SourceDefinition.Environment field, so push/status/drain/removal all agree.
+        var qualifiedName = EnvKeys.Qualify(def.Environment, sourceName);
+        var buffer = registry.GetOrCreate(qualifiedName, config, (rows, ct) => DrainAsync(qualifiedName, rows, ct));
 
         // Plan 009 A1.1: row-level dedup runs AFTER coercion, BEFORE admission — a duplicate never
         // consumes buffer capacity and (together with the whole-batch-Invalid return above) a 400
@@ -291,8 +302,9 @@ internal sealed class OrleansIngressFacade(
             if (PasswordHasher.Verify(presentedKey, key.Hash, key.Salt))
             {
                 // Best-effort, in-memory, per-replica — see IngestKeyUsageTracker's own doc comment
-                // for why this is never round-tripped through UpsertSourceAsync on the hot path.
-                keyUsage.RecordUse(sourceName, key.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                // for why this is never round-tripped through UpsertSourceAsync on the hot path. Qualified
+                // for the same reason every other ingest key here is (see PushCoreAsync).
+                keyUsage.RecordUse(EnvKeys.Qualify(def.Environment, sourceName), key.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
                 return true;
             }
         }
@@ -314,7 +326,8 @@ internal sealed class OrleansIngressFacade(
             return null;
         }
 
-        var buffer = registry.TryGet(sourceName);
+        var qualifiedName = EnvKeys.Qualify(def.Environment, sourceName);
+        var buffer = registry.TryGet(qualifiedName);
         var config = def.Ingest ?? new IngestConfig();
 
         // Never pushed to on THIS replica yet (SourceIngressRegistry.TryGet's own doc): report the
@@ -322,8 +335,8 @@ internal sealed class OrleansIngressFacade(
         // a GET — the aggregation below can still show other replicas' totals for this source.
         var local = buffer?.GetStatus() ?? new IngestStatus { Policy = config.Policy, CapacityRows = config.CapacityRows, MaxBatchRows = config.MaxBatchRows };
 
-        var snapshot = await client.GetGrain<IIngressStatsGrain>(sourceName).GetSnapshotAsync();
-        var baseline = statsTracker.GetBaseline(sourceName);
+        var snapshot = await client.GetGrain<IIngressStatsGrain>(qualifiedName).GetSnapshotAsync();
+        var baseline = statsTracker.GetBaseline(qualifiedName);
         var pending = IngressStatsReportTracker.ComputeDelta(baseline, local);
 
         local.TotalAccepted = snapshot.TotalAccepted + pending.Accepted;
@@ -354,13 +367,16 @@ internal sealed class OrleansIngressFacade(
     /// <see cref="IngestStatus.DownstreamDropped"/>. <see cref="PushStreamBus"/> isn't registered at
     /// all under the default pull (memory-streams) transport, so DownstreamDropped simply stays 0
     /// there — pull's own loss point (pulling-agent queue overflow) isn't instrumented today.</summary>
-    private async Task DrainAsync(string sourceName, IReadOnlyList<Dictionary<string, object?>> rows, CancellationToken ct)
+    private async Task DrainAsync(string qualifiedName, IReadOnlyList<Dictionary<string, object?>> rows, CancellationToken ct)
     {
         var pushBus = services.GetService<PushStreamBus>();
         var before = pushBus?.TotalDropped ?? 0;
 
+        // qualifiedName (EnvKeys.Qualify(def.Environment, sourceName), captured by PushCoreAsync's closure)
+        // is also this source's own stream identity — matching TableGrain/PipelineGrain's subscription to
+        // (SourcesNamespace, EnvKeys.Qualify(def.Environment, sourceName)) for the SAME source.
         var stream = client.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, sourceName));
+            .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, qualifiedName));
         foreach (var record in IngressEnvelopeBuilder.ToEventRecords(rows))
         {
             await stream.OnNextAsync(record);
@@ -374,7 +390,7 @@ internal sealed class OrleansIngressFacade(
         var delta = pushBus.TotalDropped - before;
         if (delta > 0)
         {
-            registry.TryGet(sourceName)?.RecordDownstreamDropped((int)delta);
+            registry.TryGet(qualifiedName)?.RecordDownstreamDropped((int)delta);
         }
     }
 }
@@ -420,7 +436,11 @@ internal sealed class OrleansArrangementMetaFacade(IClusterClient client) : IArr
                 var infos = new List<ArrangementInfo>(pcount);
                 for (int p = 0; p < pcount; p++)
                 {
-                    var key = $"{inputName}:{hash}:{p}";
+                    // Plan 021 D3 — MUST match TableGrain.StartCoordinatorAsync's own arrangementKey
+                    // composition (EnvKeys.Qualify(def.Environment, inputName)) exactly, or this facade
+                    // would address a DIFFERENT (empty) ArrangementGrain activation than the one the table
+                    // actually attached to.
+                    var key = $"{EnvKeys.Qualify(def.Environment, inputName)}:{hash}:{p}";
                     infos.Add(await client.GetGrain<IArrangementGrain>(key).GetInfoAsync());
                 }
 

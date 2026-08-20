@@ -3,7 +3,7 @@
 // helper (client.ts): export returns a file (blob + Content-Disposition filename), import accepts
 // application/json, text/yaml, or multipart/form-data depending on the source the user picked — so
 // this file mirrors explorerTypes.ts's fetchProtoText raw-fetch approach rather than reusing `api`.
-import { ApiError, getStoredToken } from './client'
+import { ApiError, environmentHeader, getStoredToken } from './client'
 import type { ConfigImportReport } from './types'
 
 export type ConfigFormat = 'json' | 'yaml'
@@ -14,8 +14,12 @@ export interface ConfigExportResult {
   filename: string
 }
 
+// Plan 021 wave 2 (021-F): every call through this helper also carries the environment header, so an
+// export or an import targets whichever environment the console has selected — not the header-less
+// default it would silently fall back to otherwise. Both export() and the two import functions below
+// build their headers through this one function, so this is the one place that has to remember it.
 function authHeaders(extra?: Record<string, string>): Record<string, string> {
-  const headers: Record<string, string> = { ...extra }
+  const headers: Record<string, string> = { ...extra, ...environmentHeader() }
   const token = getStoredToken()
   if (token) headers.Authorization = `Bearer ${token}`
   return headers

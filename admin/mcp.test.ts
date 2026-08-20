@@ -17,6 +17,8 @@ import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ENV_HEADER,
+  normalizeEnv,
   readAllStoredTokens,
   readStoredToken,
   removeStoredToken,
@@ -34,6 +36,9 @@ interface RecordedRequest {
   path: string;
   auth: string | null;
   body: string;
+  /** Plan 021 — X-StreamForge-Environment, or null when the client sent none at all (the default-env
+   * "costs nothing" path — see sfclient.ts's request()). */
+  env: string | null;
 }
 
 const recorded: RecordedRequest[] = [];
@@ -47,6 +52,7 @@ const stub = Bun.serve({
       path: url.pathname + url.search,
       auth: req.headers.get("authorization"),
       body: await req.text(),
+      env: req.headers.get(ENV_HEADER),
     });
 
     const json = (value: unknown, status = 200) =>
@@ -85,6 +91,16 @@ const stub = Bun.serve({
           catalogWarnings: ["pipeline 'p' collides with a source name"],
           startedAtMs: 1,
         });
+      // --- plan 021: environments ---
+      case "GET /api/environments":
+        return json([{ name: "staging", description: "for testing", createdBy: "admin", createdAtMs: 1 }]);
+      case "POST /api/environments":
+        return json({ name: "staging", description: "for testing", createdBy: "admin", createdAtMs: 1 }, 200);
+      // The switch key is built from url.pathname alone (no query string — see below), so this one
+      // case answers both `DELETE .../staging` and `DELETE .../staging?force=true`.
+      case "DELETE /api/environments/staging":
+        return new Response(null, { status: 204 });
+
       case "GET /api/meta/peers":
         return json([
           {
@@ -169,12 +185,12 @@ class Session {
   private buffer = "";
   private reader!: ReadableStreamDefaultReader<Uint8Array>;
 
-  async start(): Promise<void> {
+  async start(env: Record<string, string> = {}): Promise<void> {
     this.proc = Bun.spawn(["bun", `${import.meta.dir}/mcp.ts`], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, SF_URL: STUB_URL, SF_USER: "admin", SF_PASSWORD: "pw", SF_TOKEN: "" },
+      env: { ...process.env, SF_URL: STUB_URL, SF_USER: "admin", SF_PASSWORD: "pw", SF_TOKEN: "", ...env },
     });
     this.reader = this.proc.stdout.getReader();
   }
@@ -374,6 +390,53 @@ describe("MCP tools", () => {
     expect(text).toContain("connection refused");
   });
 
+  test("list_environments answers the catalog's environments (plan 021)", async () => {
+    const res = await callTool("list_environments");
+    const text = (res.result as any).content[0].text as string;
+    expect(text).toContain("staging");
+  });
+
+  test("health reports 'default' when this server was configured with no SF_ENV", async () => {
+    const res = await callTool("health");
+    const text = (res.result as any).content[0].text as string;
+    expect(text).toContain('"environment": "default"');
+  });
+
+  test("SF_ENV binds this server's whole session to one environment, header included on every call", async () => {
+    // A separate process, not the shared module-level `session` — SF_ENV is read once at startup
+    // (new SfClient() at the bottom of mcp.ts), exactly like SF_URL, so it needs its own subprocess.
+    const staged = new Session();
+    await staged.start({ SF_ENV: "staging" });
+    await staged.send({
+      jsonrpc: "2.0",
+      id: "init",
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } },
+    });
+    await staged.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+    try {
+      const before = recorded.length;
+      const health = await staged.send({
+        jsonrpc: "2.0",
+        id: "h1",
+        method: "tools/call",
+        params: { name: "health", arguments: {} },
+      });
+      expect(((health!.result as any).content[0].text as string)).toContain('"environment": "staging"');
+
+      await staged.send({
+        jsonrpc: "2.0",
+        id: "l1",
+        method: "tools/call",
+        params: { name: "list_entities", arguments: { kind: "tables" } },
+      });
+      expect(recorded.slice(before).some((r) => r.path === "/api/tables" && r.env === "staging")).toBe(true);
+    } finally {
+      staged.stop();
+    }
+  });
+
   test("get_rows can ask for CSV, which comes back as text not JSON", async () => {
     const res = await callTool("get_rows", { id: "t1", csv: true });
     expect((res.result as any).content[0].text).toBe("symbol,qty\nACME,5\n");
@@ -552,6 +615,88 @@ describe("SfClient", () => {
     const peers = await client.peers();
     expect(peers).toHaveLength(1);
     expect((peers[0] as Record<string, unknown>).name).toBe("prod-east");
+  });
+
+  // --- plan 021: environments ----------------------------------------------------------------------
+
+  test("normalizeEnv treats absent, empty and the literal 'default' (any case) as the default environment", () => {
+    expect(normalizeEnv(undefined)).toBe("");
+    expect(normalizeEnv("")).toBe("");
+    expect(normalizeEnv("  ")).toBe("");
+    expect(normalizeEnv("default")).toBe("");
+    expect(normalizeEnv("Default")).toBe("");
+    expect(normalizeEnv(" staging ")).toBe("staging");
+  });
+
+  test("a client configured with no environment sends NO X-StreamForge-Environment header at all", async () => {
+    // D2: the default path costs nothing — not even the header naming it, matching the server's own
+    // "no round trip" rule for the same case (EnvironmentSelectionMiddleware).
+    const client = new SfClient({ url: STUB_URL, token: "t" });
+    expect(client.env).toBe("");
+
+    await client.list("tables");
+    const read = recorded.filter((r) => r.path === "/api/tables").at(-1)!;
+    expect(read.env).toBeNull();
+  });
+
+  test("the literal 'default' env option is exactly as free as no option at all", async () => {
+    const client = new SfClient({ url: STUB_URL, token: "t", env: "default" });
+    expect(client.env).toBe("");
+
+    await client.list("tables");
+    const read = recorded.filter((r) => r.path === "/api/tables").at(-1)!;
+    expect(read.env).toBeNull();
+  });
+
+  test("a named environment is sent on every request", async () => {
+    const client = new SfClient({ url: STUB_URL, token: "t", env: "staging" });
+    expect(client.env).toBe("staging");
+
+    await client.list("tables");
+    const read = recorded.filter((r) => r.path === "/api/tables").at(-1)!;
+    expect(read.env).toBe("staging");
+  });
+
+  test("SF_ENV is picked up exactly like SF_URL/SF_TOKEN, and an explicit option wins over it", async () => {
+    const prior = process.env.SF_ENV;
+    try {
+      process.env.SF_ENV = "staging";
+      expect(new SfClient({ url: STUB_URL, token: "t" }).env).toBe("staging");
+      expect(new SfClient({ url: STUB_URL, token: "t", env: "prod" }).env).toBe("prod");
+    } finally {
+      if (prior === undefined) delete process.env.SF_ENV;
+      else process.env.SF_ENV = prior;
+    }
+  });
+
+  test("login never carries an environment header — /api/auth/* is environment-free on the server too", async () => {
+    const client = new SfClient({ url: STUB_URL, user: "admin", password: "pw", env: "staging" });
+    await client.list("tables"); // triggers the lazy login
+
+    const login = recorded.filter((r) => r.path === "/api/auth/login").at(-1)!;
+    expect(login.env).toBeNull();
+  });
+
+  test("listEnvironments / createEnvironment / deleteEnvironment hit the routes plan 021 documents", async () => {
+    const client = new SfClient({ url: STUB_URL, token: "t" });
+
+    const list = (await client.listEnvironments()) as Record<string, unknown>[];
+    expect(list[0]!.name).toBe("staging");
+    expect(recorded.at(-1)!.method).toBe("GET");
+    expect(recorded.at(-1)!.path).toBe("/api/environments");
+
+    await client.createEnvironment("staging", "for testing");
+    const created = recorded.at(-1)!;
+    expect(created.method).toBe("POST");
+    expect(created.path).toBe("/api/environments");
+    expect(JSON.parse(created.body)).toEqual({ name: "staging", description: "for testing" });
+
+    await client.deleteEnvironment("staging");
+    expect(recorded.at(-1)!.method).toBe("DELETE");
+    expect(recorded.at(-1)!.path).toBe("/api/environments/staging");
+
+    await client.deleteEnvironment("staging", true);
+    expect(recorded.at(-1)!.path).toBe("/api/environments/staging?force=true");
   });
 });
 
@@ -775,6 +920,64 @@ describe("sf login / instance / peers (CLI subprocess)", () => {
     } finally {
       rmSync(file, { force: true });
     }
+  });
+
+  // --- plan 021: --env / SF_ENV, driven through the real `sf` binary --------------------------------
+  //
+  // The subprocess talks to THIS test file's own `stub` (same STUB_URL, same process) — so `recorded`
+  // below is the direct record of what the real CLI binary put on the wire, not a mock of it.
+
+  test("sf ls tables --env staging sends the header; no --env sends none", async () => {
+    const noEnvFile = join(tmpdir(), `sf-token-test-env-none-${Date.now()}.json`);
+    const before = recorded.length;
+    const { code } = await runCliEnv(["ls", "tables", "--url", STUB_URL, "--token", "t"], {
+      SF_TOKEN_FILE: noEnvFile,
+    });
+    expect(code).toBe(0);
+    expect(recorded.slice(before).find((r) => r.path === "/api/tables")?.env).toBeNull();
+
+    const withEnvFile = join(tmpdir(), `sf-token-test-env-staging-${Date.now()}.json`);
+    const before2 = recorded.length;
+    const { code: code2 } = await runCliEnv(
+      ["ls", "tables", "--url", STUB_URL, "--token", "t", "--env", "staging"],
+      { SF_TOKEN_FILE: withEnvFile },
+    );
+    expect(code2).toBe(0);
+    expect(recorded.slice(before2).find((r) => r.path === "/api/tables")?.env).toBe("staging");
+  });
+
+  test("SF_ENV works exactly like --env when no flag is given", async () => {
+    const file = join(tmpdir(), `sf-token-test-sfenv-${Date.now()}.json`);
+    const before = recorded.length;
+    const { code } = await runCliEnv(["ls", "tables", "--url", STUB_URL, "--token", "t"], {
+      SF_TOKEN_FILE: file,
+      SF_ENV: "staging",
+    });
+    expect(code).toBe(0);
+    expect(recorded.slice(before).find((r) => r.path === "/api/tables")?.env).toBe("staging");
+  });
+
+  test("sf environments ls / create / rm --yes drive the real routes", async () => {
+    const file = join(tmpdir(), `sf-token-test-environments-${Date.now()}.json`);
+
+    const ls = await runCliEnv(["environments", "ls", "--url", STUB_URL, "--token", "t"], {
+      SF_TOKEN_FILE: file,
+    });
+    expect(ls.code).toBe(0);
+    expect(ls.stdout).toContain("staging");
+
+    const create = await runCliEnv(
+      ["environments", "create", "staging", "--description", "for testing", "--url", STUB_URL, "--token", "t"],
+      { SF_TOKEN_FILE: file },
+    );
+    expect(create.code).toBe(0);
+
+    const rm = await runCliEnv(
+      ["environments", "rm", "staging", "--yes", "--url", STUB_URL, "--token", "t"],
+      { SF_TOKEN_FILE: file },
+    );
+    expect(rm.code).toBe(0);
+    expect(rm.stdout).toContain("deleted environment 'staging'");
   });
 });
 

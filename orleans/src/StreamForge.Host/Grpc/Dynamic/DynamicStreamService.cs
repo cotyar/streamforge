@@ -82,7 +82,7 @@ public sealed class DynamicStreamService(IClusterClient client, AccessGuard guar
         var numbers = await FetchNumbersAsync(registry, entityKey, fields);
 
         var streamProvider = client.GetStreamProvider(StreamConstants.ProviderName);
-        var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, name));
+        var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, EnvKeys.Qualify(src.Environment, name)));
 
         long seq = 0;
         var handle = await stream.SubscribeAsync(async (evt, _) =>
@@ -130,7 +130,7 @@ public sealed class DynamicStreamService(IClusterClient client, AccessGuard guar
         // Table delta streams are keyed by table NAME, not id (see TableGrain / StreamGrpcService.SubscribeTable) —
         // entity_key carries the id (stable across renames), so resolve id -> name via the definition above.
         var streamProvider = client.GetStreamProvider(StreamConstants.ProviderName);
-        var stream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, table.Name));
+        var stream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, EnvKeys.Qualify(table.Environment, table.Name)));
 
         long seq = 0;
         var handle = await stream.SubscribeAsync(async (deltas, _) =>
@@ -177,7 +177,7 @@ public sealed class DynamicStreamService(IClusterClient client, AccessGuard guar
         var numbers = await FetchNumbersAsync(registry, entityKey, fields);
 
         var streamProvider = client.GetStreamProvider(StreamConstants.ProviderName);
-        var stream = streamProvider.GetStream<List<ResultEnvelope>>(StreamId.Create(StreamConstants.OutputNamespace, id));
+        var stream = streamProvider.GetStream<List<ResultEnvelope>>(StreamId.Create(StreamConstants.OutputNamespace, EnvKeys.Qualify(pipeline.Environment, id)));
 
         var handle = await stream.SubscribeAsync(async (rows, _) =>
         {

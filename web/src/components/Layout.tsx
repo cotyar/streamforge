@@ -3,6 +3,8 @@ import { ArrowLeftRight, Bot, BookOpen, Braces, ClipboardCheck, LayoutDashboard,
 import { useAuth } from '../api/auth'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/lib/theme'
+import { useEnvironment } from '@/lib/environment'
+import { EnvironmentPicker } from './EnvironmentPicker'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -52,6 +54,7 @@ function ThemeToggle() {
 
 function Layout() {
   const { user, hasRole, can, logout } = useAuth()
+  const { environment } = useEnvironment()
 
   return (
     <div className="flex h-full min-h-screen bg-background">
@@ -180,7 +183,11 @@ function Layout() {
         </nav>
 
         {user && (
-          <div className="border-t border-sidebar-border p-3">
+          <div className="flex flex-col gap-2 border-t border-sidebar-border p-3">
+            {/* Plan 021 wave 2 (021-F): the environment picker sits beside the auth/user control, the
+                one place every authenticated page already surfaces "who am I" — "which catalog am I
+                talking to" belongs right next to it. */}
+            <EnvironmentPicker />
             <div className="flex items-center gap-3 rounded-lg px-2 py-2">
               <Avatar className="shrink-0">
                 <AvatarFallback>{user.displayName.slice(0, 1).toUpperCase()}</AvatarFallback>
@@ -200,7 +207,16 @@ function Layout() {
         )}
       </aside>
 
-      <main className="min-w-0 flex-1 overflow-y-auto">
+      {/* Plan 021 wave 2 (021-F): keying on the environment remounts every routed page on a switch.
+          The console keeps no query/state cache beyond each page's own useEffect-on-mount fetch, so a
+          forced remount IS the invalidation — every page refetches against the newly selected
+          environment instead of going on showing the previous one's rows under the new name. It also
+          unmounts every live hub subscription (useTableRows.ts etc.); EnvironmentPicker's switchTo()
+          tears the hub connection down FIRST and only then flips this key, so by the time those
+          subscriptions' cleanup functions run, hub.ts's `connection` is already null and their
+          `if (connection) invoke('Unsubscribe...')` guard is a no-op rather than a call against a
+          connection that no longer exists. */}
+      <main key={environment} className="min-w-0 flex-1 overflow-y-auto">
         <Outlet />
       </main>
       <Toaster />

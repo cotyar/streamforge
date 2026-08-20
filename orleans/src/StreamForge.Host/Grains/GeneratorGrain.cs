@@ -156,7 +156,7 @@ public sealed class GeneratorGrain : Grain, IGeneratorGrain
         }
 
         var stream = this.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, _def.Name));
+            .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, this.GetPrimaryKeyString()));
         foreach (var row in rows)
         {
             await stream.OnNextAsync(ScenarioGenerator.ToEventRecord(row, _def.Name));
@@ -174,7 +174,7 @@ public sealed class GeneratorGrain : Grain, IGeneratorGrain
 
         var evt = MarketDataProfiles.GenerateEvent(_def);
         var stream = this.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, _def.Name));
+            .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, this.GetPrimaryKeyString()));
         await stream.OnNextAsync(evt);
     }
 
@@ -200,14 +200,19 @@ public sealed class GeneratorGrain : Grain, IGeneratorGrain
             return;
         }
 
-        var rows = LoopbackHub.Drain(_def.Name, LoopbackDrainBatchCap);
+        // Plan 021 wave 2: the SAME key Attach/Detach use — this grain's own (environment-qualified)
+        // primary key. It read _def.Name before, which is byte-identical in the default environment and
+        // silently wrong in every other one: attach registers the channel under `staging.feed` while the
+        // drain loop reads `feed`, so the loop runs forever draining nothing and the channel (unbounded)
+        // grows without limit.
+        var rows = LoopbackHub.Drain(this.GetPrimaryKeyString(), LoopbackDrainBatchCap);
         if (rows.Count == 0)
         {
             return;
         }
 
         var stream = this.GetStreamProvider(StreamConstants.ProviderName)
-            .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, _def.Name));
+            .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, this.GetPrimaryKeyString()));
 
         // Fresh _source/_ts on arrival — a row drained here is a NEW event at THIS source, same as a
         // ScenarioGenerator/MarketDataProfiles row would be, regardless of whatever stamped values (if

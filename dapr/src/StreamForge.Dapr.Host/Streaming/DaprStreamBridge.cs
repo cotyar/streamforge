@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.SignalR;
 using StreamForge.Abstractions;
 using StreamForge.Abstractions.Streaming;
+using StreamForge.AppCore.Environments;
 using StreamForge.Api.Hubs;
 
 namespace StreamForge.Dapr.Host.Streaming;
@@ -47,8 +48,14 @@ public sealed class DaprStreamBridge(IHubContext<StreamHub> hub) : ISourceEvents
                 continue;
             }
 
+            // Plan 021 wave 2 — GROUP name qualified, PAYLOAD name bare. The group has to match
+            // StreamHub's subscribe half, which composes $"source:{EnvKeys.Qualify(env, name)}"; the
+            // argument the browser receives has to be the name the browser asked for, because the SPA
+            // keys its own state on it and never sees a qualified name anywhere else. envelope.Source is
+            // already the qualified key (the actor's own id — see GeneratorActor/ConnectorActor), so the
+            // group is right as-is and only the payload needs stripping.
             await hub.Clients.Group($"source:{envelope.Source}")
-                .SendAsync("sourceEvent", envelope.Source, evt);
+                .SendAsync("sourceEvent", EnvKeys.Split(envelope.Source).Key, evt);
         }
     }
 
@@ -59,8 +66,9 @@ public sealed class DaprStreamBridge(IHubContext<StreamHub> hub) : ISourceEvents
     /// one; W7's TableActor is the single source of truth for sequence numbers on this flavor.</summary>
     public async Task OnTableDeltaAsync(TableDeltaEnvelope envelope)
     {
+        // Plan 021 wave 2 — group qualified, payload bare; see OnSourceEventsAsync for the rule.
         await hub.Clients.Group($"table:{envelope.Table}")
-            .SendAsync("tableDelta", envelope.Table, envelope.Deltas, envelope.Seq);
+            .SendAsync("tableDelta", EnvKeys.Split(envelope.Table).Key, envelope.Deltas, envelope.Seq);
     }
 
     /// <summary>Mirrors StreamBridgeService.SubscribeToPipelineOutputAsync: group
@@ -68,8 +76,9 @@ public sealed class DaprStreamBridge(IHubContext<StreamHub> hub) : ISourceEvents
     /// <c>List&lt;ResultEnvelope&gt;</c> batch shape as Orleans sends per stream item.</summary>
     public async Task OnPipelineResultsAsync(PipelineResultsEnvelope envelope)
     {
+        // Plan 021 wave 2 — group qualified, payload bare; see OnSourceEventsAsync for the rule.
         await hub.Clients.Group($"pipeline:{envelope.PipelineId}")
-            .SendAsync("pipelineResult", envelope.PipelineId, envelope.Results);
+            .SendAsync("pipelineResult", EnvKeys.Split(envelope.PipelineId).Key, envelope.Results);
     }
 
     /// <summary>Mirrors StreamBridgeService.OnLifecycleEventAsync/OnTableLifecycleEventAsync: table
@@ -86,13 +95,15 @@ public sealed class DaprStreamBridge(IHubContext<StreamHub> hub) : ISourceEvents
     {
         if (evt.Kind.StartsWith("table-", StringComparison.Ordinal))
         {
+            // Plan 021 wave 2 — group qualified, payload bare; see OnSourceEventsAsync for the rule.
             var tableName = evt.PipelineId;
-            await hub.Clients.Group($"table:{tableName}").SendAsync("tableStatus", tableName, evt.Status);
+            await hub.Clients.Group($"table:{tableName}")
+                .SendAsync("tableStatus", EnvKeys.Split(tableName).Key, evt.Status);
             return;
         }
 
         await hub.Clients.Group($"pipeline:{evt.PipelineId}")
-            .SendAsync("pipelineStatus", evt.PipelineId, evt.Status);
+            .SendAsync("pipelineStatus", EnvKeys.Split(evt.PipelineId).Key, evt.Status);
     }
 
     /// <summary>Mirrors StreamBridgeService.OnMetricsAsync: group <c>metrics</c>, event

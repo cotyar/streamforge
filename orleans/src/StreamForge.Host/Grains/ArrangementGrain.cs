@@ -160,15 +160,23 @@ public sealed class ArrangementGrain(
             _rebuilding = false;
         }
 
+        // Plan 021 D3/D6 — this grain's OWN primary key is "{qualifiedInputName}:{keySpecHash}:{partition}"
+        // (TableGrain.StartCoordinatorAsync composes it that way — see its arrangement-attach loop), so the
+        // qualified input name is recoverable from the key itself without adding an Environment field to
+        // the frozen, shared/-owned ArrangementAttachRequest: split on ':' and take the first component.
+        // _inputName (from request.InputName) stays BARE — it is also handed to Engine-facing calls
+        // (OnBatch's originName / TableExecutor.OnTableDelta), which compare it against the compiled
+        // plan's own bare names.
+        var qualifiedInputName = this.GetPrimaryKeyString().Split(':')[0];
         var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
         if (_isTableInput)
         {
-            var stream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, _inputName));
+            var stream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, qualifiedInputName));
             _tableSub = await stream.SubscribeAsync((batch, _) => OnTableDeltaBatchAsync(batch));
         }
         else
         {
-            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, _inputName));
+            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, qualifiedInputName));
             _streamSub = await stream.SubscribeAsync((evt, _) => OnStreamEventAsync(evt));
         }
 

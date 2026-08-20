@@ -1,7 +1,7 @@
 // Types + client for the API Explorer page's own backend surface (GET /api/meta/*). Kept out of
 // ./types.ts (the frozen REST/hub contract shared with the rest of the console) since this is a
 // new, Explorer-only surface — see src/StreamForge.Host/Api/MetaEndpoints.cs for the DTOs this mirrors.
-import { api, ApiError, getStoredToken } from './client'
+import { api, ApiError, environmentHeader, getStoredToken } from './client'
 
 /** Raw text of one of the two hand-authored static .proto files (streamforge.proto /
  * streamforge_dynamic.proto), served verbatim by GET /api/meta/protos/static. */
@@ -43,7 +43,7 @@ export const metaApi = {
  * in ./client.ts, these routes return `text/plain`, not JSON, so the shared `api` helper can't be
  * reused as-is; this mirrors its auth/error handling for the one text-response case the Explorer needs. */
 export async function fetchProtoText(path: string): Promise<string> {
-  const headers: Record<string, string> = {}
+  const headers: Record<string, string> = { ...environmentHeader() }
   const token = getStoredToken()
   if (token) headers.Authorization = `Bearer ${token}`
 

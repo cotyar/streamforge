@@ -55,14 +55,14 @@ public class StreamHubEntitlementTests
         var groups = new RecordingGroups();
         var hub = new StreamHub(
             new AccessGuard(resolver, entitlementsEnabled: true),
-            new StubCatalog(
+            new SingleCatalogServiceProvider(new StubCatalog(
                 sources: [new SourceDefinition { Name = "dev-trades" }, new SourceDefinition { Name = "prod-trades" }],
                 pipelines: [new PipelineDefinition { Id = "dev-1" }, new PipelineDefinition { Id = "prod-1" }],
                 tables:
                 [
                     new TableDefinition { Id = "t-fin", Name = "positions", Tags = ["finance"] },
                     new TableDefinition { Id = "t-hr", Name = "salaries", Tags = ["hr"] },
-                ]))
+                ])))
         {
             Context = new FakeCallerContext(user),
             Groups = groups,
@@ -177,7 +177,7 @@ public class StreamHubEntitlementTests
         var resolver = new PermissionResolver(
             new CountingAccessPolicyFacade(Document()), NullLogger<PermissionResolver>.Instance, 600);
         var groups = new RecordingGroups();
-        var hub = new StreamHub(new AccessGuard(resolver, entitlementsEnabled: false), new StubCatalog([], [], []))
+        var hub = new StreamHub(new AccessGuard(resolver, entitlementsEnabled: false), new SingleCatalogServiceProvider(new StubCatalog([], [], [])))
         {
             Context = new FakeCallerContext(PermissionResolverTests.Principal("mallory")),
             Groups = groups,

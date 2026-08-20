@@ -1,4 +1,5 @@
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.AppCore.Transports;
 
 namespace StreamForge.Connectors.Fix;
@@ -60,8 +61,15 @@ public sealed class FixDuplexTransport : IDuplexTransport
     public IDuplexSession OpenDuplex(SourceDefinition def)
     {
         var config = ConfigOf(def);
-        var session = new FixDuplexSession(def.Name, config);
-        DuplexSessions.Publish(def.Name, session);
+        // Plan 021 wave 2: the registry key is environment-qualified, because DuplexSessions is one
+        // process-wide dictionary and two environments may each own a duplex source named `orders_out`.
+        // The session carries the same key so its own DisposeAsync withdraws what OpenDuplex published —
+        // "OpenDuplex publishes, the session's DisposeAsync withdraws" is the seam's stated contract, and
+        // a key that differs between the two halves would leave a dead session published forever.
+        // EnvKeys.Qualify("", name) == name, so the default environment is byte-identical.
+        var key = EnvKeys.Qualify(def.Environment, def.Name);
+        var session = new FixDuplexSession(key, config);
+        DuplexSessions.Publish(key, session);
         return session;
     }
 

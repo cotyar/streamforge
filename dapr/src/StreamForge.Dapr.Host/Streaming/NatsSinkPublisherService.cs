@@ -139,7 +139,11 @@ public sealed class NatsSinkPublisherService(
                 }
             }
 
-            var clients = active.Select(s => NewClient(s, entityKind, key)).OfType<ISinkClient>().ToList();
+            // Plan 021 wave 2 — loopback/duplex sinks name a CATALOG ENTITY, so they are read in the
+            // environment that authored them; see SinkEnvironmentScoping's class doc for the leak this
+            // closes. `key` is already the qualified entity key, so it IS the environment.
+            var clients = active.Select(s => NewClient(SinkEnvironmentScoping.Scope(s, EnvKeys.EnvOf(key)), entityKind, key))
+                .OfType<ISinkClient>().ToList();
             lock (_gate)
             {
                 if (map.TryGetValue(key, out var stale))

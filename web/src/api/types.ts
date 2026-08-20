@@ -1234,3 +1234,22 @@ export interface NamedEndpoint {
   name: string
   value: string
 }
+
+/** Plan 021 wave 2 (021-F) — mirrors shared/StreamForge.Contracts/EnvironmentModels.cs's
+ *  EnvironmentRecord exactly. One row of `GET /api/environments`; the default environment is always
+ *  present, always first, and always spelled `"default"` here (never the server's internal empty-string
+ *  key). `entityCount` is -1 when the server did not count it. */
+export interface EnvironmentRecord {
+  name: string
+  description: string
+  createdAtMs: number
+  createdBy: string
+  entityCount: number
+}
+
+/** Body of `POST /api/environments` — matches shared/StreamForge.Api/Endpoints/EnvironmentsEndpoints.cs's
+ *  CreateEnvironmentRequest. */
+export interface CreateEnvironmentRequest {
+  name: string
+  description?: string
+}

@@ -15,7 +15,18 @@
 // Claude Code / Claude Desktop config:
 //   { "mcpServers": { "streamforge": { "command": "bun",
 //       "args": ["/abs/path/to/admin/mcp.ts"],
-//       "env": { "SF_URL": "http://localhost:5199", "SF_USER": "admin", "SF_PASSWORD": "..." } } } }
+//       "env": { "SF_URL": "http://localhost:5199", "SF_USER": "admin", "SF_PASSWORD": "...",
+//                 "SF_ENV": "staging" } } } }
+//
+// SF_ENV (plan 021), server-level rather than a per-tool argument: this server is one process bound
+// to one SfClient for its whole session — exactly the same shape SF_URL/SF_USER/SF_PASSWORD already
+// use — so the environment is configured the same way the instance and the identity are, once, at
+// launch. A per-tool `env` argument was considered and declined: every tool would need it threaded
+// through, a model could name a DIFFERENT environment on every call from the one its dedicated
+// account was actually meant to operate in (see the "give this server its own login" note further
+// down — the whole point is a narrow, auditable identity), and mid-session environment-hopping is not
+// a capability anything here asks for. Unset means the default environment, exactly like SF_URL
+// unset means :5199.
 
 import { APPROVAL_STATES, isKind, KINDS, SfClient, SfError, toApprovalState, type Kind } from "./sfclient.ts";
 
@@ -35,6 +46,11 @@ A stopped pipeline or table produces nothing — check status before concluding 
 
 get_instance and list_peers (plan 016) answer "which instance is this, and which others does it know
 about" — get_instance is anonymous and works with SF_URL alone, no credentials required.
+
+This server is configured against exactly ONE environment (plan 021) for its whole session, via
+SF_ENV — "default" when unset. Every tool call here reads and writes that environment's catalog only;
+there is no per-call environment argument. The health tool's response includes the environment this
+server is bound to.
 
 It also READS the plan-015 authorization surface: the access policy, one user's effective permissions,
 the approval inbox and the audit log. It cannot write any of it. When an action needs a human's
@@ -129,6 +145,7 @@ export const TOOLS: Tool[] = [
     annotations: READ_ONLY,
     run: async (_args, client) => ({
       url: client.url,
+      environment: client.env || "default",
       health: await client.health(),
       identity: await client.me().catch(() => "anonymous (no credentials configured)"),
     }),
@@ -150,6 +167,15 @@ export const TOOLS: Tool[] = [
     inputSchema: { type: "object", properties: {} },
     annotations: READ_ONLY,
     run: (_args, client) => client.peers(),
+  },
+  {
+    name: "list_environments",
+    title: "List environments",
+    description:
+      "Every environment this instance knows about (plan 021), besides 'default' which always exists implicitly and is never listed. This server itself is bound to exactly ONE environment for its whole session (SF_ENV) — this tool answers 'what else exists', not 'which one am I using' (see the health tool for that).",
+    inputSchema: { type: "object", properties: {} },
+    annotations: READ_ONLY,
+    run: (_args, client) => client.listEnvironments(),
   },
   {
     name: "list_entities",
@@ -610,6 +636,9 @@ export async function serve(stream: AsyncIterable<Uint8Array>, client: SfClient)
 // test it is imported for its exports only, which is what import.meta.main distinguishes.
 if (import.meta.main || process.argv[1]?.endsWith("sf.ts")) {
   const client = new SfClient();
-  log(`ready — ${client.url} (protocol ${SUPPORTED_PROTOCOL_VERSIONS[0]}, ${TOOLS.length} tools)`);
+  log(
+    `ready — ${client.url} env=${client.env || "default"} `
+    + `(protocol ${SUPPORTED_PROTOCOL_VERSIONS[0]}, ${TOOLS.length} tools)`,
+  );
   await serve(process.stdin, client);
 }

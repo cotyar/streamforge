@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Play, Square, Rocket } from 'lucide-react'
 import { toast } from 'sonner'
@@ -49,11 +49,23 @@ export function DashboardPage() {
     load()
   }, [load])
 
+  // Plan 021 wave 2 (021-F): the hub's "metrics" SignalR group is deliberately CLUSTER-WIDE, not
+  // qualified by environment (shared/StreamForge.Api/Hubs/StreamHub.cs's class remarks — it names no
+  // entity, so there is nothing to qualify it with). That means `metrics` here can and does carry
+  // pipelineIds that belong to a DIFFERENT environment than the one this page is currently showing —
+  // confirmed live: switching to a freshly created, empty "staging" environment still pushed a nonzero
+  // rowsOutPerSec from "default"'s running pipelines. Every OTHER read of `metrics` in this file already
+  // indexes by an id drawn from `pipelines` (the environment-scoped REST list), so it self-filters; only
+  // this set exists to keep the two aggregate computations below (totalRowsPerSec, and the sparkline
+  // history feeding it) from summing/retaining rows for pipelines this environment cannot even list.
+  const pipelineIds = useMemo(() => new Set((pipelines ?? []).map((p) => p.id)), [pipelines])
+
   useEffect(() => {
     setHistory((prev) => {
       let changed = false
       const next = { ...prev }
       for (const m of Object.values(metrics)) {
+        if (!pipelineIds.has(m.pipelineId)) continue
         const arr = next[m.pipelineId] ?? []
         if (arr[arr.length - 1] !== m.rowsOutPerSec) {
           next[m.pipelineId] = [...arr, m.rowsOutPerSec].slice(-30)
@@ -62,7 +74,7 @@ export function DashboardPage() {
       }
       return changed ? next : prev
     })
-  }, [metrics])
+  }, [metrics, pipelineIds])
 
   async function toggle(p: PipelineDefinition) {
     setBusyIds((prev) => new Set(prev).add(p.id))
@@ -91,7 +103,9 @@ export function DashboardPage() {
   const totalPipelines = pipelines?.length ?? 0
   const runningCount = pipelines?.filter((p) => p.status === 'Running').length ?? 0
   const totalSources = sources?.length ?? 0
-  const totalRowsPerSec = Object.values(metrics).reduce((sum, m) => sum + m.rowsOutPerSec, 0)
+  const totalRowsPerSec = Object.values(metrics)
+    .filter((m) => pipelineIds.has(m.pipelineId))
+    .reduce((sum, m) => sum + m.rowsOutPerSec, 0)
   const totalTables = tables?.length ?? 0
   const runningTables = tables?.filter((t) => t.status === 'Running').length ?? 0
 

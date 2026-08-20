@@ -1,5 +1,6 @@
 using Orleans;
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Environments;
 using StreamForge.Engine;
 using StreamForge.Engine.Dataflow;
 
@@ -39,7 +40,10 @@ public sealed class TableStageGrain : Grain, ITableStageGrain
     {
         await StopAsync();
 
-        _tableName = def.Name;
+        // Plan 021 D3 — the QUALIFIED table name, so every sibling grain key this activation composes
+        // below (ITableOutputGrain, downstream ITableStageGrain) lands in the same environment TableGrain
+        // started this dataflow in, without this grain having to hold or re-derive `def.Environment` itself.
+        _tableName = EnvKeys.Qualify(def.Environment, def.Name);
         _partition = partition;
         var (_, dataflow) = await TableDataflowFactory.BuildAsync(GrainFactory, def);
         _dataflow = dataflow;
