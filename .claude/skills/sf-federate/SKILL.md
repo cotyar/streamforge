@@ -128,10 +128,11 @@ catalog.
 
 - **Only `GET` routes are id-or-name; `PUT`/`DELETE`/`start`/`stop` are id-only.** Resolve a federated
   entity's name to an id first if you need to mutate it directly on the producer.
-- **Import validate never evaluates a `dependsOn` pin.** `staleReason` is computed by the registry only
-  when the pinned entity, or the thing it depends on, is actually written — `mode=validate` reports an
-  empty diagnostics list even for an already-broken pin. Read the entity back after a real
-  `merge`/`replace` to see it.
+- **`mode=validate` reports a `dependsOn` pin that will not hold** — as a `dependsOn: …` line in that
+  entity's `diagnostics`, before anything is applied — but it is a WARNING: the document still applies,
+  because a violated pin badges an entity rather than stopping it. One blind spot: a pin naming an entity
+  the same document also declares is not evaluated at import, since both revision counters are assigned by
+  the registry at write time. That one appears as `staleReason` after the write.
 - **A `requires: [{kind, version}]` mismatch refuses the WHOLE import**, not just the entities using that
   kind, and — like every refusal on this route — comes back as HTTP `200` with `"ok": false`. Check `ok`,
   not the status code (`curl -f` will not catch it).

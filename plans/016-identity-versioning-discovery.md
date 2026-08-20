@@ -247,6 +247,27 @@ argument rather than rediscovering the symptom.
   already visible on a source's config, and `GET /api/meta/endpoints` is Viewer-gated. But a
   connection string put behind a name would carry a credential, and nothing masks it there.
 
+### Wave 7 found the plan lying about its own code
+
+The docs wave was told to verify every sentence it wrote against the running system, and it caught this
+document overclaiming. The decisions section says a `dependsOn` pin is checked "at exactly two moments:
+**import** (against the post-import world `ConfigImportService` already builds, so `mode=validate` catches
+it before anything is applied) and **start**." Neither was true: `CatalogRevisions.EvaluatePins` was
+reachable only from each registry's post-write `RecomputeStaleReasons`, so `validate` reported an empty
+diagnostics list and the break first appeared as a `staleReason` after a real `merge`.
+
+The import half is now implemented (`ConfigImportService.AttachPinWarnings`, verified live: `validate`
+reports `dependsOn: source 'trades' moved from schemaRevision 999 to 0` and creates nothing; `merge`
+applies with the same warning; a holding pin is silent) — as a **warning**, not a gate, because wave 2
+already decided a violated pin badges an entity rather than stopping it, and an import stricter than the
+runtime it imports into would be backwards. It carries one stated blind spot: a pin naming an entity the
+same document declares is skipped, because both counters are registry-assigned and the post-import value
+is not knowable at plan time.
+
+The "and start" half stays **unimplemented, deliberately**. `StaleReason` is already recomputed on every
+write that could break a pin, so a check at start would report exactly what the badge already says, at a
+moment when the plan's own rule is that the entity starts anyway.
+
 ### Wave 5, in the plan's own terms
 
 The plan promised `IPeerDirectory` with `StaticPeerDirectory` as its first implementation. Shipped as one

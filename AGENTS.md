@@ -74,9 +74,10 @@ happily still 404s on a write to the identical URL. Sources have no id and can n
 renames only while `Stopped`, unsharded and unreferenced; pipeline names are enforced unique going forward.
 Two registry-assigned counters — `Revision` (any change) and `SchemaRevision` (sources/tables, shape only)
 — back `dependsOn: [{kind, name, schemaRevision}]` pins on pipeline/table config documents: a violated pin
-sets `staleReason` and rolls into `catalogWarnings` as a count, it never stops the entity, and it is
-evaluated only when the pinned entity or its dependency is actually written — **`mode=validate` reports
-nothing for it**, the break only shows up after a real `merge`/`replace`. Config import is schema-gated by
+sets `staleReason` and rolls into `catalogWarnings` as a count, and it never stops the entity.
+`mode=validate` reports it as a `dependsOn:` diagnostic before anything is applied — **except** for a pin
+naming an entity the same document declares, whose post-import revision is registry-assigned and so
+unknowable at plan time; that one only surfaces as `staleReason` after the write. Config import is schema-gated by
 default (`schemaPolicy: "any"` is the one string that turns it off) and can declare
 `requires: [{kind, version}]` connector versions that refuse the **whole** import when unsatisfied — like
 every per-entity refusal here, that comes back as **HTTP 200** with `ok:false`, so `curl -f` reads a

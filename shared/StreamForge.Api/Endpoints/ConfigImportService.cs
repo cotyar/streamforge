@@ -732,6 +732,13 @@ public static class ConfigImportService
         // stays silent about something the real run would flag is a worse dry run than none.
         AttachEndpointWarnings(entries, doc);
 
+        // Plan 016 wave 7 follow-up. The plan promised a dependsOn pin is checked "at import ... so
+        // mode=validate catches it before anything is applied"; it was not — EvaluatePins was reachable
+        // ONLY from each registry's post-write RecomputeStaleReasons, so validate said nothing and the
+        // break first appeared as a staleReason after a real merge. Found by the wave-7 docs agent
+        // testing the plan's own sentence against the running code.
+        AttachPinWarnings(entries, doc, currentSources, currentTables);
+
         return new ConfigImportReport
         {
             Mode = mode,
@@ -769,6 +776,69 @@ public static class ConfigImportService
             if (byEntity.TryGetValue((entry.Kind, entry.Name), out var messages))
             {
                 entry.Diagnostics = [.. entry.Diagnostics, .. messages];
+            }
+        }
+    }
+
+    /// <summary>Plan 016 wave 7 follow-up — reports a <c>dependsOn</c> pin that will not hold here, on the
+    /// entity that declares it, at PLAN time, so <c>mode=validate</c> answers "will this land here" for
+    /// pins the way it already does for cycles, plugin requirements and schema breaks.
+    ///
+    /// <para><b>A warning, not a gate</b> — deliberately, and unlike the three fatal checks above. Wave 2
+    /// already decided what a violated pin MEANS: it sets <c>staleReason</c>, badges the entity, and lets
+    /// it keep running on its compiled plan. A gate here would make import stricter than the runtime it
+    /// imports into, which is backwards.</para>
+    ///
+    /// <para><b>The honest limit:</b> only pins naming an entity the document does NOT itself declare are
+    /// evaluated. Both revision counters are registry-assigned at write time, so the post-import
+    /// <c>SchemaRevision</c> of an entity this very document creates or updates is not knowable here, and
+    /// guessing it would produce confident nonsense. That leaves exactly the case worth reporting, and the
+    /// common one: a pin against an upstream the author is not editing.</para></summary>
+    private static void AttachPinWarnings(
+        List<ConfigImportReportEntry> entries,
+        ConfigDocument doc,
+        List<SourceDefinition> currentSources,
+        List<TableDefinition> currentTables)
+    {
+        var declaredSources = doc.Sources.Select(s => s.Name).ToHashSet(StringComparer.Ordinal);
+        var declaredTables = doc.Tables.Select(t => t.Name).ToHashSet(StringComparer.Ordinal);
+
+        bool Knowable(EntityPin pin) => pin.Kind switch
+        {
+            "source" => !declaredSources.Contains(pin.Name),
+            "table" => !declaredTables.Contains(pin.Name),
+            _ => true, // an unpinnable kind is wrong no matter what the document declares.
+        };
+
+        var byEntity = new Dictionary<(string Kind, string Name), string>();
+        foreach (var (kind, name, pins) in
+                 doc.Tables.Select(t => ("table", t.Name, (IReadOnlyList<EntityPin>)t.DependsOn))
+                     .Concat(doc.Pipelines.Select(p => ("pipeline", p.Name, (IReadOnlyList<EntityPin>)p.DependsOn))))
+        {
+            var knowable = pins.Where(Knowable).ToList();
+            if (CatalogRevisions.EvaluatePins(knowable, currentSources, currentTables) is { } reason)
+            {
+                byEntity[(kind, name)] = reason;
+            }
+        }
+
+        if (byEntity.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var entry in entries)
+        {
+            // Same exclusions AttachEndpointWarnings applies, for the same reasons: a deleted entity's
+            // pins are on their way out of the catalog, and an "error" entry never applied at all.
+            if (entry.Action is "deleted" or "error")
+            {
+                continue;
+            }
+
+            if (byEntity.TryGetValue((entry.Kind, entry.Name), out var reason))
+            {
+                entry.Diagnostics = [.. entry.Diagnostics, $"dependsOn: {reason}"];
             }
         }
     }
