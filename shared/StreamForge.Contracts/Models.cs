@@ -106,6 +106,21 @@ public sealed class SourceDefinition
     /// dependant, and without two counters the choice is between pins that fire constantly and pins that
     /// never fire.</summary>
     [Id(15)] public long SchemaRevision { get; set; }
+
+    /// <summary>Plan 021 D5 — the environment this entity belongs to, empty for the default one. Written
+    /// ONCE at creation from the request's environment and never edited afterwards: the name is in every
+    /// runtime key this entity owns, so changing it would strand a grain, a state file and a stream the
+    /// same way renaming a sharded table would.
+    ///
+    /// <para>It exists because the ambient (<c>EnvironmentAmbient</c>) answers "which catalog is this
+    /// REQUEST talking to" and is empty everywhere else. Supervisors, the lifecycle orchestrator, connector
+    /// drivers and stream bridges run on timers and subscriptions, outside any request — they read this
+    /// field. Conflating the two is how background work silently operates on <c>default</c>.</para>
+    ///
+    /// <para>Deliberately NOT part of a config document (D8): a document carrying its environment would be
+    /// deployable to exactly one place, which is the opposite of the point. The environment is a property
+    /// of the import CALL. Config export therefore omits it, and import writes it from the target.</para></summary>
+    [Id(16)] public string Environment { get; set; } = "";
 }
 
 /// <summary>Well-known <see cref="SourceDefinition.GeneratorProfile"/> values that have a dedicated
@@ -500,6 +515,21 @@ public sealed class PipelineDefinition
     /// only useful thing to render is WHICH dependency moved and from what — a boolean would send the
     /// operator to the logs to learn the one fact the badge exists to convey.</summary>
     [Id(16)] public string? StaleReason { get; set; }
+
+    /// <summary>Plan 021 D5 — the environment this entity belongs to, empty for the default one. Written
+    /// ONCE at creation from the request's environment and never edited afterwards: the name is in every
+    /// runtime key this entity owns, so changing it would strand a grain, a state file and a stream the
+    /// same way renaming a sharded table would.
+    ///
+    /// <para>It exists because the ambient (<c>EnvironmentAmbient</c>) answers "which catalog is this
+    /// REQUEST talking to" and is empty everywhere else. Supervisors, the lifecycle orchestrator, connector
+    /// drivers and stream bridges run on timers and subscriptions, outside any request — they read this
+    /// field. Conflating the two is how background work silently operates on <c>default</c>.</para>
+    ///
+    /// <para>Deliberately NOT part of a config document (D8): a document carrying its environment would be
+    /// deployable to exactly one place, which is the opposite of the point. The environment is a property
+    /// of the import CALL. Config export therefore omits it, and import writes it from the target.</para></summary>
+    [Id(17)] public string Environment { get; set; } = "";
 }
 
 /// <summary>One emitted result row. Values are primitives only (string/double/long/bool/null).</summary>
@@ -778,6 +808,21 @@ public sealed class TableDefinition
     /// only useful thing to render is WHICH dependency moved and from what — a boolean would send the
     /// operator to the logs to learn the one fact the badge exists to convey.</summary>
     [Id(34)] public string? StaleReason { get; set; }
+
+    /// <summary>Plan 021 D5 — the environment this entity belongs to, empty for the default one. Written
+    /// ONCE at creation from the request's environment and never edited afterwards: the name is in every
+    /// runtime key this entity owns, so changing it would strand a grain, a state file and a stream the
+    /// same way renaming a sharded table would.
+    ///
+    /// <para>It exists because the ambient (<c>EnvironmentAmbient</c>) answers "which catalog is this
+    /// REQUEST talking to" and is empty everywhere else. Supervisors, the lifecycle orchestrator, connector
+    /// drivers and stream bridges run on timers and subscriptions, outside any request — they read this
+    /// field. Conflating the two is how background work silently operates on <c>default</c>.</para>
+    ///
+    /// <para>Deliberately NOT part of a config document (D8): a document carrying its environment would be
+    /// deployable to exactly one place, which is the opposite of the point. The environment is a property
+    /// of the import CALL. Config export therefore omits it, and import writes it from the target.</para></summary>
+    [Id(35)] public string Environment { get; set; } = "";
 }
 
 /// <summary>Plan 008: per-table durability policy. State is the materialized snapshot; the question is only

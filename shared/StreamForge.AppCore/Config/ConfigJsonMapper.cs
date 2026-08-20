@@ -377,6 +377,17 @@ internal static class ConfigJsonMapper
             node.Remove("kind");
         }
 
+        // Plan 021 D8: the config document stays environment-free. A source is the one entity type this
+        // file serializes WHOLE (pipelines and tables go through the trimmed ConfigPipeline/ConfigTable
+        // projections, which simply never carry the field), so its environment has to be dropped here or
+        // an export from `staging` would re-import into `prod` carrying "staging" with it — the opposite
+        // of the promotion this plan exists to make possible. The environment is a property of the import
+        // CALL, never of the document. An empty string is not pruned by PruneEmpty (the rule is null /
+        // empty array / empty object, deliberately), so this is unconditional rather than a default-value
+        // special case. ImportPlanner compares entities through this same node, which is what makes an
+        // otherwise-identical entity plan as "skipped" across environments instead of churning Revision.
+        node.Remove("environment");
+
         return node;
     }
 
