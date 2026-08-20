@@ -190,6 +190,7 @@ half nobody can act on later.
 | 3-C | `113d444` | Fatal cycles naming the full chain; the `schemaPolicy` gate; the `dependsOn` mapping the import service was missing; and `ConfigComposer.MergeDocs` carrying document-level scalars at all. |
 | — | `7b83410` | Follow-up: the FROM-regex fallback deleted and the unparseable `"TABLE AS SELECT …"` fixtures fixed. A declared behaviour change — those expectations were not testing the behaviour they claimed to. |
 | 5 | `23538a8` `247fdab` `c6d28d7` `15c3a9e` | The discovery headline. `GET /api/meta/instance` (anonymous, like `/healthz`), `/api/meta/peers` + a probe, a static `PeerDirectory` configured from `Discovery:Peers`, an instance id persisted at `{DataDir}/instance.json`; `GrpcSubConfig.Peer` resolved fresh at every (re)connect; `table:<name>` federation; the admin token store keyed per instance; the console can name a peer. **Gate met: two live instances, the consumer's source carrying `peer: "producer"` + `entityKey: "table:positions"` and no address and no GUID, ingesting 79 events.** |
+| 6 | `85aa5d0` `07be779` | `@name` named external endpoints. `NamedEndpoints` plus every connect site — url poll (both drivers), `NatsConnectionSettings`, `HttpSinkClient`, `GrpcPeerResolver`'s peer-unset branch, both SQL dialects' `CreateConnection`, the FIX session builder; `GET /api/meta/endpoints` (Viewer, deliberately not anonymous); an unresolvable reference at import is a **warning**, never a refusal. **Verified live: one catalog, authored once with `@feed` and never edited, ingested `PROD-AAA` under one `--Endpoints:feed` and `DEV-ZZZ` under another, while the export still contained `@feed` once and the resolved host zero times.** |
 
 ## Found and deliberately not fixed
 
@@ -233,6 +234,18 @@ argument rather than rediscovering the symptom.
 - **The Dapr flavor writes `instance.json` into a `DataDir` it otherwise does not use.** Its state lives
   in Redis; this one file does not. Deleting that directory silently gives the instance a new identity,
   which is correct for Orleans (that IS the documented reseed) and merely arbitrary for Dapr.
+- **`@name` is unwired in most of the console.** The hint that tells you whether this instance knows a
+  name is on the `url` source's URL field only. Every other endpoint-shaped field — grpc addresses,
+  the transport editor's nats/db/fix hosts, the sink editors — takes the identical one-line addition
+  against an already-shared fetch cache; it was left because screen space, not plumbing, is the
+  question.
+- **A sink whose `@name` does not resolve disappears from its entity with only a log line.** Wave 6
+  stopped one such sink from aborting the whole refresh sweep, which was the serious half. But the
+  entity's own status still does not say "one of your sinks did not start" — the sink layer has no
+  per-sink status surface to say it on, and inventing one is its own change.
+- **`Endpoints:` values are not treated as secrets.** They are hosts and URLs, the same class of thing
+  already visible on a source's config, and `GET /api/meta/endpoints` is Viewer-gated. But a
+  connection string put behind a name would carry a credential, and nothing masks it there.
 
 ### Wave 5, in the plan's own terms
 
