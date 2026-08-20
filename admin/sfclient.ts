@@ -10,7 +10,13 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export const DEFAULT_URL = "http://localhost:5199";
-export const TOKEN_FILE = join(homedir(), ".streamforge", "token.json");
+// SF_TOKEN_FILE is a TEST-ONLY knob, same family as SF_URL/SF_TOKEN/SF_USER/SF_PASSWORD: it lets a
+// `sf` subprocess (or an in-process SfClient) point its token store at a temp path instead of a
+// developer's real ~/.streamforge/token.json — the requirement plan 016 wave 5's prerequisite fix
+// carries (see admin/mcp.test.ts's "token store" suite). Every read/write below also accepts an
+// explicit `filePath` override for callers that already have a path in hand and would rather not go
+// through the environment at all.
+export const TOKEN_FILE = process.env.SF_TOKEN_FILE || join(homedir(), ".streamforge", "token.json");
 
 /** The three catalog entity kinds, as they appear in REST paths. Sources are addressed by NAME,
  * pipelines and tables by ID — a REST-level asymmetry the callers would otherwise each rediscover. */
@@ -92,31 +98,89 @@ export interface ClientOptions {
   password?: string;
 }
 
-interface StoredToken {
+export interface StoredToken {
   url: string;
   token: string;
   username: string;
   role: string;
 }
 
-/** Reads the token `sf login` stored, but only when it belongs to the instance being addressed —
- * a token minted by one host is meaningless to another, and silently sending it would produce a
- * confusing 401 instead of "you are not logged in to this one". */
-export function readStoredToken(url: string): StoredToken | null {
+/** On-disk shape since plan 016 wave 5: one entry PER INSTANCE, keyed by url. Before this it was a
+ * single StoredToken object — logging into a second instance silently evicted the first, which made
+ * multi-instance administration impossible. `readTokenStore` reads either shape and always returns
+ * the new one; nothing downstream of it ever sees the old shape again. */
+type TokenStore = Record<string, StoredToken>;
+
+/** A corrupt or unparseable file must never crash a command — it is a cache of convenience, not a
+ * source of truth (the source of truth is the login the caller can always redo). Any shape this
+ * cannot make sense of, including valid-but-alien JSON, is treated as "no tokens yet". */
+function readTokenStore(filePath: string): TokenStore {
+  let raw: unknown;
   try {
-    const stored = JSON.parse(readFileSync(TOKEN_FILE, "utf8")) as StoredToken;
-    return stored.url === url ? stored : null;
+    raw = JSON.parse(readFileSync(filePath, "utf8"));
   } catch {
-    return null;
+    return {};
   }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const obj = raw as Record<string, unknown>;
+
+  // Old (pre-016) shape: a single { url, token, username, role } object AT THE TOP LEVEL — migrated
+  // in place to one entry in the new map, keyed by its own url. Distinguished from the new shape by
+  // `token` being a top-level string; the new shape's values are one level down from the top.
+  if (typeof obj.url === "string" && typeof obj.token === "string" && typeof obj.username === "string") {
+    return { [obj.url]: { url: obj.url, token: obj.token, username: obj.username, role: String(obj.role ?? "") } };
+  }
+
+  const store: TokenStore = {};
+  for (const [url, entry] of Object.entries(obj)) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.token === "string" && typeof e.username === "string") {
+      store[url] = { url, token: e.token, username: e.username, role: String(e.role ?? "") };
+    }
+  }
+  return store;
 }
 
-export function writeStoredToken(stored: StoredToken): string {
-  mkdirSync(dirname(TOKEN_FILE), { recursive: true });
-  writeFileSync(TOKEN_FILE, JSON.stringify(stored, null, 2) + "\n");
-  // The JWT is a bearer credential for its 12h lifetime — no wider than the owner.
-  chmodSync(TOKEN_FILE, 0o600);
-  return TOKEN_FILE;
+function writeTokenStore(store: TokenStore, filePath: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, JSON.stringify(store, null, 2) + "\n");
+  // The JWT is a bearer credential for its 12h lifetime — no wider than the owner. Re-applied on every
+  // write (not just the first) since some editors/tools recreate the file with default permissions.
+  chmodSync(filePath, 0o600);
+}
+
+/** Reads the token `sf login` stored, but only when it belongs to the instance being addressed —
+ * a token minted by one host is meaningless to another, and silently sending it would produce a
+ * confusing 401 instead of "you are not logged in to this one". `filePath` defaults to the real
+ * TOKEN_FILE; tests pass a temp path instead of touching a developer's own file. */
+export function readStoredToken(url: string, filePath: string = TOKEN_FILE): StoredToken | null {
+  return readTokenStore(filePath)[url] ?? null;
+}
+
+/** Reads every instance currently logged in to — `sf peers`-adjacent tooling and tests use this to
+ * confirm a second `sf login` left the first entry alone. */
+export function readAllStoredTokens(filePath: string = TOKEN_FILE): StoredToken[] {
+  return Object.values(readTokenStore(filePath));
+}
+
+/** Upserts ONE instance's entry, migrating an old-shape file to the new one on first write and
+ * leaving every other instance's entry untouched. */
+export function writeStoredToken(stored: StoredToken, filePath: string = TOKEN_FILE): string {
+  const store = readTokenStore(filePath);
+  store[stored.url] = stored;
+  writeTokenStore(store, filePath);
+  return filePath;
+}
+
+/** `sf logout` — removes exactly one instance's entry. A no-op (not an error) when that instance was
+ * never logged in to, and never touches any other entry in the file. */
+export function removeStoredToken(url: string, filePath: string = TOKEN_FILE): boolean {
+  const store = readTokenStore(filePath);
+  if (!(url in store)) return false;
+  delete store[url];
+  writeTokenStore(store, filePath);
+  return true;
 }
 
 export class SfClient {
@@ -210,6 +274,20 @@ export class SfClient {
 
   me(): Promise<unknown> {
     return this.request("GET", "/api/auth/me");
+  }
+
+  /** Plan 016 wave 5: GET /api/meta/instance — anonymous, exactly like /healthz, so `sf instance`
+   * works against a host nobody has ever logged in to on this machine. request() only ever attaches
+   * an Authorization header when a token is actually configured, so an anonymous caller sends none —
+   * nothing here needs to special-case "no credential". */
+  instanceInfo(): Promise<unknown> {
+    return this.request("GET", "/api/meta/instance");
+  }
+
+  /** GET /api/meta/peers — Viewer-gated. The instance's configured federation peers, each carrying
+   * the last probe result rather than a live one (see PeerRecord in web/src/api/types.ts). */
+  peers(): Promise<unknown[]> {
+    return this.request<unknown[]>("GET", "/api/meta/peers");
   }
 
   list(kind: Kind): Promise<unknown[]> {

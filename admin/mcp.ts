@@ -33,6 +33,9 @@ catalog, entity lifecycle, SQL validation, rows/results, and config export/impor
 Entity ids: sources are addressed by NAME, pipelines and tables by ID. list_entities returns both.
 A stopped pipeline or table produces nothing — check status before concluding a query is wrong.
 
+get_instance and list_peers (plan 016) answer "which instance is this, and which others does it know
+about" — get_instance is anonymous and works with SF_URL alone, no credentials required.
+
 It also READS the plan-015 authorization surface: the access policy, one user's effective permissions,
 the approval inbox and the audit log. It cannot write any of it. When an action needs a human's
 sign-off, file it with request_approval and say so — there is deliberately no tool here to approve,
@@ -129,6 +132,24 @@ export const TOOLS: Tool[] = [
       health: await client.health(),
       identity: await client.me().catch(() => "anonymous (no credentials configured)"),
     }),
+  },
+  {
+    name: "get_instance",
+    title: "Instance identity",
+    description:
+      "This instance's identity, flavor, version, endpoints, capabilities, plugins and catalog counts/warnings (plan 016). Anonymous — works even with no credentials configured.",
+    inputSchema: { type: "object", properties: {} },
+    annotations: READ_ONLY,
+    run: (_args, client) => client.instanceInfo(),
+  },
+  {
+    name: "list_peers",
+    title: "List federation peers",
+    description:
+      "This instance's configured federation peers (plan 016), each with its last probe result. An empty `instanceId` on an entry means 'configured' but never successfully probed yet, vs 'seen'.",
+    inputSchema: { type: "object", properties: {} },
+    annotations: READ_ONLY,
+    run: (_args, client) => client.peers(),
   },
   {
     name: "list_entities",

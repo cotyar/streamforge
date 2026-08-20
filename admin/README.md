@@ -106,7 +106,10 @@ SF_URL=http://localhost:5399 bun admin/sf.ts ls tables    # the Dapr flavor, sam
 | Command | Does |
 |---|---|
 | `sf health` | Instance health + the identity this token carries |
-| `sf login [--user U]` | Stores a token in `~/.streamforge/token.json` (mode 600). Password from `--password`, `SF_PASSWORD`, or a no-echo prompt |
+| `sf login [--user U]` | Stores a token for **this URL** in `~/.streamforge/token.json` (mode 600). Password from `--password`, `SF_PASSWORD`, or a no-echo prompt |
+| `sf logout` | Removes **this URL's** stored token only — every other logged-in instance is untouched |
+| `sf instance` | This instance's identity — id, flavor, version, endpoints, capabilities, plugins, catalog counts/warnings. **Anonymous**, like `/healthz`: works with no login and no stored token at all |
+| `sf peers` | This instance's configured federation peers, each with its last probe result (`configured` = never reached, `seen` = probed at least once) |
 | `sf ls <sources\|pipelines\|tables>` | One line per entity (`--json` for the raw array) |
 | `sf get <kind> <id>` | One entity's full definition |
 | `sf start\|stop <pipelines\|tables> <id>` | Lifecycle |
@@ -158,6 +161,26 @@ URL matches the one being addressed — a token from another host is not silentl
 with `SF_USER`/`SF_PASSWORD`. Only the JWT is ever written to disk, and only by an explicit
 `sf login`; no credential is. There are no default credentials in the code.
 
+### The token file holds one entry PER INSTANCE (plan 016 wave 5)
+
+`~/.streamforge/token.json` used to be a single `{ url, token, username, role }` object, so logging
+in to a second instance silently evicted the first — multi-instance administration (`sf instance` /
+`sf peers` against several hosts, or just juggling Orleans `:5199` and Dapr `:5399` day to day) was
+impossible. It is now `{ [url]: { url, token, username, role } }`, one entry per URL:
+
+- **An old-shape file is migrated in place on first read** — it is read as one entry for its own
+  `url`, and the next `sf login`/`sf logout` rewrites the file in the new shape. Nothing is lost; a
+  login from before this change keeps working.
+- Logging in to a second URL, or logging out of one, never touches any other URL's entry.
+- 0600 permissions are re-applied on every write, not just the first.
+- **A corrupt or unparseable file never crashes a command** — it reads as "no tokens yet", the same
+  as a missing file. The store is a cache of convenience; the source of truth is the login the caller
+  can always redo.
+
+`SF_TOKEN_FILE` (test-only, same family as `SF_URL`/`SF_TOKEN`/`SF_USER`/`SF_PASSWORD`) repoints the
+store at a different path for the process's lifetime — how the test suite exercises `sf login`/
+`sf logout` without ever touching a real `~/.streamforge/token.json`. Leave it unset in normal use.
+
 ## MCP server (plan 013)
 
 Stdio transport, written to the MCP specification (protocol `2025-06-18`, negotiating down to
@@ -178,11 +201,13 @@ that matters is pinned by `mcp.test.ts` rather than assumed.
 }
 ```
 
-**Tools** — `health`, `list_entities`, `get_entity`, `get_metrics`, `validate_sql`, `get_rows`,
-`get_results`, `create_entity`, `start_entity`, `stop_entity`, `delete_entity`, `export_config`,
-`import_config`, and plan 015's `get_access_policy`, `get_effective_permissions`, `list_approvals`,
-`get_approval`, `request_approval`, `get_audit_days`, `get_audit_day`. Read-only tools carry
-`readOnlyHint`; `delete_entity` and `import_config` carry `destructiveHint`.
+**Tools** — `health`, `get_instance`, `list_peers` (plan 016 wave 5), `list_entities`, `get_entity`,
+`get_metrics`, `validate_sql`, `get_rows`, `get_results`, `create_entity`, `start_entity`,
+`stop_entity`, `delete_entity`, `export_config`, `import_config`, and plan 015's
+`get_access_policy`, `get_effective_permissions`, `list_approvals`, `get_approval`,
+`request_approval`, `get_audit_days`, `get_audit_day`. Read-only tools carry `readOnlyHint`;
+`delete_entity` and `import_config` carry `destructiveHint`. `get_instance` is anonymous — it works
+even when this server is configured with no credentials at all.
 
 Four deliberate omissions, all about what an agent should be handed:
 
@@ -226,7 +251,9 @@ asserts it.
 bun test admin/
 ```
 
-30 tests: protocol conformance driven against the server as a real subprocess over pipes (handshake,
+54 tests: protocol conformance driven against the server as a real subprocess over pipes (handshake,
 version negotiation, notifications never answered, parse errors survivable, batches refused, stdout
-purity), the plan-015 tool boundary above, plus the shared client's auth and error handling against a
-stub instance.
+purity), the plan-015 tool boundary above, the shared client's auth and error handling against a stub
+instance, plan 016 wave 5's `get_instance`/`list_peers` tools, and the token-store migration (old
+shape → new, two instances coexisting, logout disturbing nobody else, a corrupt file surviving both a
+read and a write) driven both directly and through real `sf login`/`sf logout` subprocesses.

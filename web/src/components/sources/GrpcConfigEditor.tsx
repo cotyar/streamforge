@@ -1,6 +1,7 @@
-import { useState } from 'react'
-import type { FieldDef, GrpcSubConfig } from '@/api/types'
+import { useEffect, useState } from 'react'
+import type { FieldDef, GrpcSubConfig, PeerRecord } from '@/api/types'
 import { sourcesApi } from '@/api/sources'
+import { api } from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -21,6 +22,10 @@ export interface GrpcFormState {
   restAddress: string
   schemaSource: SchemaSource
   protoText: string
+  /** Plan 016 wave 5 — name of a configured peer (GET /api/meta/peers). When non-empty it WINS over
+   *  `address`/`restAddress` at every reconnect (see GrpcSubConfig.peer in types.ts); empty means
+   *  "use the literal address fields below", the pre-016 behaviour. */
+  peer: string
 }
 
 export function toGrpcFormState(cfg?: GrpcSubConfig | null): GrpcFormState {
@@ -34,6 +39,7 @@ export function toGrpcFormState(cfg?: GrpcSubConfig | null): GrpcFormState {
     restAddress: cfg?.restAddress ?? '',
     schemaSource: cfg?.schemaSource === 'proto' ? 'proto' : 'reflection',
     protoText: cfg?.protoText ?? '',
+    peer: cfg?.peer ?? '',
   }
 }
 
@@ -47,6 +53,7 @@ export function buildGrpcConfig(state: GrpcFormState): GrpcSubConfig {
     restAddress: state.restAddress.trim() || null,
     schemaSource: state.schemaSource,
     protoText: state.schemaSource === 'proto' ? state.protoText : null,
+    peer: state.peer.trim() || null,
   }
 }
 
@@ -72,6 +79,28 @@ export function GrpcConfigEditor({
   const [fetching, setFetching] = useState(false)
   const [diagnostics, setDiagnostics] = useState<string[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Plan 016 wave 5: populates the peer datalist below. GET /api/meta/peers is Viewer-gated and, at
+  // the time this was written, may not exist yet on a given instance (a concurrent track was still
+  // building it) — either failure degrades to an empty list rather than an error banner, since the
+  // peer field stays usable as free text (a name typed ahead of the instance having probed it) either
+  // way.
+  const [peers, setPeers] = useState<PeerRecord[]>([])
+  useEffect(() => {
+    let cancelled = false
+    api
+      .get<PeerRecord[]>('/api/meta/peers')
+      .then((list) => {
+        if (!cancelled) setPeers(list)
+      })
+      .catch(() => {
+        // Silently degrade — see the comment on the `peers` state above.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const peerNamed = value.peer.trim().length > 0
 
   async function fetchSchema() {
     setError(null)
@@ -91,15 +120,45 @@ export function GrpcConfigEditor({
   return (
     <FieldGroup className="gap-3">
       <Field>
+        <FieldLabel htmlFor="grpc-cfg-peer">Peer (optional)</FieldLabel>
+        <Input
+          id="grpc-cfg-peer"
+          list="grpc-cfg-peer-list"
+          value={value.peer}
+          onChange={(e) => onChange({ peer: e.target.value })}
+          placeholder="e.g. prod-east — leave blank to use the address below"
+          disabled={disabled}
+          className="font-mono"
+        />
+        {/* Free text with autocomplete, not a <Select>: a peer can be named before this instance has
+            ever reached it (`sf peers` shows "configured" vs "seen"), so the field must accept a name
+            the datalist below does not yet know about. */}
+        <datalist id="grpc-cfg-peer-list">
+          {peers.map((p) => (
+            <option key={p.name} value={p.name} />
+          ))}
+        </datalist>
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          Name of a configured peer (see <span className="font-mono">GET /api/meta/peers</span>). When
+          set, this WINS over the address fields below at every reconnect — they are disabled while a
+          peer is named, so nothing here implies they would still take effect.
+        </p>
+      </Field>
+      <Field>
         <FieldLabel htmlFor="grpc-cfg-address">Remote gRPC address</FieldLabel>
         <Input
           id="grpc-cfg-address"
           value={value.address}
           onChange={(e) => onChange({ address: e.target.value })}
           placeholder="localhost:5299"
-          disabled={disabled}
+          disabled={disabled || peerNamed}
           className="font-mono"
         />
+        {peerNamed && (
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Ignored — resolved from peer <span className="font-mono">{value.peer.trim()}</span> instead.
+          </p>
+        )}
       </Field>
       <Field>
         <FieldLabel htmlFor="grpc-cfg-entitykey">Entity key</FieldLabel>
@@ -112,8 +171,9 @@ export function GrpcConfigEditor({
           className="font-mono"
         />
         <p className="mt-1 text-[11px] text-muted-foreground">
-          One of <span className="font-mono">source:{'{name}'}</span>, <span className="font-mono">pipeline:{'{id}'}</span>,{' '}
-          <span className="font-mono">table:{'{id}'}</span> on the remote instance.
+          One of <span className="font-mono">source:{'{name}'}</span>, <span className="font-mono">pipeline:{'{id-or-name}'}</span>,{' '}
+          <span className="font-mono">table:{'{id-or-name}'}</span> on the remote instance. A name is resolved against the
+          remote at each reconnect, so a peer name plus an entity name needs no GUID anywhere.
         </p>
       </Field>
 
@@ -159,11 +219,13 @@ export function GrpcConfigEditor({
               value={value.restAddress}
               onChange={(e) => onChange({ restAddress: e.target.value })}
               placeholder="http://localhost:5199"
-              disabled={disabled}
+              disabled={disabled || peerNamed}
               className="font-mono"
             />
             <p className="mt-1 text-[11px] text-muted-foreground">
-              Required with username/password — used to POST /api/auth/login on the remote instance.
+              {peerNamed
+                ? `Ignored — the peer's own REST endpoint is used instead.`
+                : 'Required with username/password — used to POST /api/auth/login on the remote instance.'}
             </p>
           </Field>
         </>
@@ -227,7 +289,7 @@ export function GrpcConfigEditor({
         variant="outline"
         size="sm"
         className="self-start"
-        disabled={disabled || fetching || !value.address.trim() || !value.entityKey.trim()}
+        disabled={disabled || fetching || !(value.address.trim() || peerNamed) || !value.entityKey.trim()}
         onClick={() => void fetchSchema()}
       >
         {fetching ? 'Fetching…' : 'Fetch schema from remote'}

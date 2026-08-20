@@ -13,10 +13,18 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Subprocess } from "bun";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SfClient, SfError, toApprovalState } from "./sfclient.ts";
+import {
+  readAllStoredTokens,
+  readStoredToken,
+  removeStoredToken,
+  SfClient,
+  SfError,
+  toApprovalState,
+  writeStoredToken,
+} from "./sfclient.ts";
 import { formatImportReport } from "./sf.ts";
 
 // --- stub StreamForge instance ---------------------------------------------------------------------
@@ -59,6 +67,36 @@ const stub = Bun.serve({
         return json({ id: "t1", status: "Running" });
       case "GET /api/tables/missing":
         return json({ error: "table 'missing' not found" }, 404);
+
+      // --- plan 016 wave 5: instance identity + peers ---
+      // Both answer unconditionally, regardless of the Authorization header — /api/meta/instance is
+      // genuinely anonymous on the real server, and this stub does not need to reimplement Viewer
+      // gating on /api/meta/peers to prove the CLIENT sends the request and renders the response.
+      case "GET /api/meta/instance":
+        return json({
+          instanceId: "11111111-1111-1111-1111-111111111111",
+          name: "stub-instance",
+          flavor: "stub",
+          version: "0.0.0-test",
+          endpoints: { rest: "http://stub:0", grpc: "stub:1" },
+          capabilities: ["csv"],
+          plugins: ["postgres"],
+          catalogCounts: { sources: 1, pipelines: 0, tables: 1 },
+          catalogWarnings: ["pipeline 'p' collides with a source name"],
+          startedAtMs: 1,
+        });
+      case "GET /api/meta/peers":
+        return json([
+          {
+            name: "prod-east",
+            instanceId: "",
+            restEndpoint: "http://prod-east:5199",
+            grpcEndpoint: "prod-east:5299",
+            lastSeenAtMs: 0,
+            lastError: "connection refused",
+            info: null,
+          },
+        ]);
 
       // --- plan 015: access, approvals, audit ---
       case "GET /api/access":
@@ -322,6 +360,20 @@ describe("MCP tools", () => {
     expect((res.result as any).content[0].text).toContain("positions");
   });
 
+  test("get_instance answers this instance's identity (plan 016)", async () => {
+    const res = await callTool("get_instance");
+    const text = (res.result as any).content[0].text as string;
+    expect(text).toContain("stub-instance");
+    expect(text).toContain("11111111-1111-1111-1111-111111111111");
+  });
+
+  test("list_peers answers the configured peers, including an unreached one's lastError", async () => {
+    const res = await callTool("list_peers");
+    const text = (res.result as any).content[0].text as string;
+    expect(text).toContain("prod-east");
+    expect(text).toContain("connection refused");
+  });
+
   test("get_rows can ask for CSV, which comes back as text not JSON", async () => {
     const res = await callTool("get_rows", { id: "t1", csv: true });
     expect((res.result as any).content[0].text).toBe("symbol,qty\nACME,5\n");
@@ -480,6 +532,249 @@ describe("SfClient", () => {
     const listed = recorded.filter((r) => r.path.startsWith("/api/approvals?")).at(-1)!;
     expect(listed.path).toBe("/api/approvals?limit=5&state=Pending");
     expect(() => toApprovalState("Bogus")).toThrow("Pending, Approved, Rejected");
+  });
+
+  // --- plan 016 wave 5: instance identity + peers -------------------------------------------------
+
+  test("instanceInfo sends NO Authorization header when no credential is configured at all", async () => {
+    // Deliberately no token/user/password — GET /api/meta/instance is anonymous, like /healthz, and
+    // that is the entire point of `sf instance`: it must work with nothing configured.
+    const client = new SfClient({ url: STUB_URL });
+    const info = (await client.instanceInfo()) as Record<string, unknown>;
+
+    expect(info.name).toBe("stub-instance");
+    const read = recorded.filter((r) => r.path === "/api/meta/instance").at(-1)!;
+    expect(read.auth).toBeNull();
+  });
+
+  test("peers lists the configured peers as-is", async () => {
+    const client = new SfClient({ url: STUB_URL, token: "t" });
+    const peers = await client.peers();
+    expect(peers).toHaveLength(1);
+    expect((peers[0] as Record<string, unknown>).name).toBe("prod-east");
+  });
+});
+
+// --- plan 016 wave 5: the token store holds ONE ENTRY PER INSTANCE ---------------------------------
+//
+// Every test below drives readStoredToken/writeStoredToken/readAllStoredTokens/removeStoredToken
+// through an EXPLICIT filePath argument pointed at a temp file — never the module's real TOKEN_FILE
+// (~/.streamforge/token.json) — so none of this can read or clobber a developer's actual login.
+
+describe("token store (one entry per instance)", () => {
+  function tempTokenFile(): string {
+    return join(tmpdir(), `sf-token-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  }
+
+  test("an old-shape single-object file is read as one entry for its own url", () => {
+    const file = tempTokenFile();
+    try {
+      writeFileSync(file, JSON.stringify({ url: "http://a", token: "tok-a", username: "alice", role: "Admin" }));
+      expect(readStoredToken("http://a", file)).toEqual({
+        url: "http://a",
+        token: "tok-a",
+        username: "alice",
+        role: "Admin",
+      });
+      // Nobody else's url is in an old-shape file, by construction — asking for one answers null,
+      // not a crash and not a false positive.
+      expect(readStoredToken("http://b", file)).toBeNull();
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
+
+  test("writing against a migrated (old-shape) file rewrites it in the new map shape, losing nothing", () => {
+    const file = tempTokenFile();
+    try {
+      writeFileSync(file, JSON.stringify({ url: "http://a", token: "tok-a", username: "alice", role: "Admin" }));
+      writeStoredToken({ url: "http://b", token: "tok-b", username: "bob", role: "Viewer" }, file);
+
+      // The pre-existing login for http://a survives the write for http://b...
+      expect(readStoredToken("http://a", file)?.token).toBe("tok-a");
+      expect(readStoredToken("http://b", file)?.token).toBe("tok-b");
+      // ...and the file on disk is now keyed by url, not a bare {url,token,...} object.
+      const onDisk = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+      expect(onDisk.token).toBeUndefined();
+      expect((onDisk["http://a"] as Record<string, unknown>).token).toBe("tok-a");
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
+
+  test("two instances coexist: logging into a second does not evict the first", () => {
+    const file = tempTokenFile();
+    try {
+      writeStoredToken({ url: "http://a", token: "tok-a", username: "alice", role: "Admin" }, file);
+      writeStoredToken({ url: "http://b", token: "tok-b", username: "bob", role: "Viewer" }, file);
+
+      expect(readStoredToken("http://a", file)?.username).toBe("alice");
+      expect(readStoredToken("http://b", file)?.username).toBe("bob");
+      expect(readAllStoredTokens(file)).toHaveLength(2);
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
+
+  test("removing one instance's token disturbs no other entry", () => {
+    const file = tempTokenFile();
+    try {
+      writeStoredToken({ url: "http://a", token: "tok-a", username: "alice", role: "Admin" }, file);
+      writeStoredToken({ url: "http://b", token: "tok-b", username: "bob", role: "Viewer" }, file);
+
+      expect(removeStoredToken("http://a", file)).toBe(true);
+      expect(readStoredToken("http://a", file)).toBeNull();
+      expect(readStoredToken("http://b", file)?.token).toBe("tok-b");
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
+
+  test("removing an instance that was never logged in to is a no-op, not an error", () => {
+    const file = tempTokenFile();
+    try {
+      writeStoredToken({ url: "http://a", token: "tok-a", username: "alice", role: "Admin" }, file);
+      expect(removeStoredToken("http://nope", file)).toBe(false);
+      expect(readAllStoredTokens(file)).toHaveLength(1);
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
+
+  test("a corrupt (unparseable) file does not crash a command — reads as empty", () => {
+    const file = tempTokenFile();
+    try {
+      writeFileSync(file, "{ this is not : valid json ][");
+      expect(readStoredToken("http://a", file)).toBeNull();
+      expect(readAllStoredTokens(file)).toEqual([]);
+      // Nor does it crash a WRITE — the corrupt file is simply replaced.
+      writeStoredToken({ url: "http://a", token: "tok-a", username: "alice", role: "Admin" }, file);
+      expect(readStoredToken("http://a", file)?.token).toBe("tok-a");
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
+
+  test("valid JSON that is neither shape (an array, a number, null) reads as empty, not thrown", () => {
+    const file = tempTokenFile();
+    try {
+      writeFileSync(file, JSON.stringify([1, 2, 3]));
+      expect(readAllStoredTokens(file)).toEqual([]);
+      writeFileSync(file, "null");
+      expect(readAllStoredTokens(file)).toEqual([]);
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
+
+  test("a missing file is read as empty, not thrown", () => {
+    const file = tempTokenFile(); // never created
+    expect(readStoredToken("http://a", file)).toBeNull();
+    expect(readAllStoredTokens(file)).toEqual([]);
+  });
+
+  test("the file is written 0600 — a bearer credential is no wider than its owner", () => {
+    const file = tempTokenFile();
+    try {
+      writeStoredToken({ url: "http://a", token: "tok-a", username: "alice", role: "Admin" }, file);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
+});
+
+// --- plan 016 wave 5: `sf login`/`sf logout`/`sf instance`/`sf peers` (CLI subprocess) -------------
+//
+// SF_TOKEN_FILE (test-only, same family as SF_URL/SF_TOKEN/SF_USER/SF_PASSWORD) repoints the real
+// `sf` binary's token store at a temp file for the duration of each subprocess, so these never touch
+// a developer's actual ~/.streamforge/token.json either.
+
+describe("sf login / instance / peers (CLI subprocess)", () => {
+  async function runCliEnv(args: string[], env: Record<string, string>): Promise<{ code: number; stdout: string }> {
+    const proc = Bun.spawn(["bun", `${import.meta.dir}/sf.ts`, ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, ...env },
+    });
+    const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    return { code, stdout };
+  }
+
+  test("sf instance works with NO credential configured at all", async () => {
+    const { code, stdout } = await runCliEnv(["instance", "--url", STUB_URL], {
+      SF_TOKEN: "",
+      SF_USER: "",
+      SF_PASSWORD: "",
+      SF_TOKEN_FILE: join(tmpdir(), `sf-token-test-instance-${Date.now()}.json`), // never created
+    });
+    expect(code).toBe(0);
+    expect(stdout).toContain("stub-instance");
+    expect(stdout).toContain("catalog warning");
+  });
+
+  test("sf peers lists the configured peers", async () => {
+    const { code, stdout } = await runCliEnv(["peers", "--url", STUB_URL, "--token", "t"], {
+      SF_TOKEN_FILE: join(tmpdir(), `sf-token-test-peers-${Date.now()}.json`),
+    });
+    expect(code).toBe(0);
+    expect(stdout).toContain("prod-east");
+    expect(stdout).toContain("configured"); // instanceId is empty on the stub's one peer
+  });
+
+  test("sf login against a second URL leaves the first instance's login intact", async () => {
+    // A genuine second instance, not a second call against the same stub — the property under test is
+    // that `sf login` keys its store entry by url, so it needs two DIFFERENT urls to say anything.
+    const second = Bun.serve({
+      port: 0,
+      fetch: (req) =>
+        new URL(req.url).pathname === "/api/auth/login"
+          ? new Response(JSON.stringify({ token: "tok-bob", username: "bob", role: "Viewer" }), {
+            headers: { "content-type": "application/json" },
+          })
+          : new Response("not found", { status: 404 }),
+    });
+    const secondUrl = `http://127.0.0.1:${second.port}`;
+    const file = join(tmpdir(), `sf-token-test-two-logins-${Date.now()}.json`);
+    try {
+      const first = await runCliEnv(["login", "--user", "admin", "--password", "pw"], {
+        SF_URL: STUB_URL,
+        SF_TOKEN_FILE: file,
+      });
+      expect(first.code).toBe(0);
+      expect(first.stdout).toContain(`logged in to ${STUB_URL}`);
+
+      const second_ = await runCliEnv(["login", "--user", "bob", "--password", "pw"], {
+        SF_URL: secondUrl,
+        SF_TOKEN_FILE: file,
+      });
+      expect(second_.code).toBe(0);
+      expect(second_.stdout).toContain(`logged in to ${secondUrl}`);
+
+      // Both entries survive, keyed by their own url — the second `sf login` did not evict the first.
+      expect(readStoredToken(STUB_URL, file)?.username).toBe("admin");
+      expect(readStoredToken(secondUrl, file)?.username).toBe("bob");
+      expect(readAllStoredTokens(file)).toHaveLength(2);
+    } finally {
+      rmSync(file, { force: true });
+      second.stop(true);
+    }
+  });
+
+  test("sf logout removes only the addressed instance's token", async () => {
+    const file = join(tmpdir(), `sf-token-test-logout-${Date.now()}.json`);
+    try {
+      writeStoredToken({ url: STUB_URL, token: "tok-a", username: "alice", role: "Admin" }, file);
+      writeStoredToken({ url: "http://other:1", token: "tok-b", username: "bob", role: "Viewer" }, file);
+
+      const { code, stdout } = await runCliEnv(["logout", "--url", STUB_URL], { SF_TOKEN_FILE: file });
+      expect(code).toBe(0);
+      expect(stdout).toContain(`logged out of ${STUB_URL}`);
+      expect(readStoredToken(STUB_URL, file)).toBeNull();
+      expect(readStoredToken("http://other:1", file)?.token).toBe("tok-b");
+    } finally {
+      rmSync(file, { force: true });
+    }
   });
 });
 

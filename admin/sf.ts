@@ -13,6 +13,7 @@ import {
   APPROVAL_STATES,
   isKind,
   KINDS,
+  removeStoredToken,
   SfClient,
   SfError,
   toApprovalState,
@@ -24,6 +25,9 @@ const USAGE = `sf — StreamForge admin CLI
 
   sf health                                  instance health + who this token is
   sf login [--user U] [--password P]         store a token in ~/.streamforge/token.json (0600)
+  sf logout                                  remove THIS instance's stored token (others untouched)
+  sf instance                                this instance's identity (anonymous — no login needed)
+  sf peers                                   this instance's configured federation peers
   sf ls <${KINDS.join("|")}>            one line per entity (--json for the raw array)
   sf get <kind> <id>                         one entity's full definition
   sf start|stop <pipelines|tables> <id>      lifecycle
@@ -103,6 +107,41 @@ function summarize(kind: Kind, entity: Record<string, unknown>): string {
   return [idOf(entity).padEnd(34), String(entity.name ?? "").padEnd(24), state.padEnd(9), extra]
     .join(" ")
     .trimEnd();
+}
+
+// --- plan 016 wave 5 printers (instance identity + peers) -----------------------------------------
+
+function printInstance(info: Record<string, any>): void {
+  console.log(`${info.name} (${info.flavor} ${info.version})  id=${info.instanceId}`);
+  const endpoints = Object.entries(info.endpoints ?? {}).map(([k, v]) => `${k}=${v}`).join("  ");
+  console.log(`  endpoints:     ${endpoints || "—"}`);
+  console.log(`  capabilities:  ${(info.capabilities ?? []).join(", ") || "—"}`);
+  console.log(`  plugins:       ${(info.plugins ?? []).join(", ") || "—"}`);
+  const counts = Object.entries(info.catalogCounts ?? {}).map(([k, v]) => `${k}=${v}`).join("  ");
+  console.log(`  catalog:       ${counts || "—"}`);
+  console.log(`  started:       ${new Date(Number(info.startedAtMs ?? 0)).toISOString()}`);
+  const warnings = (info.catalogWarnings ?? []) as string[];
+  if (warnings.length > 0) {
+    console.log(`  WARNING: ${warnings.length} catalog warning(s) this instance tolerates but somebody should see:`);
+    for (const w of warnings) console.log(`    - ${w}`);
+  }
+}
+
+/** 'configured' (never reached) vs 'seen' (probed at least once) is exactly what an EMPTY
+ * `instanceId` distinguishes — see PeerRecord's own doc comment in web/src/api/types.ts. */
+function summarizePeer(p: Record<string, any>): string {
+  const state = p.instanceId ? "seen" : "configured";
+  const seen = Number(p.lastSeenAtMs ?? 0) > 0
+    ? new Date(Number(p.lastSeenAtMs)).toISOString().replace("T", " ").slice(0, 19)
+    : "never";
+  return [
+    String(p.name ?? "").padEnd(20),
+    state.padEnd(11),
+    String(p.restEndpoint ?? "").padEnd(28),
+    String(p.grpcEndpoint ?? "").padEnd(24),
+    `last seen: ${seen}`,
+    p.lastError ? `  error: ${p.lastError}` : "",
+  ].join(" ").trimEnd();
 }
 
 // --- plan 015 printers ---------------------------------------------------------------------------
@@ -327,6 +366,31 @@ async function main(argv: string[]): Promise<number> {
       const stored = await client.login(user, password);
       const file = writeStoredToken(stored);
       console.log(`logged in to ${stored.url} as ${stored.username} (${stored.role}) — token in ${file}`);
+      return 0;
+    }
+
+    // Removes only THIS URL's entry from the (now per-instance) token store — every other logged-in
+    // instance's entry is untouched. See sfclient.ts's TokenStore for the migration this rests on.
+    case "logout": {
+      const removed = removeStoredToken(client.url);
+      console.log(removed ? `logged out of ${client.url}` : `not logged in to ${client.url}`);
+      return 0;
+    }
+
+    // Plan 016 wave 5: GET /api/meta/instance is anonymous, exactly like /healthz — this command
+    // works with no login and no stored token at all, which is the whole point of the route.
+    case "instance": {
+      const info = (await client.instanceInfo()) as Record<string, any>;
+      if (json) return out(info, true), 0;
+      printInstance(info);
+      return 0;
+    }
+
+    case "peers": {
+      const list = (await client.peers()) as Record<string, any>[];
+      if (json) return out(list, true), 0;
+      if (list.length === 0) console.log("(no peers configured)");
+      for (const p of list) console.log(summarizePeer(p));
       return 0;
     }
 
