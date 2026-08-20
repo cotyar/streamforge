@@ -281,3 +281,71 @@ public interface IAuditFacade
     /// <summary>Which days have entries. Cheap because it reads an index, not the shards.</summary>
     Task<List<string>> GetDaysAsync();
 }
+
+/// <summary>
+/// Plan 020 wave B — the one door into a CRDT document from the outside. Orleans: <c>ICrdtDocGrain</c>,
+/// keyed by <c>EnvKeys.Qualify(environment, sourceName)</c> like every other per-source grain. Dapr:
+/// <c>DisabledCrdtFacade</c>, because plan 020 D9 is Orleans-first — see
+/// <see cref="Enabled"/>.
+///
+/// <para><b>Why a facade and not just an endpoint.</b> The intake route lives in
+/// <c>StreamForge.Api</c>, which both flavours serve; without a seam here the route would either not
+/// exist on Dapr (a 404 that reads as "wrong URL") or would reference an Orleans grain from shared code.
+/// The same shape <c>ITableShardFacade</c> uses, for the same reason.</para>
+/// </summary>
+public interface ICrdtFacade
+{
+    /// <summary>False on a flavour with no document runtime. The intake endpoint answers <b>501 Not
+    /// Implemented</b> rather than 404 when this is false, so an operator learns the difference between
+    /// "this build cannot do that" and "you typed the wrong source name".</summary>
+    bool Enabled { get; }
+
+    /// <summary>Merge Yjs v1 updates into the named document, in order, and emit whatever rows the merge
+    /// changed. Returns <c>null</c> when no source of that name exists or it is not
+    /// <see cref="SourceKinds.Crdt"/> kind — the endpoint turns that into a 404.
+    ///
+    /// <para>Idempotent by construction (plan 020 D7): re-delivering a batch that has already been merged
+    /// changes no state, so it emits no rows and returns <c>RowsEmitted = 0</c>. That is the property that
+    /// makes an edge's store-and-forward buffer safe to replay after a link drops, and it is why this
+    /// method needs no request id, no dedup key and no transaction.</para></summary>
+    Task<CrdtMergeResult?> MergeAsync(string sourceName, IReadOnlyList<byte[]> updates);
+
+    /// <summary>Counters for the console and for an operator asking "did my updates land". <c>null</c>
+    /// under the same conditions as <see cref="MergeAsync"/>.</summary>
+    Task<CrdtDocStatus?> GetStatusAsync(string sourceName);
+}
+
+/// <summary>What one <see cref="ICrdtFacade.MergeAsync"/> call did.</summary>
+[GenerateSerializer]
+public sealed class CrdtMergeResult
+{
+    /// <summary>Updates that decoded and merged without throwing. An update that fails to decode does not
+    /// abort the batch — it is counted in <see cref="Diagnostics"/> and the rest are merged, because a
+    /// single corrupt frame from a flaky link must not strand every good one behind it.</summary>
+    [Id(0)] public int UpdatesApplied { get; set; }
+
+    /// <summary>Rows the merge actually changed. Zero on a replay — see the idempotence note on
+    /// <see cref="ICrdtFacade.MergeAsync"/>.</summary>
+    [Id(1)] public int RowsEmitted { get; set; }
+
+    /// <summary>Per-update decode failures and per-row projection complaints (an undeclared document key,
+    /// a value that would not coerce, a key renamed off a reserved column). Never throws in place of
+    /// these: a document written by somebody else's edge is untrusted input.</summary>
+    [Id(2)] public List<string> Diagnostics { get; set; } = [];
+}
+
+/// <summary>A document's counters. Deliberately not the document itself: plan 020's cut list puts a raw
+/// document inspector behind "the projected table is already viewable".</summary>
+[GenerateSerializer]
+public sealed class CrdtDocStatus
+{
+    /// <summary>Keys currently in the configured root map — i.e. live rows, tombstones excluded.</summary>
+    [Id(0)] public int EntityCount { get; set; }
+
+    [Id(1)] public long UpdatesMerged { get; set; }
+
+    [Id(2)] public long RowsEmitted { get; set; }
+
+    /// <summary>Set when the document is not running and why.</summary>
+    [Id(3)] public string? Error { get; set; }
+}

@@ -27,6 +27,9 @@ public static class SourceValidation
     {
         SourceKinds.Generator, SourceKinds.Url, SourceKinds.File, SourceKinds.Folder, SourceKinds.Grpc,
         SourceKinds.Ingest,
+        // Plan 020 wave B: like Generator and Ingest and unlike everything the registries supply, a CRDT
+        // document has a driver of its own rather than a transport (D3), so it is listed here by hand.
+        SourceKinds.Crdt,
     };
 
     private static bool IsKnownKind(string kind) =>
@@ -102,6 +105,12 @@ public static class SourceValidation
                 ValidateIngest(def.Ingest, errors);
             }
 
+            return errors;
+        }
+
+        if (def.Kind == SourceKinds.Crdt)
+        {
+            ValidateCrdt(def, errors);
             return errors;
         }
 
@@ -288,6 +297,49 @@ public static class SourceValidation
     /// <see cref="IngressAdmission.MaxBlockWaitMs"/> server cap the buffer itself silently clamps to at
     /// push time — flagging an out-of-range value HERE, at save time, is an honest error instead of a
     /// setting that looks respected but silently isn't.</summary>
+    /// <summary>Plan 020 wave B. Two rules, and both exist because the projector refuses to invent
+    /// schema: the key column must be a column the source actually declares, and the reserved columns the
+    /// platform stamps (<c>_ts</c>, <c>_source</c>, <c>_weight</c>, <c>_op</c>) cannot be borrowed for it.
+    /// An ERP document is entirely likely to contain a field literally called <c>_ts</c>; the projector
+    /// renames such a document key defensively at projection time, but letting the CONFIG point the key
+    /// column at one would corrupt <c>EventRecord.Timestamp</c> on every row, which no rename can
+    /// undo.</summary>
+    private static void ValidateCrdt(SourceDefinition def, List<string> errors)
+    {
+        var crdt = def.Connector?.Crdt;
+        if (crdt is null)
+        {
+            errors.Add("kind 'crdt' requires a crdt configuration");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(crdt.RootMap))
+        {
+            errors.Add("crdt.rootMap is required");
+        }
+
+        if (string.IsNullOrWhiteSpace(crdt.KeyField))
+        {
+            errors.Add("crdt.keyField is required");
+            return;
+        }
+
+        if (ReservedRowColumns.Contains(crdt.KeyField))
+        {
+            errors.Add($"crdt.keyField '{crdt.KeyField}' is a reserved column name");
+        }
+        else if (!def.Fields.Any(f => string.Equals(f.Name, crdt.KeyField, StringComparison.Ordinal)))
+        {
+            errors.Add($"crdt.keyField '{crdt.KeyField}' is not one of this source's declared fields");
+        }
+    }
+
+    /// <summary>The columns the platform stamps onto a row itself. Spelled here rather than referenced
+    /// from <c>StreamForge.Connectors.Database.CdcStamp</c> because this assembly does not depend on that
+    /// connector project — the two are pinned equal by <c>CrdtProjectorTests</c>.</summary>
+    private static readonly HashSet<string> ReservedRowColumns =
+        new(StringComparer.Ordinal) { "_ts", "_source", "_weight", "_op" };
+
     private static void ValidateIngest(IngestConfig ingest, List<string> errors)
     {
         if (ingest.CapacityRows <= 0)

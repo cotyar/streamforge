@@ -64,6 +64,20 @@ public static class SourceKinds
     /// <c>StreamForge.Connectors.Fix.FixDuplexTransport</c>.</summary>
     public const string FixDuplex = "fix-duplex";
 
+    /// <summary>Plan 020 wave B: a CRDT document — a Yjs <c>YDoc</c> that lives in a grain of its own,
+    /// accepts updates from edges that may have been offline, merges them, and projects the result to rows.
+    /// The FIRST kind since <see cref="Generator"/> and <see cref="Ingest"/> that is neither a transport nor
+    /// polled: plan 020 D3 explains at length why it does not fit <c>IInboundTransport</c>'s
+    /// bytes→rows-through-a-named-format seam — a Yjs update is a delta against stateful, durable,
+    /// per-document state and yields rows only AFTER being merged into it, so bending it into
+    /// <c>FormatOf</c> would produce a transport that secretly owns persistence. It is therefore dispatched
+    /// to its own grain, exactly as <see cref="Generator"/> is
+    /// (<see cref="SourceKindDispatch.ActorKind.Crdt"/>), and is a built-in kind for
+    /// <c>SourceValidation</c> / <c>KindVersions</c> rather than a registered transport. See
+    /// <see cref="CrdtSourceConfig"/>. Orleans-only for now (plan 020 D9): the Dapr flavor stores the kind
+    /// and refuses to START it, the same shape as <see cref="TableDefinition.ShardBy"/>.</summary>
+    public const string Crdt = "crdt";
+
     /// <summary>The masked placeholder for secrets-lite values (D-H).</summary>
     public const string SecretMask = "***";
 }
@@ -103,6 +117,47 @@ public sealed class ConnectorConfig
     /// plaintext on every config export, because <c>SecretWalk.IsContractClass</c> only recurses into
     /// types declared in THIS assembly.</summary>
     [Id(8)] public FixSourceConfig? Fix { get; set; }
+
+    /// <summary>Plan 020 wave B; set for <see cref="SourceKinds.Crdt"/>. Carries no credential today —
+    /// it lives here anyway, with every other connector config, because that is where <c>SecretWalk</c>
+    /// can see it if one is ever added (see <see cref="Db"/>'s doc comment for what happens to a config
+    /// class declared outside this assembly).</summary>
+    [Id(9)] public CrdtSourceConfig? Crdt { get; set; }
+}
+
+/// <summary>
+/// Plan 020 wave B — a CRDT document source. Deliberately two fields: everything else this kind could
+/// plausibly configure is either a decision the plan already made for good (<c>Gc = true</c>, D8) or a
+/// wave that has not landed.
+///
+/// <para><b>The document's shape is a contract, not a convention.</b> The root <see cref="RootMap"/> is a
+/// <c>YMap</c> whose keys are ENTITY KEYS and whose values are that entity's attributes (a nested
+/// <c>YMap</c>, or a scalar for a single-column entity). One key projects to one row, carrying its key in
+/// <see cref="KeyField"/>. The alternative — a root map that IS one entity's attributes, projecting the
+/// whole document to a single row — was rejected because it leaves per-entity deletion inexpressible, and
+/// deletion is the half of this feature that goes wrong silently.</para>
+///
+/// <para><b>Deletion reuses the platform's existing vocabulary rather than inventing a tombstone.</b>
+/// Plan 020's projector section calls for "an explicit tombstone convention (a reserved field on the
+/// projected row)". That convention already exists and is spoken by two subsystems: a CDC row carries
+/// <c>_op</c> (<c>c</c>/<c>u</c>/<c>d</c>) and <c>_weight</c> (<c>+1</c>/<c>-1</c>) — see
+/// <c>StreamForge.Connectors.Database.CdcStamp</c> — and the database sink planner already turns
+/// <c>_weight = -1</c> into a <c>DELETE</c>. Removing a key from the root map therefore emits exactly what
+/// a Postgres <c>DELETE</c> emits, so one piece of downstream SQL covers a CDC feed and a CRDT document
+/// alike. Inventing a third spelling would have meant every consumer learning it.</para>
+/// </summary>
+[GenerateSerializer]
+public sealed class CrdtSourceConfig
+{
+    /// <summary>Name of the root <c>YMap</c> inside the document — the map whose keys are entity keys.
+    /// Must match what the edge writes into; there is no discovery, because a document with no writes yet
+    /// is indistinguishable from a document whose root is named something else.</summary>
+    [Id(0)] public string RootMap { get; set; } = "root";
+
+    /// <summary>Column the entity's key is projected into. Must be declared in
+    /// <see cref="SourceDefinition.Fields"/> like any other column — the projector does not invent
+    /// schema.</summary>
+    [Id(1)] public string KeyField { get; set; } = "id";
 }
 
 /// <summary>Plan 009 B1: NATS subject subscription. Credentials follow the secrets-lite convention

@@ -21,8 +21,10 @@ public static class SourceKindDispatch
     /// <summary>Plan 008 W4c added <see cref="Ingest"/> as a genuine third case (not folded into
     /// <see cref="Connector"/>) — an ingest-kind source has no actor/grain at all, so callers that used to
     /// assume "not Generator means Connector" (the old binary <see cref="Classify"/>) MUST switch on all
-    /// three values explicitly now.</summary>
-    public enum ActorKind { Generator, Connector, Ingest }
+    /// three values explicitly now. Plan 020 wave B added a FOURTH, <see cref="Crdt"/> — a CRDT document
+    /// has its own grain (D3) and is neither a generator nor a connector-driven source; "all three" above
+    /// now reads "all four", and the same rule applies: enumerate, never assume a complement.</summary>
+    public enum ActorKind { Generator, Connector, Ingest, Crdt }
 
     /// <summary>Null/empty/"generator" → <see cref="ActorKind.Generator"/> (the pre-006 default — existing
     /// sources with no <see cref="SourceDefinition.Kind"/> set at all deserialize with an empty string
@@ -42,6 +44,15 @@ public static class SourceKindDispatch
             return ActorKind.Generator;
         }
 
-        return kind == SourceKinds.Ingest ? ActorKind.Ingest : ActorKind.Connector;
+        if (kind == SourceKinds.Ingest)
+        {
+            return ActorKind.Ingest;
+        }
+
+        // Plan 020 D3: a CRDT document is driven by a grain of its own, like a generator — NOT by the
+        // connector driver. It is checked ahead of the catch-all for the same reason Ingest is: without
+        // this line "crdt" falls into Connector, the connector driver activates for it, and the failure
+        // is a source that looks armed and never emits.
+        return kind == SourceKinds.Crdt ? ActorKind.Crdt : ActorKind.Connector;
     }
 }

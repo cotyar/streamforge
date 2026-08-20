@@ -40,6 +40,9 @@ public static class KindVersions
         [SourceKinds.Folder] = BuiltInVersion,
         [SourceKinds.Grpc] = BuiltInVersion,
         [SourceKinds.Ingest] = BuiltInVersion,
+        // Plan 020 wave B — a built-in for the same reason Generator and Ingest are: its driver is a
+        // grain, not a registered transport, so no registry can report its version.
+        [SourceKinds.Crdt] = BuiltInVersion,
     };
 
     /// <summary>Every kind this instance knows about right now, mapped to its declared version —

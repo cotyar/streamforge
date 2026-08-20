@@ -142,6 +142,30 @@ public sealed partial class DaprLifecycleOrchestrator(
                 // PushAsync (or rebuilt automatically if IngestConfig changes — see
                 // SourceIngressRegistry.GetOrCreate's fingerprint check), not eagerly here.
                 break;
+
+            case SourceKindDispatch.ActorKind.Crdt:
+                // Plan 020 D9: Orleans-first. There is no CrdtDocActor on this flavor, so the kind is
+                // stored (a catalog exported from an Orleans instance imports here intact and can be
+                // promoted back without loss — the same bargain ShardBy strikes, see CatalogStore's
+                // "WHERE KEY SHARDING IS REFUSED ON THIS FLAVOR" note) and never runs.
+                //
+                // It is refused LOUDLY and only here, because "looks armed and never emits" is the one
+                // outcome that must not happen. What is still missing relative to the ShardBy precedent
+                // is a Failed status carrying this text: a sharded table gets one because TableActor
+                // exists to hold it, and a crdt source has no actor at all on this flavor. Tracked in
+                // dapr/PARITY.md; the escape hatch meanwhile is plan 006's cross-flavour grpc link,
+                // which lets a Dapr instance subscribe a document projected by an Orleans one.
+                if (def.Enabled)
+                {
+                    logger.LogError(
+                        "Source '{Source}' has kind '{Kind}', which is Orleans-only (plan 020 D9) — this " +
+                        "flavor stores the definition but will never run it, so this source emits nothing. " +
+                        "Run it on an Orleans instance and subscribe to it here with a 'grpc' source.",
+                        def.Name,
+                        def.Kind);
+                }
+
+                break;
         }
     }
 
