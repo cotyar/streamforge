@@ -473,3 +473,77 @@ transport recipe.
 
 **Gates:** docs-only plus one doc-comment correction; both solutions build, `Connectors.Crdt.Tests` 20/20,
 every SQL statement published was executed and its real output pasted. Round 3 of plan 020 is complete.
+
+### Wave D · Authz + audit — DONE (2026-08-20)
+
+**All three pre-briefed findings held.**
+
+*The coarse per-document ACL was already delivered by 015, not by this wave.* `CrdtEndpoints`' existing
+`source.write`/`source.read` check scoped to the source NAME already separates one document from another
+under 015's grant model. Verified live across exact name, prefix (`wd_prod_*`), tag (`tag:finance`), no
+grant (403) and an explicit `Deny` over an `Allow` (403, naming the denying grant). The deliverable was a
+test and a documented recipe; **no second ACL mechanism was built**, which was the way this wave could most
+easily have gone wrong.
+
+*An interaction worth an operator knowing, found while testing that:* the routes also carry the coarse
+`Editor`/`Viewer` role policies, and **those ask at scope `*`**. A caller whose credential role is `Viewer`
+is refused before the fine-grained grant is consulted at all. Entitlements narrow what a role can reach;
+they never widen it.
+
+*Pre-merge field inspection is partial, and the boundary is enforced rather than described.*
+`CrdtUpdateInspector` decodes a frame without applying it and walks each item's parent chain. **Recoverable
+and checked:** the whole chain when every link was decoded from the same frame — root-level create, one-level
+fields, arbitrary nesting, and create-then-delete inside one frame (resolved through delete-set overlap).
+**Undecidable and REFUSED, never guessed:** an item whose parent came from an earlier frame — the ordinary
+case, since an edge creates an entity once and edits it later — and any deletion of content the frame did
+not itself create. That last case is the one that could have been a silent hole: a frame carrying only a
+delete set decodes to zero structs, and an empty touch list with no undecidable flag would have authorized
+it with zero checks. It is refused.
+
+Honest under-delivery, stated: 015's scope grammar has an action and a scope and **no field axis**, so the
+granularity actually enforced is the **entity key**. Field-level inspection is what makes the entity key
+recoverable for nested content; it is not itself a grantable level.
+
+*Attribution answers "who wrote this" and not "who deleted this" — proven, not assumed.* `PermanentUserData`
+maps contributing client ids to the REST caller. A test with standalone Ycs shows `GetUserByClientId` works
+for a remotely-applied update while `GetUserByDeletedId` does not, and a control test with `local: true`
+isolates the cause to that one flag (Ycs records a deletion against a user only from a local transaction,
+and an update merged from an edge is by definition not local). Both flags — `RequireEntityAuthorization`,
+`AttributeChanges` — are additive `[Id(2)]`/`[Id(3)]` and default **off**, so an existing document is
+unaffected.
+
+The attribution writes are appended to the same `PendingUpdates` log the caller's own bytes go through,
+which is load-bearing rather than tidy: wave C's `CompactLog` folds that log byte-for-byte and never
+re-derives `DocBytes` from the live `_doc`, so an uncaptured attribution write would vanish at the next
+compaction or restart.
+
+**One thing the agent flagged, and the orchestrator reverted.** To call the inspector from the endpoint it
+had added a `ProjectReference` from `StreamForge.Api` to `StreamForge.Connectors.Crdt`. That assembly
+referenced only Engine/Contracts/AppCore, and the boundary is deliberate — `SourceSchemaService`'s own doc
+comment says it **duplicates literals rather than reference** `StreamForge.Connectors.Database` "because
+this assembly does not depend on that connector project". The reference would have pulled `Ycs`, and with
+it the `external/ycs` submodule, into the shared API assembly of **both** flavours, including the one that
+does not run CRDT at all (D9). The coupling was a single call to a pure function, so the inspection DTOs
+moved to Contracts and the decode moved behind `ICrdtFacade.Inspect` (synchronous, no grain hop); the
+reference is gone. The Dapr stub returns **undecidable, not an empty touch list** — empty would read as
+"nothing to authorize" and authorize the update.
+
+That refactor broke one test, correctly: it feeds real Yjs bytes and real garbage, and the fake facade had
+started returning a canned answer, which would have passed while the decoder was broken. The fake now
+delegates to the real inspector — a test assembly already links the connector, so the boundary that
+constrains production does not constrain it.
+
+**Gates:** `Connectors.Crdt.Tests` 33/33; Orleans host 1541 tests, 5 failures, **all five green under
+`--filter`** (`HttpSinkClientTests` 15/15, `DuplexSinkTests` 19/19, `LoopbackCycleTests` 3/3,
+`WarmUpstreamDiagnosticClusterTests` 2/2). Three of the five were not on AGENTS.md's known-flake list and
+have been added with reasons: `DuplexSinkTests.SessionThatNeverReturns_*` asserts an explicit upper
+deadline, and the two `HttpSinkClientTests` carry both a 5s deadline and a `GetFreePort` bind race. Dapr
+solution builds; docs gained a `#crdt-authz` section covering both new flags, the coarse-role-floor
+interaction, the decidability boundary and the deletion-attribution gap.
+
+**Note on the build:** `orleans/StreamForge.sln` could not complete a standard build during this wave —
+`MSB3027`, another session's host (PID 21175, port 6199) holding `orleans/src/StreamForge.Host/data/state/*.json`
+open. That process was **not** killed. Verification used `-p:EnableDefaultContentItems=false`, which skips
+copying those live state files into `bin/` and changes nothing about compilation.
+
+**Remaining in plan 020:** wave F (escrow / bounded counters) and wave G (awareness, off by default).

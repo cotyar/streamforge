@@ -168,6 +168,72 @@ public sealed class CrdtSourceConfig
     /// <see cref="SourceDefinition.Fields"/> like any other column — the projector does not invent
     /// schema.</summary>
     [Id(1)] public string KeyField { get; set; } = "id";
+
+    /// <summary>Plan 020 wave D, finding 2. Off by default — an existing document's behaviour is
+    /// unchanged unless an operator opts in. When <c>true</c>, <c>CrdtEndpoints</c> decodes every
+    /// update BEFORE merging it (<c>Ycs.UpdateOperations.DecodeUpdate</c>, never applying anything) and
+    /// works out which entity key(s) it touches, then checks <see cref="StreamForge.AppCore.Access.Actions.SourceWrite"/>
+    /// against a per-entity scope (<c>"{sourceName}/{entityKey}"</c>) in addition to the coarse
+    /// per-document check every route already makes.
+    ///
+    /// <para><b>The honest boundary, stated once here rather than left for the reader to discover</b>:
+    /// which entity (and, one level deep, which field) an update touches is recoverable ONLY when the
+    /// item's whole ancestor chain — up to the configured <see cref="RootMap"/> — is present in THAT
+    /// SAME update frame. A <c>YMap</c> value's parent, as decoded (not yet applied), is either the
+    /// literal name of a root type or the <see cref="Ycs.ID"/> of the item that defined its container;
+    /// resolving an ID means finding that exact struct among the ones this same frame decoded.  An edit
+    /// nested under a map/entity created in an EARLIER update — the ordinary case, since an edge usually
+    /// creates an entity once and edits it many times afterwards — or under one that lives only in the
+    /// document's already-applied state, cannot be resolved this way at all: the defining struct simply
+    /// is not in the bytes being inspected. The inspector does not guess in that case; it reports the
+    /// update as undecidable, and — because this flag is on — the update is REFUSED rather than merged.
+    /// A refusal here never aborts the rest of the batch (matches <c>CrdtDocGrain.MergeAsync</c>'s own
+    /// corrupt-frame handling) and always names itself in <see cref="CrdtMergeResult.Diagnostics"/>.</para>
+    ///
+    /// <para><b>Cost.</b> Turning this on for an already-populated document, without ALSO granting
+    /// entity-scoped (or <c>*</c>/prefix) permissions, denies every subsequent edit outright — a grant
+    /// scoped to the bare source name does not widen to <c>"{name}/{key}"</c> under the platform's own
+    /// exact-match scope grammar (015), the same way a <c>prod-*</c> grant does not widen to <c>*</c>.
+    /// It also multiplies audit volume: each touched entity key gets its OWN
+    /// <see cref="StreamForge.Api.Auth.AccessGuard"/> decision (and, by that guard's existing policy, its
+    /// own audit row when allowed), on top of the one row the coarse per-document check already writes.
+    /// See <c>CrdtEndpoints</c>'s own comment at the call site for the exact scope string and the
+    /// deliberate choice not to gate <c>/crdt/replay</c> by it (that route re-asserts the WHOLE document
+    /// by design, so a per-entity filter there would silently under-deliver a replay rather than refuse
+    /// it honestly).</para></summary>
+    [Id(2)] public bool RequireEntityAuthorization { get; set; }
+
+    /// <summary>Plan 020 wave D, finding 3. Off by default. When <c>true</c>, a successful
+    /// <c>/crdt/updates</c> call maps every Yjs client id that contributed to an accepted update onto
+    /// the REST caller's identity, using <c>Ycs.PermanentUserData.SetUserMapping</c> — durable
+    /// attribution written INTO the document itself, the same mechanism y-prosemirror's change tracking
+    /// is built on.
+    ///
+    /// <para><b>The tension this creates with D8, stated rather than hidden.</b> D8 chose
+    /// <c>Gc = true</c> deliberately, because history for a twin belongs in the delta journal and row
+    /// history (both with retention), and an undeletable document would make personal data
+    /// undeletable with it. <c>PermanentUserData</c> is the opposite instinct: it writes a permanent,
+    /// append-only <c>users</c> map INTO the document, and nothing in this platform ever compacts or
+    /// expires it. That is why this is opt-in rather than the default this document already has — an
+    /// operator turning it on is choosing to carry that cost for the documents that need "who wrote
+    /// this" answered from inside the document itself.</para>
+    ///
+    /// <para><b>What this buys, precisely, and what it does not.</b> <c>SetUserMapping</c>'s clientId
+    /// -&gt; description mapping (<c>GetUserByClientId</c>) is written unconditionally and works for a
+    /// remotely-applied update exactly as it would for a local edit — the grain calls
+    /// <c>SetUserMapping</c> itself, synchronously, right after a merge, so it does not depend on Ycs's
+    /// transaction-local bookkeeping at all. <c>GetUserByDeletedId</c> — "who deleted this" — is a
+    /// DIFFERENT half of the same class, and it is NOT populated by this flag: Ycs only records a
+    /// deletion into a user's delete-set from an <c>AfterTransaction</c> handler gated on
+    /// <c>Transaction.Local</c>, and <c>YDoc.ApplyUpdateV1</c> — the only way this grain ever mutates a
+    /// document — defaults <c>local</c> to <c>false</c> and this grain never overrides it (asserting
+    /// <c>local: true</c> on a store-and-forward apply would be describing an edge's remote edit as this
+    /// grain's own local one, which is not true and would have unknown knock-on effects on whatever else
+    /// in Ycs keys off that flag). So "who wrote entity X" is answered by this feature; "who deleted
+    /// entity X" is not — see <c>CrdtDocGrain</c>'s own comment at the call site, and
+    /// <c>CrdtAttributionTests</c> for the empirical check that pins this exact gap rather than assuming
+    /// it.</para></summary>
+    [Id(3)] public bool AttributeChanges { get; set; }
 }
 
 /// <summary>Plan 009 B1: NATS subject subscription. Credentials follow the secrets-lite convention

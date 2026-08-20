@@ -91,6 +91,17 @@ public sealed class CrdtDocGrain(
     /// in that state (both check <c>state.State.Running</c> first).</summary>
     private YDoc? _doc;
 
+    /// <summary>Plan 020 wave D, finding 3 — lazily constructed the first time
+    /// <see cref="MergeAttributedAsync"/> actually needs to write an attribution, and ALWAYS reset to
+    /// <c>null</c> by <see cref="RehydrateDoc"/> alongside <see cref="_doc"/>: a <see cref="PermanentUserData"/>
+    /// instance is bound to the specific <see cref="YDoc"/> it was constructed against (its
+    /// <c>YUsers</c> map reference and its internal <c>Clients</c>/<c>Dss</c> caches), so reusing one
+    /// across a rehydrate would read and write against an orphaned, no-longer-current document. Staying
+    /// null for a document that never opts into <see cref="CrdtSourceConfig.AttributeChanges"/> is the
+    /// mechanism that makes the flag cost nothing when off — no "users" map is ever touched, so an
+    /// existing document's bytes are unaffected.</summary>
+    private PermanentUserData? _pud;
+
     public override Task OnActivateAsync(CancellationToken cancellationToken)
     {
         if (state.State.Running && state.State.Def is not null)
@@ -161,6 +172,10 @@ public sealed class CrdtDocGrain(
         {
             _doc.ApplyUpdateV1(update);
         }
+
+        // Wave D finding 3 — see _pud's own doc comment for why this MUST be dropped here rather than
+        // carried over from the previous _doc.
+        _pud = null;
     }
 
     /// <summary>Folds <see cref="CrdtDocGrainState.PendingUpdates"/> back into
@@ -189,8 +204,17 @@ public sealed class CrdtDocGrain(
     /// <summary>The whole algorithm plan 020 wave B names: flatten before, apply every update (one bad
     /// frame counted and skipped, never aborting the batch — D7's "a flaky link must not strand every good
     /// one behind it"), flatten after, diff, emit, persist. See this class's own doc comment for the
-    /// generation-guard window.</summary>
-    public async Task<CrdtMergeResult> MergeAsync(IReadOnlyList<byte[]> updates)
+    /// generation-guard window. Delegates to <see cref="MergeCoreAsync"/> with no actor — see that
+    /// method for wave D finding 3's attribution step, which this signature stays frozen against.</summary>
+    public Task<CrdtMergeResult> MergeAsync(IReadOnlyList<byte[]> updates) => MergeCoreAsync(updates, actor: null);
+
+    /// <summary>Plan 020 wave D, finding 3 — <see cref="MergeCoreAsync"/> with attribution turned on for
+    /// this call. See <see cref="ICrdtDocGrain.MergeAttributedAsync"/> and
+    /// <see cref="CrdtSourceConfig.AttributeChanges"/> for the contract and its documented boundary.</summary>
+    public Task<CrdtMergeResult> MergeAttributedAsync(IReadOnlyList<byte[]> updates, string actor) =>
+        MergeCoreAsync(updates, actor);
+
+    private async Task<CrdtMergeResult> MergeCoreAsync(IReadOnlyList<byte[]> updates, string? actor)
     {
         var def = state.State.Def;
         if (def is null || !state.State.Running || _doc is null)
@@ -245,6 +269,23 @@ public sealed class CrdtDocGrain(
         var after = CrdtProjector.Flatten(doc, config, def.Fields, diagnostics);
         var rows = CrdtProjector.Diff(before, after, config);
 
+        // Wave D finding 3 — attribution, opt-in (actor is null on the plain MergeAsync path, and this
+        // is a no-op even when non-null unless the source has ALSO opted into AttributeChanges: see
+        // CrdtSourceConfig.AttributeChanges's own doc comment for what this writes and its documented
+        // boundary against GetUserByDeletedId). Placed here — after the diff, before emission — so it
+        // can never influence the before/after projection (it writes into the "users" root map, a
+        // sibling of config.RootMap that CrdtProjector.Flatten never reads) and stays inside the same
+        // synchronous, no-await window MergeCoreAsync's own class doc names for the generation guard.
+        //
+        // acceptedUpdates gets the PRODUCED bytes appended, not just a side effect recorded elsewhere:
+        // CompactLog folds PendingUpdates byte-for-byte and never re-derives DocBytes from the live
+        // _doc, so an attribution write that is not captured this way would vanish on the next
+        // RehydrateDoc (compaction, or a restart) even though _doc itself still had it moments ago.
+        if (actor is not null && config.AttributeChanges && acceptedUpdates.Count > 0)
+        {
+            AttributeAcceptedUpdates(doc, acceptedUpdates, actor, diagnostics);
+        }
+
         await EmitRowsAsync(rows, def);
 
         if (generation != _generation)
@@ -287,11 +328,75 @@ public sealed class CrdtDocGrain(
         return new CrdtMergeResult { UpdatesApplied = applied, RowsEmitted = rows.Count, Diagnostics = diagnostics };
     }
 
+    /// <summary>Plan 020 wave D, finding 3. Maps every Yjs client id that contributed to
+    /// <paramref name="acceptedUpdates"/> onto <paramref name="actor"/> via
+    /// <see cref="PermanentUserData.SetUserMapping"/>, mutates <paramref name="acceptedUpdates"/> in
+    /// place to append the bytes those writes themselves produced (see the call site's own comment for
+    /// why that append is load-bearing, not decoration), and never throws past a per-update decode
+    /// failure — this runs after <see cref="MergeCoreAsync"/> has already decided which caller-supplied
+    /// bytes counted as applied, and a client-id parsing hiccup here must not undo that.</summary>
+    private void AttributeAcceptedUpdates(YDoc doc, List<byte[]> acceptedUpdates, string actor, List<string> diagnostics)
+    {
+        _pud ??= new PermanentUserData(doc);
+
+        var produced = new List<byte[]>();
+        void OnUpdate(object? _, (byte[] data, object origin, Transaction transaction) e) => produced.Add(e.data);
+
+        doc.UpdateV1 += OnUpdate;
+        try
+        {
+            var seenClients = new HashSet<int>();
+            foreach (var bytes in acceptedUpdates)
+            {
+                UpdateMeta meta;
+                try
+                {
+                    meta = UpdateOperations.ParseUpdateMeta(bytes);
+                }
+                catch (Exception ex)
+                {
+                    // This update already applied cleanly moments ago (it is only in acceptedUpdates
+                    // because MergeCoreAsync's own apply loop succeeded on it) — ParseUpdateMeta failing
+                    // here would be a genuine surprise, not the expected shape of untrusted input, but
+                    // attribution is explicitly a best-effort add-on: the merge itself must not be put
+                    // at risk by it.
+                    diagnostics.Add($"attribution: could not read client id(s) from an accepted update ({ex.GetType().Name}: {ex.Message}) — that update's writer was not attributed");
+                    continue;
+                }
+
+                foreach (var clientIdLong in meta.From.Keys)
+                {
+                    // PermanentUserData's own API is int-keyed (Yjs client ids are generated in the
+                    // 32-bit range); this cast matches what any caller of that class is forced to do.
+                    var clientId = unchecked((int)clientIdLong);
+                    if (!seenClients.Add(clientId))
+                    {
+                        continue; // Already handled earlier in this same call.
+                    }
+
+                    if (_pud.GetUserByClientId(clientId) == actor)
+                    {
+                        continue; // Already mapped to this exact actor by an earlier merge — do not grow the log for nothing.
+                    }
+
+                    _pud.SetUserMapping(doc, clientId, actor);
+                }
+            }
+        }
+        finally
+        {
+            doc.UpdateV1 -= OnUpdate;
+        }
+
+        acceptedUpdates.AddRange(produced);
+    }
+
     /// <summary>The one door out of this grain (plan D1/D4) — one <see cref="EventRecord"/> per row onto
     /// <c>(SourcesNamespace, primaryKey)</c>, stamped exactly as <see cref="ConnectorGrain.EmitRowsAsync"/>
     /// stamps a connector's rows, so a subscribed table cannot tell a document from a generator. Shared by
-    /// <see cref="MergeAsync"/> (deltas) and <see cref="ReplayAsync"/> (a full re-assert) so the two can
-    /// never drift apart in how a row reaches the platform.</summary>
+    /// <see cref="MergeCoreAsync"/> (deltas, via <see cref="MergeAsync"/>/<see cref="MergeAttributedAsync"/>)
+    /// and <see cref="ReplayAsync"/> (a full re-assert) so the three can never drift apart in how a row
+    /// reaches the platform.</summary>
     private async Task EmitRowsAsync(List<Dictionary<string, object?>> rows, SourceDefinition def)
     {
         if (rows.Count == 0)

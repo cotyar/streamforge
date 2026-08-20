@@ -165,6 +165,12 @@ whole-solution parallel load — never under `--filter` on their own): `Loopback
 status to propagate before a deadline),
 `WarmUpstreamDiagnosticClusterTests.TableStartedAfterItsTableInputAlreadyHoldsRows_*` (waits for a
 warning log line to be emitted before a deadline),
+`DuplexSinkTests.SessionThatNeverReturns_FailsAfterThePublishTimeoutRatherThanHanging` and
+`HttpSinkClientTests.PublishAsync_*` (added 2026-08-20 during plan 020 wave D — the first asserts the call
+returned within `DuplexSinkClient.PublishTimeout + 2s`, an explicit upper deadline; the two
+`HttpSinkClientTests` stand up an `HttpListener` on a `GetFreePort()` and wait "within 5s" for the request,
+so they carry both a deadline AND a bind race — `GetFreePort` closes its probe listener before the real one
+binds, which is a TOCTOU another test can lose them under parallel load. All three pass under `--filter`),
 `ShardedTableD2ClusterTests.ShardedTable_ResumesAsRebuilding_WithoutTheMirrorToDetectItBy` (added
 2026-08-20 during plan 020 wave C — its shard-history assertion sits behind a fixed `await Task.Delay(600)`
 "to let the write-behind flush persist the HadRows marker", which is the weakest form of deadline: a hard

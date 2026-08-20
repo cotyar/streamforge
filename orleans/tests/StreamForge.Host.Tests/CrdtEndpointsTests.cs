@@ -8,10 +8,12 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using StreamForge.Abstractions;
+using StreamForge.Connectors.Crdt;
 using StreamForge.Api;
 using StreamForge.Api.Auth;
 using StreamForge.AppCore.Access;
 using Xunit;
+using Ycs;
 
 namespace StreamForge.Host.Tests;
 
@@ -81,6 +83,17 @@ public sealed class CrdtEndpointsTests : IAsyncDisposable
         public Task<CrdtMergeResult?> MergeAsync(string sourceName, IReadOnlyList<byte[]> updates) =>
             Task.FromResult<CrdtMergeResult?>(new CrdtMergeResult { UpdatesApplied = updates.Count, RowsEmitted = updates.Count });
 
+        // Plan 020 wave D, finding 3 — records the actor it was called with so
+        // Attribution_actor_reaches_the_facade_when_AttributeChanges_is_on can assert on it without a
+        // real grain in this file (this file is about the ROUTE, per its own class doc).
+        public string? LastAttributedActor { get; private set; }
+
+        public Task<CrdtMergeResult?> MergeAttributedAsync(string sourceName, IReadOnlyList<byte[]> updates, string actor)
+        {
+            LastAttributedActor = actor;
+            return Task.FromResult<CrdtMergeResult?>(new CrdtMergeResult { UpdatesApplied = updates.Count, RowsEmitted = updates.Count });
+        }
+
         public Task<CrdtDocStatus?> GetStatusAsync(string sourceName) =>
             Task.FromResult<CrdtDocStatus?>(new CrdtDocStatus { EntityCount = 3, UpdatesMerged = 5, RowsEmitted = 5 });
 
@@ -88,6 +101,16 @@ public sealed class CrdtEndpointsTests : IAsyncDisposable
         // a real replay returns: it re-asserts the projection and merges nothing.
         public Task<CrdtMergeResult?> ReplayAsync(string sourceName) =>
             Task.FromResult<CrdtMergeResult?>(new CrdtMergeResult { UpdatesApplied = 0, RowsEmitted = 3 });
+
+        // Plan 020 wave D — the inspection seam. This fake DELEGATES to the real decoder rather than
+        // stubbing it: the route tests below feed genuine Yjs bytes and genuine garbage, and what they
+        // are asserting is that a real undecidable frame is refused without aborting the batch. A stub
+        // returning a canned answer would pass those tests while the decode was broken. The production
+        // reason this call goes through ICrdtFacade at all is the project boundary (StreamForge.Api holds
+        // no reference to a connector — see that method's own doc comment); a test assembly that already
+        // links the connector has no such constraint.
+        public CrdtUpdateInspection Inspect(SourceDefinition source, byte[] update) =>
+            CrdtUpdateInspector.Inspect(update, source.Connector?.Crdt ?? new CrdtSourceConfig());
     }
 
     private sealed class FakeUserStoreFacade : IUserStoreFacade
@@ -115,8 +138,20 @@ public sealed class CrdtEndpointsTests : IAsyncDisposable
         public Task<bool> DeleteApprovalTemplateAsync(string name) => throw new NotSupportedException();
     }
 
+    /// <summary>Plan 020 wave D, finding 3 — captures whatever <c>CrdtEndpoints</c> hands
+    /// <see cref="IAuditSink"/> directly, in-process, so a test does not have to race
+    /// <c>AuditWriterService</c>'s own background drain to see a row land. Registered AFTER
+    /// <c>AddStreamForgeApi</c> so it replaces the real <c>AuditChannelSink</c> for this file's tests,
+    /// same override idiom the fake facades above already use.</summary>
+    private sealed class FakeAuditSink : IAuditSink
+    {
+        public List<AuditEntry> Entries { get; } = [];
+        public void Record(AuditEntry entry) { lock (Entries) Entries.Add(entry); }
+    }
+
     private readonly FakeCatalogFacade _catalog = new();
     private readonly FakeCrdtFacade _crdt = new();
+    private readonly FakeAuditSink _audit = new();
 
     private async Task<HttpClient> StartAsync()
     {
@@ -149,6 +184,7 @@ public sealed class CrdtEndpointsTests : IAsyncDisposable
         builder.Services.AddSingleton<ICrdtFacade>(_crdt);
         builder.Services.AddSingleton<IAccessPolicyFacade>(new FakeAccessPolicyFacade());
         builder.Services.AddSingleton<IUserStoreFacade>(new FakeUserStoreFacade());
+        builder.Services.AddSingleton<IAuditSink>(_audit);
 
         _app = builder.Build();
         _app.MapStreamForgeApi(new StreamForgeApiOptions(
@@ -182,12 +218,12 @@ public sealed class CrdtEndpointsTests : IAsyncDisposable
         return request;
     }
 
-    private static SourceDefinition CrdtSource(string name) => new()
+    private static SourceDefinition CrdtSource(string name, CrdtSourceConfig? config = null) => new()
     {
         Name = name,
         Kind = SourceKinds.Crdt,
         Fields = [new FieldDef("id", FieldType.String)],
-        Connector = new ConnectorConfig { Crdt = new CrdtSourceConfig { RootMap = "root", KeyField = "id" } },
+        Connector = new ConnectorConfig { Crdt = config ?? new CrdtSourceConfig { RootMap = "root", KeyField = "id" } },
     };
 
     // ---------------------------------------------------------------------------------------------
@@ -296,5 +332,146 @@ public sealed class CrdtEndpointsTests : IAsyncDisposable
         var response = await client.SendAsync(AuthedRequest(HttpMethod.Post, "/api/sources/doc1/crdt/updates", "Viewer", updates));
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Plan 020 wave D, finding 3 — the "executed" audit row, distinct from AccessGuard's own
+    // allow/deny row (that one is asserted here only by absence-of-a-second-mechanism; its own
+    // coverage lives in AccessGuardTests/ChatToolGate's suite).
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Executed_audit_row_is_written_after_a_successful_merge()
+    {
+        _catalog.Sources["doc1"] = CrdtSource("doc1");
+        using var client = await StartAsync();
+
+        var updates = new CrdtUpdatesRequest([Convert.ToBase64String([1, 2, 3])]);
+        var response = await client.SendAsync(AuthedRequest(HttpMethod.Post, "/api/sources/doc1/crdt/updates", "Editor", updates));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var executed = Assert.Single(_audit.Entries, e => e.Outcome == "executed" && e.Scope == "doc1");
+        Assert.Equal(Actions.SourceWrite, executed.Action);
+        Assert.Contains("crdt merge", executed.Detail);
+        Assert.Contains("1 update(s) applied", executed.Detail); // FakeCrdtFacade echoes updates.Count
+    }
+
+    [Fact]
+    public async Task Executed_audit_row_is_written_after_a_successful_replay()
+    {
+        _catalog.Sources["doc1"] = CrdtSource("doc1");
+        using var client = await StartAsync();
+
+        var response = await client.SendAsync(AuthedRequest(HttpMethod.Post, "/api/sources/doc1/crdt/replay", "Editor"));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var executed = Assert.Single(_audit.Entries, e => e.Outcome == "executed" && e.Scope == "doc1");
+        Assert.Contains("crdt replay", executed.Detail);
+        Assert.Contains("3 row(s) re-asserted", executed.Detail); // FakeCrdtFacade.ReplayAsync's fixed 3
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Plan 020 wave D, finding 3 — attribution actor threading. AttributeChanges is off by default
+    // (the config in CrdtSource(name) with no override), so the plain path must be untouched.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Attribution_actor_reaches_the_facade_when_AttributeChanges_is_on()
+    {
+        _catalog.Sources["doc1"] = CrdtSource("doc1", new CrdtSourceConfig { RootMap = "root", KeyField = "id", AttributeChanges = true });
+        using var client = await StartAsync();
+
+        var updates = new CrdtUpdatesRequest([Convert.ToBase64String([1, 2, 3])]);
+        var response = await client.SendAsync(AuthedRequest(HttpMethod.Post, "/api/sources/doc1/crdt/updates", "Editor", updates));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("editor", _crdt.LastAttributedActor); // AuthedRequest mints role.ToLowerInvariant() as the username
+    }
+
+    [Fact]
+    public async Task Attribution_actor_is_not_forwarded_when_AttributeChanges_is_off()
+    {
+        _catalog.Sources["doc1"] = CrdtSource("doc1"); // AttributeChanges defaults to false
+        using var client = await StartAsync();
+
+        var updates = new CrdtUpdatesRequest([Convert.ToBase64String([1, 2, 3])]);
+        var response = await client.SendAsync(AuthedRequest(HttpMethod.Post, "/api/sources/doc1/crdt/updates", "Editor", updates));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Null(_crdt.LastAttributedActor); // MergeAsync was called, not MergeAttributedAsync
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Plan 020 wave D, finding 2 — pre-merge entity-level authorization. Off by default; when on, an
+    // undecidable update is refused individually and the rest of the batch still merges (D7's own
+    // "a flaky link must not strand every good one behind it", applied to a missing/undecidable grant).
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task EntityAuthorization_off_by_default_forwards_every_update_unfiltered()
+    {
+        _catalog.Sources["doc1"] = CrdtSource("doc1"); // RequireEntityAuthorization defaults to false
+        using var client = await StartAsync();
+
+        // Garbage bytes — CrdtUpdateInspector would call this Undecidable, but the flag is off so the
+        // inspector never runs at all and the byte-opaque FakeCrdtFacade sees it unfiltered.
+        var updates = new CrdtUpdatesRequest([Convert.ToBase64String([1, 2, 3])]);
+        var response = await client.SendAsync(AuthedRequest(HttpMethod.Post, "/api/sources/doc1/crdt/updates", "Editor", updates));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<CrdtMergeResult>();
+        Assert.Equal(1, result!.UpdatesApplied);
+        Assert.Empty(result.Diagnostics);
+    }
+
+    [Fact]
+    public async Task EntityAuthorization_refuses_an_undecidable_update_without_aborting_the_batch()
+    {
+        var config = new CrdtSourceConfig { RootMap = "root", KeyField = "id", RequireEntityAuthorization = true };
+        _catalog.Sources["doc1"] = CrdtSource("doc1", config);
+        using var client = await StartAsync();
+
+        var doc = new YDoc();
+        doc.Transact(_ =>
+        {
+            var e1 = new YMap();
+            doc.GetMap("root").Set("e1", e1);
+            e1.Set("name", "Ann");
+        });
+        var decidableUpdate = Convert.ToBase64String(doc.EncodeStateAsUpdateV1());
+        var undecidableUpdate = Convert.ToBase64String([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+
+        var updates = new CrdtUpdatesRequest([undecidableUpdate, decidableUpdate]);
+        var response = await client.SendAsync(AuthedRequest(HttpMethod.Post, "/api/sources/doc1/crdt/updates", "Editor", updates));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var result = await response.Content.ReadFromJsonAsync<CrdtMergeResult>();
+        // Only the decidable update reached FakeCrdtFacade — it echoes the COUNT it was called with.
+        Assert.Equal(1, result!.UpdatesApplied);
+        Assert.Contains(result.Diagnostics, d => d.Contains("update[0]") && d.Contains("refused pre-merge"));
+    }
+
+    [Fact]
+    public async Task EntityAuthorization_forwards_a_decidable_update_the_caller_is_granted_on()
+    {
+        var config = new CrdtSourceConfig { RootMap = "root", KeyField = "id", RequireEntityAuthorization = true };
+        _catalog.Sources["doc1"] = CrdtSource("doc1", config);
+        using var client = await StartAsync();
+
+        var doc = new YDoc();
+        doc.GetMap("root").Set("e1", "whole-entity-scalar");
+
+        // The built-in Editor role's Actions.SourceWrite grant is scoped "*" (BuiltInRoleCatalog), which
+        // matches the composite "doc1/e1" scope too — this is the "operator did not need to add a new
+        // grant just to keep working with a blanket role" case; EntityAuthorization_refuses_an_
+        // undecidable_update... above and the live check cover the narrower-grant boundary this harness
+        // cannot construct without a custom role.
+        var updates = new CrdtUpdatesRequest([Convert.ToBase64String(doc.EncodeStateAsUpdateV1())]);
+        var response = await client.SendAsync(AuthedRequest(HttpMethod.Post, "/api/sources/doc1/crdt/updates", "Editor", updates));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<CrdtMergeResult>();
+        Assert.Equal(1, result!.UpdatesApplied);
+        Assert.Empty(result.Diagnostics);
     }
 }

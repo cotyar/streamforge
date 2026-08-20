@@ -324,6 +324,155 @@ public sealed class CrdtDocGrainClusterTests : IAsyncLifetime
         }
     }
 
+    // ------------------------------------------------------------------
+    // 6 — Plan 020 wave D, finding 3: MergeAttributedAsync is functionally MergeAsync (D7, row shape,
+    // diagnostics) plus attribution — never a second algorithm. GetUserByClientId/GetUserByDeletedId
+    // themselves are pinned standalone in CrdtAttributionTests (Connectors.Crdt.Tests), which is where
+    // the actual PermanentUserData mechanism is provable without a socket; there is no grain accessor
+    // for "users" map content by design (plan 020's own cut list: no raw-document inspector), so what
+    // this file proves is the WIRING — attribution never leaks into the projection, and never breaks
+    // idempotence, including across a real restart (so the attribution bytes AttributeAcceptedUpdates
+    // appends to PendingUpdates genuinely round-trip through RehydrateDoc like any other accepted byte).
+    // ------------------------------------------------------------------
+
+    private static SourceDefinition MakeAttributedCrdtSource(string name) => new()
+    {
+        Name = name,
+        Kind = SourceKinds.Crdt,
+        Enabled = true,
+        Fields =
+        [
+            new FieldDef("id", FieldType.String),
+            new FieldDef("name", FieldType.String),
+        ],
+        Connector = new ConnectorConfig
+        {
+            Crdt = new CrdtSourceConfig { RootMap = "root", KeyField = "id", AttributeChanges = true },
+        },
+    };
+
+    [Fact]
+    public async Task AttributedMergeEmitsExactlyTheSameRowAsAnOrdinaryMergeNothingFromTheUsersMapLeaksIn()
+    {
+        var name = "crdt_attr_emit_" + Guid.NewGuid().ToString("n")[..8];
+
+        var streamProvider = _cluster.Client.GetStreamProvider(StreamConstants.ProviderName);
+        var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, name));
+        var received = new List<EventRecord>();
+        var subHandle = await stream.SubscribeAsync((evt, _) =>
+        {
+            lock (received) received.Add(evt);
+            return Task.CompletedTask;
+        });
+
+        var grain = _cluster.GrainFactory.GetGrain<ICrdtDocGrain>(name);
+        try
+        {
+            await grain.StartAsync(MakeAttributedCrdtSource(name));
+
+            var edge = new YDoc();
+            var e1 = new YMap();
+            Root(edge).Set("e1", e1);
+            e1.Set("name", "Ann");
+
+            var result = await grain.MergeAttributedAsync([edge.EncodeStateAsUpdateV1()], "alice");
+            Assert.Equal(1, result.UpdatesApplied);
+            Assert.Equal(1, result.RowsEmitted); // exactly one row — attribution's own "users" map writes never project
+
+            var row = await PollUntilAsync(
+                () => Task.FromResult(Snapshot(received).FirstOrDefault(e => (string?)e.GetValueOrDefault("id") == "e1")),
+                r => r is not null,
+                deadlineSeconds: 15);
+            Assert.NotNull(row);
+            Assert.Equal("Ann", row!.GetValueOrDefault("name"));
+
+            // Give the stream a moment past the one expected row, then assert nothing ELSE ever arrived
+            // (a "users" map row would be the failure mode this test exists to catch).
+            await Task.Delay(200);
+            Assert.Single(Snapshot(received));
+        }
+        finally
+        {
+            await subHandle.UnsubscribeAsync();
+            await grain.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task AttributedMergePreservesD7IdempotenceAcrossARealRestart()
+    {
+        var name = "crdt_attr_resume_" + Guid.NewGuid().ToString("n")[..8];
+        var grain = _cluster.GrainFactory.GetGrain<ICrdtDocGrain>(name);
+        try
+        {
+            await grain.StartAsync(MakeAttributedCrdtSource(name));
+
+            var edge = new YDoc();
+            var e1 = new YMap();
+            Root(edge).Set("e1", e1);
+            e1.Set("name", "Ann");
+            var update = edge.EncodeStateAsUpdateV1();
+
+            var first = await grain.MergeAttributedAsync([update], "alice");
+            Assert.Equal(1, first.RowsEmitted);
+
+            // A second attributed merge by the SAME actor: SetUserMapping must not be called again
+            // (CrdtDocGrain.AttributeAcceptedUpdates's own GetUserByClientId short-circuit), and — the
+            // property this test actually exists to check — D7 must still hold with attribution turned
+            // on: re-delivering the identical update emits nothing.
+            var replay = await grain.MergeAttributedAsync([update], "alice");
+            Assert.Equal(0, replay.RowsEmitted);
+
+            // A real restart. If AttributeAcceptedUpdates's produced bytes were NOT captured into
+            // PendingUpdates (the load-bearing append documented at its call site), this would still
+            // pass today (the entity's own content survives regardless) but would be silently losing
+            // attribution on every compaction/restart — this at least proves the restart itself does not
+            // throw or corrupt the document with the attribution machinery wired in, and that D7 holds
+            // for the RESUMED activation exactly as CrdtDocGrainClusterTests' own un-attributed version
+            // (test 5 above) already established for the plain path.
+            await _cluster.Client.GetGrain<IManagementGrain>(0).ForceActivationCollection(TimeSpan.Zero);
+
+            var status = await grain.GetStatusAsync();
+            Assert.Equal(1, status.EntityCount);
+
+            var replayAfterRestart = await grain.MergeAttributedAsync([update], "alice");
+            Assert.Equal(0, replayAfterRestart.RowsEmitted);
+        }
+        finally
+        {
+            await grain.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task PlainMergeAsyncIgnoresAttributeChangesWhenNoActorIsSupplied()
+    {
+        // MergeAsync delegates to MergeCoreAsync(updates, actor: null) — actor is null regardless of the
+        // source's own AttributeChanges config, so a caller of the UNATTRIBUTED method never triggers
+        // PermanentUserData at all, even on a source that opted in. This is what keeps MergeAsync's own
+        // signature and behaviour frozen (CrdtDocGrainClusterTests' first five tests all call it and must
+        // keep passing unmodified).
+        var name = "crdt_attr_unused_" + Guid.NewGuid().ToString("n")[..8];
+        var grain = _cluster.GrainFactory.GetGrain<ICrdtDocGrain>(name);
+        try
+        {
+            await grain.StartAsync(MakeAttributedCrdtSource(name)); // AttributeChanges = true on the source
+
+            var edge = new YDoc();
+            var e1 = new YMap();
+            Root(edge).Set("e1", e1);
+            e1.Set("name", "Ann");
+
+            var result = await grain.MergeAsync([edge.EncodeStateAsUpdateV1()]); // the plain, un-attributed call
+            Assert.Equal(1, result.RowsEmitted);
+            Assert.Empty(result.Diagnostics); // no attribution-related diagnostic, because attribution never ran
+        }
+        finally
+        {
+            await grain.StopAsync();
+        }
+    }
+
     private static List<EventRecord> Snapshot(List<EventRecord> list)
     {
         lock (list) return [.. list];

@@ -31,6 +31,13 @@ public interface ICrdtDocGrain : IGrainWithStringKey
     /// correctly-wired caller should reach.</summary>
     Task<CrdtMergeResult> MergeAsync(IReadOnlyList<byte[]> updates);
 
+    /// <summary>Plan 020 wave D, finding 3 — <see cref="MergeAsync"/> plus attribution. A separate method,
+    /// not an added parameter on <see cref="MergeAsync"/>, so that method's signature — and every existing
+    /// caller/test pinned against it — stays untouched. See <see cref="ICrdtFacade.MergeAttributedAsync"/>
+    /// and <see cref="CrdtSourceConfig.AttributeChanges"/> for what <paramref name="actor"/> is used for
+    /// and its documented boundary (writes who touched an entity, not who deleted one).</summary>
+    Task<CrdtMergeResult> MergeAttributedAsync(IReadOnlyList<byte[]> updates, string actor);
+
     /// <summary>Plan 020 wave C — re-emit the document's ENTIRE current projection as create rows, without
     /// merging anything. The recovery action for the one thing a CRDT cannot recover from on its own:
     /// D7 makes replaying an edge's update history a no-op, so a consumer that lost its rows can never be

@@ -86,9 +86,20 @@ public sealed class DisabledCrdtFacade : ICrdtFacade
     public Task<CrdtMergeResult?> MergeAsync(string sourceName, IReadOnlyList<byte[]> updates) =>
         Task.FromResult<CrdtMergeResult?>(null);
 
+    // Plan 020 wave D, finding 3 — same "no runtime here" null as every other member; Enabled already
+    // false is what makes CrdtEndpoints answer 501 before this is ever reached.
+    public Task<CrdtMergeResult?> MergeAttributedAsync(string sourceName, IReadOnlyList<byte[]> updates, string actor) =>
+        Task.FromResult<CrdtMergeResult?>(null);
+
     public Task<CrdtDocStatus?> GetStatusAsync(string sourceName) =>
         Task.FromResult<CrdtDocStatus?>(null);
 
     public Task<CrdtMergeResult?> ReplayAsync(string sourceName) =>
         Task.FromResult<CrdtMergeResult?>(null);
+
+    // Undecidable, not "no touches": an empty Touches list reads as "nothing to authorize" and would
+    // AUTHORIZE the update. Unreachable today (CrdtEndpoints answers 501 on Enabled == false before
+    // asking), so this is purely about which way a future wiring mistake falls.
+    public CrdtUpdateInspection Inspect(SourceDefinition source, byte[] update) =>
+        new() { Undecidable = true, UndecidableReason = "this build has no CRDT document runtime" };
 }

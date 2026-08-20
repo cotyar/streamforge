@@ -310,6 +310,17 @@ public interface ICrdtFacade
     /// method needs no request id, no dedup key and no transaction.</para></summary>
     Task<CrdtMergeResult?> MergeAsync(string sourceName, IReadOnlyList<byte[]> updates);
 
+    /// <summary>Plan 020 wave D, finding 3 — same as <see cref="MergeAsync"/>, plus attribution: on a
+    /// build where <c>CrdtSourceConfig.AttributeChanges</c> is on for this source, every accepted update
+    /// records <paramref name="actor"/> against the Yjs client id(s) it carried, via
+    /// <c>Ycs.PermanentUserData.SetUserMapping</c> — see <see cref="CrdtSourceConfig.AttributeChanges"/>'s
+    /// own doc comment for exactly what that does and does not cover. A NEW method rather than a changed
+    /// signature on <see cref="MergeAsync"/>, so that method's contract stays frozen for every existing
+    /// caller. On a source where the flag is off this behaves exactly like <see cref="MergeAsync"/> —
+    /// <paramref name="actor"/> is accepted but nothing is written with it, which is what lets
+    /// <c>CrdtEndpoints</c> call this unconditionally without checking the flag itself first.</summary>
+    Task<CrdtMergeResult?> MergeAttributedAsync(string sourceName, IReadOnlyList<byte[]> updates, string actor);
+
     /// <summary>Plan 020 wave C — re-emit the document's whole current projection as create rows, merging
     /// nothing. <c>null</c> under the same conditions as <see cref="MergeAsync"/>.
     ///
@@ -321,9 +332,49 @@ public interface ICrdtFacade
     /// consumer attaches to a document that is not going to change again on its own.</para></summary>
     Task<CrdtMergeResult?> ReplayAsync(string sourceName);
 
+    /// <summary>Plan 020 wave D — decode ONE update frame far enough to say which entity keys it touches,
+    /// without applying it to anything. Pure and synchronous: no grain call, no registry read, no state.
+    ///
+    /// <para>It is on this interface rather than called directly because the decoder lives in
+    /// <c>StreamForge.Connectors.Crdt</c> (it needs Ycs) and <c>StreamForge.Api</c> deliberately holds no
+    /// project reference to any connector — the same boundary <c>SourceSchemaService.ReservedRowColumns</c>
+    /// pays duplication to keep. The endpoint gets a decoded answer; the decoder stays behind the
+    /// flavour seam, exactly like every other "can this build do CRDT" question.</para>
+    ///
+    /// <para>On a flavour where <see cref="Enabled"/> is false this is unreachable — the endpoint answers
+    /// 501 first — and the disabled implementation returns an undecidable result rather than an empty one,
+    /// so a wiring mistake refuses instead of silently authorizing.</para></summary>
+    CrdtUpdateInspection Inspect(SourceDefinition source, byte[] update);
+
     /// <summary>Counters for the console and for an operator asking "did my updates land". <c>null</c>
     /// under the same conditions as <see cref="MergeAsync"/>.</summary>
     Task<CrdtDocStatus?> GetStatusAsync(string sourceName);
+}
+
+/// <summary>Plan 020 wave D. These two live in Contracts, not in StreamForge.Connectors.Crdt where the
+/// inspector that produces them lives, so that <c>StreamForge.Api</c> can authorize a decoded update
+/// WITHOUT taking a project reference on a connector — a boundary this repository keeps deliberately
+/// (see <c>SourceSchemaService.ReservedRowColumns</c>, which duplicates literals rather than reference
+/// <c>StreamForge.Connectors.Database</c>). The decode itself stays behind
+/// <see cref="ICrdtFacade.Inspect"/>, so Ycs never enters the shared API assembly.</summary>
+/// <summary>One resolvable touch: the entity key it belongs to, and — when the whole chain is
+/// map-nested, never list-positioned — the dotted field path <c>CrdtProjector</c> would itself
+/// project it under. <see cref="FieldPath"/> is <c>null</c> for a touch that replaces/creates the WHOLE
+/// entity value (the item sits directly under the root map) — the same "whole entity" case
+/// <c>CrdtProjector</c>'s scalar-entity path documents.</summary>
+public readonly record struct CrdtUpdateTouch(string EntityKey, string? FieldPath);
+
+/// <summary>What <see cref="ICrdtFacade.Inspect"/> answers for one update frame. Either a
+/// (possibly empty — an update touching no structs at all, e.g. a pure no-op) list of
+/// <see cref="CrdtUpdateInspection.Touches"/>, or <see cref="Undecidable"/> with a human-readable
+/// <see cref="UndecidableReason"/> naming exactly why. Never both: an undecidable struct anywhere in the
+/// frame makes the WHOLE frame undecidable — a partially-authorized update is not a thing this class
+/// hands back for the caller to reason about further.</summary>
+public sealed class CrdtUpdateInspection
+{
+    public IReadOnlyList<CrdtUpdateTouch> Touches { get; init; } = [];
+    public bool Undecidable { get; init; }
+    public string? UndecidableReason { get; init; }
 }
 
 /// <summary>What one <see cref="ICrdtFacade.MergeAsync"/> call did.</summary>

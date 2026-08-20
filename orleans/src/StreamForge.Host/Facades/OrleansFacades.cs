@@ -1,6 +1,7 @@
 using Orleans;
 using Orleans.Streams;
 using StreamForge.Abstractions;
+using StreamForge.Connectors.Crdt;
 using StreamForge.AppCore.Environments;
 using StreamForge.AppCore.Ingest;
 using StreamForge.Engine;
@@ -219,6 +220,19 @@ internal sealed class OrleansCrdtFacade(IClusterClient client) : ICrdtFacade
         return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).MergeAsync(updates);
     }
 
+    /// <summary>Plan 020 wave D, finding 3 — same "resolve, check kind, forward" shape as
+    /// <see cref="MergeAsync"/>, forwarding to <see cref="ICrdtDocGrain.MergeAttributedAsync"/> instead.</summary>
+    public async Task<CrdtMergeResult?> MergeAttributedAsync(string sourceName, IReadOnlyList<byte[]> updates, string actor)
+    {
+        var def = await ResolveCrdtSourceAsync(sourceName);
+        if (def is null)
+        {
+            return null;
+        }
+
+        return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).MergeAttributedAsync(updates, actor);
+    }
+
     public async Task<CrdtDocStatus?> GetStatusAsync(string sourceName)
     {
         var def = await ResolveCrdtSourceAsync(sourceName);
@@ -240,6 +254,12 @@ internal sealed class OrleansCrdtFacade(IClusterClient client) : ICrdtFacade
 
         return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).ReplayAsync();
     }
+
+    // Plan 020 wave D: pure delegation. This host already references StreamForge.Connectors.Crdt (the
+    // grain projects documents with it), so the decode costs nothing new HERE — the point of routing it
+    // through the facade is that StreamForge.Api does not have to.
+    public CrdtUpdateInspection Inspect(SourceDefinition source, byte[] update) =>
+        CrdtUpdateInspector.Inspect(update, source.Connector?.Crdt ?? new CrdtSourceConfig());
 
     private async Task<SourceDefinition?> ResolveCrdtSourceAsync(string sourceName)
     {
