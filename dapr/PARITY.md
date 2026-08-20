@@ -30,8 +30,9 @@ This file has three sections and the split between them is the point:
 | `IngestStatus.DownstreamDropped` | always `0` — there is no Dapr equivalent of `PushStreamBus.TotalDropped` to observe | 009 |
 | `--Streams:Transport push\|pull` | an Orleans stream-provider knob; Dapr's transport is Redis pub/sub and has nothing to select | — |
 
-Plan 020's `crdt` source kind is declared Orleans-first (020 D9) but is not implemented on *either*
-flavor yet, so it is not on this list until it exists.
+Plan 020's `crdt` source kind is declared Orleans-first (020 D9). It is a **descope with an escape
+hatch**, not a permanent one — see debt item D5 below for what the Dapr side does today and what it is
+missing.
 
 ---
 
@@ -93,6 +94,19 @@ While fixing it: the long "WHERE KEY SHARDING IS REFUSED ON THIS FLAVOR" explana
 document (the refusal lives in `TableActor.StartAsync`). Left as found: it is the best explanation of
 the asymmetry in the repo and moving it is a bigger edit than this document's scope. Anyone reading
 `ValidateParallelism` should know the first paragraph above it is not about `ValidateParallelism`.
+
+### D5 · The `crdt` source kind is refused, but without a status to refuse into
+
+Plan 020 D9 is Orleans-first, so this is expected — the entry exists because the refusal is currently
+*less* honest than the `ShardBy` precedent it copies. `Lifecycle/DaprLifecycleOrchestrator.cs` logs an
+error when an enabled `crdt` source is seen and does nothing else; the definition is stored so an
+Orleans export imports intact. What is missing is a **Failed status carrying that message**: a sharded
+table gets one because `TableActor` exists to hold it, and a `crdt` source has no actor on this flavor at
+all. Until a document runtime lands here, the intended escape hatch is plan 006's cross-flavour link — a
+Dapr instance subscribing to a document projected by an Orleans one over a `grpc` source.
+
+The intake endpoint answers **501**, not 404, via `ICrdtFacade.Enabled` — deliberately, so an operator
+can tell "this build cannot do that" from "you typed the wrong source name".
 
 ### Explicitly NOT debt — checked and present on Dapr
 

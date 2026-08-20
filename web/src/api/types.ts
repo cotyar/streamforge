@@ -60,7 +60,7 @@ export interface SourceDefinition {
  *  transport — the console learns those from GET /api/transports rather than from this union, so a new
  *  transport does not need a line here. The literals stay for autocompletion and for the places that
  *  genuinely branch on a built-in kind. */
-export type SourceKind = 'generator' | 'url' | 'file' | 'folder' | 'grpc' | 'ingest' | 'nats' | (string & {})
+export type SourceKind = 'generator' | 'url' | 'file' | 'folder' | 'grpc' | 'ingest' | 'nats' | 'crdt' | (string & {})
 export const SECRET_MASK = '***'
 export type FileFormat = 'ndjson' | 'json' | 'csv' | 'fix'
 
