@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Orleans;
 using Orleans.Hosting;
@@ -39,14 +40,35 @@ if (string.IsNullOrEmpty(builder.Configuration["urls"]))
     // REST/SignalR and gRPC apart (a deployment that has two ports to spend, or a TLS-terminating
     // front end that only forwards one protocol per port) rather than the only option.
     //
-    // ListenAnyIP, not ListenLocalhost: a loopback-only listener is unreachable from outside the
-    // process's own network namespace, which is exactly what made a published Docker port a dead end
-    // for gRPC even before the single-port work below existed (see the Dockerfile's note). AnyIP still
-    // answers on localhost, so nothing about local dev changes.
+    // IPAddress.Any (all IPv4 interfaces), not ListenLocalhost and NOT ListenAnyIP:
+    //
+    // - Not ListenLocalhost, for the original reason: a loopback-only listener is unreachable from
+    //   outside the process's own network namespace, which is exactly what made a published Docker port
+    //   a dead end for gRPC even before the single-port work below existed (see the Dockerfile's note).
+    //   IPAddress.Any is every IPv4 interface, not loopback, so Docker port publishing is unaffected.
+    //
+    // - Not ListenAnyIP, which was the shape here until 2026-08-21, because it binds the IPv6 wildcard
+    //   `[::]` in DUAL-STACK mode and this platform crashes on that. Measured, not theorised: driving the
+    //   TypeScript client's contract suite over `localhost` (which resolves to BOTH ::1 and 127.0.0.1, so
+    //   the client flips address families) makes Kestrel's socket accept loop throw
+    //   `System.ArgumentException: The supplied System.Net.SocketAddress is an invalid size for the
+    //   System.Net.IPEndPoint end point` out of `SocketConnectionListener.AcceptAsync`. That exception is
+    //   UNHANDLED inside the accept loop, so it does not fail one connection — it kills the listener
+    //   ("The connection listener failed to accept any new connections") and the host then shuts down.
+    //   Every later request gets ECONNREFUSED. Reproduced 4/4 on macOS 26.5.1 / .NET SDK 10.0.302, at
+    //   both high and low machine load, and identically at a pre-plan-020 commit, so it is neither a
+    //   load flake nor anything the CRDT work introduced. Switching these two lines to IPAddress.Any
+    //   takes that suite from 6/14 to 14/14 with zero listener crashes.
+    //
+    // The cost, stated: this host no longer answers on IPv6. That is a real regression for an
+    // IPv6-only client and is the accepted price of not having the whole listener die. The underlying
+    // defect is in the runtime's dual-stack accept path, not here — if a fixed .NET revision lands,
+    // this can go back to ListenAnyIP and the contract suite is the thing that will tell you whether it
+    // is safe to (see AGENTS.md's verification gates, which now list it for exactly that reason).
     builder.WebHost.ConfigureKestrel(kestrel =>
     {
-        kestrel.ListenAnyIP(httpPort, o => o.Protocols = HttpProtocols.Http1);
-        kestrel.ListenAnyIP(grpcPort, o => o.Protocols = HttpProtocols.Http2);
+        kestrel.Listen(IPAddress.Any, httpPort, o => o.Protocols = HttpProtocols.Http1);
+        kestrel.Listen(IPAddress.Any, grpcPort, o => o.Protocols = HttpProtocols.Http2);
     });
 }
 else

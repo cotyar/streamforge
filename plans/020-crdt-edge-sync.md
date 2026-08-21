@@ -658,7 +658,14 @@ Wave G is proven innocent; plan 020 as a whole is not. Waves A–F should be ine
 catalog declares no `crdt` source, but that is reasoning, not a measurement — running the same suite at a
 pre-020 commit is the one datum that decides it, and it is filed as follow-up work rather than done here.
 
-**Consequently unverified:** `clients/typescript/test/awareness.test.ts` has never run against a real
+**Consequently unverified — CORRECTED 2026-08-21, it is now verified.** The cause of both the red
+contract suite and this file's apparent hang was a single server defect, not the client: `ListenAnyIP`
+binds a dual-stack IPv6 wildcard, and an IPv4-mapped accept threw an **unhandled**
+`System.ArgumentException` out of Kestrel's accept loop, killing the whole listener. With the host bound
+to `IPAddress.Any`, `awareness.test.ts` runs **5 pass / 0 fail in ~30s** and the whole TypeScript client
+suite is **43 pass / 3 skip / 0 fail in 13s** (it was 30/13/165s). So wave G's client IS live-verified
+against a real server, and the wire format is measured rather than inferred. The original text follows for
+the record: `clients/typescript/test/awareness.test.ts` had never run against a real
 server. It typechecks and builds; the server logic it would exercise is separately covered by
 `StreamHubAwarenessTests` (11 tests, hub driven directly), but the wire format between them is inference
 from SignalR's documented `JsonHubProtocol` defaults, not a captured payload. Stated plainly rather than

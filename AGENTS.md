@@ -148,6 +148,7 @@ pinned to the fork's `parity-yjs-13.6.32` branch, NOT `main`; see that project's
 ~/.dotnet/dotnet test  orleans/StreamForge.sln     # 2424 tests — the whole suite must be green
 ~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln
 ~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 695 tests — the whole suite must be green
+cd clients/typescript && bun test  # 14 contract + conformance/live-table; boots its own engine on 8199/8299
 cd web && bun run build
 ~/.dotnet/dotnet run --project orleans/src/StreamForge.Host   # :5199 + :5299
 cd dapr && ./tools/run.sh                                      # :5399 (needs `dapr init` done once)
@@ -156,6 +157,16 @@ Both counts EXCLUDE the 52 live-database tests (`StreamForge.Connectors.Database
 shared by both solutions), which `DockerGate` skips with a stated reason unless a Docker daemon answers
 and the backend's image (`postgres:17`, `mcr.microsoft.com/mssql/server:2022-latest`) is already local —
 "0 integration tests ran" must never read as "integration passed".
+
+**Kestrel binds IPv4-only, deliberately** (`orleans/src/StreamForge.Host/Program.cs`). `ListenAnyIP`
+binds the IPv6 wildcard in dual-stack mode, and on macOS 26.5 / .NET 10.0.302 an IPv4-mapped accept
+throws `System.ArgumentException: The supplied System.Net.SocketAddress is an invalid size…` **unhandled
+inside Kestrel's accept loop** — which kills the whole listener ("The connection listener failed to accept
+any new connections") and shuts the host down, not just that one connection. Any client resolving
+`localhost` to both families can trigger it. The TypeScript client's contract suite is what caught it
+(6/14 → 14/14 after the change) and is now a gate for that reason; the cost is that this host does not
+answer on IPv6. Revisit only against a runtime that fixes the dual-stack accept path, and re-run that
+suite to decide.
 
 **Known time-bounded flakes** (they assert progress within a deadline, so they lose races under
 whole-solution parallel load — never under `--filter` on their own): `LoopbackCycleTests`,
