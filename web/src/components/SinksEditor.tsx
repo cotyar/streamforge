@@ -150,6 +150,7 @@ export function SinksEditor({
                       isEdit={isEdit}
                       disabled={disabled}
                       idPrefix={`sink-${i}`}
+                      direction="outbound"
                     />
                     <KeyColumnsSuggestion
                       descriptor={descriptor}

@@ -4,6 +4,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { findTransportEditor, PluginErrorBoundary, type TransportDirection } from '@/plugins/registry'
 
 /** The transport's own config object as it goes on the wire (a NatsSubConfig, a NatsPubConfig, …). This
  *  component never knows which — it reads and writes by descriptor key. */
@@ -21,6 +22,10 @@ export type TransportConfigValue = Record<string, unknown>
  *
  * Secrets follow the same secrets-lite convention as every other editor in this console: a stored value
  * reads back as `***`, and sending `***` unchanged keeps it.
+ *
+ * UI plugins: this is also the ONE seam a third-party library overrides (`web/src/plugins/registry.tsx`).
+ * A registered editor for this kind replaces the descriptor form here, which is why it applies to the
+ * source modal and the sinks editor without either of them knowing plugins exist.
  */
 export function TransportConfigEditor({
   descriptor,
@@ -29,6 +34,7 @@ export function TransportConfigEditor({
   isEdit,
   disabled = false,
   idPrefix = 'tcfg',
+  direction = 'inbound',
 }: {
   descriptor: TransportDescriptor
   value: TransportConfigValue
@@ -36,7 +42,26 @@ export function TransportConfigEditor({
   isEdit: boolean
   disabled?: boolean
   idPrefix?: string
+  /** Which half of the kind is being configured — a plugin may register a different editor per half. */
+  direction?: TransportDirection
 }) {
+  const Plugin = findTransportEditor(descriptor.kind, direction)
+  if (Plugin) {
+    return (
+      <PluginErrorBoundary kind={descriptor.kind}>
+        <Plugin
+          descriptor={descriptor}
+          value={value}
+          onChange={onChange}
+          isEdit={isEdit}
+          disabled={disabled}
+          idPrefix={idPrefix}
+          direction={direction}
+        />
+      </PluginErrorBoundary>
+    )
+  }
+
   const ungrouped = descriptor.fields.filter((f) => !f.group)
   const hasSecret = descriptor.fields.some((f) => f.type === 'secret')
 

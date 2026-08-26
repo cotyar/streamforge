@@ -285,6 +285,16 @@ public class AuthorizationCoverageTests
 
         new("GET", "/api/transports", Guards.Viewer),
         new("POST", "/api/transports/{kind}/probe", Guards.Editor),
+        // Console UI plugins. Anonymous ON PURPOSE, the same way the SPA's own JS bundle is: the console
+        // imports these modules before anyone has logged in, so a Viewer floor would make a plugin
+        // unloadable on the login screen and every page after it. What they serve is front-end code an
+        // operator installed into ui-plugins/ plus its filenames — never catalog data, never a value from
+        // any entity. That is also the documented rule for the directory (TRANSPORTS.md): anything put
+        // there is served to every browser that can reach the console.
+        new("GET", "/api/ui-plugins", Guards.Anonymous,
+            "deliberate: the SPA loads plugin modules before login, exactly like its own bundle"),
+        new("GET", "/api/ui-plugins/{file}", Guards.Anonymous,
+            "deliberate: serves operator-installed front-end code, not catalog data"),
         new("GET", "/api/sql/functions", Guards.Viewer),
 
         // ---- per-entity OpenAPI documents (EntityOpenApiEndpoints.RouteSuffix) ----------------------

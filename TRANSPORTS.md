@@ -768,6 +768,47 @@ validator in TypeScript that drifts from the first.
 
 ---
 
+## A specialized console editor (UI plugin)
+
+For the kinds the generic form can't express — a topic browser, a connection tester, a query builder — a
+library outside this repo can ship its own React editor and have the console load it. Nothing under `web/`
+changes, and no StreamForge assembly is rebuilt.
+
+A plugin is **one ES module** in the host's `ui-plugins/` directory (`<host output dir>/ui-plugins/`, or
+wherever `Ui:PluginsPath` points). Ship it from a connector package as content copied to the output
+directory and a `PackageReference` installs the UI along with the transport. The console fetches
+`GET /api/ui-plugins` before its first render, imports each module, and the module registers itself:
+
+```js
+// ui-plugins/rv.js — see web/plugins-example/example-nats.js for a complete one.
+const { react, registerTransportEditor } = window.streamforge
+registerTransportEditor('rv', RvEditor, 'inbound')  // omit 'inbound' to serve the sink half too
+```
+
+`RvEditor` gets exactly the props the built-in editor gets — `{ descriptor, value, onChange, isEdit,
+disabled, idPrefix, direction }` — and replaces `TransportConfigEditor`'s output for that kind, in the
+source modal and the sinks editor alike (they both render through that one component, which is why one
+registration covers both). Rules that bite:
+
+- **`onChange` replaces the whole config object.** Spread the previous value; a config carries fields your
+  editor doesn't show (an optional group's nested object, a secret) and a bare `{[key]: v}` deletes them.
+- **Secrets stay secrets-lite**: on `isEdit` a stored value reads back as `***`, and sending `***`
+  unchanged keeps it. An editor that "helpfully" clears that field wipes the credential on save.
+- **`window.streamforge.react` is the console's own React** — use it rather than bundling a second copy,
+  which would break hooks. `apiVersion` (1) is bumped only if those props change shape.
+- **Validation still lives in `Validate()` on the backend.** A plugin that also validates is a second
+  validator that drifts, exactly as above.
+- A plugin that throws while rendering takes down its own panel, not the console (`PluginErrorBoundary`);
+  one that fails to import is logged and skipped. Neither loses the stored configuration.
+- **The listing and the files are anonymous** — the console loads them before login. They are front-end
+  assets served to every browser that can reach the console; put nothing else in that directory.
+
+Registration is per `kind`, and that is the only seam: a plugin cannot add pages, routes, or catalog
+behavior. A kind with no plugin keeps the descriptor form — which remains the answer for almost every
+transport.
+
+---
+
 ## Named external endpoints (`@name`)
 
 Plan 016 wave 6. Any config field holding a host, URL or connection string can be authored as `@name`
@@ -869,6 +910,9 @@ repo's test cluster once. `Register()` covers the out-of-tree case above.
 - [ ] `~/.dotnet/dotnet test orleans/StreamForge.sln` and `dapr/StreamForge.Dapr.sln` — both suites green,
       **no existing test file modified**
 - [ ] `cd web && bun run build` — should need no source change; it is a check that nothing regressed
+- [ ] Only if the generic form genuinely can't express the kind: a UI plugin (see
+      [A specialized console editor](#a-specialized-console-editor-ui-plugin)) — dropped into `ui-plugins/`,
+      loaded live, and checked to preserve secrets and untouched config fields on save
 - [ ] Live check on an isolated port (6xxx–9xxx, `--Http:Port … --Grpc:Port … --DataDir <temp>`, killed
       afterwards): the kind appears in `GET /api/transports`, an invalid config is rejected with your
       messages, credentials read back as `***`, a masked PUT round-trip preserves them, and the source arms

@@ -242,6 +242,7 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#connectors-grpc" class="sub">gRPC federation</a>
   <a href="#connectors-endpoints" class="sub">Named external endpoints</a>
   <a href="#connectors-secrets" class="sub">Secrets-lite</a>
+  <a href="#connectors-uiplugins" class="sub">Console UI plugins</a>
   <a href="#crdt">CRDT document sync</a>
   <a href="#crdt-config" class="sub">Kind &amp; document shape</a>
   <a href="#crdt-stamps" class="sub">Three stamps, three readers</a>
@@ -813,6 +814,38 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 
 <h3 id="connectors-secrets">Secrets-lite</h3>
 <p>The two secret slots on a connector — URL header <i>values</i> and gRPC <code>password</code>/<code>token</code> — follow a deliberately honest, minimal ceiling: stored <b>plaintext at rest</b> in each flavor's own store (Orleans JSON file / Dapr Redis — the same posture as JWT signing config today), <b>no KMS, no encryption</b>. Every read path (GET one, list, export) masks a non-empty secret as <code>"***"</code>. Writing back a literal <code>"***"</code> means <b>"keep the stored value"</b> — this is what makes the SPA's GET (masked) → edit → PUT (whole object) cycle safe: it never clobbers a real secret with the mask string. <code>GET /api/config/export</code> omits real secret values unless the caller is Admin and passes <code>includeSecrets=true</code>.</p>
+
+<h3 id="connectors-uiplugins">Console UI plugins</h3>
+<p>Every source and sink kind already gets a working config form for free — the console builds it from the kind's own descriptor (<code>GET /api/transports</code>), so a transport added in an outside library is configurable in the console without a line of front-end code. A <b>UI plugin</b> is the escape hatch for the kinds that form cannot express: a topic browser, a connection tester, a query builder. It replaces that one kind's config panel with the library author's own React component — everywhere the panel appears (the source modal <i>and</i> the sinks editor on pipelines and tables), and without rebuilding or reconfiguring StreamForge.</p>
+<p><b>Installing one</b> — three steps, no build tooling required:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Step</th><th>What to do</th></tr></thead>
+<tbody>
+<tr><td>1. Drop the file</td><td>Put the plugin's <code>.js</code> (or <code>.mjs</code>) into the host's <code>ui-plugins/</code> directory — <code>ui-plugins/</code> next to the host binaries by default (Orleans: <code>orleans/src/StreamForge.Host/bin/&lt;cfg&gt;/net10.0/ui-plugins/</code>), or wherever <code>--Ui:PluginsPath</code> points. A connector shipped as a NuGet package that declares its plugin as content copied to the output directory lands there by itself, so installing the package installs the UI.</td></tr>
+<tr><td>2. Restart the host</td><td>Only to pick up a <b>newly created</b> directory; a file added to an existing one is listed on the next request. There is no plugin cache on the server.</td></tr>
+<tr><td>3. Reload the console</td><td>Plugins are imported once, before the first render. A hard reload (cache-busting) is what applies a changed file.</td></tr>
+</tbody></table></div>
+<p><b>Checking what is installed:</b> <code>curl -s http://localhost:5199/api/ui-plugins</code> lists the module URLs the console will import — anonymous, like the console's own bundle. If a kind still shows the generic form, look in the browser console: a plugin that fails to import is logged and skipped, never fatal.</p>
+<p><b>Writing one</b> — one ES module, no bundler, no React copy of its own:</p>
+<pre><code>// ui-plugins/rv.js
+const { react, registerTransportEditor } = window.streamforge
+const h = react.createElement
+
+function RvEditor({ value, onChange, disabled, idPrefix }) {
+  return h('input', {
+    id: `${idPrefix}-daemon`,
+    value: value.daemon ?? '',
+    disabled,
+    // Spread the previous value: the config holds fields this editor never shows.
+    onChange: (e) =&gt; onChange({ ...value, daemon: e.target.value }),
+  })
+}
+
+registerTransportEditor('rv', RvEditor, 'inbound')   // omit 'inbound' to serve the sink half too
+</code></pre>
+<p>The component receives exactly what the built-in editor receives — <code>{ descriptor, value, onChange, isEdit, disabled, idPrefix, direction }</code> — and <code>window.streamforge.react</code> is the console's own React (bundling a second copy breaks hooks). <code>apiVersion</code> is <code>1</code> and is bumped only if those props change shape.</p>
+<div class="callout"><b>Four rules that bite.</b> <code>onChange</code> replaces the <i>whole</i> config object, so always spread the previous value — a bare <code>{ key: v }</code> deletes the fields the editor doesn't render. Secrets keep the secrets-lite convention above: while editing an existing entity a stored secret reads back as <code>"***"</code> and sending it back unchanged keeps it, so an editor that "helpfully" blanks that field wipes the credential on save. Validation stays on the server (the modal already renders its messages) — a second validator in the plugin is one that drifts. And the plugin files are served <b>anonymously</b>, like the console's own JavaScript, because the console loads them before anyone logs in: treat that directory as public front-end code, never a place for anything sensitive.</div>
+<p>A plugin that throws while rendering loses its own panel and nothing else — the surrounding form, and the stored configuration, are untouched. Registration is per kind and that is the only seam: a plugin cannot add pages, routes, or catalog behavior. The contributor-facing side (props, the registry, the example module) is in <a href="https://github.com/cotyar/streamforge/blob/master/TRANSPORTS.md">TRANSPORTS.md</a>.</p>
 </section>
 
 <section id="crdt">

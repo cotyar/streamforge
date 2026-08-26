@@ -6,7 +6,11 @@ in code, but behind on live verification: read [`dapr/PARITY.md`](dapr/PARITY.md
 about it, and land new work on Orleans first). Both
 flavors share one runtime-agnostic core (`shared/`): Engine, Contracts, AppCore, Api, and the `web/`
 SPA. Execution plans with acceptance criteria: [`plans/`](plans/README.md). Adding an ingress/egress transport
-(NATS + a `file` sink today; the recipe is one class + one registry line): [`TRANSPORTS.md`](TRANSPORTS.md). Architecture:
+(NATS + a `file` sink today; the recipe is one class + one registry line): [`TRANSPORTS.md`](TRANSPORTS.md) —
+which also covers **console UI plugins**: an out-of-tree library can replace the generic config form for its
+own source/sink kind with its own React editor by dropping one ES module in the host's `ui-plugins/`
+directory (`GET /api/ui-plugins`, `Ui:PluginsPath`), with no change under `web/`. Operator-facing
+install instructions: `orleans/docs/index.html` § Console UI plugins. Architecture:
 [`orleans/ARCHITECTURE.md`](orleans/ARCHITECTURE.md) · [`dapr/ARCHITECTURE.md`](dapr/ARCHITECTURE.md)
 · Dapr's descoped/owed/unverified list: [`dapr/PARITY.md`](dapr/PARITY.md)
 · rationale: [`orleans/DESIGN.md`](orleans/DESIGN.md) · runtime comparison + measured latency:
