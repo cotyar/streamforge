@@ -1,4 +1,5 @@
 using StreamForge.Abstractions;
+using StreamForge.AppCore.Transports;
 
 namespace StreamForge.AppCore.Config;
 
@@ -60,7 +61,55 @@ public static class SecretsMasker
             }
         }
 
+        MaskSettings(connector.Settings, TransportDescriptors.ForSource(clone.Kind));
+
         return clone;
+    }
+
+    /// <summary>Masks an out-of-tree kind's <c>Settings</c> bag (see
+    /// <see cref="ConnectorConfig.Settings"/>). The bag is a plain string dictionary, so
+    /// <see cref="SecretWalk"/>'s <c>[Secret]</c> attributes cannot reach into it — which keys are
+    /// credentials is read off the kind's own descriptor instead.
+    ///
+    /// <para><b>An unregistered kind masks EVERYTHING.</b> No descriptor means nothing here can tell a
+    /// hostname from a password, and the two failure modes are not symmetric: over-masking makes an
+    /// export of a kind whose plugin isn't installed unhelpful, under-masking exports that plugin's
+    /// credentials in plaintext. This is the same instinct <c>[Secret]</c> exists to serve, applied
+    /// where the attribute cannot go.</para></summary>
+    private static void MaskSettings(Dictionary<string, string>? settings, TransportDescriptor? descriptor)
+    {
+        if (settings is null || settings.Count == 0)
+        {
+            return;
+        }
+
+        var secretKeys = TransportDescriptors.SecretKeys(descriptor);
+        foreach (var key in settings.Keys.ToList())
+        {
+            if (!string.IsNullOrEmpty(settings[key]) && (descriptor is null || secretKeys.Contains(key)))
+            {
+                settings[key] = SourceKinds.SecretMask;
+            }
+        }
+    }
+
+    /// <summary>The "a written *** means keep the stored value" half for a <c>Settings</c> bag, matched by
+    /// KEY. Needs no descriptor: only a value that IS the mask is restored, and only when the stored bag
+    /// has that key — so a kind whose plugin has since been uninstalled still round-trips.</summary>
+    private static void MergeSettings(Dictionary<string, string>? incoming, IReadOnlyDictionary<string, string>? stored)
+    {
+        if (incoming is null || stored is null)
+        {
+            return;
+        }
+
+        foreach (var key in incoming.Keys.ToList())
+        {
+            if (incoming[key] == SourceKinds.SecretMask && stored.TryGetValue(key, out var storedValue))
+            {
+                incoming[key] = storedValue;
+            }
+        }
     }
 
     /// <summary>Plan 009 A1.2: masks Hash/Salt on every configured push key — the doc comment on
@@ -131,6 +180,8 @@ public static class SecretsMasker
             }
         }
 
+        MergeSettings(connector.Settings, storedConnector.Settings);
+
         return clone;
     }
 
@@ -191,6 +242,11 @@ public static class SecretsMasker
             return true;
         }
 
+        if (connector.Settings.Values.Any(v => v == SourceKinds.SecretMask))
+        {
+            return true;
+        }
+
         return SecretWalk.Slots(connector).Any(s => s.Value == SourceKinds.SecretMask);
     }
 
@@ -246,6 +302,11 @@ public static class SecretsMasker
                 slot.Set(SourceKinds.SecretMask);
             }
         }
+
+        foreach (var sink in sinks)
+        {
+            MaskSettings(sink.Settings, TransportDescriptors.ForSink(sink.Kind));
+        }
     }
 
     /// <summary>Restores masked NatsPubConfig credentials in <paramref name="incoming"/> from
@@ -274,6 +335,8 @@ public static class SecretsMasker
                     slot.Set(slot.StoredValue);
                 }
             }
+
+            MergeSettings(clone[i].Settings, stored[i].Settings);
         }
 
         return clone;
@@ -284,5 +347,6 @@ public static class SecretsMasker
     /// sources: decide whether an imported/PUT-ed Sinks list needs <see cref="MergeSinkSecrets"/>
     /// applied before comparing/persisting it.</summary>
     public static bool HasMaskedSinkValues(List<SinkSpec>? sinks) =>
-        (sinks ?? []).SelectMany(s => SecretWalk.Slots(s)).Any(slot => slot.Value == SourceKinds.SecretMask);
+        (sinks ?? []).Any(s => s.Settings.Values.Any(v => v == SourceKinds.SecretMask))
+        || (sinks ?? []).SelectMany(s => SecretWalk.Slots(s)).Any(slot => slot.Value == SourceKinds.SecretMask);
 }

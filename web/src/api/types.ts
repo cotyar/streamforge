@@ -137,6 +137,11 @@ export interface ConnectorConfig {
   mapping?: MappingSpec | null
   /** Plan 009 B1; set only for 'nats'-kind sources. */
   nats?: NatsSubConfig | null
+  /** The platform's open, string-valued config bag (ConnectorConfig.Settings on the server): where an
+   *  OUT-OF-TREE source kind — one whose config class cannot live in StreamForge.Contracts — keeps its
+   *  fields. The console never reads a key of it by name; it renders whatever the kind's descriptor
+   *  declares, and writes every value as a string (see TransportConfigEditor's SETTINGS_BAG). */
+  settings?: Record<string, string> | null
 }
 
 /** Plan 009 B1. Credentials follow the same secrets-lite convention as the other connectors:
@@ -170,6 +175,8 @@ export interface SinkSpec {
   enabled: boolean
   nats?: NatsPubConfig | null
   file?: FileSinkConfig | null
+  /** The sink half of ConnectorConfig.settings — same bag, same rules. */
+  settings?: Record<string, string> | null
 }
 
 /** Plan 012: the file egress sink — appends to a file on the HOST's filesystem, never truncates. */

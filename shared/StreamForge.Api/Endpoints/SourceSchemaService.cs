@@ -585,13 +585,20 @@ public static class SourceSchemaService
     /// is the caller's job to pick (the endpoint reads it from config); this method just enforces it.</summary>
     public static async Task<ProbeOutcome> ProbeAsync(string kind, SourceDefinition def, TimeSpan timeout, CancellationToken ct)
     {
-        var transport = PolledTransports.Find(kind);
+        // BOTH registries, polled first. ISchemaProbe is documented as an optional capability ANY
+        // transport may implement, but until this looked in InboundTransports too, only a polled kind
+        // could ever be reached through it — a push-shaped kind that implements ISchemaProbe (a broker
+        // that can list a topic's fields, a service catalog that describes its own tables) 404'd as
+        // "unknown kind" no matter what it implemented. Widening the lookup is the whole fix; everything
+        // below is already generic over "an object that might be ISchemaProbe".
+        object? transport = PolledTransports.Find(kind) ?? (object?)InboundTransports.Find(kind);
         if (transport is null)
         {
-            // Distinct from "cannot probe" below: nobody registered this kind at all — on the default
-            // build (PolledTransports.Kinds empty) EVERY kind lands here, and the message says so.
+            // Distinct from "cannot probe" below: nobody registered this kind at all — on a build with
+            // neither registry populated EVERY kind lands here, and the message says which are known.
+            var known = string.Join(", ", PolledTransports.Kinds.Concat(InboundTransports.Kinds));
             return new ProbeOutcome(ProbeOutcomeKind.UnknownKind, null,
-                $"kind '{kind}' is not a registered polled transport (known: {string.Join(", ", PolledTransports.Kinds)})");
+                $"kind '{kind}' is not a registered transport (known: {known})");
         }
 
         if (transport is not ISchemaProbe probe)

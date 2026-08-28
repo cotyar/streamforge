@@ -768,6 +768,88 @@ validator in TypeScript that drifts from the first.
 
 ---
 
+## An out-of-tree kind: install, don't fork
+
+Everything above assumes the transport lives in this repo. It does not have to. A kind can ship as a
+library nobody here references — **one DLL in `plugins/`, and (optionally) one ES module in
+`ui-plugins/`** — and the platform picks up both at startup with no rebuild and no config beyond the
+files themselves.
+
+```csharp
+// YourCompany.Orion.dll, dropped in <host binaries>/plugins/ (or wherever `Plugins:Path` points)
+public sealed class OrionPlugin : IStreamForgePlugin      // StreamForge.AppCore.Plugins
+{
+    public string Name => "Orion connector 1.2.0";
+    public void Register() => InboundTransports.Register(new OrionInboundTransport());
+}
+```
+
+The loader reports one line per outcome at startup (`[plugins] plugin 'Orion connector 1.2.0' … registered`)
+and **never throws**: a plugin that fails to load, constructs badly, or tries to register a kind that is
+already taken is skipped with a reason, because a third-party file must not keep the host from starting.
+Plugins load AFTER the built-in registrations, so a plugin cannot shadow a built-in kind — it loses the
+duplicate-kind race and says so. Assemblies load into the host's DEFAULT load context (they must share its
+`IInboundTransport` type to register at all), so a plugin's own dependency versions are not isolated from
+the host's.
+
+### Config with no config class: the `settings` bag
+
+The one thing an out-of-tree kind cannot do is add a property to `ConnectorConfig`/`SinkSpec` — those live
+in `StreamForge.Contracts`, in this repo, and every typed config class is there for a reason
+(`SecretWalk` only recurses into types from that assembly, so a config class declared elsewhere would
+export its password in plaintext). The bag closes that from the other side:
+
+```csharp
+public TransportDescriptor Describe() => new()
+{
+    Kind = "orion",
+    ConfigProperty = "settings",                    // ← the open bag, not a typed property
+    Fields =
+    [
+        new TransportField { Key = "environment", Label = "Environment", Required = true },
+        new TransportField { Key = "subEnvironment", Label = "Sub-environment" },   // a 4th dimension costs nothing
+        new TransportField { Key = "password", Label = "Password", Type = TransportFieldTypes.Secret },
+    ],
+};
+
+public void Validate(SourceDefinition def, List<string> errors)
+{
+    var s = def.Connector?.Settings;
+    SettingsBag.Require(s, "environment", "Environment", errors);
+    var sub = SettingsBag.GetOrNull(s, "subEnvironment");        // absent and blank both read as null
+    var timeout = SettingsBag.GetInt(s, "timeoutMs", 5000);      // unparseable → the fallback, never a throw
+}
+```
+
+`ConnectorConfig.Settings` / `SinkSpec.Settings` is a `Dictionary<string, string>` that the platform
+stores, exports, imports and renders without knowing a single key. What it buys, and what it costs:
+
+- **Adding a field is not a schema change.** A new key in a bag spends no `[Id(n)]`, breaks no older
+  document, and needs no coordination with this repo — which is the whole point when a kind's config has
+  several orthogonal dimensions (environment × location × sub-environment × …) that keep growing.
+- **Secrets still mask**, but by DESCRIPTOR, not by attribute: a field declared
+  `Type = TransportFieldTypes.Secret` is masked as `"***"` on every read path and follows the same
+  "sending `***` back keeps the stored value" rule as every typed credential. `SettingsBag`'s readers are
+  in `StreamForge.AppCore.Transports`.
+- **A kind nobody registered masks its WHOLE bag.** With no descriptor there is no way to tell a hostname
+  from a password, and the platform fails closed — so an export taken on a host where the plugin is not
+  installed is unhelpful rather than a leak.
+- **Everything is a string.** `number`/`bool` fields are written as their plain spelling by the console
+  and parsed by `SettingsBag.GetInt`/`GetBool`. `@name` endpoint references work as they do anywhere
+  else — call `NamedEndpoints.Resolve` on the value at connect time, exactly like a typed config does.
+- **The ceiling: no nested optional group.** A descriptor group with an `ObjectKey` (a nullable nested
+  object — "core NATS vs a JetStream consumer") cannot be expressed in a flat bag. A kind that genuinely
+  needs one needs a typed class in `StreamForge.Contracts`, i.e. a PR here.
+
+### Schema discovery works for push kinds too
+
+`ISchemaProbe` is optional for ANY transport, polled or pushed: implement it and
+`POST /api/transports/{kind}/probe` reaches it (`SourceSchemaService.ProbeAsync` checks
+`PolledTransports` first, then `InboundTransports`), the console renders **Discover schema** off
+`CanProbe`, and a probe that throws comes back as a diagnostic on a 200 rather than a 500.
+
+---
+
 ## A specialized console editor (UI plugin)
 
 For the kinds the generic form can't express — a topic browser, a connection tester, a query builder — a
@@ -788,7 +870,19 @@ registerTransportEditor('rv', RvEditor, 'inbound')  // omit 'inbound' to serve t
 `RvEditor` gets exactly the props the built-in editor gets — `{ descriptor, value, onChange, isEdit,
 disabled, idPrefix, direction }` — and replaces `TransportConfigEditor`'s output for that kind, in the
 source modal and the sinks editor alike (they both render through that one component, which is why one
-registration covers both). Rules that bite:
+registration covers both).
+
+`window.streamforge` also hands over what the console already has, so a plugin never pays for a second
+copy of it (`apiVersion` is `2`; feature-detect with `(window.streamforge?.apiVersion ?? 0) >= 2`):
+
+| Member | What it is |
+| --- | --- |
+| `react` | The console's own React. A bundled second copy breaks hooks. |
+| `api` | Authenticated REST — `get`/`post`/`put`/`del`, bearer token AND the selected environment header, `ApiError.status` on failure. |
+| `live` | `subscribeTable` / `subscribeSource` / `subscribePipeline` on the console's ONE SignalR connection. A plugin that opened its own client would mean a second socket, a second auth handshake and a second subscription for the same rows. |
+| `loadLiveTables()` | Lazily resolves `{ createCollection, createLiveQueryCollection, streamForgeCollectionOptions, connect }` — TanStack DB over a StreamForge table, for a plugin that wants query/join on top of raw deltas. Dynamically imported, so a console that loads no plugin never downloads it; `connect()` is memoized and uses this console's origin + session token. |
+
+Rules that bite:
 
 - **`onChange` replaces the whole config object.** Spread the previous value; a config carries fields your
   editor doesn't show (an optional group's nested object, a secret) and a bare `{[key]: v}` deletes them.
@@ -848,13 +942,18 @@ TIBCO Rendezvous is the motivating case: `TIBCO.Rendezvous` is not on public NuG
 licensed Rendezvous installation and wraps a native library. Putting it in `shared/StreamForge.AppCore`
 would make the main build require a license.
 
-Put it in its own project that neither solution references, and register from host startup:
+Put it in its own project that neither solution references, and register from host startup — either by
+editing that host (when the project is in this repo but unreferenced by the main build):
 
 ```csharp
 // orleans/src/StreamForge.Host/Program.cs — before the host starts serving.
 InboundTransports.Register(new RvInboundTransport());
 SinkTransports.Register(new RvSinkTransport());
 ```
+
+…or, when it is not in this repo at all, by shipping an `IStreamForgePlugin` and dropping the DLL in
+`plugins/` — see [An out-of-tree kind](#an-out-of-tree-kind-install-dont-fork) above, which is the same
+registration one file later.
 
 Registration must happen before any source starts. A duplicate `Kind` throws rather than silently shadowing
 a built-in.
@@ -893,7 +992,9 @@ transport recipe, and a CRDT document isn't a transport.
 **The registries are static lists, not DI discovery.** Assembly scanning would buy nothing — transports are
 compile-time known — and both connector drivers are constructed by runtime machinery (an Orleans grain, a
 Dapr actor) whose container is not the host's; injecting a registry into a grain has already broken this
-repo's test cluster once. `Register()` covers the out-of-tree case above.
+repo's test cluster once. `Register()` covers the out-of-tree case above — and the `plugins/` loader does
+not weaken this: it discovers FILES an operator installed, never transport TYPES to infer registration
+from. What runs is still one explicit `Register()` call, written by the plugin's own author.
 
 ---
 
@@ -905,8 +1006,9 @@ repo's test cluster once. `Register()` covers the out-of-tree case above.
       dials nothing external
 - [ ] `IInboundTransport` / `ISinkTransport` implemented, including `Describe()` — **or**, for a pull-shaped
       kind, `IPolledTransport` (plus `ISchemaProbe` if it can discover its own schema)
-- [ ] Registered in `InboundTransports` / `SinkTransports` / `PolledTransports` (or from host startup, if
-      out-of-tree)
+- [ ] Registered in `InboundTransports` / `SinkTransports` / `PolledTransports` (or, out-of-tree, from an
+      `IStreamForgePlugin` in `plugins/` — and then config in the `settings` bag rather than a new property
+      on `ConnectorConfig`)
 - [ ] `~/.dotnet/dotnet test orleans/StreamForge.sln` and `dapr/StreamForge.Dapr.sln` — both suites green,
       **no existing test file modified**
 - [ ] `cd web && bun run build` — should need no source change; it is a check that nothing regressed

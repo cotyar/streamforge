@@ -221,6 +221,17 @@ FixConnectors.RegisterAll();
 // never links a pricing library. Must precede anything that compiles SQL.
 StreamForge.Quant.QuantFunctions.RegisterAll();
 
+// Out-of-tree connectors, installed rather than referenced: every IStreamForgePlugin in `plugins/` next
+// to the binaries (or wherever `Plugins:Path` points) registers its own kinds here, at the same
+// "before any source starts" deadline the three lines above satisfy — and AFTER them, so a plugin
+// shipping a kind name a built-in already owns loses to the built-in instead of shadowing it. The report
+// is logged, never thrown: a plugin that fails to load must not keep this host from starting, and the
+// line is the only diagnostic an operator has for "I copied the DLL and nothing happened".
+foreach (var line in StreamForge.AppCore.Plugins.StreamForgePlugins.LoadFrom(builder.Configuration["Plugins:Path"]))
+{
+    Console.WriteLine($"[plugins] {line}");
+}
+
 // Plan 016 wave 5: this instance's directory of known peers, read from config and installed into the
 // process-wide PeerDirectory before the host starts serving. "Discovery:Peers" (a section, not a flat
 // key) so it binds as an ARRAY — the shape .NET configuration gives every provider for free, including

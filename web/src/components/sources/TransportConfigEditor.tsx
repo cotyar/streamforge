@@ -65,14 +65,22 @@ export function TransportConfigEditor({
   const ungrouped = descriptor.fields.filter((f) => !f.group)
   const hasSecret = descriptor.fields.some((f) => f.type === 'secret')
 
+  // An out-of-tree kind stores its config in the platform's open `settings` bag, which is a
+  // Dictionary<string, string> on the wire — so a number/bool field has to go over as its string
+  // spelling or the whole PUT fails to deserialize. Every other descriptor writes a typed config object
+  // and is untouched. (A bag cannot hold a nested optional GROUP either; TRANSPORTS.md states that
+  // ceiling — such a kind needs a typed config class in the platform.)
+  const stringValued = descriptor.configProperty === SETTINGS_BAG
+
   function set(field: TransportField, group: TransportGroup | undefined, next: unknown) {
+    const written = stringValued ? asWireString(next) : next
     const objectKey = group?.objectKey
     if (!objectKey) {
-      onChange({ ...value, [field.key]: next })
+      onChange({ ...value, [field.key]: written })
       return
     }
     const nested = (value[objectKey] as TransportConfigValue | null | undefined) ?? {}
-    onChange({ ...value, [objectKey]: { ...nested, [field.key]: next } })
+    onChange({ ...value, [objectKey]: { ...nested, [field.key]: written } })
   }
 
   function read(field: TransportField, group: TransportGroup | undefined): unknown {
@@ -270,6 +278,17 @@ function asString(value: unknown): string {
   return typeof value === 'string' ? value : value == null ? '' : String(value)
 }
 
+/** The property name of the platform's open, string-valued config bag (ConnectorConfig.Settings /
+ *  SinkSpec.Settings) — what an out-of-tree transport declares as its `configProperty` when it has no
+ *  typed config class in StreamForge.Contracts. */
+export const SETTINGS_BAG = 'settings'
+
+/** `null`/`undefined` become "", everything else its plain spelling — `true`/`false` and invariant
+ *  numbers, which is exactly what SettingsBag.GetBool/GetInt parse back on the server. */
+function asWireString(value: unknown): string {
+  return value == null ? '' : String(value)
+}
+
 /** Initial config for a NEW entity: every field's declared default, and every optional group off (its
  *  nested object null) — matching the server-side defaults so the first save round-trips unchanged. */
 export function emptyTransportConfig(descriptor: TransportDescriptor): TransportConfigValue {
@@ -281,7 +300,10 @@ export function emptyTransportConfig(descriptor: TransportDescriptor): Transport
   for (const group of descriptor.groups) {
     if (group.objectKey) config[group.objectKey] = null
   }
-  return config
+  if (descriptor.configProperty !== SETTINGS_BAG) return config
+  // Same reason `set` stringifies: the settings bag is a string dictionary, so even the initial defaults
+  // of a brand-new entity have to go over as strings.
+  return Object.fromEntries(Object.entries(config).map(([k, v]) => [k, asWireString(v)]))
 }
 
 function defaultsFor(fields: TransportField[]): TransportConfigValue {

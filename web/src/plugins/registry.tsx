@@ -1,4 +1,6 @@
 import * as react from 'react'
+import { api, getStoredToken } from '@/api/client'
+import { subscribePipeline, subscribeSource, subscribeTable } from '@/realtime/hub'
 import type { TransportDescriptor } from '@/api/types'
 import type { TransportConfigValue } from '@/components/sources/TransportConfigEditor'
 
@@ -53,13 +55,78 @@ export function clearTransportEditors(): void {
   editors.clear()
 }
 
-/** The plugin-facing API, installed on `window` before any plugin module is imported. `react` is handed
- *  over so a plugin doesn't bundle (and break on) a second copy of it. */
+/**
+ * The plugin-facing API, installed on `window` before any plugin module is imported.
+ *
+ * Everything here is something the console ALREADY has and a plugin cannot get for itself without paying
+ * twice: `react` (a second copy breaks hooks), `api` (an authenticated fetch that carries the session
+ * token AND the selected environment header), and `live` (the console's ONE SignalR connection — a plugin
+ * that opened its own would mean a second socket, a second auth handshake and a second subscription for
+ * the same rows). `loadLiveTables` is the heavy path, behind a dynamic import so a console that never
+ * loads a plugin never downloads it.
+ */
 export const pluginHost = {
-  /** Bump only for a breaking change to TransportEditorProps; a plugin can refuse to register below it. */
-  apiVersion: 1,
+  /** Bumped when this object or TransportEditorProps changes shape, so a plugin can feature-detect
+   *  (`if ((window.streamforge?.apiVersion ?? 0) >= 2)`) instead of assuming. 1 → 2 added `api`, `live`
+   *  and `loadLiveTables`. */
+  apiVersion: 2,
   react,
   registerTransportEditor,
+
+  /** The console's own REST client: `get`/`post`/`put`/`del`, bearer token and environment header
+   *  included, `ApiError` (with `.status`) on failure. Paths are absolute — `api.get('/api/tables')`. */
+  api,
+
+  /** The console's own live feed, off the connection it already holds. Each returns an unsubscribe
+   *  function; `subscribeTable`'s also carries `.ready`, a promise resolved once the server has confirmed
+   *  the subscription (await it before reading a snapshot you need to be complete). */
+  live: {
+    subscribeTable,
+    subscribeSource,
+    subscribePipeline,
+  },
+
+  /**
+   * TanStack DB against a StreamForge table, loaded on demand: resolves
+   * `{ createCollection, createLiveQueryCollection, streamForgeCollectionOptions, connect }` — enough for
+   *
+   *   const { createCollection, streamForgeCollectionOptions, connect } = await sf.loadLiveTables()
+   *   const client = await connect()            // this console's URL + session token, SignalR transport
+   *   const rows = createCollection(streamForgeCollectionOptions({ client, table: 'orders' }))
+   *
+   * `connect()` is memoized per page: one client, however many plugins ask. It is a SECOND connection
+   * from the console's SignalR hub above — use `live.subscribeTable` when plain deltas are enough, and
+   * this when the plugin wants TanStack DB's own query/join layer on top.
+   */
+  loadLiveTables,
+}
+
+let clientPromise: Promise<unknown> | null = null
+
+async function loadLiveTables() {
+  // Three dynamic imports, so @tanstack/db and the client's transport stack are their own chunks — the
+  // console itself uses none of them.
+  const [db, bridge, client] = await Promise.all([
+    import('@tanstack/db'),
+    import('@streamforge/tanstack-db'),
+    import('@streamforge/client'),
+  ])
+
+  return {
+    createCollection: db.createCollection,
+    createLiveQueryCollection: db.createLiveQueryCollection,
+    streamForgeCollectionOptions: bridge.streamForgeCollectionOptions,
+    /** Connects (once) with this console's origin and stored session token. `transport: 'signalr'`
+     *  because the client's gRPC transport is Node-only. */
+    connect: () => {
+      clientPromise ??= client.connect({
+        url: window.location.origin,
+        token: getStoredToken() ?? undefined,
+        transport: 'signalr',
+      })
+      return clientPromise as ReturnType<typeof client.connect>
+    },
+  }
 }
 
 declare global {

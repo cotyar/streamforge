@@ -123,6 +123,27 @@ public sealed class ConnectorConfig
     /// can see it if one is ever added (see <see cref="Db"/>'s doc comment for what happens to a config
     /// class declared outside this assembly).</summary>
     [Id(9)] public CrdtSourceConfig? Crdt { get; set; }
+
+    /// <summary>
+    /// The open slot for a kind whose config class cannot live in this assembly at all: an OUT-OF-TREE
+    /// transport, registered from host startup (see <c>StreamForge.AppCore.Plugins.StreamForgePlugins</c>),
+    /// whose fields this repo has never heard of. Every typed property above exists because a config class
+    /// declared elsewhere is invisible to <c>SecretWalk</c> — this bag closes that hole from the other side:
+    /// a string dictionary IS visible, and which of its keys are secret is read off the kind's own
+    /// <c>TransportDescriptor</c> (<c>SecretsMasker.MaskSettings</c>) rather than from an attribute the
+    /// walker cannot see.
+    ///
+    /// <para><b>Flat, string-valued, and that is the ceiling.</b> Descriptor field types (number, bool,
+    /// select…) are declared as strings here and parsed by the transport — <c>SettingsBag</c> in AppCore has
+    /// the readers. A descriptor group with an <c>ObjectKey</c> (a nested, nullable object — "core NATS vs a
+    /// JetStream consumer") is the one form this cannot express; a kind that needs it needs a typed class in
+    /// this file, and that is the deliberate trade for not having to edit this file at all.</para>
+    ///
+    /// <para>Never used by a built-in kind. Empty on every source that predates it, and an out-of-tree kind
+    /// that ADDS a field (a fourth environment dimension, say) changes nothing here: a new key in a bag is
+    /// not a schema change, so no <c>[Id(n)]</c> is spent and no import of an older document breaks.</para>
+    /// </summary>
+    [Id(10)] public Dictionary<string, string> Settings { get; set; } = [];
 }
 
 /// <summary>
@@ -521,6 +542,11 @@ public sealed class SinkSpec
     /// <summary>Plan 019 D2; set only for <see cref="SinkKinds.Duplex"/>. See
     /// <see cref="DuplexSinkConfig"/>.</summary>
     [Id(8)] public DuplexSinkConfig? Duplex { get; set; }
+
+    /// <summary>The sink half of <see cref="ConnectorConfig.Settings"/> — same bag, same rules, same
+    /// reason (an out-of-tree sink kind's config class is invisible to <c>SecretWalk</c>). See that
+    /// property's doc comment; everything it says applies verbatim here.</summary>
+    [Id(9)] public Dictionary<string, string> Settings { get; set; } = [];
 }
 
 public static class SinkKinds

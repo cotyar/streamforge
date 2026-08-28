@@ -197,6 +197,10 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   </div>
   <input id="navfilter" type="search" placeholder="Filter sections…" aria-label="Filter documentation sections">
   <a href="#overview">Overview</a>
+  <a href="#positioning">Where it fits</a>
+  <a href="#positioning-market" class="sub">Compared with the market</a>
+  <a href="#positioning-not" class="sub">What it is not</a>
+  <a href="#usecases">Typical deployments</a>
   <a href="#quickstart">Quick start</a>
   <a href="#concepts">Core concepts</a>
   <a href="#examples">The seeded demo world</a>
@@ -220,29 +224,48 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#tables-search" class="sub">Row search</a>
   <a href="#tables-parallel" class="sub">Parallel execution</a>
   <a href="#tables-history" class="sub">Row history</a>
+  <a href="#tables-retention" class="sub">Retention</a>
+  <a href="#tables-persistence" class="sub">Persistence modes</a>
+  <a href="#tables-shards" class="sub">Sharded tables</a>
   <a href="#tables-metadata" class="sub">Tags &amp; metadata</a>
   <a href="#rbac">Roles, entitlements &amp; approvals</a>
-  <a href="#rbac-grants" class="sub">Grants: action × scope</a>
+  <a href="#rbac-grants" class="sub">Grants: action &times; scope</a>
   <a href="#rbac-disable" class="sub">Disabling a login</a>
   <a href="#rbac-approvals" class="sub">Approvals</a>
   <a href="#rbac-audit" class="sub">Audit log</a>
+  <div class="navgap"></div>
   <a href="#api">REST API</a>
   <a href="#api-naming" class="sub">Id-or-name resolution</a>
   <a href="#api-revisions" class="sub">Revisions &amp; schema compat.</a>
   <a href="#grpc">gRPC &amp; typed clients</a>
   <a href="#grpc-reflection" class="sub">Dynamic reflection</a>
   <a href="#grpc-codegen" class="sub">Typed client codegen</a>
+  <a href="#clients">Client libraries</a>
   <a href="#realtime">Realtime events</a>
   <div class="navgap"></div>
+  <a href="#formats">Payload formats</a>
+  <a href="#formats-csv" class="sub">CSV &amp; friends</a>
+  <a href="#formats-csvout" class="sub">CSV out</a>
   <a href="#connectors">Ingestion connectors</a>
   <a href="#connectors-schedule" class="sub">Scheduling &amp; backoff</a>
   <a href="#connectors-mapping" class="sub">Mapping documents</a>
   <a href="#connectors-openapi" class="sub">OpenAPI derivation</a>
   <a href="#connectors-files" class="sub">File &amp; folder sources</a>
+  <a href="#connectors-push" class="sub">NATS &amp; client push</a>
+  <a href="#connectors-db" class="sub">Database sources</a>
+  <a href="#connectors-cdc" class="sub">Change data capture</a>
+  <a href="#connectors-fix" class="sub">FIX &amp; order entry</a>
   <a href="#connectors-grpc" class="sub">gRPC federation</a>
   <a href="#connectors-endpoints" class="sub">Named external endpoints</a>
   <a href="#connectors-secrets" class="sub">Secrets-lite</a>
+  <a href="#connectors-plugins" class="sub">Server plugins &amp; out-of-tree kinds</a>
   <a href="#connectors-uiplugins" class="sub">Console UI plugins</a>
+  <a href="#sinks">Egress: sinks</a>
+  <a href="#sinks-contract" class="sub">The delivery contract</a>
+  <a href="#sinks-file" class="sub">File sink</a>
+  <a href="#sinks-db" class="sub">Database sinks</a>
+  <a href="#sinks-httploop" class="sub">HTTP &amp; loopback</a>
+  <a href="#sinks-duplex" class="sub">Duplex sink</a>
   <a href="#crdt">CRDT document sync</a>
   <a href="#crdt-config" class="sub">Kind &amp; document shape</a>
   <a href="#crdt-stamps" class="sub">Three stamps, three readers</a>
@@ -252,6 +275,7 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#crdt-reconcile" class="sub">Reconciliation pattern</a>
   <a href="#crdt-escrow" class="sub">Escrow: bounded counters</a>
   <a href="#crdt-awareness" class="sub">Awareness: presence/liveness</a>
+  <div class="navgap"></div>
   <a href="#discovery">Instance discovery &amp; federation</a>
   <a href="#discovery-instance" class="sub">Instance identity</a>
   <a href="#discovery-peers" class="sub">Peer directory</a>
@@ -266,8 +290,16 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#config-deps" class="sub">Dependency pins</a>
   <a href="#config-requires" class="sub">Connector version requirements</a>
   <a href="#config-import" class="sub">Import modes</a>
+  <div class="navgap"></div>
   <a href="#aichat">AI control chat</a>
+  <a href="#admincli">Admin CLI &amp; MCP</a>
   <a href="#deploy">Deployment &amp; admin</a>
+  <a href="#embedding">Embedding in your process</a>
+  <a href="#embedding-wiring" class="sub">The wiring</a>
+  <a href="#embedding-engine" class="sub">Or just the engine</a>
+  <a href="#tuning">Performance &amp; tuning</a>
+  <a href="#tuning-streams" class="sub">Stream transport</a>
+  <a href="#tuning-tables" class="sub">Table-level knobs</a>
   <div class="navgap"></div>
   <a href="#architecture">Architecture</a>
   <a href="#limits">Limitations</a>
@@ -283,15 +315,15 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
 
 <p class="eyebrow">Enterprise streaming platform</p>
 <h1>StreamForge Documentation</h1>
-<p class="lede">Define streaming pipelines and persistent materialized tables in SQL, watch them run live, and manage everything from a role-gated console — all on Microsoft Orleans, with zero external infrastructure.</p>
+<p class="lede">Define streaming pipelines and persistent materialized tables in SQL over real sources — databases, change logs, FIX sessions, subjects, files, peers — watch them run live, send the results anywhere, and manage all of it from a role-gated console. One .NET process, no broker, no cluster, no JVM.</p>
 
 <section id="overview">
 <h2>Overview</h2>
-<p>StreamForge is a streaming platform foundation built on <b>Microsoft Orleans 10</b> (.NET 10). Synthetic market-data generators publish events onto Orleans streams; you declare what to compute over those streams in a SQL-like dialect, and StreamForge runs it continuously:</p>
+<p>StreamForge is a streaming platform built on <b>Microsoft Orleans 10</b> (.NET 10). A <a href="#connectors">source</a> puts events onto a stream — a synthetic generator for the seeded demo world, or a database, a <a href="#connectors-cdc">change log</a>, a <a href="#connectors-fix">FIX session</a>, a NATS subject, a file, an HTTP endpoint, a <a href="#discovery-federation">peer instance</a>. You declare what to compute over those streams in a SQL-like dialect, StreamForge runs it continuously, and the answer leaves through a <a href="#sinks">sink</a>:</p>
 <div class="cards">
   <div class="card"><h4><span>Pipelines</span> — continuous queries</h4><p>Windowed streaming queries: joins across streams, temporal windows, filters, projections. Results stream to your browser in real time.</p></div>
   <div class="card"><h4><span>Tables</span> — materialized views</h4><p>Persistent, incrementally-maintained tables (DBSP-style Z-sets): running aggregates that update in place, table-over-table chaining, optional fuzzy search.</p></div>
-  <div class="card"><h4><span>Sources</span> — event generators</h4><p>Schema-declared synthetic streams (trades, quotes, orders, nested-JSON app events) with per-source rate control and a live tape.</p></div>
+  <div class="card"><h4><span>Sources</span> &amp; <span>sinks</span> — the outside world</h4><p>Fourteen source kinds and seven sink kinds: databases and their change logs, FIX in both directions, NATS, HTTP, files, CRDT documents, peer instances — plus schema-declared synthetic generators for the demo world.</p></div>
   <div class="card"><h4><span>Console</span> — the UI</h4><p>SQL editor with as-you-type validation and autocomplete, a visual query builder, live charts and grids, light/dark themes, and role-based access control.</p></div>
 </div>
 <div class="arch">
@@ -314,6 +346,57 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
 </div>
 </section>
 
+<section id="positioning">
+<h2>Where StreamForge fits</h2>
+<p>StreamForge is a <b>streaming SQL engine with its own connectors, state, governance and console, running as one .NET process</b>. Rows arrive from a <a href="#connectors">source</a> — a database's change log, a FIX session, a NATS subject, a file, an HTTP endpoint, a peer instance — you declare what to compute over them in SQL, the engine maintains the answer incrementally as a <a href="#tables">materialized table</a> or a windowed <a href="#concepts">pipeline</a>, and the result leaves through a <a href="#sinks">sink</a>. Nothing in that sentence requires a broker, a JVM, a scheduler, a separate state store or a second team.</p>
+<p>The comparison that fits best is <b>Flink SQL / ksqlDB / Materialize</b> — genuine incremental view maintenance over changing inputs, not a batch job on a timer — and, inside a Microsoft shop, <b>Azure Stream Analytics</b>, which is what a streaming query usually means there already. The difference is packaging and reach: those systems are clusters you operate <i>next to</i> your application, in a language your .NET team probably does not write, fed by a broker you also operate. StreamForge is the same class of semantics reachable as <code>dotnet run</code>, as one container, or as <a href="#embedding">the same registration calls inside your own ASP.NET Core host</a>.</p>
+
+<h3 id="positioning-market">Compared with the market</h3>
+<p>Read this as "what you have to stand up and keep alive", not as a benchmark. Every row is a property of the deployment, and the honest limits are in <a href="#positioning-not">the next section</a>.</p>
+<div class="tablewrap"><table>
+<thead><tr><th></th><th>StreamForge</th><th>Flink SQL</th><th>ksqlDB</th><th>Materialize / RisingWave</th><th>Azure Stream Analytics</th><th>Benthos / Redpanda Connect</th></tr></thead>
+<tbody>
+<tr><td><b>Runtime</b></td><td>.NET 10, one process</td><td>JVM cluster (JobManager + TaskManagers)</td><td>JVM server(s)</td><td>Rust service, self-hosted or SaaS</td><td>Fully managed Azure PaaS (the Trill engine); also an IoT&nbsp;Edge / Azure&nbsp;Stack module</td><td>Go binary</td></tr>
+<tr><td><b>Broker required</b></td><td>No — a broker is one optional source among many</td><td>Usually Kafka</td><td>Kafka, mandatory</td><td>Kafka or Postgres upstream, in practice</td><td>Event&nbsp;Hubs or IoT&nbsp;Hub in practice (plus Blob/ADLS)</td><td>No</td></tr>
+<tr><td><b>Incremental view maintenance</b></td><td>Z-set / DBSP, retract + assert</td><td>Yes (changelog streams)</td><td>Limited — tables over compacted topics</td><td>Yes (differential dataflow)</td><td>No — windowed CEP over temporal constraints, no retract/assert</td><td>None — stateless transforms</td></tr>
+<tr><td><b>Delivery guarantees</b></td><td><b>At-least-once</b> (polled, CDC), <b>at-most-once</b> (FIX session, core NATS); <a href="#sinks-contract">sinks are fire-and-forget</a></td><td>Exactly-once with checkpointing and supporting sinks</td><td>Exactly-once within Kafka</td><td>Exactly-once on supported sources</td><td><b>Exactly-once processing</b>, at-least-once delivery (exactly-once to selected outputs)</td><td>At-least-once</td></tr>
+<tr><td><b>Where query state lives</b></td><td>In the owning actor, snapshot / <a href="#tables-persistence">journal</a> to disk</td><td>RocksDB + periodic checkpoints</td><td>RocksDB + changelog topics</td><td>The service's own storage</td><td>Managed checkpoints; not user-visible, and input data is never stored</td><td>Nowhere</td></tr>
+<tr><td><b>Runs inside your application</b></td><td><a href="#embedding">Yes</a> — or standalone, same binary</td><td>No</td><td>No</td><td>No</td><td>No — the edge module is a container, not an in-process library</td><td>As a library, without SQL or state</td></tr>
+<tr><td><b>Connectors in the box</b></td><td>Postgres/SQL&nbsp;Server incl. <a href="#connectors-cdc">native CDC</a>, <a href="#connectors-fix">FIX</a> (both directions), NATS, HTTP, files/folders, gRPC federation, <a href="#crdt">CRDT</a></td><td>Via connectors + Debezium</td><td>Via Kafka Connect</td><td>Native Postgres/MySQL CDC + Kafka</td><td>Azure-native only: Event&nbsp;Hubs, IoT&nbsp;Hub, Blob/ADLS in; SQL&nbsp;DB, Cosmos&nbsp;DB, Synapse, Power&nbsp;BI, Functions, Service&nbsp;Bus out. No CDC, no FIX</td><td>Very many, transport-shaped</td></tr>
+<tr><td><b>Governance in-product</b></td><td><a href="#rbac">Entitlements, approvals, audit</a>, <a href="#environments">environments</a></td><td>&mdash;</td><td>&mdash;</td><td>RBAC (managed offering)</td><td>Azure RBAC on the job resource — not per-entity grants over a catalog</td><td>&mdash;</td></tr>
+<tr><td><b>Operator console</b></td><td>Built in — SQL editor, live grids, lineage, dataflow, access, audit</td><td>Job dashboard</td><td>Vendor web UI</td><td>Vendor web UI</td><td>Azure portal: query editor, job diagram, no-code editor</td><td>&mdash;</td></tr>
+<tr><td><b>Client libraries</b></td><td><a href="#clients">.NET, Python, TypeScript, React, Kotlin, TanStack&nbsp;DB</a></td><td>JDBC / Table API</td><td>REST + Java</td><td>Postgres wire protocol</td><td>&mdash; results reach you through an output sink; C#/JavaScript UDFs run <i>inside</i> the query</td><td>&mdash;</td></tr>
+</tbody></table></div>
+<p><b>Where Azure Stream Analytics wins, stated plainly</b>, because it is the one on this list a Microsoft-shop buyer is most likely to already own: it is fully managed with nothing to operate, it scales by streaming units with no cluster to provision, and it guarantees <b>exactly-once processing</b> — which StreamForge does not. Reach for StreamForge instead when the workload has to run <a href="#embedding">on-premises or inside your own application</a>, when the inputs are a database's <a href="#connectors-cdc">change log</a> or a <a href="#connectors-fix">FIX session</a> rather than Event&nbsp;Hubs, when you need a maintained <a href="#tables">materialized table</a> rather than a windowed query, or when the catalog itself needs <a href="#rbac">per-entity access control and an audit trail</a>.</p>
+<div class="callout"><b>The claim, stated precisely.</b> Not "faster than Flink" and not "a replacement for Kafka". It is: <i>for the class of problem that fits one process — and that class is much larger than the streaming ecosystem's defaults assume</i> — you get incremental SQL, connectors, durable state, access control and a UI with no cluster, no JVM and no broker, in the language the rest of the system is already written in. When the problem genuinely does not fit one process, the systems above are the right answer and this page will not pretend otherwise.</div>
+
+<h3 id="positioning-not">What StreamForge is not</h3>
+<p>Each of these is a deliberate boundary with the reasoning written down somewhere in this document, not an unshipped feature.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Not this</th><th>What that means concretely</th></tr></thead>
+<tbody>
+<tr><td><b>Not a message broker or durable log</b></td><td>No partitions, no consumer groups, no replay from an arbitrary offset. A source's history is not re-readable; a broker (NATS today) sits <i>upstream</i> when you need those properties.</td></tr>
+<tr><td><b>Not multi-node, today</b></td><td>Each flavor is <a href="#limits">one self-contained unit</a>. The Orleans programming model is cluster-shaped, but a multi-silo deployment means swapping the clustering, stream and storage providers.</td></tr>
+<tr><td><b>Not an order-management system</b></td><td><a href="#connectors-fix"><code>fix-duplex</code></a> sends and receives on a real session and persists <i>sequence numbers</i>. It keeps no order log, cannot answer a <code>ResendRequest</code> from history, and does not model an amendable order.</td></tr>
+<tr><td><b>Not backpressured at egress</b></td><td>Every <a href="#sinks">sink</a> is fire-and-forget: a slow or absent destination <b>drops and counts</b>, it never slows the pipeline down. That is a stated contract, not an accident.</td></tr>
+<tr><td><b>Not exactly-once</b></td><td>Polled and CDC sources are at-least-once; a <a href="#connectors-fix">FIX session</a> is at-most-once into the platform. Idempotence belongs in your SQL (<code>LATEST BY</code> on a key) or downstream.</td></tr>
+<tr><td><b>Environments are not a security boundary</b></td><td><a href="#environments">Environments</a> partition the catalog; they are not yet scoped by <a href="#rbac">entitlements</a>, so any authenticated Editor can address any environment.</td></tr>
+<tr><td><b>Not a petabyte-scale ingest tier</b></td><td>The engine is an incremental view maintainer, not a storage layer. Retention and sharding <a href="#tables-retention">bound a table</a>; they do not make it a warehouse.</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="usecases">
+<h2>Typical deployments</h2>
+<p>Five shapes this platform was actually built and verified against. Each names the concrete wiring, so the sections below can be read in the order a given shape needs.</p>
+
+<div class="cards">
+  <div class="card"><h4><span>1.</span> Database &rarr; SQL &rarr; system of record</h4><p>A <a href="#connectors-cdc"><code>postgres-cdc</code></a> source tails the write-ahead log, a table maintains the aggregate or the reconciliation, and a <a href="#sinks-db"><code>postgres</code>/<code>mssql</code> sink</a> mirrors the answer into a reporting schema. No Debezium, no Kafka, no connector cluster in between.</p></div>
+  <div class="card"><h4><span>2.</span> FIX order flow &amp; drop-copy</h4><p>A <a href="#connectors-fix"><code>fix</code></a> session takes execution reports in; a <code>fix-duplex</code> source plus a <code>duplex</code> sink send orders out. Reports correlate back to the orders that caused them by <code>ClOrdID</code> in ordinary platform SQL.</p></div>
+  <div class="card"><h4><span>3.</span> Edge site, quiet uplink</h4><p>A site aggregates locally and survives its own network. <a href="#crdt">CRDT sources</a> converge edits made offline; <a href="#discovery-federation">federation</a> lets a central instance subscribe to a site's table by <i>peer name + entity name</i>, no address and no GUID.</p></div>
+  <div class="card"><h4><span>4.</span> Embedded in a product you ship</h4><p>The <a href="#embedding">same registration calls</a> this host makes put the whole engine, API and console inside your own ASP.NET Core host. Your customer installs one thing; there is no second service in the deployment diagram.</p></div>
+  <div class="card"><h4><span>5.</span> Files and APIs &rarr; reporting tables</h4><p><code>url</code>/<code>file</code>/<code>folder</code> sources read <a href="#formats">JSON, NDJSON, CSV/TSV or FIX</a> on a schedule, tables maintain the report, and the answer leaves as a <a href="#sinks-file">CSV file</a>, an <a href="#api">HTTP download</a>, or an <a href="#sinks-httploop">HTTP POST</a>.</p></div>
+</div>
+</section>
 <section id="quickstart">
 <h2>Quick start</h2>
 <pre><code># prerequisites: .NET 10 SDK (~/.dotnet), Bun / Node 22+
@@ -435,6 +518,7 @@ Row history is enabled in <code>LastN(8)</code> mode, so clicking a row in the c
 [<span class="sql-k">WINDOW</span> <span class="sql-k">TUMBLING</span>(<span class="sql-k">SIZE</span> dur) | <span class="sql-k">HOPPING</span>(<span class="sql-k">SIZE</span> dur, <span class="sql-k">ADVANCE BY</span> dur) | <span class="sql-k">SESSION</span>(<span class="sql-k">GAP</span> dur)]
 [<span class="sql-k">EMIT CHANGES</span> | <span class="sql-k">EMIT FINAL</span>]
 [<span class="sql-k">UNION</span> [<span class="sql-k">ALL</span>|<span class="sql-k">DISTINCT</span>] <span class="sql-k">SELECT</span> … ] …   -- top level or FROM (…) alias only; UNION (no ALL) is tables-only</code></pre>
+<p><b>One statement form exists outside that grammar</b>: <code>INSERT INTO &lt;sink-name&gt; SELECT …</code> is pre-parse sugar handled above the Engine, which never learns about <code>INSERT</code> — it strips the target, stores the untouched <code>SELECT</code>, and enables the named <a href="#sinks">sink</a>. See <a href="#sinks-contract">the sink contract</a> for what it is sugar <i>for</i>, including its one lossy edge on round-trip.</p>
 <p>Durations: <code>N MILLISECONDS | SECONDS | MINUTES | HOURS</code> (singular accepted). Keywords are case-insensitive; comments start with <code>--</code>. <code>SELECT *</code> and <code>alias.*</code> expand to all columns (alias-prefixed like <code>t_symbol</code> when the query has multiple inputs); stars are not allowed with <code>GROUP BY</code>/aggregates.</p>
 <p><b><code>UNION</code> / <code>UNION ALL</code></b> combines two or more SELECTs of equal arity into one result (branch 0's column names win; kinds unify positionally — <code>Long</code>+<code>Double</code> → <code>Double</code>, everything else must match exactly, <code>JSON</code>/timestamp only with themselves). <code>UNION ALL</code> works in pipelines and tables alike (plain row concatenation — a row from two branches appears twice). Plain <code>UNION</code>/<code>UNION ALL DISTINCT</code> dedups and is <b>tables-only</b> — a pipeline has no Z-set weight to dedup with, so an unbounded distinct over an unbounded stream would be unbounded state; pipelines get a diagnostic naming <code>UNION ALL</code> as the fix. Accepted at the top level (optionally under <code>WITH</code>) and in derived-table position (<code>FROM (… UNION …) alias</code>) — not inside <code>IN</code>/<code>EXISTS</code>/scalar subqueries. A set-operation table runs single-partition only (<code>Parallelism = 1</code>).</p>
 
@@ -541,6 +625,50 @@ Row history is enabled in <code>LastN(8)</code> mode, so clicking a row in the c
 </tbody></table></div>
 <p>An optional time window prunes versions older than the configured duration. History is fed by the table's own delta stream (the delta stream <i>is</i> the event log), so it never slows the table itself. API: <code>POST /api/tables/{id}/history/lookup</code> with <code>{row}</code> → versions; <code>GET /api/tables/{id}/history/stats</code>. Changing history config or the table's SQL resets the trail.</p>
 
+<h3 id="tables-retention">Retention: bounding a table</h3>
+<p>A materialized table is unbounded by default — it keeps whatever its query says the answer is, for as long as that stays true. Two opt-in bounds trim it, and both are set on the table definition (<code>PUT /api/tables/{id}</code>) or in its Execution card:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>retentionMaxRows</code></td><td>Maximum rows retained; the oldest by event timestamp are evicted once the count exceeds it. <code>0</code> (default) = unbounded.</td></tr>
+<tr><td><code>retentionTtlMs</code></td><td>Maximum age of a retained row, in <b>event-time</b> milliseconds measured back from the highest event timestamp this table has admitted. <code>0</code> (default) = unbounded.</td></tr>
+</tbody></table></div>
+<div class="callout warn"><b>Two consequences worth stating before you enable either.</b> First, <b>retention changes the table's results</b> — that is the point, not a side effect: an evicted row is retracted from the answer, so a <code>SUM</code> over a retained window is a different number from the same <code>SUM</code> over all history. Second, the TTL is measured from the <b>newest event the table has seen, not the wall clock</b>, because replay must be deterministic; the honest consequence is that <b>when the input stops, nothing further ages out</b> — a table whose source goes quiet freezes at whatever it retained rather than draining to empty. When both are set, age is applied first and the row-count bound second.</div>
+
+<h3 id="tables-persistence">Persistence modes</h3>
+<p>How a table's materialized rows reach durable storage is a per-table choice (<code>persistence</code>), independent of the query. All four resume the same way — output rows are restored, <i>operator internals</i> (join indexes, aggregate accumulators) rebuild from live traffic, which is what the <mark>Rebuilding</mark> badge means.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Mode</th><th>How it writes</th><th>What a crash costs</th></tr></thead>
+<tbody>
+<tr><td><b>Batched</b> <i>(default)</i></td><td>Dirty flag plus a periodic flush, <b>awaited inside the grain turn</b> — so a flush stalls the table for as long as serializing the whole snapshot takes.</td><td>Up to one flush interval of deltas.</td></tr>
+<tr><td><b>Journaled</b></td><td>Same durability, but a flush writes only the rows that <b>changed</b> since the last compaction. Write cost is O(changed) rather than O(|table|); when the journal outgrows <code>journalMaxEntries</code> the full snapshot is written once and the journal truncated. Activation loads the snapshot and replays the journal over it.</td><td>Same as Batched — identical resumed state.</td></tr>
+<tr><td><b>FireAndForget</b></td><td>Same periodic flush, but the turn returns as soon as the snapshot is captured and the write completes in the background (single-flight: a flush already running is not overlapped, the next tick is skipped).</td><td>Whatever had not reached disk — <b>with no signal that it was lost</b>.</td></tr>
+<tr><td><b>MemoryOnly</b></td><td>Never written. Nothing touches storage on any path.</td><td>Everything: a restart brings the table back <b>empty</b> and it re-accumulates only from deltas that arrive afterwards. It does not replay history.</td></tr>
+</tbody></table></div>
+<p><code>flushMs</code> sets the interval for Batched and FireAndForget (<code>0</code> = the 2000&nbsp;ms default; ignored by MemoryOnly), and <b>changing it restarts the table</b>. <code>journalMaxEntries</code> applies to Journaled only — too small and every flush degenerates into a full snapshot write, too large and activation spends its time replaying. On a large table, Journaled is what stops the flush interval from being a latency knob at all.</p>
+
+<h3 id="tables-shards">Sharded tables</h3>
+<p>Set <code>shardBy</code> to one or more of a table's <b>output column names</b> and every delta the table emits is additionally routed, by those columns' values, to a per-key shard holding just that key's rows and just that key's version history. The shard tier is a <i>second materialization</i> fed by the table's own delta stream — exactly like the row-history tier — so <b>nothing about how the table is computed changes</b>: the SQL path, the planner, the partitioned dataflow and every downstream table-over-table subscriber are untouched. Empty (the default) is today's behavior byte for byte.</p>
+<p>The property that makes it worth having: <b>a shard does not pin itself alive.</b> An idle key deactivates, its state lives on disk, and the next lookup brings it back. <code>--Shards:IdleSeconds</code> (default 120) is that collection age; lowering it much below ~90&nbsp;s also needs <code>--Shards:QuantumSeconds</code>, because Orleans requires the silo-wide collection scan interval to be strictly smaller than any collection age.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Route</th><th>Method</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>/api/tables/{id}/shards?limit=&amp;offset=</code></td><td class="pill get">GET</td><td>Tier state and key listing: shard count, resident count, activations/deactivations, router sequence and routed-delta counters. <b>Activates nothing.</b></td></tr>
+<tr><td><code>/api/tables/{id}/shard/lookup</code></td><td class="pill mut">POST</td><td><code>{row}</code> carrying the <code>shardBy</code> columns → that one key's rows and history (<code>?historyLimit=</code>). One key is one grain, strictly consistent by construction.</td></tr>
+<tr><td><code>/api/tables/{id}/shards/scan?fenced=</code></td><td class="pill get">GET</td><td>The explicit full scan — <b>this one does activate every shard in its page</b>, which is why it is its own endpoint rather than a flag on <code>/rows</code>. 400 on an unsharded table.</td></tr>
+</tbody></table></div>
+<p><code>?fenced=true</code> upgrades that scan from a set of observations into a genuine <b>consistent cut</b>: the router names the sequence it has forwarded up to and reads every shard without letting another batch through, so no delta at or before the fence is missing and none after it is present — checkably, since the shards' own <code>deltasApplied</code> must then sum to <code>routedDeltasAtFence</code>. It is off by default because the fence <b>pauses the shard tier's ingest for the duration of the scan</b>. Per-key reads need none of this and get none of it.</p>
+<div class="callout warn"><b>What sharding is not, measured rather than assumed.</b> It was built as a memory optimization and <b>measured not to be one</b>. What it actually buys is <i>query locality</i> (one key's rows and history in one place, reachable without touching the rest) and <i>swap-out</i> (an idle key stops being resident). Reach for it when a table has many keys that are read individually and rarely — not to make a large table cheaper in aggregate.</div>
+<p><b>The rules a sharded table takes on</b>, each because the tier is keyed by name and the shards <i>are</i> the durable copy:</p>
+<ul>
+<li>It keeps <b>no persisted consolidated snapshot</b>. <code>GET /api/tables/{id}/rows</code> is served live from the table's own executor and consults no shard — that route is polled every two seconds by the console, and a keyless listing that fanned out across the directory would wake every shard on every poll. The response carries a <code>shardNote</code> saying exactly that.</li>
+<li><b>Per-key history replaces the table-wide history grain</b> — running both would double the memory the tier exists to save.</li>
+<li><b><code>searchEnabled</code> is rejected outright</b>: a table-wide inverted index keeps every row resident, which defeats the point.</li>
+<li><b><code>MemoryOnly</code> is refused</b>, and the table <b>cannot be renamed</b> — the tier is keyed by name.</li>
+<li>Columns are <b>explicit and validated</b> against the table's output fields at upsert. The textual <code>GROUP BY</code>/<code>LATEST BY</code> extraction the history tier falls back on is deliberately not used to pick them silently: best-effort matching is acceptable for "which versions belong together" and not for "which grain owns this row".</li>
+<li><b>Orleans only.</b> The Dapr flavor stores <code>shardBy</code> and refuses to start such a table, the same shape as <code>parallelism &gt; 1</code>.</li>
+</ul>
+
 <h3 id="tables-metadata">Tags &amp; metadata</h3>
 <p>Sources, pipelines, and tables carry free-form <b>tags</b> and <b>key-value metadata</b> (owner, desk, environment…), editable on each detail page (Editors). Tags show as badges in the lists and are click-to-filter on the pipelines and tables pages.</p>
 </section>
@@ -619,6 +747,8 @@ Row history is enabled in <code>LastN(8)</code> mode, so clicking a row in the c
 <tr><td><code>/api/auth/me</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Current user info</td></tr>
 <tr><td><code>/api/sources</code>, <code>/api/sources/{name}</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>List / fetch sources (schemas include nested JSON children)</td></tr>
 <tr><td><code>/api/sources[…]</code></td><td class="pill mut">POST·PUT·DELETE</td><td><span class="pill editor">E</span></td><td>Create / replace / delete a source (PUT takes the full definition)</td></tr>
+<tr><td><code>/api/sources/{name}/events</code></td><td class="pill mut">POST</td><td><span class="pill editor">E</span></td><td><code>{"events":[…]}</code> into an <a href="#connectors-push"><code>ingest</code></a> source. Also accepts an <code>X-SF-Ingest-Key</code> header instead of a JWT — a machine credential scoped to one source</td></tr>
+<tr><td><code>/api/sources/{name}/status</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Connector runtime: <code>nextRunMs</code>, <code>lastStatus</code>, <code>lastError</code>, <code>consecutiveFailures</code>, totals. 204 for generator sources</td></tr>
 <tr><td><code>/api/pipelines</code>, <code>/{id}</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>List / fetch pipelines</td></tr>
 <tr><td><code>/api/pipelines[…]</code></td><td class="pill mut">POST·PUT·DELETE</td><td><span class="pill editor">E</span></td><td>Create / update / delete</td></tr>
 <tr><td><code>/api/pipelines/{id}/start</code> · <code>/stop</code></td><td class="pill mut">POST</td><td><span class="pill editor">E</span></td><td>Start or stop; compile errors mark the pipeline Failed</td></tr>
@@ -633,8 +763,23 @@ Row history is enabled in <code>LastN(8)</code> mode, so clicking a row in the c
 <tr><td><code>/api/tables/{id}/metrics</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Row count, delta counters, rebuilding flag</td></tr>
 <tr><td><code>/api/tables/{id}/history/lookup</code></td><td class="pill mut">POST</td><td><span class="pill viewer">V</span></td><td><code>{row}</code> → that row's version trail — see <a href="#tables-history">Row history</a></td></tr>
 <tr><td><code>/api/tables/{id}/history/stats</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>History mode, tracked key count, total versions</td></tr>
+<tr><td><code>/api/tables/{id}/rows.csv</code> · <code>/api/pipelines/{id}/results.csv</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>The same rows as a downloadable file — see <a href="#formats-csvout">CSV out</a></td></tr>
+<tr><td><code>/api/tables/{id}/shards</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Shard-tier state and key listing. Activates nothing — see <a href="#tables-shards">Sharded tables</a></td></tr>
+<tr><td><code>/api/tables/{id}/shard/lookup</code></td><td class="pill mut">POST</td><td><span class="pill viewer">V</span></td><td><code>{row}</code> carrying the <code>shardBy</code> columns → that one key's rows and history</td></tr>
+<tr><td><code>/api/tables/{id}/shards/scan?fenced=</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>The explicit full scan; <code>fenced=true</code> is a consistent cut that pauses the tier's ingest</td></tr>
 <tr><td><code>/api/{sources|pipelines|tables}/{key}/proto</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Self-contained <code>.proto</code> for the entity (by id or name) — see <a href="#grpc-codegen">Typed client codegen</a></td></tr>
 <tr><td><code>/api/meta/grpc</code> · <code>/api/meta/protos/static</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>gRPC surface catalog + static proto texts (powers the console's API Explorer)</td></tr>
+<tr><td><code>/api/transports</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Every registered source/sink kind and its descriptor — what the console builds config forms from</td></tr>
+<tr><td><code>/api/transports/{kind}/probe</code></td><td class="pill mut">POST</td><td><span class="pill editor">E</span></td><td>Schema discovery for kinds that support it (the <b>Discover</b> button); 400 when the kind has no probe</td></tr>
+<tr><td><code>/api/sql/functions</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>The dialect's function catalog, as the editor's autocomplete reads it</td></tr>
+<tr><td><code>/api/meta/instance</code></td><td class="pill get">GET</td><td>—</td><td><b>Anonymous.</b> This instance's identity, capabilities and <code>catalogWarnings</code> — see <a href="#discovery-instance">Instance identity</a></td></tr>
+<tr><td><code>/api/meta/peers</code> · <code>/api/meta/peers/{name}/probe</code></td><td class="pill get">GET · <span class="pill mut">POST</span></td><td><span class="pill viewer">V</span></td><td>The configured <a href="#discovery-peers">peer directory</a>, and a live probe of one peer</td></tr>
+<tr><td><code>/api/meta/endpoints</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Configured <a href="#connectors-endpoints"><code>@name</code> endpoints</a> — values read back <b>unmasked</b></td></tr>
+<tr><td><code>/api/meta/arrangements</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>Live <a href="#tables-parallel">shared arrangements</a> and their reference counts</td></tr>
+<tr><td><code>/api/environments</code> · <code>/api/environments/{name}?force=</code></td><td class="pill get">GET · <span class="pill mut">POST·DELETE</span></td><td><span class="pill editor">E</span></td><td>List / create / force-delete an <a href="#environments">environment</a></td></tr>
+<tr><td><code>/api/ui-plugins</code></td><td class="pill get">GET</td><td><span class="pill viewer">V</span></td><td>The <a href="#connectors-uiplugins">console UI plugins</a> this host serves</td></tr>
+<tr><td><code>/api/chat</code></td><td class="pill mut">POST</td><td><span class="pill editor">E</span></td><td><a href="#aichat">AI control chat</a>; 503 when no key is configured, 429 past the per-session cap</td></tr>
+<tr><td><code>/api/config/export</code> · <code>/api/config/import</code></td><td class="pill get">GET · <span class="pill mut">POST</span></td><td><span class="pill editor">E</span></td><td>The whole catalog as one document — see <a href="#config">Configuration import/export</a></td></tr>
 <tr><td><code>/api/users[…]</code></td><td class="pill mut">GET·POST·PUT·DELETE</td><td><span class="pill admin">A</span></td><td>User management (self-deletion rejected)</td></tr>
 <tr><td><code>/api/access</code> · <code>/api/access/effective/{user}</code></td><td class="pill get">GET</td><td><span class="pill admin">A</span></td><td>The whole access document (roles, groups, user entries, approval templates) · one user's flattened permissions — see <a href="#rbac-grants">Grants</a></td></tr>
 <tr><td><code>/api/access/{roles|groups|users|approval-templates}/{name}</code></td><td class="pill mut">PUT·DELETE</td><td><span class="pill admin">A</span></td><td>Upsert / delete one entry (whole-object PUT; built-in roles cannot be deleted → 409)</td></tr>
@@ -693,6 +838,31 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 <p>Because field numbers come from the same persisted registry map as reflection, a client generated today still decodes streams correctly after columns are added — new fields simply appear as unknown fields until you regenerate. For other languages, feed the downloaded <code>.proto</code> to <code>protoc</code> (Go, Python, TypeScript, Java…) — the file is standard proto3 with no custom options.</p>
 </section>
 
+<section id="clients">
+<h2>Client libraries</h2>
+<p>Six packages, all implementing the same shared design: <b>subscribe → snapshot → replay</b>, then fold the Z-set delta stream into current rows, with reconnect and backoff handled for you. A "live table" object in every language is a table whose rows are always current, without you writing a polling loop.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Package</th><th>Where it lives</th><th>What is idiomatic about it</th></tr></thead>
+<tbody>
+<tr><td><b>.NET</b> — <code>StreamForge.Client</code></td><td><code>clients/dotnet</code></td><td>gRPC and SignalR behind one <code>ITransport</code>, a <code>LiveTable</code>, ad-hoc SQL, ingest. Targets <code>net10.0</code>. <b>No project reference to the engine</b> — the only coupling is build-time codegen from the server's own <code>.proto</code>, so the wire contract cannot drift while the client stays shippable alone.</td></tr>
+<tr><td><b>Python</b> — <code>streamforge-client</code></td><td><code>clients/python</code></td><td>Sync-first. <code>t.rows</code> is a thread-safe copy, <code>t.df</code> is a fresh <code>pandas.DataFrame</code>, <code>t.wait_for(…)</code> blocks on a predicate, <code>t.on_change(…)</code> subscribes a callback. Config resolves per field from kwargs → environment → <code>~/.config/streamforge/config.toml</code>.</td></tr>
+<tr><td><b>TypeScript</b> — <code>@streamforge/client</code></td><td><code>clients/typescript</code></td><td>gRPC (Node) and SignalR (browser + Node) behind one <code>Transport</code>; a framework-free <code>LiveTable</code>. The console's own hook is a thin React wrapper over this exact logic, extracted rather than duplicated.</td></tr>
+<tr><td><b>React</b> — <code>@streamforge/react</code></td><td><code>clients/react</code></td><td>A provider owning one client per subtree, hooks (<code>useLiveTable</code>, <code>useLiveSql</code>, <code>useTables</code>) and unstyled components. Re-implements no protocol: one <code>LiveTable</code> per hook.</td></tr>
+<tr><td><b>Kotlin</b> — <code>streamforge-client</code></td><td><code>clients/kotlin</code></td><td>Coroutines-first: <code>Flow</code>/<code>StateFlow</code> instead of a reader thread, <code>suspend</code> instead of blocking calls, structured concurrency, a sealed exception hierarchy instead of one flat error type.</td></tr>
+<tr><td><b>TanStack DB</b> — <code>@streamforge/tanstack-db</code></td><td><code>clients/tanstack-db</code></td><td>A bridge, nothing more: relays an already-reduced <code>LiveTable</code>'s rows into a TanStack DB collection, so you get cross-collection live queries and optimistic local mutations in the browser.</td></tr>
+</tbody></table></div>
+<pre><code># Python
+sf = streamforge.connect(url="http://localhost:5199", grpc="localhost:5299", user="admin", password="admin123!")
+t  = sf.table("trigger_monitor")     # subscribes, snapshots, replays; blocks until ready
+t.df                                 # always-current pandas.DataFrame
+sf.snapshot("mc_path_pnl")           # one-shot REST read: no subscription, no thread</code></pre>
+<pre><code>// Kotlin
+val sf = StreamForge.connect(url = "http://localhost:5199", user = "admin", password = "admin123!")
+val t  = sf.table("trigger_monitor")   // transport = AUTO by default
+t.rowsFlow                             // StateFlow&lt;List&lt;Row&gt;&gt;</code></pre>
+<div class="callout"><b>One reducer, one shared conformance corpus.</b> The delta-reduction logic — including the race between the subscription and the initial snapshot read — is reimplemented per language, and drift there is <i>silent</i>: a wrong row count in a risk table, not a crash. So <code>clients/conformance/zset-cases.json</code> is a language-neutral fixture every client's own test runner reads, and every in-app copy is held to it too. "These agree" becomes something that fails on the same named case everywhere. The three wire states of a table's key are not interchangeable and the corpus covers all three: a <b>non-empty key list</b> (supersede rows agreeing on those columns), <b>an empty list</b> (an unkeyed global aggregate — one row, always replaced), and <b>null</b> (whole-row identity).</div>
+<p>Need a typed, generated client for one specific entity instead of a generic one? That is the <a href="#grpc-codegen">proto download + codegen</a> path, which is a different tool for a different job: a compiled contract for one table's exact shape, rather than a general client for any of them.</p>
+</section>
 <section id="realtime">
 <h2>Realtime events</h2>
 <p>The console receives live data over a SignalR hub at <code>/hubs/stream</code> (JWT via <code>access_token</code> query string). Subscriptions are per-entity; the client re-subscribes automatically after reconnects, retrying forever with capped backoff.</p>
@@ -708,9 +878,55 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 </tbody></table></div>
 </section>
 
+<section id="formats">
+<h2>Payload formats</h2>
+<p>A source that fetches <b>bytes</b> — <code>url</code>, <code>file</code>, <code>folder</code>, <code>nats</code> — names the format those bytes are in. One parser per format turns the payload into the same "one JSON element per item" shape, and everything downstream — <a href="#connectors-mapping">mapping</a>, field coercion, dedup, the row path — is identical whichever one you picked. Structured sources (<code>postgres</code>, <code>mssql</code>, both CDC kinds, <code>grpc</code>, <code>ingest</code>, <code>crdt</code>) have no format: a result set is already rows.</p>
+<div class="tablewrap"><table>
+<thead><tr><th><code>format</code></th><th>Reads</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><code>json</code> <i>(default)</i></td><td>A JSON document — typically an array, or an object you reach into with <code>itemsPath</code>.</td><td>The original shape; everything else was added around it.</td></tr>
+<tr><td><code>ndjson</code></td><td>One JSON object per line.</td><td>The natural shape for append-only logs and for the <a href="#sinks-file"><code>file</code> sink</a>'s own output.</td></tr>
+<tr><td><code>csv</code></td><td>A header line plus rows — and, by sniffing, <b>TSV, semicolon- and pipe-separated</b> exports too.</td><td>See below.</td></tr>
+<tr><td><code>fix</code></td><td>FIX tag=value messages, with repeating groups as nested JSON arrays.</td><td>See <a href="#connectors-fix">FIX</a>. Also what a live <code>fix</code>/<code>fix-duplex</code> session feeds its rows through, so a FIX log on disk and a FIX session parse identically.</td></tr>
+</tbody></table></div>
+
+<h3 id="formats-csv">CSV, and the files that are nearly CSV</h3>
+<p>The delimiter is <b>sniffed from the header line</b> when you don't name one — candidates <code>,</code> <code>\t</code> <code>;</code> <code>|</code> counted outside quotes, highest count wins, a tie going to the earlier candidate (so a single-column file reads as comma-delimited, exactly as it did before sniffing existed). The header is the right sample: it is the one line whose cell count is definitional, and it rarely contains free text. That is why a TSV, an Excel export from a decimal-comma locale, and a pipe-separated dump all read through <code>format: "csv"</code> rather than through three more format constants nobody would find.</p>
+<ul>
+<li><b>Values are typed when they parse exactly</b> (invariant culture) as <code>long</code>, <code>double</code> or <code>bool</code>, and stay strings otherwise — including the empty string for an empty cell.</li>
+<li><b>A repeated header name keeps the last occurrence</b> and drops the earlier ones entirely, rather than overwriting in an unpredictable order.</li>
+<li><b>The failure mode is visible, not subtle.</b> Sniff wrong and every row becomes one wide column with a header to match — obvious in the console's schema preview on the first poll, rather than a quiet mis-parse of individual values.</li>
+</ul>
+
+<h3 id="formats-csvout">CSV out</h3>
+<p>The same writer serves every CSV the platform emits, so a download and a sink file are the same bytes:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Route</th><th>Method</th><th>What</th></tr></thead>
+<tbody>
+<tr><td><code>/api/tables/{id}/rows.csv?limit=&amp;offset=</code></td><td class="pill get">GET</td><td>The table's snapshot rows as a file — the same rows as <code>/rows</code>. Also the <b>CSV</b> button on the table page.</td></tr>
+<tr><td><code>/api/pipelines/{id}/results.csv?limit=</code></td><td class="pill get">GET</td><td>The pipeline's recent-results ring buffer as a file, and its <b>CSV</b> button.</td></tr>
+</tbody></table></div>
+<p>Both are deliberately their own routes rather than a <code>?format=csv</code> branch on the JSON ones: the per-entity OpenAPI document rewrites <code>/rows</code>' row shape into that table's real output schema, and a second content type on the same operation would have made that document describe two things at once. For a continuous file instead of a download, use the <a href="#sinks-file"><code>file</code> sink</a>.</p>
+</section>
 <section id="connectors">
 <h2>Ingestion connectors</h2>
-<p>Alongside synthetic <code>generator</code> sources, a source's <code>kind</code> can be <code>url</code>, <code>file</code>, <code>folder</code>, or <code>grpc</code> — real ingestion from the outside world. Every kind still declares a schema (<code>fields</code>) up front, same as a generator source; a <code>connector</code> object carries the kind-specific configuration. Non-<code>grpc</code> kinds are <b>polled</b> on a schedule; <code>grpc</code> is a <b>persistent subscription</b> to another StreamForge instance (federation). Whatever a connector emits flows through the exact same door a generator does — onto the source's stream — so pipelines, tables, SignalR, and the SPA all work unchanged.</p>
+<p>Alongside synthetic <code>generator</code> sources, a source's <code>kind</code> names how rows reach the platform. Every kind still declares a schema (<code>fields</code>) up front, same as a generator; a <code>connector</code> object carries the kind-specific configuration. Whatever a connector emits flows through the exact same door a generator does — onto the source's stream — so pipelines, tables, SignalR, gRPC and the console all work unchanged, whichever kind produced the row.</p>
+<div class="tablewrap"><table>
+<thead><tr><th><code>kind</code></th><th>Shape</th><th>Reads</th></tr></thead>
+<tbody>
+<tr><td><code>generator</code></td><td>Timer</td><td>Synthetic events from a declared profile — the seeded demo world.</td></tr>
+<tr><td><code>url</code></td><td>Polled</td><td>An HTTP(S) endpoint, in any <a href="#formats">payload format</a>. Optional <a href="#connectors-openapi">OpenAPI derivation</a>.</td></tr>
+<tr><td><code>file</code> · <code>folder</code></td><td>Polled</td><td>One file, or every matching file in a directory — <a href="#connectors-files">see below</a>.</td></tr>
+<tr><td><code>nats</code></td><td>Persistent subscription</td><td>A NATS subject; optionally a JetStream durable consumer. <a href="#connectors-push">Below</a>.</td></tr>
+<tr><td><code>ingest</code></td><td>Client push</td><td>The only kind with no connector and no timer — rows arrive by <code>POST</code>. <a href="#connectors-push">Below</a>.</td></tr>
+<tr><td><code>postgres</code> · <code>mssql</code></td><td>Polled, durable cursor</td><td>A table or your own query, on a monotonic cursor column. <a href="#connectors-db">Below</a>.</td></tr>
+<tr><td><code>postgres-cdc</code> · <code>mssql-cdc</code></td><td>Polled, durable cursor</td><td>The database's own change log — logical replication / capture tables. <a href="#connectors-cdc">Below</a>.</td></tr>
+<tr><td><code>fix</code></td><td>Persistent session</td><td>A receive-only FIX session: market data, drop-copy. <a href="#connectors-fix">Below</a>.</td></tr>
+<tr><td><code>fix-duplex</code></td><td>Persistent session, both halves</td><td>One FIX session that also <i>sends</i> — order entry, paired with a <a href="#sinks-duplex"><code>duplex</code> sink</a>.</td></tr>
+<tr><td><code>grpc</code></td><td>Persistent subscription</td><td>Another StreamForge instance's entity — <a href="#connectors-grpc">federation</a>, addressable by <a href="#discovery-federation">peer name</a>.</td></tr>
+<tr><td><code>crdt</code></td><td>Document merge</td><td>A Yjs document that accepts updates from edges that may have been offline. <a href="#crdt">See CRDT document sync</a>.</td></tr>
+</tbody></table></div>
+<p><b>Three seams, not one.</b> Push-shaped kinds implement <code>IInboundTransport</code> (something else decides when a message exists). Pull-shaped kinds implement <code>IPolledTransport</code> — <code>PollAsync(def, cursor)</code>, so the <b>cursor lives in the driver that persists it</b> rather than inside a subscription object that dies with the activation. <code>fix-duplex</code> implements <code>IDuplexTransport</code>, the third seam, whose outbound half a sink reaches by name. Adding a kind is one class plus one registry line; the recipe is <code>TRANSPORTS.md</code> in the repository.</p>
 <pre><code>{
   "name": "weather",
   "kind": "url",
@@ -791,6 +1007,126 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 <p><b>File</b> (<code>connector.file: { path, format }</code>) polls one file on the schedule; the whole file is <b>re-parsed</b> whenever its mtime changes — there is no tailing, no append-detection, just "did this file change since I last read it." <b>Folder</b> (<code>connector.folder: { path, format, glob? }</code>) polls a directory (no recursion); each file whose name+mtime isn't already in the ledger is parsed once and remembered. Formats: <code>ndjson</code>, <code>json</code> (a JSON array), <code>csv</code> (RFC-4180, header row required).</p>
 <p>The name+mtime ledger is persisted per flavor (Orleans: grain <code>[PersistentState]</code>; Dapr: actor state in Redis) — <b>restart-safe</b>: a source that has already seen 9 files still shows 9 known files after a process restart, verified live. Like the dedup tracker, the ledger is bounded at 10,000 entries, FIFO. Because re-parse is whole-file and dedup is at-least-once beyond the bound, there is <b>no cross-restart exactly-once guarantee</b> — pair a file/folder source with <code>mapping.dedupKeyField</code> when the upstream can repeat content across restarts.</p>
 
+<h3 id="connectors-push">NATS subjects &amp; client push</h3>
+<p>Two kinds where nothing is polled and the <code>schedule</code> is ignored.</p>
+<p><b><code>nats</code></b> subscribes to a subject (wildcards are the server's to interpret, not ours) and parses each message in the configured <a href="#formats">format</a>. <code>queueGroup</code> is the important field with more than one instance: two replicas sharing one group <b>split</b> the subject between them instead of both ingesting every message. Credentials are <code>token</code>, <code>username</code>/<code>password</code>, or the <i>contents</i> of a <code>.creds</code> file (not a path — the catalog has to stay portable across hosts), all masked on read and export. Leaving JetStream unset is a core NATS subscribe: at-most-once, no cursor, nothing left behind on the server. Configuring a durable consumer opts into redelivery and acks — at the price of server-side state this platform then owns.</p>
+<p><b><code>ingest</code></b> has no connector at all: rows arrive at <code>POST /api/sources/{name}/events</code> with a body of <code>{"events": [ … ]}</code>. It is authorized two ways — an Editor JWT, or an <code>X-SF-Ingest-Key</code> header validated against that one source's configured keys, which is a machine credential scoped to a single source rather than a platform login. The knobs are about what happens when the buffer is full, and they are deliberately not one number:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Field</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>policy</code></td><td><code>Reject</code></td><td>What overflow does. <code>Reject</code> refuses the batch <b>whole</b> (429 + <code>Retry-After</code>) so the identical body can be retried — a partially-admitted batch would have no safe retry. <code>Block</code> waits for space, and on the bidi gRPC path is the only real transport-level backpressure in the feature.</td></tr>
+<tr><td><code>capacityRows</code></td><td>10&nbsp;000</td><td>Buffer capacity.</td></tr>
+<tr><td><code>maxWaitMs</code></td><td>5&nbsp;000</td><td>Only meaningful for <code>Block</code>; server-capped at 30&nbsp;s.</td></tr>
+<tr><td><code>maxBatchRows</code></td><td>1&nbsp;000</td><td>Largest batch one push may carry — a bigger one is <b>413, never a partial admit</b>.</td></tr>
+<tr><td><code>dedupKeyField</code></td><td>—</td><td>A declared field whose value identifies a row, for at-least-once upstreams.</td></tr>
+<tr><td><code>rejectUnknownFields</code></td><td><code>false</code></td><td>Whether an undeclared field fails its row or is dropped-and-counted. The encoder only writes declared fields either way; this chooses silence vs. an error.</td></tr>
+</tbody></table></div>
+<p><b>Three reasons a row didn't land stay three counters</b> — <code>duplicate</code> (dedup), <code>dropped</code> (capacity) and <code>invalid</code> (coercion) are never collapsed, because the operator's next action differs for each.</p>
+
+<h3 id="connectors-db">Database sources</h3>
+<p><code>postgres</code> and <code>mssql</code> poll a table — or your own query — on a <b>durable, monotonic cursor</b>. The cursor is opaque to the platform: the transport mints it, the driver persists it once per cycle, and nothing in between parses it, which is why an LSN, a composite <code>(ts,id)</code> string and a plain bigint all fit without the platform learning what any of them mean.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>host</code> · <code>port</code> · <code>database</code> · <code>username</code> · <code>password</code> · <code>tls</code></td><td>Connection. <code>connectionString</code> instead <b>wins over every structured field</b> when set, and masks wholesale.</td></tr>
+<tr><td><code>schema</code> · <code>table</code> · <code>where</code></td><td>Table mode. Empty schema = the dialect default (<code>public</code> / <code>dbo</code>); <code>where</code> is ANDed onto the generated predicate.</td></tr>
+<tr><td><code>query</code></td><td>Escape hatch: your own SQL, which <b>must</b> contain the <code>@cursor</code> placeholder. Bound as a <b>parameter</b>, never interpolated — for injection, and just as much for type fidelity, since a <code>timestamptz</code> spliced in as text compares wrong across a DST boundary.</td></tr>
+<tr><td><code>cursorColumn</code> · <code>cursorKind</code></td><td>The monotonic column, and how its persisted string is parsed back (<code>long</code> | <code>timestamp</code> | <code>string</code>).</td></tr>
+<tr><td><code>initialCursor</code></td><td>Where to start with no cursor persisted. Empty + <code>snapshot</code> = from the beginning; empty without it = from <code>MAX(cursorColumn)</code>, i.e. new rows only.</td></tr>
+<tr><td><code>dedupKeyColumn</code></td><td>The companion to a <code>&gt;=</code> cursor — see the callout.</td></tr>
+<tr><td><code>batchSize</code> · <code>snapshot</code></td><td>Rows per poll, and whether to read the whole table first and then tail. <code>batchSize</code> is also the snapshot's page size, and <b>a snapshot pages across successive driver cycles</b>, each persisting its own cursor, so a restart mid-snapshot resumes instead of starting over.</td></tr>
+</tbody></table></div>
+<div class="callout warn"><b>Read this before choosing a timestamp as your cursor.</b> A surrogate key compared with <code>&gt;</code> is safe. An <code>updated_at</code> compared with <code>&gt;</code> <b>loses every row written in the same millisecond as the watermark</b>; compared with <code>&gt;=</code> it re-reads them — which is why the recommended shape is <code>&gt;=</code> plus a <code>dedupKeyColumn</code>. Neither variant ever sees a row whose transaction commits <i>after</i> a later-timestamped one already moved the watermark past it: a polled source is eventually-consistent-with-holes on a timestamp column, and that is the honest argument for <a href="#connectors-cdc">CDC</a> when it matters.</div>
+<p><b>A failed cycle keeps the old cursor.</b> That rule is enforced once, in the shared polled-source driver, and not by each transport — a transport bug is exactly the case the rule has to protect against, and a rule enforced by the code that might be buggy protects nothing. Throwing from a poll is therefore a normal, expected outcome (a database is down far more often than a config is wrong); the driver reports the error and hands the incoming cursor back unchanged, so the same rows are re-read next cycle rather than skipped. Delivery is <b>at-least-once</b>.</p>
+<p><b>Schema discovery</b> is an optional capability rather than a second interface: <code>POST /api/transports/{kind}/probe</code> returns the fields and diagnostic notes a transport can discover, and 400s when that transport has no probe. The console renders its <b>Discover</b> button from the kind's descriptor, so it offers the button honestly instead of hopefully. There is deliberately no <a href="#connectors-mapping">mapping</a> editor for these kinds: for a row source the <code>SELECT</code> list <i>is</i> the mapping, and a JSONPath layer on top would be a second way to say the same thing, free to disagree with the first the moment a column is renamed in one and not the other.</p>
+
+<h3 id="connectors-cdc">Change data capture</h3>
+<p><code>postgres-cdc</code> and <code>mssql-cdc</code> read the source database's <b>own change log</b> instead of polling a cursor column — Postgres logical replication over a <b>slot + publication</b> (pgoutput, via <code>Npgsql.Replication</code>), SQL Server's built-in <b>capture tables</b> (<code>cdc.fn_cdc_get_all_changes_*</code>, cursor is the <code>binary(10)</code> LSN). They are the same polled seam as their siblings above — CDC is still pull-shaped from this platform's point of view, one cycle at a time, even though the source database is doing the pushing internally. Extra fields: <code>slotName</code>/<code>publicationName</code>/<code>createSlotIfMissing</code> (Postgres), <code>captureInstance</code> (SQL Server), <code>tables</code>, <code>maxPollMs</code>.</p>
+<div class="callout warn"><b>Operational hazards. Read these before enabling either kind</b> — they are also in each kind's own descriptor help text, where an operator actually meets them.
+<ul>
+<li><b>An undrained Postgres slot pins WAL until the <i>source</i> database's disk fills</b> — not this platform's disk, the database being read from. <code>max_slot_wal_keep_size</code> is the server-side safety valve; it is not a substitute for keeping the source running.</li>
+<li><b>SQL Server CDC retention defaults to 3 days.</b> A source left stopped longer than that has permanently lost whatever retention discarded — the next cycle fails loudly on a retention-breach check rather than quietly resuming from wherever it can.</li>
+<li><b><code>REPLICA IDENTITY FULL</code></b> is what makes a Postgres <code>DELETE</code> carry more than its key columns. Without it a delete event is genuinely partial — not fabricated, not dropped, just partial.</li>
+<li><b>An unchanged TOASTed column arrives as the sentinel <code>__debezium_unavailable_value</code></b>, not its real content: Postgres never wrote the value into the change record, so there is nothing to decode. A consumer that treats the sentinel as real data corrupts silently.</li>
+</ul></div>
+<p><b>A batch always ends on a transaction boundary</b> in both dialects. <code>batchSize</code> is therefore a <i>target</i> for a cycle's read, never a hard ceiling on what one batch can emit — a transaction larger than <code>batchSize</code> is delivered whole, over budget, once a bounded re-read resolves it. Emitting a truncated transaction and advancing the cursor past it would be silent, permanent data loss.</p>
+<p><b>Backfill is asymmetric between the dialects.</b> <code>postgres-cdc</code> <b>refuses <code>snapshot</code> outright</b> — a replication slot carries no history from before its own creation, so there is nothing to snapshot; backfill with the polled <code>postgres</code> kind first, then switch the source to <code>postgres-cdc</code> to tail from where the backfill stopped. <code>mssql-cdc</code>'s <code>snapshot</code> means "replay whatever the capture table still retains", not a full-table snapshot — bounded by that 3-day default.</p>
+<div class="callout"><b>A delete does not retract a row, and this is the one thing to internalize about CDC here.</b> A source is an append-only event stream: <code>_weight</code> on an <i>inbound</i> row is just a column, a value like any other. The Z-set weights that make a table a genuine multiset are computed <i>from table SQL</i>, not carried in from ingress. So a delete arrives as one more event (<code>_op = "d"</code>) sitting next to every insert and update before it. The working pattern is <code>LATEST BY &lt;key&gt;</code> + <code>WHERE _op &lt;&gt; 'd'</code> downstream — which <b>hides</b> a deleted key from query results but does <b>not free it</b>: the tombstone, and everything before it, is still in the source's history.</div>
+<p>For a database this connector does not speak natively — MySQL, Oracle, MongoDB — <code>mapping.envelope: "debezium"</code> is still the right route: Debezium Server emitting into a <code>nats</code> source, whose envelope this platform unwraps. The native kinds are an <i>addition</i> to that path, not a replacement: they exist because this connector already speaks Postgres and SQL Server, so a slot/capture-table reader was cheap. A standalone user guide with worked examples for both kinds lives at <code>docs/cdc.md</code> in the repository.</p>
+
+<h3 id="connectors-fix">FIX: format, sessions, and order entry</h3>
+<p>Three separate things, useful separately and better together: a <b>wire format</b> any bytes-shaped source can name, a <b>receive-only session</b> kind, and a <b>bidirectional session</b> kind for order entry.</p>
+
+<p><b>The <code>fix</code> format</b> (<a href="#formats">alongside <code>json</code>/<code>ndjson</code>/<code>csv</code>) parses tag=value into the same shape the other parsers produce — so a FIX log on disk, a FIX message on a NATS subject and a live session all read identically.</p>
+<ul>
+<li><b>Delimiter sniffed once per input.</b> A real session speaks SOH (<code>\x01</code>); logs, tickets and fixtures use <code>|</code> or <code>^</code>, because SOH doesn't paste into a text editor.</li>
+<li><b>No FIX dictionary — ever, anywhere.</b> Names and types come from one static table covering the common 4.2/4.4/5.0 tag set; tag numbers are globally unique across FIX versions by design (tag 35 is <code>MsgType</code> in every version from 4.0 to 5.0), so one table is correct rather than a version-specific compromise. An unknown tag becomes <code>"tag&lt;N&gt;"</code>, a plain string. <b>No <code>FIX44.xml</code> is a deployment artifact.</b></li>
+<li><b>Values are typed from that table, never sniffed.</b> CSV sniffs because it has nothing better to go on; FIX has a spec that says tag 44 is a price and tag 55 is a symbol, so sniffing would silently turn <code>55=123</code> into the number 123.</li>
+<li><b>Repeating groups become nested JSON arrays</b> — and this is the most useful thing about the format. <code>NoMDEntries=2</code> plus two entries becomes <code>"MDEntries": [{…},{…}]</code>, which is what lets <code>itemsPath: "$.MDEntries[*]"</code> fan one market-data snapshot into one row per quote using the same JSONPath machinery every other source's mapping already runs.</li>
+<li><b>Length-prefixed fields are read by byte count.</b> <code>RawDataLength(95)</code>/<code>RawData(96)</code> and its siblings carry a character count precisely because the value may contain the delimiter; the parser takes exactly that many characters verbatim. Skipping this corrupts exactly the messages that are hardest to debug afterwards.</li>
+</ul>
+<div class="callout warn"><b>The two ceilings of dictionary-free group framing.</b> A group's field set is inferred from its <i>first</i> entry — so a later entry carrying a field the first omitted terminates right at that tag, and the trailing fields land on the <b>parent</b> object rather than the entry they visually belong to. And a <b>single-entry group is bounded only</b> by the next delimiter tag, a repeated tag, or the standard trailer (93/89/10), so a single-entry group that is not the last thing at its nesting level absorbs whatever follows it. The upgrade path for both is a real dictionary. Neither was found by accident: both are named explicitly in the parser's own test suite.</div>
+
+<p><b>The <code>fix</code> source kind</b> is a persistent session — market data, drop-copy — implemented out of the core on <code>QuickFIXn.Core</code>. This platform is always the <b>initiator</b>, dialing out; the counterparty is always the acceptor. <code>UseDataDictionary=N</code> is set unconditionally, so QuickFIX/n does the session layer and no message validation and hands the application message over intact; <code>beginString</code> only selects which version header the session claims.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Field</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>host</code> · <code>port</code></td><td>Counterparty to dial.</td></tr>
+<tr><td><code>senderCompId</code> · <code>targetCompId</code></td><td>This session's own CompID and the counterparty's.</td></tr>
+<tr><td><code>beginString</code></td><td><code>FIX.4.0</code>–<code>FIX.4.4</code>, <code>FIXT.1.1</code>. Header only.</td></tr>
+<tr><td><code>username</code> · <code>password</code></td><td>Optional; sent as tags 553/554 inside the Logon. QuickFIX/n has no built-in credential exchange, so this is this platform's own addition. <code>password</code> masks to <code>***</code>.</td></tr>
+<tr><td><code>heartBtIntSeconds</code> · <code>resetOnLogon</code> · <code>useSsl</code></td><td>Heartbeat, sequence reset on logon (default <code>true</code>), TLS. TLS is the bare flag only: client certificates and CA pinning are deferred.</td></tr>
+<tr><td><code>storePath</code></td><td>Empty = in-memory sequence store. Non-empty = file-backed. <b>Different rules on <code>fix-duplex</code></b> — see below.</td></tr>
+<tr><td><code>onLogon</code></td><td>Raw FIX text, one message per line, sent right after logon succeeds.</td></tr>
+<tr><td><code>msgTypes</code></td><td>Comma-separated MsgType (tag 35) include-filter, e.g. <code>W,X</code>. Empty = every application message.</td></tr>
+<tr><td><code>queueCapacity</code></td><td>Bound of the drop-oldest bridge queue. Default 10&nbsp;000.</td></tr>
+</tbody></table></div>
+<p><b><code>onLogon</code> is raw FIX text, not a request builder.</b> A market-data session must <i>send</i> something — a <code>MarketDataRequest</code>, a <code>SecurityListRequest</code> — right after logon to receive anything at all. No templating, no request/response correlation, no resubscribe-on-reject. A send failure here fails the whole connection attempt, because silence would be the worst possible symptom.</p>
+<pre><code>{
+  "name": "eurusd-md", "kind": "fix",
+  "connector": {
+    "fix": {
+      "host": "fix.venue.example.com", "port": 9880,
+      "senderCompId": "STREAMFORGE", "targetCompId": "VENUE",
+      "beginString": "FIX.4.4", "heartBtIntSeconds": 30,
+      "resetOnLogon": true, "storePath": "", "msgTypes": "W",
+      "onLogon": "35=V|262=1|263=1|264=1|265=1|267=2|269=0|269=1|146=1|55=EUR/USD"
+    },
+    "mapping": { "itemsPath": "$.MDEntries[*]", "fields": [
+      { "sourcePath": "MDEntryType", "field": { "name": "side",  "type": "String" } },
+      { "sourcePath": "MDEntryPx",   "field": { "name": "price", "type": "Double" } },
+      { "sourcePath": "MDEntrySize", "field": { "name": "size",  "type": "Double" } }
+    ] }
+  }
+}</code></pre>
+<p>That <code>35=V</code> line is a <code>MarketDataRequest</code> — snapshot+updates, top-of-book, bid and offer, one symbol. The venue's <code>35=W</code> reply arrives with a <code>NoMDEntries</code> group and <code>itemsPath</code> fans it into one row per entry.</p>
+<div class="callout warn"><b>Session hazards.</b> The bridge from QuickFIX/n's session thread is a <b>bounded, drop-oldest channel</b>: the inbound callback is synchronous on the FIX session's own thread, and blocking it would apply backpressure to the session and eventually trip the counterparty's heartbeat timeout — a worse failure than dropping. That makes drop-oldest <b>right for market data</b> (a stale quote is worthless) and <b>wrong for drop-copy</b>, where every message matters; the running drop count is logged on every increment rather than swallowed. Empty <code>storePath</code> + <code>resetOnLogon</code> is likewise <b>right for market data</b> and wrong for a session that must not lose its place — and in a container a <code>storePath</code> must be a mounted volume. Delivery into the platform is <b>at-most-once</b>: QuickFIX/n's sequence layer acknowledges a <i>session</i>, which is not the same thing as this platform having processed the row into a table, and claiming otherwise would be a lie the platform is not allowed to tell. Session-level traffic (Logon, Heartbeat, ResendRequest, Logout…) is consumed by QuickFIX/n and never reaches the row path, so "receive-only" costs nothing to enforce.</div>
+
+<p><b><code>fix-duplex</code> — order entry.</b> One live FIX session with both halves, declared as <b>two entities that meet in the middle</b>: a source of kind <code>fix-duplex</code> that owns the session (its inbound half behaves exactly like a <code>fix</code> source), and a <a href="#sinks-duplex"><code>duplex</code> sink</a> on any pipeline or table naming that source by <code>sourceName</code>. Publishing a row into an entity with that sink attached <i>is</i> sending an order.</p>
+<p><b>Why two entities and not one.</b> A pipeline's or table's sink list is re-signed and rebuilt on <b>any</b> field edit, including an unrelated one — a content hash of the active sink list, re-checked every 30&nbsp;s. If the session lived in the sink, every such edit would cost a logon. It doesn't: the session lives in the source's connector driver, and the sink only ever asks it, by name, whether it is there.</p>
+<ul>
+<li><b>The message type comes from the row, not from config.</b> A row needs a <code>MsgType</code> column (tag 35, e.g. <code>"D"</code> for <code>NewOrderSingle</code>), because one duplex source's outbound half plausibly carries several message types across its lifetime and a per-source default cannot express that. Every other column is looked up in a curated name → tag table, and <b>a column with no known tag refuses the whole row</b> rather than dropping just that column.</li>
+<li><b>Required fields are gated for exactly three message types</b> — <code>NewOrderSingle</code>, <code>OrderCancelRequest</code>, <code>OrderCancelReplaceRequest</code> — refusing an incomplete row before it reaches the wire and naming both the field and its tag number. <b>A <code>MsgType</code> outside those three is not gated at all</b>: this is still not a real dictionary, so it sails through with whatever columns the row carried.</li>
+<li><code>TransactTime</code> (tag 60) is stamped when absent on those three types and <b>never overwritten</b> when present. QuickFIX/n stamps <code>SendingTime</code> (52) but not 60, and FIX 4.4 requires it there — leaving it unstamped produced a wire message venues reject.</li>
+<li><b><code>generateClOrdId</code> is opt-in and off by default</b>, because a row missing <code>ClOrdID</code> is more useful refused than silently completed. A caller-supplied id is never overwritten — and <b>never checked for uniqueness</b>: there is no registry of previously-sent ids. Two rows with the same supplied <code>ClOrdID</code> are both sent as given, and the venue's reject for the duplicate is an ordinary inbound row.</li>
+<li><b>Reserved platform columns are skipped, not refused.</b> Every real row carries <code>_ts</code> and <code>_source</code>, and a table-sourced row also carries <code>_weight</code>. Before the first live check that sent an order through a real table's SQL output rather than a hand-built row, the mapper refused <b>every single one</b> of them on the unknown-column rule. The generalizable lesson: a test that calls a session directly with a hand-built row cannot see anything the platform stamps onto a row before a sink ever touches it.</li>
+</ul>
+<pre><code>// the session itself
+{ "name": "fixoe", "kind": "fix-duplex", "connector": { "fix": {
+    "host": "oms.venue.example.com", "port": 9881,
+    "senderCompId": "STREAMFORGE", "targetCompId": "VENUE", "beginString": "FIX.4.4",
+    "resetOnLogon": false, "storePath": "/var/lib/streamforge/fix/fixoe.store",
+    "generateClOrdId": false } } }
+
+// orders flow in from "new_orders" and out over fixoe's session
+{ "name": "orders_sent", "sql": "SELECT * FROM new_orders",
+  "sinks": [ { "kind": "duplex", "duplex": { "sourceName": "fixoe" } } ] }</code></pre>
+<p>A row <code>{"MsgType":"D","ClOrdID":"ORD-1","Symbol":"EUR/USD","Side":"1","OrdType":"2","OrderQty":1000000,"Price":1.2345}</code> landing in <code>new_orders</code> sends a <code>NewOrderSingle</code>. The venue's <code>ExecutionReport</code> comes back on <code>fixoe</code>'s <i>inbound</i> half — and correlates to the order that caused it in ordinary platform SQL, which is the whole trick:</p>
+<pre><code><span class="sql-k">SELECT</span> o.ClOrdID, o.Symbol, e.OrdStatus, e.LastPx
+<span class="sql-k">FROM</span> orders_sent o <span class="sql-k">INNER JOIN</span> execs e <span class="sql-k">ON</span> o.ClOrdID = e.ClOrdID   <span class="sql-s">-- execs: SELECT * FROM fixoe</span></code></pre>
+<div class="callout warn"><b><code>storePath</code> stops being optional on this kind, and validation refuses four things.</b> An order session's sequence store is this platform's only record of what it told the venue it sent — not an optimization. So <code>fix-duplex</code> refuses: an <b>empty <code>storePath</code></b> (in-memory is refused outright, not warned about); <b><code>resetOnLogon: true</code></b> independently of the path, since a durable store thrown away every logon buys nothing; a <b>relative path</b>, which resolves against a working directory no deployment promises is stable; and a path under <b><code>/tmp</code></b>, the one ephemeral pattern detectable from the string alone. <b>Read that last one literally</b>: this process cannot see the volume behind <i>any</i> path, so a path that isn't <code>/tmp</code> has not been confirmed durable — only not caught. Losing the store is a <b>coordinated sequence reset with the counterparty, not a restart</b>: restarting reproduces the mismatch, and there is no order log anywhere in this design to replay from. Recover the old volume if it exists; otherwise agree a hard <code>SequenceReset</code> on both sides <i>before</i> restarting, then reconcile the gap with the <code>ClOrdID</code> join above.</div>
+<p>There is <b>no FIX sink</b>. The <code>file</code> sink's format list stays CSV and NDJSON, and writing FIX with no session to number the messages produces something no counterparty would accept.</p>
+
 <h3 id="connectors-grpc">gRPC federation</h3>
 <p>A <code>grpc</code>-kind source subscribes to <b>another StreamForge instance's</b> <code>DynamicStreamService/SubscribeEntity</code> — the federation story. <code>connector.grpc</code>:</p>
 <div class="tablewrap"><table>
@@ -814,6 +1150,16 @@ await foreach (var delta in StreamForgeClient.SubscribeAsync("http://localhost:5
 
 <h3 id="connectors-secrets">Secrets-lite</h3>
 <p>The two secret slots on a connector — URL header <i>values</i> and gRPC <code>password</code>/<code>token</code> — follow a deliberately honest, minimal ceiling: stored <b>plaintext at rest</b> in each flavor's own store (Orleans JSON file / Dapr Redis — the same posture as JWT signing config today), <b>no KMS, no encryption</b>. Every read path (GET one, list, export) masks a non-empty secret as <code>"***"</code>. Writing back a literal <code>"***"</code> means <b>"keep the stored value"</b> — this is what makes the SPA's GET (masked) → edit → PUT (whole object) cycle safe: it never clobbers a real secret with the mask string. <code>GET /api/config/export</code> omits real secret values unless the caller is Admin and passes <code>includeSecrets=true</code>.</p>
+
+<h3 id="connectors-plugins">Server plugins &amp; out-of-tree kinds</h3>
+<p>A source or sink kind does not have to be built into StreamForge. A library nobody here references can add one by <b>installing two files</b>: a .NET assembly in the host's <code>plugins/</code> directory (next to the binaries, or wherever <code>Plugins:Path</code> points), and — only if the generic config form isn't enough — an ES module in <code>ui-plugins/</code> (see below). No rebuild, no configuration beyond the files.</p>
+<p>At startup the host loads every assembly in that directory, instantiates each <code>IStreamForgePlugin</code> it finds and lets it register its kinds. Each outcome is one line on stdout:</p>
+<pre><code>[plugins] plugin 'Orion connector 1.2.0' (YourCompany.Orion.OrionPlugin) registered
+[plugins] plugin assembly 'broken.dll' could not be loaded: Could not load file or assembly …</code></pre>
+<div class="callout"><b>A plugin can never keep the host from starting.</b> A file that isn't a managed assembly, a plugin whose constructor throws, and one that claims a kind name already taken are each reported and skipped. Plugins load <i>after</i> the built-in kinds, so a plugin cannot shadow a built-in — it loses the name and says so in that line. The line is the diagnostic for "I copied the DLL and nothing happened": no line at all means the file holds no plugin type; a "failed to register" line names the cause.</div>
+<p>Once registered, the kind is a first-class citizen with no further wiring: it appears in <code>GET /api/transports</code>, the console renders its config form from the descriptor it declares, <code>GET /api/meta/instance</code> reports its version for <code>requires:</code> import gates, validation and secret masking apply to it, and both connector drivers run it. Its configuration lives in the platform's open <code>settings</code> bag (a string dictionary on the source/sink, stored, exported and imported like any other config) rather than in a typed field this repo would have to add — which is what lets such a kind add a field, or a whole extra dimension of them, without any change here. Fields the plugin declares as secrets mask as <code>"***"</code> and follow the usual "send <code>***</code> back to keep the stored value" rule.</p>
+<div class="callout"><b>Two operational notes.</b> A kind whose plugin is <i>not</i> installed on the host you export from has its whole settings bag masked — with no plugin there is no way to tell a hostname from a password, so the platform fails closed; export from a host that has the plugin. And plugin assemblies load into the host's own context, so a plugin's dependency versions are not isolated from the host's: on a conflict, the host's copy wins.</div>
+<p>The contributor-facing recipe — the interface, the descriptor, the <code>SettingsBag</code> readers, and the one thing the bag cannot express — is in <a href="https://github.com/cotyar/streamforge/blob/master/TRANSPORTS.md">TRANSPORTS.md</a>.</p>
 
 <h3 id="connectors-uiplugins">Console UI plugins</h3>
 <p>Every source and sink kind already gets a working config form for free — the console builds it from the kind's own descriptor (<code>GET /api/transports</code>), so a transport added in an outside library is configurable in the console without a line of front-end code. A <b>UI plugin</b> is the escape hatch for the kinds that form cannot express: a topic browser, a connection tester, a query builder. It replaces that one kind's config panel with the library author's own React component — everywhere the panel appears (the source modal <i>and</i> the sinks editor on pipelines and tables), and without rebuilding or reconfiguring StreamForge.</p>
@@ -843,11 +1189,68 @@ function RvEditor({ value, onChange, disabled, idPrefix }) {
 
 registerTransportEditor('rv', RvEditor, 'inbound')   // omit 'inbound' to serve the sink half too
 </code></pre>
-<p>The component receives exactly what the built-in editor receives — <code>{ descriptor, value, onChange, isEdit, disabled, idPrefix, direction }</code> — and <code>window.streamforge.react</code> is the console's own React (bundling a second copy breaks hooks). <code>apiVersion</code> is <code>1</code> and is bumped only if those props change shape.</p>
+<p>The component receives exactly what the built-in editor receives — <code>{ descriptor, value, onChange, isEdit, disabled, idPrefix, direction }</code>. Alongside <code>react</code> (the console's own — bundling a second copy breaks hooks), <code>window.streamforge</code> hands the plugin the rest of what the console already holds: <code>api</code> (authenticated REST, session token and environment header included), <code>live</code> (<code>subscribeTable</code>/<code>subscribeSource</code>/<code>subscribePipeline</code> on the console's single SignalR connection — no second socket for a live preview), and <code>loadLiveTables()</code>, which lazily resolves TanStack DB bound to a StreamForge table for a plugin that wants query and join on top. <code>apiVersion</code> is <code>2</code>; check it (<code>(window.streamforge?.apiVersion ?? 0) &gt;= 2</code>) rather than assuming.</p>
 <div class="callout"><b>Four rules that bite.</b> <code>onChange</code> replaces the <i>whole</i> config object, so always spread the previous value — a bare <code>{ key: v }</code> deletes the fields the editor doesn't render. Secrets keep the secrets-lite convention above: while editing an existing entity a stored secret reads back as <code>"***"</code> and sending it back unchanged keeps it, so an editor that "helpfully" blanks that field wipes the credential on save. Validation stays on the server (the modal already renders its messages) — a second validator in the plugin is one that drifts. And the plugin files are served <b>anonymously</b>, like the console's own JavaScript, because the console loads them before anyone logs in: treat that directory as public front-end code, never a place for anything sensitive.</div>
 <p>A plugin that throws while rendering loses its own panel and nothing else — the surrounding form, and the stored configuration, are untouched. Registration is per kind and that is the only seam: a plugin cannot add pages, routes, or catalog behavior. The contributor-facing side (props, the registry, the example module) is in <a href="https://github.com/cotyar/streamforge/blob/master/TRANSPORTS.md">TRANSPORTS.md</a>.</p>
 </section>
 
+<section id="sinks">
+<h2>Egress: sinks</h2>
+<p>A <b>sink</b> is where a pipeline's result rows or a table's deltas leave the platform. Every pipeline and every table carries a <code>sinks</code> list; empty (the default) means nowhere. One entity may have several, and each is independently <code>enabled</code>.</p>
+<pre><code>"sinks": [
+  { "kind": "file",     "enabled": true, "file": { "path": "/var/log/sf/{name}.csv", "format": "csv" } },
+  { "kind": "postgres", "name": "warehouse", "db": { "host": "…", "table": "positions", "mode": "upsert",
+                                                    "keyColumns": "symbol" } }
+]</code></pre>
+<div class="tablewrap"><table>
+<thead><tr><th><code>kind</code></th><th>Sends to</th><th>Config key</th></tr></thead>
+<tbody>
+<tr><td><code>nats</code></td><td>A NATS subject.</td><td><code>nats</code></td></tr>
+<tr><td><code>file</code></td><td>A file on the host — CSV or NDJSON, append-only. <a href="#sinks-file">Below</a>.</td><td><code>file</code></td></tr>
+<tr><td><code>postgres</code> · <code>mssql</code></td><td>A database table, appending or mirroring. <a href="#sinks-db">Below</a>.</td><td><code>db</code></td></tr>
+<tr><td><code>http</code></td><td>An HTTP(S) endpoint, one row per POST. <a href="#sinks-httploop">Below</a>.</td><td><code>http</code></td></tr>
+<tr><td><code>loopback</code></td><td>A named generator source in this same process, no network hop. <a href="#sinks-httploop">Below</a>.</td><td><code>loopback</code></td></tr>
+<tr><td><code>duplex</code></td><td>The outbound half of a named <a href="#connectors-fix"><code>fix-duplex</code></a> session. <a href="#sinks-duplex">Below</a>.</td><td><code>duplex</code></td></tr>
+</tbody></table></div>
+
+<h3 id="sinks-contract">The contract, and what it deliberately does not do</h3>
+<div class="callout warn"><b>Delivery is fire-and-forget, and there is no backpressure from a sink into the platform.</b> A sink client must <b>never throw and never block past its own timeout</b> — both publisher paths await it with no try/catch, on purpose. A slow or absent destination therefore <b>counts the failure and drops the row</b>; it does not slow down the pipeline or table it is attached to, and it does not queue the row for later. This is the same honest limit the ingress side carries, restated rather than pretended away. If you need durable hand-off, the destination has to provide it — a broker, a database, a file — not the sink.</div>
+<p>Three more behaviors that surprise people, in the order they usually bite:</p>
+<ul>
+<li><b><code>{name}</code> substitution.</b> A path, subject, table or URL may contain <code>{name}</code>, replaced with the owning pipeline's id or the table's name — so one spec serves a whole catalog.</li>
+<li><b>The sink list is rebuilt on any field edit.</b> The active sink list is content-hashed and re-checked every 30&nbsp;s, so editing an unrelated field on the entity tears down and recreates its sink clients. Harmless for everything that opens its own connection lazily — and the reason the <a href="#sinks-duplex"><code>duplex</code></a> sink owns no connection at all.</li>
+<li><b>A failing sink is visible only in the logs.</b> Failures are counted internally and reported through a throttled callback; the entity's own status has <b>no per-sink field</b>. A sink whose <a href="#connectors-endpoints"><code>@name</code></a> endpoint fails to resolve likewise just drops out of its entity with a log line.</li>
+</ul>
+<p><b>Pipelines and tables do not emit the same thing</b>, and sinks that care say so. A table emits <b>deltas</b>: each row carries <code>_weight</code> — <code>+1</code> for an assertion, <code>-1</code> for a retraction — so a downstream store can mirror current state. A pipeline emits <b>results</b>: no identity, no weight. That is why <code>mode: "upsert"</code> is rejected outright on a pipeline sink — "mirror current state" means nothing where there is no identity to mirror on.</p>
+<p><b><code>INSERT INTO &lt;sink-name&gt; SELECT …</code></b> is pre-parse sugar for the same thing: give a sink a <code>name</code>, write <code>INSERT INTO warehouse SELECT …</code>, and the target is stripped, the untouched <code>SELECT</code> stored, and that named sink enabled. The Engine never learns about <code>INSERT</code> — a destination is already modelled as a sink spec. It is lossy on round-trip: reopening the entity shows the <code>SELECT</code> plus a sink row, and the console says so after save.</p>
+
+<h3 id="sinks-file">The <code>file</code> sink</h3>
+<p>Appends rows to a path on the host — the egress twin of the <code>file</code> source. <code>path</code> takes <code>{name}</code> and missing parent directories are created. <code>format</code> is <code>csv</code> (default) or <code>ndjson</code>; <b>FIX is not accepted</b>, deliberately (see <a href="#connectors-fix">FIX</a>). <code>columns</code> gives an explicit comma-separated column order — e.g. <code>symbol,qty,_weight</code> — and empty means the first written row's key order.</p>
+<div class="callout"><b>Set <code>columns</code> when the rows are not uniform.</b> The file is append-only and its <b>header is fixed for the life of the file</b>, so a column that only appears in a later row is <b>dropped</b> — rather than silently shifting every subsequent row one cell to the left. In a container the path must be a mounted volume, the same requirement a <a href="#connectors-fix">FIX <code>storePath</code></a> carries.</div>
+
+<h3 id="sinks-db">The <code>postgres</code> and <code>mssql</code> sinks</h3>
+<p>Write rows into an existing database table. Connection fields mirror the <a href="#connectors-db">database source's</a> deliberately, so an operator configuring both directions fills in the same form twice rather than two different ones. This is the first sink whose natural unit is a <b>transaction</b> rather than a message, which is why it applies a whole batch at once.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>schema</code> · <code>table</code></td><td>Destination. <code>{name}</code> substitution applies. <b>It must already exist</b> — this sink issues no DDL, because a streaming sink that can <code>CREATE</code> is a trust escalation over one that can only <code>INSERT</code>.</td></tr>
+<tr><td><code>mode</code></td><td><code>append</code> (default) — every delivered row becomes an <code>INSERT</code>, the destination is a log, nothing is ever deleted. Or <code>upsert</code> — see below.</td></tr>
+<tr><td><code>keyColumns</code></td><td>Comma-separated identity, <b>required</b> for <code>upsert</code> and unused by <code>append</code>. Explicit rather than derived: a sink client only ever sees the entity's name, and reaching back into the catalog to guess its identity would couple egress to the catalog. The console prefills it from the table's declared keys — a visible suggestion, not a silent derivation.</td></tr>
+<tr><td><code>includeWeight</code></td><td>Write <code>_weight</code> as a column. <b>Append mode only</b>: in upsert mode the weight <i>is</i> the operation, so persisting it would store a number already spent.</td></tr>
+<tr><td><code>columns</code> · <code>commandTimeoutSeconds</code> · <code>tls</code> · <code>connectionString</code></td><td>Explicit column order (empty = union of the batch's keys), timeout, TLS, and the full connection string that wins over the structured fields when set.</td></tr>
+</tbody></table></div>
+<p><b><code>upsert</code> is how you mirror a table's current state into a database.</b> Positive weights upsert on <code>keyColumns</code>, negative weights delete, and <b>deletes are applied last within the one transaction</b> — so a delete-then-reinsert of the same key inside a batch lands the way the caller meant it rather than the way the rows happened to be ordered.</p>
+
+<h3 id="sinks-httploop">The <code>http</code> and <code>loopback</code> sinks — and the cycle guard</h3>
+<p>Two ways to feed rows back into a source, one over the network and one not.</p>
+<p><b><code>http</code></b> POSTs each row to <code>url</code>. The body is always <code>{"events": [ &lt;row&gt; ]}</code> — exactly one event, wire-identical to this platform's own ingest request, because the destination this sink was built for is <code>/api/sources/{name}/events</code> on a StreamForge host. <b>A one-row batch is not an optimization left on the table</b>: batching would mean holding rows before sending, which is precisely the unbounded buffering this whole family of sinks exists to avoid. Auth is <b>one generic <code>headerName</code>/<code>headerValue</code> pair</b>, not a bearer-token field — set <code>X-SF-Ingest-Key</code> for a StreamForge ingest source, or <code>Authorization: Bearer …</code> for anything else, without this config needing to know which scheme the receiver expects. <code>timeoutMs</code> defaults to 3000.</p>
+<p><b><code>loopback</code></b> is the same idea with no network hop: it hands the row directly to an in-process hub that the target generator source drains on its own timer and republishes exactly as it would a synthetic tick. No URL, no header, no timeout — there is nothing to configure but <code>targetSourceName</code> (required, <code>{name}</code>-substitutable), which must name a <b>started generator-kind source</b>.</p>
+<div class="callout warn"><b>Both can build a cycle, and termination is your SQL's job.</b> A table reading source A with a loopback sink targeting A again is a legitimate shape — a scenario clock, an iterative what-if. <code>stepField</code> (default <code>step</code>) plus <code>maxDepth</code> (<code>0</code> = off) is the guard, shared by both sink kinds through one implementation so they cannot drift apart. What the hub guarantees is delivery, ordering, and freedom from deadlock or stack overflow — <b>never termination</b>. An unbounded cycle cannot corrupt the process; it just runs, and keeps running, until something stops it. Bound it in the query (<code>WHERE step &lt; D</code>).</div>
+
+<h3 id="sinks-duplex">The <code>duplex</code> sink</h3>
+<p>The outbound half of a <a href="#connectors-fix"><code>fix-duplex</code></a> session, and the only sink that opens no connection of its own: <code>sourceName</code> names the source that owns the live session, every publish resolves it by name, and forwards. That is what makes the 30-second sink rebuild above free here — there is nothing to tear down. Everything about the row → FIX mapping, the required-field gate, <code>ClOrdID</code> and the sequence-store rules is in <a href="#connectors-fix">the FIX section</a>, because it belongs to the session, not to the sink.</p>
+<div class="callout"><b>Sinks that name a catalog entity are environment-scoped; sinks that name the outside world are not.</b> <code>nats</code>, <code>http</code>, <code>file</code> and the database sinks all point at something <i>outside</i> this process — a subject, a URL, a path, a table — and an <a href="#environments">environment</a> has no opinion about any of those; qualifying them would silently rename an operator's subject or table out from under them. <code>loopback</code> and <code>duplex</code> are the two exceptions, because both name a <b>catalog entity</b>, and both registries are keyed by the environment-qualified name. This was a real bug, not a hypothetical: before it was fixed, a table in <code>staging</code> with a loopback sink to <code>feed</code> published to the bare key <code>feed</code> — which is exactly where <code>default</code>'s own generator is attached. <code>staging</code>'s rows landed in <code>default</code>'s source, and the publish <b>reported success</b>. The qualification happens at sink-client construction and is never written back to the catalog, so an export from <code>staging</code> stays importable into <code>prod</code>.</div>
+</section>
 <section id="crdt">
 <h2>CRDT document sync</h2>
 <p>A <code>crdt</code>-kind source is an offline-tolerant twin, not a connector — it exists for a link that drops (an ERP integration across an unreliable network) or a document edited from more than one place (a digital twin whose connectivity isn't guaranteed). It is deliberately <b>not</b> an <code>IInboundTransport</code>: a Yjs update is a delta against durable, per-document state, not bytes through a named format parser, so it is driven by its own grain (<code>CrdtDocGrain</code>) rather than the connector driver every other kind shares. It never enters the dataflow — a document merges independently of pipelines/tables/SQL, and what crosses into the platform is the same thing every other source produces: ordinary rows on the source's stream. <b>Orleans-only</b> today; the Dapr flavor stores the kind and refuses to start it, the same shape as a sharded table.</p>
@@ -1238,9 +1641,29 @@ curl -s -X POST "localhost:5199/api/config/import?mode=merge" \
 <li><b>Setup</b>: <code>export GEMINI_API_KEY=&lt;key&gt;</code> (or config <code>Gemini:ApiKey</code>) before starting the host; without it the page shows a setup notice. <code>Gemini:Model</code> and <code>Gemini:BaseUrl</code> override the defaults.</li>
 <li><b>Audit trail</b>: every tool call the model makes (name, input, result) is logged beneath the reply — the chat can do nothing the tools don't expose.</li>
 <li><b>Guardrails</b>: destructive operations (deletes) require explicit in-conversation confirmation, and the tool loop is capped at 8 rounds per message.</li>
+<li><b>Rate limit</b>: <code>Chat:MaxRequestsPerSession</code> (default 10) caps it per login session; past that the route answers 429. <code>≤0</code> disables the cap.</li>
+<li><b>It has no privilege of its own.</b> The model acts as the calling user, through the same <a href="#rbac">entitlement checks</a> as any other caller, and its audit rows carry <code>origin: "chat"</code> and <code>onBehalfOf</code>. With <a href="#rbac-approvals">approvals</a> enabled it files a request rather than acting; <code>Chat:MayExecutePrivileged=true</code> lets it execute instead — leave it <code>false</code>.</li>
 </ul>
+<div class="callout"><b>The feature is entirely optional, and that matters for a closed network.</b> Without a key the page shows a setup notice and <code>POST /api/chat</code> answers a clear 503 naming the missing setting — <b>nothing is sent anywhere</b>. Nothing else in the platform contacts a third-party service on its own initiative either: every outbound connection it makes is to an endpoint an operator configured — a database, a broker, a venue, a <a href="#discovery-peers">declared peer</a>. An air-gapped or regulated deployment can simply never configure it and lose nothing else. When it <i>is</i> configured, conversation content and catalog metadata reach the configured model provider, which is a decision to make deliberately rather than a default to inherit.</div>
 </section>
 
+<section id="admincli">
+<h2>Admin CLI &amp; MCP server</h2>
+<p>Two front ends over the same REST surface, both in <code>admin/</code>, both with zero npm dependencies — one for a terminal, one for an agent, sharing one client so they cannot disagree.</p>
+<pre><code>SF_URL=http://localhost:5199 bun admin/sf.ts health
+bun admin/sf.ts login admin admin123!
+bun admin/sf.ts ls tables
+bun admin/sf.ts get table positions
+bun admin/sf.ts start pipeline &lt;id&gt;      # · stop · create · delete
+bun admin/sf.ts rows positions --limit 20
+bun admin/sf.ts results &lt;pipeline-id&gt;
+bun admin/sf.ts validate "SELECT symbol, SUM(qty) FROM trades GROUP BY symbol"
+bun admin/sf.ts config export &gt; catalog.json
+bun admin/sf.ts api GET /api/meta/instance   # escape hatch: any route, authenticated</code></pre>
+<p><code>SF_URL</code> defaults to <code>:5199</code> — point it at <code>:5399</code> for the Dapr flavor, or at a container/Cloud&nbsp;Run URL. Everything the CLI can do is an ordinary <a href="#api">REST call</a>, so it is subject to the same <a href="#rbac">entitlements</a> as any other caller.</p>
+<p><b><code>bun admin/mcp.ts</code></b> serves the same operations as MCP tools over stdio, hand-written to the spec with no SDK and pinned by subprocess conformance tests. It is how an agent administers a running instance without being handed a shell.</p>
+<div class="callout warn"><b>Give any automated caller its own login.</b> The MCP server deliberately exposes <code>request_approval</code> and <b>not</b> <code>approve</code> — but <a href="#rbac-approvals">that boundary lives in its tool list and nowhere else</a>. The self-vote rule compares identities, so a script authenticating as an administrator files requests a human administrator can then approve, because the store cannot tell them apart: they are the same principal.</div>
+</section>
 <section id="deploy">
 <h2>Deployment &amp; admin</h2>
 <p>Both flavors ship as self-contained containers under <code>deploy/</code> — the same images run locally under docker compose and on Google Cloud Run:</p>
@@ -1252,24 +1675,100 @@ curl -s -X POST "localhost:5199/api/config/import?mode=merge" \
 </ul>
 </section>
 
+<section id="embedding">
+<h2>Running it inside your own process</h2>
+<p>StreamForge's host is not a special executable — it is an ordinary ASP.NET Core application that co-hosts an Orleans silo and registers the shared API. Everything that makes it StreamForge is behind extension methods, which is what makes the platform embeddable: your own service can <i>be</i> the StreamForge instance rather than talk to one.</p>
+<p>That matters in exactly two situations. If you ship software to customers, one process is one deployment artifact — no second service in the diagram, no broker for the customer to operate, no runtime they don't already have. And if you are building your own product on top, the SQL, the tables and the connectors are in-process: no network hop between your code and the engine, and your own types can be published straight into an <a href="#connectors-push"><code>ingest</code></a> source.</p>
+
+<h3 id="embedding-wiring">The wiring</h3>
+<p>This is the whole of it — the same calls the shipped host makes, in the same order:</p>
+<pre><code>var builder = WebApplication.CreateBuilder(args);
+
+builder.Host.UseOrleans(silo =&gt; { /* clustering, streams, storage — see the host's Program.cs */ });
+
+builder.Services.AddStreamForgeApi(builder.Configuration);   // endpoints, auth, access, audit, chat
+builder.Services.AddOrleansFacades();                        // the runtime-specific facades
+builder.Services.AddHostedService&lt;GeneratorSupervisorService&gt;();
+builder.Services.AddHostedService&lt;IngestDrainPumpService&gt;();
+builder.Services.AddHostedService&lt;StreamBridgeService&gt;();
+builder.Services.AddHostedService&lt;NatsPublisherService&gt;();
+DatabaseConnectors.RegisterAll();                            // out-of-core connectors opt in here
+
+var app = builder.Build();
+app.MapStreamForgeApi(new StreamForgeApiOptions(
+    ProtosDir: …, GrpcPort: …, GrpcStaticServices: [ … ],
+    DocsFilePath: …, SpaDistPath: …, Flavor: "orleans",
+    DataDir: …, InstanceName: …, Version: …));
+// your own controllers, endpoints, background work — same app, same DI container</code></pre>
+<p><code>StreamForgeApiOptions</code> is where a host states the facts only it knows — where the protos and the SPA bundle live, which gRPC port to advertise, which data directory carries its identity file. It exists so the shared endpoints answer byte-identically across both runtime flavors rather than each host resolving those inline.</p>
+<div class="callout"><b>Registration deadlines are the one ordering rule.</b> Out-of-core transports — the database connectors, FIX, anything you add via the <code>TRANSPORTS.md</code> recipe — must register <b>before any source starts</b>. Nothing in the process can start a source before <code>builder.Build()</code> returns, so anywhere before that line satisfies it; keeping the call next to the rest of the transport wiring is a legibility choice, not a requirement.</div>
+<div class="callout warn"><b>What embedding does not give you today.</b> There are <b>no published NuGet packages</b> — you reference the projects (or pack them yourself), which is fine inside one repository and a decision to make consciously if the consumer lives elsewhere. Configuration is ASP.NET Core configuration, so the host's own settings and StreamForge's share one namespace: <code>DataDir</code>, <code>Http:Port</code>, <code>Grpc:Port</code>, <code>Streams:*</code>, <code>Auth:*</code>, <code>Endpoints:*</code> are all yours to set and yours to avoid colliding with. And the <a href="#limits">single-process topology</a> applies to the embedded case too — embedding does not turn one silo into a cluster.</div>
+
+<h3 id="embedding-engine">Or just the engine</h3>
+<p>The narrower option: <code>StreamForge.Engine</code> is a <b>pure C# library with no Orleans, no Dapr and no ASP.NET Core types in it</b> — tokenizer → parser → validator → planner → interpreted operators, plus the Z-set algebra. That is a deliberate architectural boundary, enforced because both runtime flavors depend on it, and it means you can compile and run this SQL dialect over your own data with no actor runtime at all. What you give up is everything the platform layer provides: persistence, the catalog, lifecycle, connectors, the API and the console. Take the engine alone if you want incremental SQL as a library; take the wiring above if you want the platform.</p>
+</section>
+<section id="tuning">
+<h2>Performance &amp; tuning</h2>
+<p>Every knob below has a measured reason to exist. Defaults are chosen so an untouched instance behaves exactly as it did before the knob was added.</p>
+
+<h3 id="tuning-streams">Stream transport</h3>
+<p>The single largest latency lever, and the one worth checking first. Default <code>--Streams:Transport pull</code> is byte-identical stock Orleans memory streams, tunable with <code>--Streams:PullPeriodMs</code> (default 100). <code>--Streams:Transport push</code> swaps in an in-process push bus: <b>tableDelta p50 1&nbsp;ms versus 115&nbsp;ms on stock pull</b>, measured on this platform's own soak shapes. <code>--Streams:PushCapacity</code> (default 10&nbsp;000) bounds it.</p>
+<div class="callout"><b>This is also the answer to a comparison that used to look like an architecture verdict.</b> An early Orleans-vs-Dapr scoreboard read Dapr p50 7&nbsp;ms against Orleans p50 122&nbsp;ms — and was root-caused not to the actor model but to those pull-based memory streams and their 100&nbsp;ms polling cadence. With the push bus Orleans measures p50 1&nbsp;ms. The full measured scoreboard, including where the two flavors genuinely differ and where the comparison is not apples to apples, is on the <a href="/docs/comparison.html">comparison page</a>.</div>
+
+<h3 id="tuning-tables">Table-level knobs</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Knob</th><th>Reach for it when</th></tr></thead>
+<tbody>
+<tr><td><a href="#tables-persistence"><code>persistence: "Journaled"</code></a></td><td>A large table's flush interval has become a latency knob. Journaled writes O(changed) instead of O(|table|), which is what stops that.</td></tr>
+<tr><td><a href="#tables-persistence"><code>flushMs</code></a></td><td>You want to trade durability window against flush cost. <code>0</code> = 2000&nbsp;ms. Changing it restarts the table.</td></tr>
+<tr><td><a href="#tables-parallel"><code>parallelism</code> (2–16)</a></td><td>A hot stage is blocking the whole table. In our soak, p99 at 4 partitions came in at <b>0.70×</b> the single-partition baseline. <code>CROSS JOIN</code> refuses above 1 — no equi-key to hash on.</td></tr>
+<tr><td><a href="#tables-retention"><code>retentionMaxRows</code> / <code>retentionTtlMs</code></a></td><td>A table grows without bound and the old rows are not part of the answer you want. This changes results, on purpose.</td></tr>
+<tr><td><a href="#tables-shards"><code>shardBy</code></a></td><td>Many keys, read individually and rarely. Buys query locality and swap-out — <b>measured not to be a memory optimization in aggregate</b>.</td></tr>
+<tr><td><code>--Shards:IdleSeconds</code> (120)</td><td>Tuning how long an idle shard stays resident. Below ~90&nbsp;s also needs <code>--Shards:QuantumSeconds</code>, since the silo-wide collection scan must be strictly shorter than any collection age.</td></tr>
+<tr><td><code>TABLES__FLUSHMS</code></td><td>Tuning the epoch flush — parallel tables (<code>parallelism ≥ 2</code>) only.</td></tr>
+</tbody></table></div>
+<p>Memory is worth measuring rather than assuming: a flush amplifier found during plan 011 took a soak shape from <b>287 MB/min to 109 MB/min</b>, and row retention is what makes a table plateau rather than climb. The soak harness itself is <code>tools/soak/run-soak.sh --shape orders|instruments</code> in the repository.</p>
+
+<h3 id="tuning-other">Everything else with a latency or cost story</h3>
+<ul>
+<li><b><code>Auth:PolicyCacheSeconds</code></b> (default 10) is how long a resolved permission set is cached — and therefore the worst-case lag on a <a href="#rbac">revocation</a> landing. Lower is safer and costs a resolve per request more often.</li>
+<li><b>Connector schedules have a 1&nbsp;s floor</b> on <code>intervalMs</code>, so nobody hot-loops a live endpoint, and <a href="#connectors-schedule">failure backoff</a> caps at 15 minutes.</li>
+<li><b><code>batchSize</code></b> on a <a href="#connectors-db">database or CDC source</a> is a target per cycle, not a hard ceiling — a transaction larger than it is delivered whole.</li>
+<li><b><code>Chat:MaxRequestsPerSession</code></b> (default 10) caps the <a href="#aichat">AI control chat</a> per login session; <code>≤0</code> disables the cap.</li>
+<li><b>Sinks never cost latency</b>, by contract — they <a href="#sinks-contract">drop rather than block</a>. If a sink appears to be slowing an entity down, the cause is somewhere else.</li>
+</ul>
+</section>
 <section id="architecture">
 <h2>Architecture</h2>
 <p>One .NET process co-hosts an Orleans silo and the ASP.NET Core API. Orleans <b>virtual actors</b> (grains) own all state — single-threaded per entity, activated on demand:</p>
 <div class="tablewrap"><table>
 <thead><tr><th>Grain</th><th>Key</th><th>Responsibility</th></tr></thead>
 <tbody>
-<tr><td><code>RegistryGrain</code></td><td><code>catalog</code></td><td>Source/pipeline/table catalog, seeding, start/stop orchestration, dependency ordering, resume-on-restart</td></tr>
+<tr><td><code>RegistryGrain</code></td><td><code>catalog</code>, <b>per <a href="#environments">environment</a></b></td><td>Source/pipeline/table catalog, seeding, start/stop orchestration, dependency ordering, resume-on-restart. An environment is the registry <i>key</i>: two environments are two grains with two states, not one filtered read</td></tr>
 <tr><td><code>GeneratorGrain</code></td><td>source name</td><td>Timer-driven synthetic events → <code>sources/{name}</code> stream</td></tr>
 <tr><td><code>PipelineGrain</code></td><td>pipeline id</td><td>Compiles SQL, subscribes to sources, runs the executor, publishes results + metrics, 100-row ring buffer</td></tr>
 <tr><td><code>TableGrain</code></td><td>table name</td><td>Z-set executor, consolidated snapshot (persisted, write-behind), delta stream to downstream tables + UI, search index</td></tr>
 <tr><td><code>UserStoreGrain</code></td><td><code>users</code></td><td>Credential validation, user CRUD</td></tr>
+<tr><td><code>ConnectorGrain</code></td><td>source name</td><td>Drives a non-generator source: the poll loop and its persisted cursor, or a persistent subscription / <a href="#connectors-fix">FIX session</a> (including a <code>fix-duplex</code> session's outbound half)</td></tr>
+<tr><td><code>TableStageGrain</code></td><td>table · stage · partition</td><td>One operator of a <a href="#tables-parallel">parallel table</a>'s compiled plan, one partition of it</td></tr>
+<tr><td><code>TableShardGrain</code></td><td>table · key</td><td>One key's rows and version history on a <a href="#tables-shards">sharded table</a> — deactivates when idle, which is the whole point</td></tr>
+<tr><td><code>TableHistoryGrain</code></td><td>table name</td><td><a href="#tables-history">Row history</a>, fed by the table's own delta stream</td></tr>
+<tr><td><code>CrdtDocGrain</code></td><td>source name</td><td>A <a href="#crdt">Yjs document</a>: merges updates from edges that may have been offline, projects the result to rows</td></tr>
+<tr><td><code>AccessPolicyGrain</code> · <code>ApprovalGrain</code> · <code>AuditLogGrain</code></td><td>singleton · request id · day</td><td>The <a href="#rbac">access document, approval state machine and day-sharded audit log</a></td></tr>
 </tbody></table></div>
 <p>The <b>SQL engine</b> (<code>StreamForge.Engine</code>) is a pure C# library with no Orleans dependency: tokenizer → recursive-descent parser → validator (positioned diagnostics) → planner → interpreted operators. Persistence is a JSON-file grain store (one file per grain state under <code>data/</code>) — debuggable, restart-safe, and swappable for a database provider without touching grain code. The stack is Orleans 10.2.1 on .NET 10; the console is React 19 + Tailwind 4 + shadcn/ui with a bespoke design-token system.</p>
 </section>
 
 <section id="limits">
 <h2>Limitations &amp; design notes</h2>
+<p>The product-level boundaries — what this platform is deliberately not — are in <a href="#positioning-not">Where it fits</a>. What follows is the engineering detail behind them.</p>
 <ul>
+<li><b>Delivery guarantees differ by ingress kind, and none of them is exactly-once.</b> <a href="#connectors-db">Polled database</a> and <a href="#connectors-cdc">CDC</a> sources are <b>at-least-once</b> (a failed cycle keeps the old cursor, so rows are re-read rather than skipped). A <a href="#connectors-fix">FIX session</a> is <b>at-most-once</b> into the platform: QuickFIX/n's sequence layer acknowledges a session, not a row landing in a table. Core NATS without a durable consumer is at-most-once. Idempotence belongs in your SQL — <code>LATEST BY</code> on a key — or downstream.</li>
+<li><b>Egress is fire-and-forget with no backpressure.</b> A <a href="#sinks-contract">sink</a> that cannot deliver counts the failure and drops the row; it never slows or stalls the entity it is attached to, and it does not retry from a queue. The entity's status carries no per-sink field, so a persistently failing sink is visible in the logs and nowhere else.</li>
+<li><b>A CDC delete does not retract anything.</b> Ingress rows are events, and <code>_weight</code> on an inbound row is just a column — the Z-set weights that make a table a multiset come from table SQL. <code>LATEST BY</code> + <code>WHERE _op &lt;&gt; 'd'</code> <a href="#connectors-cdc">hides a deleted key but does not free it</a>.</li>
+<li><b><a href="#environments">Environments</a> are a namespace, not a security boundary.</b> Until <a href="#rbac-grants">grants</a> are scoped to one, any authenticated Editor can address any environment with a header. A source or table name may not contain <code>.</code> going forward, because that is the key separator.</li>
+<li><b>Three features are Orleans-only.</b> <a href="#tables-shards"><code>shardBy</code></a>, <code>parallelism &gt; 1</code> and the <a href="#crdt"><code>crdt</code></a> source kind: the Dapr flavor stores each and refuses to start such an entity, rather than silently degrading. The Dapr flavor is feature-complete in code but behind on live verification — <code>dapr/PARITY.md</code> in the repository is the list of what is descoped, owed and unverified, and is the file to read before relying on it.</li>
+<li><b>Embedding means a project reference.</b> No packages are published to a feed today, so <a href="#embedding">running the platform in your own process</a> means referencing the projects or packing them yourself.</li>
 <li><b>Single-process topology (by design, wherever it runs).</b> Each flavor is one self-contained unit — locally as <code>dotnet run</code>, as a docker compose stack, or as a single Cloud Run service instance (<code>max-instances=1</code>; the Dapr flavor's app+daprd+placement+redis ride in one instance as sidecars). The Orleans programming model is production-shaped, but a multi-silo deployment would swap clustering, stream, and storage providers. Stream delivery is switchable: stock pull-based memory streams (default; 100&nbsp;ms polling cadence, <code>--Streams:PullPeriodMs</code>) or the in-process push bus (<code>--Streams:Transport push</code>, tableDelta p50 1&nbsp;ms vs 115&nbsp;ms stock — see the <a href="/docs/comparison.html">comparison page</a> for the measured scoreboard).</li>
 <li><b>Tables rebuild on restart.</b> Snapshots persist and serve immediately, but operator internals rebuild from live traffic (the <mark>Rebuilding</mark> badge). Full operator-state checkpointing is future work.</li>
 <li><b>Materialized-table <code>CROSS JOIN</code> is single-partition only</b> — it has no equi-key to hash rows on, so <code>Parallelism</code> above 1 is rejected at start with a clear error. <code>INNER</code>/<code>LEFT</code>/<code>RIGHT</code>/<code>FULL OUTER</code> table joins (plus SEMI/ANTI via <code>EXISTS</code>/<code>IN</code> subqueries) have no such restriction — see Materialized tables &rarr; Outer &amp; cross joins for the incremental pad/retract semantics and NULL-key rules.</li>
@@ -1281,7 +1780,7 @@ curl -s -X POST "localhost:5199/api/config/import?mode=merge" \
 </section>
 
 <footer style="margin-top:72px; padding-top:20px; border-top:1px solid var(--border); font-size:13px; color:var(--muted);">
-StreamForge — an Orleans streaming platform demo · Served at <code>/docs</code> by the StreamForge host
+StreamForge — streaming SQL, connectors and governance in one .NET process · Served at <code>/docs</code> by the StreamForge host
 </footer>
 
 </div></main>

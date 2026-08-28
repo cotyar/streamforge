@@ -9,8 +9,17 @@ SPA. Execution plans with acceptance criteria: [`plans/`](plans/README.md). Addi
 (NATS + a `file` sink today; the recipe is one class + one registry line): [`TRANSPORTS.md`](TRANSPORTS.md) —
 which also covers **console UI plugins**: an out-of-tree library can replace the generic config form for its
 own source/sink kind with its own React editor by dropping one ES module in the host's `ui-plugins/`
-directory (`GET /api/ui-plugins`, `Ui:PluginsPath`), with no change under `web/`. Operator-facing
-install instructions: `orleans/docs/index.html` § Console UI plugins. Architecture:
+directory (`GET /api/ui-plugins`, `Ui:PluginsPath`), with no change under `web/` — the plugin gets the
+console's own React, authenticated `api`, its single SignalR connection (`live.subscribe*`) and a lazy
+`loadLiveTables()` (TanStack DB) off `window.streamforge`, `apiVersion: 2`. The SERVER half is the same
+shape: an `IStreamForgePlugin` in the host's `plugins/` directory (`Plugins:Path`) registers its own
+transports at startup, and its config lives in the open **`settings` bag**
+(`ConnectorConfig.Settings`/`SinkSpec.Settings`, a string dictionary — masked by the kind's own
+descriptor, since `SecretWalk` cannot see into a dictionary; a kind whose plugin is absent masks its
+WHOLE bag, failing closed). So an out-of-tree kind adds a config dimension without touching
+`StreamForge.Contracts`; the one thing the bag cannot express is a nested optional group. Operator-facing
+install instructions: `orleans/docs/index.html` §§ Server plugins & out-of-tree kinds / Console UI
+plugins. Architecture:
 [`orleans/ARCHITECTURE.md`](orleans/ARCHITECTURE.md) · [`dapr/ARCHITECTURE.md`](dapr/ARCHITECTURE.md)
 · Dapr's descoped/owed/unverified list: [`dapr/PARITY.md`](dapr/PARITY.md)
 · rationale: [`orleans/DESIGN.md`](orleans/DESIGN.md) · runtime comparison + measured latency:
@@ -126,7 +135,16 @@ the `/sf-env` skill; per-wave outcomes and the found-and-not-fixed list at the e
 ## Environment — non-negotiables
 
 - **dotnet**: `~/.dotnet/dotnet` (SDK 10.0.3xx). It is **NOT on PATH** — always use the full path.
-- **JS tooling**: **bun only, never npm** (build: `bun run build` in the web folder).
+- **JS tooling**: **bun ≥ 1.4, never npm.** The repo root is a **bun workspace** (`package.json`,
+  members `web` + `clients/{typescript,tanstack-db,react}`) with ONE `bun.lock`: the local
+  `@streamforge/*` packages are LINKED, so an edit in `clients/typescript` is what `web` compiles
+  against. Before that they were `file:` deps, which bun COPIES — and since `dist/` is gitignored, a
+  fresh clone copied a package with no build output and `bun run build` failed on
+  `Cannot find module '@streamforge/client'`. `web`'s `prebuild` compiles both client packages, so
+  `bun run build` in `web/` (or `bun run --cwd web build` from the root) is one command from a clean
+  checkout. Bun 1.4 links workspaces **isolated** (pnpm-style), so a package must DECLARE every module
+  it imports or augments — an undeclared transitive dependency that used to be hoisted into reach now
+  fails to resolve.
 - **Ports**: Orleans dev server owns `5199` (REST/SignalR/SPA) + `5299` (gRPC h2c) and is often
   running — never bind or kill it. Dapr flavor: app `5399` (REST/SignalR/SPA), gRPC reserved `5499`
   (not yet served — phase 2), sidecar HTTP `3599` / gRPC `4599`; run via `dapr/tools/run.sh` (dapr
@@ -153,7 +171,8 @@ pinned to the fork's `parity-yjs-13.6.32` branch, NOT `main`; see that project's
 ~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln
 ~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 695 tests — the whole suite must be green
 cd clients/typescript && bun test  # 14 contract + conformance/live-table; boots its own engine on 8199/8299
-cd web && bun run build
+bun install                       # once, at the REPO ROOT — one workspace, one lockfile
+cd web && bun run build           # prebuild compiles @streamforge/client + @streamforge/tanstack-db
 ~/.dotnet/dotnet run --project orleans/src/StreamForge.Host   # :5199 + :5299
 cd dapr && ./tools/run.sh                                      # :5399 (needs `dapr init` done once)
 ```
