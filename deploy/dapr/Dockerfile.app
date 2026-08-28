@@ -9,12 +9,18 @@
 # the Cloud Run multi-container service in deploy/dapr/service.yaml (see deploy/dapr/README.md).
 
 # ---- Stage 1: web SPA (bun only — never npm, see AGENTS.md) ----------------------------------------
-FROM oven/bun:1 AS web-build
-WORKDIR /web
-COPY web/package.json web/bun.lock ./
+FROM oven/bun:1.4 AS web-build
+WORKDIR /src
+# Workspace root, not web/ — see the same stage in deploy/orleans/Dockerfile for why.
+COPY package.json bun.lock ./
+COPY web/package.json web/
+COPY clients/typescript/package.json clients/typescript/
+COPY clients/tanstack-db/package.json clients/tanstack-db/
+COPY clients/react/package.json clients/react/
 RUN bun install --frozen-lockfile
-COPY web/ ./
-RUN bun run build
+COPY web/ web/
+COPY clients/ clients/
+RUN bun run --cwd web build
 
 # ---- Stage 2: .NET publish --------------------------------------------------------------------------
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS dotnet-build
@@ -36,7 +42,7 @@ COPY --from=dotnet-build /app/publish ./
 # Baked-in static assets (decision D-A): the SPA and the shared docs page, pointed at by the two config
 # keys StreamForge.Dapr.Host.Program.cs already reads (Web:Dist / Docs:File, env-mapped as Web__Dist /
 # Docs__File — ASP.NET Core's double-underscore convention for nested config keys).
-COPY --from=web-build /web/dist ./web-dist
+COPY --from=web-build /src/web/dist ./web-dist
 COPY orleans/docs/ ./docs/
 
 COPY deploy/dapr/healthcheck.sh ./healthcheck.sh

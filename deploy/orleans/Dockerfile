@@ -15,16 +15,24 @@
 # ---------------------------------------------------------------------------
 # Stage 1 — SPA build (bun only, never npm — see CLAUDE.md)
 # ---------------------------------------------------------------------------
-FROM oven/bun:1 AS web-build
-WORKDIR /web
+FROM oven/bun:1.4 AS web-build
+WORKDIR /src
 
-# Install first from the lockfile alone so this layer caches across source-only changes.
-COPY web/package.json web/bun.lock ./
+# The console is a member of the repo's bun WORKSPACE (root package.json): @streamforge/client and
+# @streamforge/tanstack-db are linked, not copied, and web's own prebuild compiles them. So the build
+# context is the workspace root, not web/ — copying web/ alone leaves those two dependencies unresolvable.
+# Manifests first, so this layer caches across source-only changes.
+COPY package.json bun.lock ./
+COPY web/package.json web/
+COPY clients/typescript/package.json clients/typescript/
+COPY clients/tanstack-db/package.json clients/tanstack-db/
+COPY clients/react/package.json clients/react/
 RUN bun install --frozen-lockfile
 
-COPY web/ ./
-RUN bun run build
-# → /web/dist
+COPY web/ web/
+COPY clients/ clients/
+RUN bun run --cwd web build
+# → /src/web/dist
 
 # ---------------------------------------------------------------------------
 # Stage 2 — publish StreamForge.Host (and its shared/ + orleans project references)
@@ -53,7 +61,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=dotnet-build /app/publish ./
-COPY --from=web-build /web/dist ./web-dist
+COPY --from=web-build /src/web/dist ./web-dist
 COPY orleans/docs ./docs
 
 # Wishlist #19: ship the .proto contract alongside the image, so a non-.NET client can compile

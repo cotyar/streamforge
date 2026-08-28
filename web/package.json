@@ -3,18 +3,20 @@
   "version": "0.1.0",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "prebuild": "bun run --cwd ../clients/typescript build && bun run --cwd ../clients/tanstack-db build",
+    "build": "tsc -b && vite build"
   },
   "type": "module",
   "dependencies": {
     "@microsoft/signalr": "^10.0.0",
-    "@streamforge/client": "file:../clients/typescript",
     "@radix-ui/react-use-controllable-state": "^1.2.6",
     "@streamdown/cjk": "^1.0.3",
     "@streamdown/code": "^1.1.1",
     "@streamdown/math": "^1.0.2",
     "@streamdown/mermaid": "^1.0.2",
+    "@streamforge/client": "workspace:*",
+    "@streamforge/tanstack-db": "workspace:*",
+    "@tanstack/db": "^0.1.12",
     "@xyflow/react": "^12.11.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

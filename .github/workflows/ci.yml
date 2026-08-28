@@ -10,7 +10,11 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
+      # submodules: external/ycs is a ProjectReference of StreamForge.Connectors.Crdt.Tests — without it
+      # BOTH solutions fail to build (see AGENTS.md's build section).
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -18,15 +22,19 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: '1.4.0'
 
       # The SPA is served by both hosts out of web/dist — build it first so a broken
-      # front-end fails CI too, not just at deploy time.
+      # front-end fails CI too, not just at deploy time. One install at the WORKSPACE ROOT: the
+      # console links @streamforge/client and @streamforge/tanstack-db from clients/, and web's
+      # prebuild compiles both before tsc runs.
       - name: Build web console
-        working-directory: web
         run: |
           bun install --frozen-lockfile
-          bun run build
+          bun run --cwd web build
+
+      - name: Test — TypeScript packages
+        run: bun run --cwd clients/tanstack-db test && bun run --cwd clients/react test && bun test web/test admin/
 
       - name: Build + test — Orleans flavor
         run: dotnet test orleans/StreamForge.sln -c Release --logger 'console;verbosity=normal'
