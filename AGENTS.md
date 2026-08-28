@@ -205,6 +205,13 @@ returned within `DuplexSinkClient.PublishTimeout + 2s`, an explicit upper deadli
 `HttpSinkClientTests` stand up an `HttpListener` on a `GetFreePort()` and wait "within 5s" for the request,
 so they carry both a deadline AND a bind race — `GetFreePort` closes its probe listener before the real one
 binds, which is a TOCTOU another test can lose them under parallel load. All three pass under `--filter`),
+`ShardedTableD2ClusterTests.ShardedTable_KeepsNoPersistedSnapshotMirror` (added to this list 2026-08-28,
+observed failing in 2 of 3 whole-solution runs and passing 4/4 under `--filter` in ~0.5s. Its last
+assertion reads a SHARD grain's view directly, but the only thing it waits for first is the TABLE view's
+row count — and the shard tier is fed asynchronously by the router, so "the table shows 4 rows" does not
+imply "the shards have applied them". Under parallel load the shard has not caught up and `view.Found` is
+false. Same family as its sibling below — an implicit deadline on the shard tier's write-behind — one rung
+weaker still, since here there is no wait at all, only the poll on a different grain),
 `ShardedTableD2ClusterTests.ShardedTable_ResumesAsRebuilding_WithoutTheMirrorToDetectItBy` (added
 2026-08-20 during plan 020 wave C — its shard-history assertion sits behind a fixed `await Task.Delay(600)`
 "to let the write-behind flush persist the HadRows marker", which is the weakest form of deadline: a hard
