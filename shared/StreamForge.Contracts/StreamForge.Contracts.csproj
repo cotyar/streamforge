@@ -8,7 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <!-- Attribute types only ([GenerateSerializer]/[Id]) — no Orleans runtime/codegen. -->
-    <PackageReference Include="Microsoft.Orleans.Serialization.Abstractions" Version="10.2.1" />
+    <PackageReference Include="Microsoft.Orleans.Serialization.Abstractions" Version="10.3.0" />
     <!-- Orleans.Sdk.targets injects this implicitly on the Orleans side; Models.cs relies on it. -->
     <Using Include="Orleans" />
   </ItemGroup>

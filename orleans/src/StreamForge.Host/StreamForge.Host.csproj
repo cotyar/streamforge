@@ -6,13 +6,13 @@
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Grpc.AspNetCore" Version="2.80.0" />
-    <PackageReference Include="Grpc.Reflection" Version="2.80.0" />
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
-    <PackageReference Include="Microsoft.Orleans.Server" Version="10.2.1" />
-    <PackageReference Include="Microsoft.Orleans.Streaming" Version="10.2.1" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.*" />
-    <PackageReference Include="Scalar.AspNetCore" Version="2.16.15" />
+    <PackageReference Include="Grpc.AspNetCore" Version="2.83.0" />
+    <PackageReference Include="Grpc.Reflection" Version="2.83.0" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Orleans.Server" Version="10.3.0" />
+    <PackageReference Include="Microsoft.Orleans.Streaming" Version="10.3.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.11" />
+    <PackageReference Include="Scalar.AspNetCore" Version="2.17.2" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\..\shared\StreamForge.Engine\StreamForge.Engine.csproj" />
