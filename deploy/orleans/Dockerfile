@@ -45,6 +45,7 @@ WORKDIR /src
 # web/, already built by stage 1).
 COPY shared/ shared/
 COPY orleans/ orleans/
+COPY external/ycs/ external/ycs/
 
 RUN dotnet publish orleans/src/StreamForge.Host -c Release -o /app/publish
 

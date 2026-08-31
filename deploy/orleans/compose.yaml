@@ -23,6 +23,13 @@ services:
       - "6199:8080"
     environment:
       PORT: "8080"
+      # Local demo front ends that subscribe directly over REST + SignalR.
+      # Keep localhost:5173 for the built-in SPA as well.
+      Cors__AllowedOrigins__0: "http://localhost:5173"
+      Cors__AllowedOrigins__1: "https://otc-terms.ac-co.localhost:1355"
+      Cors__AllowedOrigins__2: "https://otc-addin.ac-co.localhost:1355"
+      Cors__AllowedOrigins__3: "https://aqua-demo.ac-co.localhost:1355"
+      Cors__AllowedOrigins__4: "https://aqua-addin.ac-co.localhost:1355"
       # AI control chat (plan 007 D-D) reads GEMINI_API_KEY (or Gemini__ApiKey); passed through
       # only if set on the host — unset means the chat endpoint 503s with a friendly message,
       # which is expected out of the box.

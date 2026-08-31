@@ -8,11 +8,11 @@
   <ItemGroup>
     <!-- Plan 005 W4: latest stable line matching the initialized Dapr runtime (1.18.1 — see
          dapr/ARCHITECTURE.md). -->
-    <PackageReference Include="Dapr.AspNetCore" Version="1.18.4" />
-    <PackageReference Include="Dapr.Actors.AspNetCore" Version="1.18.4" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.*" />
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
-    <PackageReference Include="Scalar.AspNetCore" Version="2.16.15" />
+    <PackageReference Include="Dapr.AspNetCore" Version="1.18.5" />
+    <PackageReference Include="Dapr.Actors.AspNetCore" Version="1.18.5" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.11" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
+    <PackageReference Include="Scalar.AspNetCore" Version="2.17.2" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\..\shared\StreamForge.Engine\StreamForge.Engine.csproj" />
