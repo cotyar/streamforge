@@ -37,7 +37,7 @@ Three user asks:
 
 - **D-A — self-contained Cloud Run services, one per flavor.**
   - *Orleans*: single container. Multi-stage Dockerfile: `oven/bun` stage builds `web/dist`,
-    `dotnet/sdk:10.0` publishes `StreamForge.Host`, `dotnet/aspnet:10.0` runtime with SPA +
+    `dotnet/sdk:10.0` publishes `StreamsForge.Host`, `dotnet/aspnet:10.0` runtime with SPA +
     `orleans/docs` baked in. Cloud Run injects `PORT` → `ASPNETCORE_URLS=http://0.0.0.0:$PORT`
     (both hosts already honor `urls`). Single-silo localhost clustering; `max-instances 1`;
     data dir ephemeral — a cold start reseeds the demo catalog (documented, acceptable for a
@@ -54,7 +54,7 @@ Three user asks:
     and double as the admin app's "local" driver. Compose host ports: orleans **6199**, dapr
     app **6399** (never 5199/5299/5399 — dev servers own those).
 - **D-B — `/healthz` in shared Api** (anonymous, `{status, flavor, time}`; flavor carried on
-  `StreamForgeApiOptions`). One implementation → both hosts, the admin app, compose
+  `StreamsForgeApiOptions`). One implementation → both hosts, the admin app, compose
   healthchecks, and Cloud Run startup probes all use it. Orchestrator does this pre-wave (W0)
   since every later wave leans on it.
 - **D-C — admin app = `admin/`, bun, zero deps, port 5599.** One `main.ts` (Bun.serve) + one
@@ -62,9 +62,9 @@ Three user asks:
   `local` shells out to `docker compose -f deploy/<flavor>/compose.yaml up -d|down|ps`;
   `cloudrun` shells out to `gcloud run services update|describe` (scale-to-zero = stop).
   Health = polling each flavor's `/healthz`. It never binds or signals the dev servers on
-  5199/5299/5399 — it manages containers and Cloud Run services only. StreamForge text wordmark only.
-- **D-D — AI control chat implemented ONCE, in `shared/StreamForge.Api/Chat/`** — both flavors
-  get it with zero host edits (registered inside `AddStreamForgeApi`/`MapStreamForgeApi`,
+  5199/5299/5399 — it manages containers and Cloud Run services only. StreamsForge text wordmark only.
+- **D-D — AI control chat implemented ONCE, in `shared/StreamsForge.Api/Chat/`** — both flavors
+  get it with zero host edits (registered inside `AddStreamsForgeApi`/`MapStreamsForgeApi`,
   exactly like every other shared endpoint). `POST /api/chat` (Editor policy): server-side
   Anthropic Messages API tool loop over the **existing facades** — list/create/update/pause/
   resume/delete sources, list/create pipelines + validate SQL, list tables + rows/search +
@@ -79,18 +79,18 @@ Three user asks:
 
 ## Waves
 
-Gates everywhere: `~/.dotnet/dotnet test orleans/StreamForge.sln` (512 green, existing test
-files unmodified) + `dapr/StreamForge.Dapr.sln` green + `bun run build` green. Implementation
+Gates everywhere: `~/.dotnet/dotnet test orleans/StreamsForge.sln` (512 green, existing test
+files unmodified) + `dapr/StreamsForge.Dapr.sln` green + `bun run build` green. Implementation
 agents = Sonnet 5, high effort, parallel where ownership is disjoint. Orchestrator commits
 between waves, pushes after stable waves.
 
 | Wave | Agents | Owns | Work | Acceptance |
 |---|---|---|---|---|
 | **P** | orchestrator | `plans/007*`, `plans/README.md` | this plan, committed first | committed |
-| **W0** | orchestrator | `shared/StreamForge.Api/StreamForgeApiExtensions.cs` + `StreamForgeApiOptions` + both `Program.cs` (flavor arg) | `/healthz` | both suites green; live 200 on both flavors (isolated ports) |
+| **W0** | orchestrator | `shared/StreamsForge.Api/StreamsForgeApiExtensions.cs` + `StreamsForgeApiOptions` + both `Program.cs` (flavor arg) | `/healthz` | both suites green; live 200 on both flavors (isolated ports) |
 | **W1A** | 1 | `deploy/orleans/**`, `deploy/README.md`, root `.dockerignore` | Orleans image + compose + Cloud Run `service.yaml` + `deploy.sh` | `docker build` green; compose up on 6199 → healthz+login+SPA; down clean |
 | **W1B** | 1 (parallel) | `deploy/dapr/**` | app image + components-baked daprd image + compose (app/daprd/placement/redis) + multi-container `service.yaml` + `deploy.sh` | compose up on 6399 → healthz+login+CRUD+live SignalR events; down clean |
-| **W1C** | 1 (parallel) | `shared/StreamForge.Api/Chat/**` + registration lines in `StreamForgeApiExtensions.cs` + new test files | chat backend per D-D | suites green; stub-loop test proves ≥2 tool round-trips; live 503-when-unset + stub-driven create-source on isolated port |
+| **W1C** | 1 (parallel) | `shared/StreamsForge.Api/Chat/**` + registration lines in `StreamsForgeApiExtensions.cs` + new test files | chat backend per D-D | suites green; stub-loop test proves ≥2 tool round-trips; live 503-when-unset + stub-driven create-source on isolated port |
 | **W2A** | 1 | `web/**` | chat UI (DTOs pinned verbatim from W1C) | `bun run build`; live chat against stubbed backend |
 | **W2B** | 1 (parallel) | `admin/**` | admin app per D-C | live: starts orleans compose stack, health turns green, stops it; cloudrun driver dry-run (`--help`/describe against no service → clean error surface) |
 | **W3** | orchestrator (+1 agent if needed) | docs (`orleans/docs/index.html`, `AGENTS.md`, `plans/*`) | full sweep: both suites, both docker builds, both compose stacks live side by side, admin drives both, chat stub loop; docs synced; status → DONE; push | everything above green in one pass |

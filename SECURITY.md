@@ -3,13 +3,13 @@
 ## Reporting a vulnerability
 
 Please report security issues privately through
-[GitHub's private vulnerability reporting](https://github.com/cotyar/streamforge/security/advisories/new)
+[GitHub's private vulnerability reporting](https://github.com/cotyar/streamsforge/security/advisories/new)
 rather than a public issue. Expect a first response within a few days; this is a side project, not
 a vendor with an on-call rotation.
 
 ## What this project is — and is not
 
-StreamForge is a **reference implementation and demo**, not a hardened production system. Before
+StreamsForge is a **reference implementation and demo**, not a hardened production system. Before
 pointing it at anything real, know that:
 
 - **The seeded demo users are public knowledge** (`admin/admin123!`, `editor/editor123!`,

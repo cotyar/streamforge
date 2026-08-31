@@ -1,12 +1,12 @@
 /**
  * Ad-hoc SQL: validate (creates nothing) -> POST /api/config/import?mode=merge (create-or-update)
  * -> LiveTable. Two-stage flow, the `adhoc_` name slug and the drop-outside-the-namespace refusal
- * are ported from otc-terms' lib/streamforge/adhoc.ts (runAdhocQuery/adhocTableName/
- * dropAdhocTable) via clients/python/src/streamforge/sql.py. Always REST: there is no gRPC RPC
+ * are ported from otc-terms' lib/streamsforge/adhoc.ts (runAdhocQuery/adhocTableName/
+ * dropAdhocTable) via clients/python/src/streamsforge/sql.py. Always REST: there is no gRPC RPC
  * for config import.
  */
 
-import { StreamForgeError, SqlError, type SqlDiagnostic } from "./errors.js";
+import { StreamsForgeError, SqlError, type SqlDiagnostic } from "./errors.js";
 import type { RestClient } from "./http.js";
 import * as tablesModule from "./tables.js";
 import type { ConfigImportReport, TableDefinitionDto, TableValidateResponse } from "./types.js";
@@ -92,14 +92,14 @@ export async function listAdhoc(http: RestClient): Promise<TableDefinitionDto[]>
 
 export async function dropAdhoc(http: RestClient, name: string): Promise<boolean> {
   if (!name.startsWith(ADHOC_PREFIX)) {
-    throw new StreamForgeError(`refusing to drop non-ad-hoc table '${name}'`);
+    throw new StreamsForgeError(`refusing to drop non-ad-hoc table '${name}'`);
   }
   const match = await tablesModule.getTable(http, name);
   if (match === null) return false;
   const res = await http.delete(`/api/tables/${encodeURIComponent(match.id)}`);
   if (res.status === 404) return false;
   if (res.status !== 200 && res.status !== 204) {
-    throw new StreamForgeError(`drop '${name}' failed: ${res.status} ${await res.text()}`);
+    throw new StreamsForgeError(`drop '${name}' failed: ${res.status} ${await res.text()}`);
   }
   return true;
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// StreamForge admin MCP server (plan 013) — stdio transport, hand-written to the MCP specification.
+// StreamsForge admin MCP server (plan 013) — stdio transport, hand-written to the MCP specification.
 //
 // Protocol, in full: newline-delimited JSON-RPC 2.0 on stdin/stdout, with `initialize`,
 // `notifications/initialized`, `ping`, `tools/list` and `tools/call`. That is the entire server half
@@ -13,7 +13,7 @@
 //   bun admin/mcp.ts          # or: bun admin/sf.ts mcp
 //
 // Claude Code / Claude Desktop config:
-//   { "mcpServers": { "streamforge": { "command": "bun",
+//   { "mcpServers": { "streamsforge": { "command": "bun",
 //       "args": ["/abs/path/to/admin/mcp.ts"],
 //       "env": { "SF_URL": "http://localhost:5199", "SF_USER": "admin", "SF_PASSWORD": "...",
 //                 "SF_ENV": "staging" } } } }
@@ -30,7 +30,7 @@
 
 import { APPROVAL_STATES, isKind, KINDS, SfClient, SfError, toApprovalState, type Kind } from "./sfclient.ts";
 
-const SERVER_NAME = "streamforge-admin";
+const SERVER_NAME = "streamsforge-admin";
 const SERVER_VERSION = "1.0.0";
 
 /** Protocol revisions this server implements, newest first. The spec's rule: echo the client's
@@ -38,7 +38,7 @@ const SERVER_VERSION = "1.0.0";
  * whether it can live with that. */
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS = `Administers a running StreamForge instance (either runtime flavor) over its REST API:
+const INSTRUCTIONS = `Administers a running StreamsForge instance (either runtime flavor) over its REST API:
 catalog, entity lifecycle, SQL validation, rows/results, and config export/import.
 
 Entity ids: sources are addressed by NAME, pipelines and tables by ID. list_entities returns both.
@@ -140,7 +140,7 @@ export const TOOLS: Tool[] = [
   {
     name: "health",
     title: "Instance health",
-    description: "Liveness of the StreamForge instance, plus the identity this server authenticates as.",
+    description: "Liveness of the StreamsForge instance, plus the identity this server authenticates as.",
     inputSchema: { type: "object", properties: {} },
     annotations: READ_ONLY,
     run: async (_args, client) => ({
@@ -529,7 +529,7 @@ export async function handle(message: JsonRpcRequest, client: SfClient): Promise
           ? requested
           : SUPPORTED_PROTOCOL_VERSIONS[0],
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: SERVER_NAME, title: "StreamForge Admin", version: SERVER_VERSION },
+        serverInfo: { name: SERVER_NAME, title: "StreamsForge Admin", version: SERVER_VERSION },
         instructions: INSTRUCTIONS,
       });
       return;

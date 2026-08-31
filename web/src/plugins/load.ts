@@ -10,7 +10,7 @@ import { pluginHost } from './registry'
  * starting.
  */
 export async function loadUiPlugins(): Promise<void> {
-  window.streamforge = pluginHost
+  window.streamsforge = pluginHost
 
   let urls: string[] = []
   try {
@@ -24,7 +24,7 @@ export async function loadUiPlugins(): Promise<void> {
   await Promise.all(
     urls.map((url) =>
       import(/* @vite-ignore */ url).catch((e: unknown) => {
-        console.error(`[streamforge] UI plugin failed to load: ${url}`, e)
+        console.error(`[streamsforge] UI plugin failed to load: ${url}`, e)
       }),
     ),
   )

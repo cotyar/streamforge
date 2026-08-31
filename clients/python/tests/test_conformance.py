@@ -9,7 +9,7 @@ import pathlib
 
 import pytest
 
-from streamforge._zset import ZSet
+from streamsforge._zset import ZSet
 
 CASES_PATH = pathlib.Path(__file__).resolve().parents[2] / "conformance" / "zset-cases.json"
 CASES = json.loads(CASES_PATH.read_text())["cases"]

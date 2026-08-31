@@ -16,7 +16,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { canonicalKey } from "@streamforge/client";
+import { canonicalKey } from "@streamsforge/client";
 import { LiveTableView } from "../src/index.js";
 
 afterEach(cleanup);

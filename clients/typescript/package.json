@@ -1,7 +1,7 @@
 {
-  "name": "@streamforge/client",
+  "name": "@streamsforge/client",
   "version": "0.2.0",
-  "description": "TypeScript client for StreamForge live tables (gRPC + SignalR).",
+  "description": "TypeScript client for StreamsForge live tables (gRPC + SignalR).",
   "type": "module",
   "license": "MIT",
   "main": "./dist/index.js",
@@ -17,7 +17,7 @@
     "src/proto"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && mkdir -p dist/proto && cp src/proto/streamforge.proto dist/proto/streamforge.proto",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/proto && cp src/proto/streamsforge.proto dist/proto/streamsforge.proto",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:test": "tsc -p tsconfig.test.json",
     "test": "bun test"

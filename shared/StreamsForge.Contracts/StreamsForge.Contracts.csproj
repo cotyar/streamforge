@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>StreamsForge.Abstractions</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Attribute types only ([GenerateSerializer]/[Id]) — no Orleans runtime/codegen. -->
+    <PackageReference Include="Microsoft.Orleans.Serialization.Abstractions" Version="10.3.0" />
+    <!-- Orleans.Sdk.targets injects this implicitly on the Orleans side; Models.cs relies on it. -->
+    <Using Include="Orleans" />
+  </ItemGroup>
+</Project>

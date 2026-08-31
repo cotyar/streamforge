@@ -1,4 +1,4 @@
-"""Contract-test fixture: boots an ISOLATED StreamForge instance on 9199/9299 (never
+"""Contract-test fixture: boots an ISOLATED StreamsForge instance on 9199/9299 (never
 5199/5299 -- the live dev server -- and never 6199 -- the demo container), imports a tiny config
 (one ingest source, one LATEST BY table, one aggregate over that derived LATEST BY), and tears it
 down after the session. Asserts the ports are free first and skips with a clear message rather
@@ -29,7 +29,7 @@ _FORBIDDEN_PORTS = {5199, 5299, 6199}
 
 DOTNET = os.path.expanduser("~/.dotnet/dotnet")
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.normpath(os.path.join(_THIS_DIR, "..", "..", "..", "orleans", "src", "StreamForge.Host"))
+PROJECT_DIR = os.path.normpath(os.path.join(_THIS_DIR, "..", "..", "..", "orleans", "src", "StreamsForge.Host"))
 
 BASE_URL = f"http://localhost:{HTTP_PORT}"
 GRPC_TARGET = f"localhost:{GRPC_PORT}"
@@ -155,7 +155,7 @@ def _import_fixture_config() -> None:
 
 def _publish(publish_dir: str) -> None:
     """`dotnet publish` into an isolated directory nothing else owns. The live demo on 6199 is
-    itself a plain `dotnet run --project orleans/src/StreamForge.Host` process, so it holds files
+    itself a plain `dotnet run --project orleans/src/StreamsForge.Host` process, so it holds files
     open under THIS project's own `bin/`/`obj/` output -- any further `dotnet run`/`build` of the
     same project collides with it (observed: MSBuild's implicit content-copy of `data/state/*`,
     which the ASP.NET Core SDK auto-includes, hung retrying against a file the live process had
@@ -180,7 +180,7 @@ def engine():
     if not os.path.exists(DOTNET):
         pytest.skip(f"dotnet not found at {DOTNET} -- cannot boot the contract-test engine")
     if not os.path.isdir(PROJECT_DIR):
-        pytest.skip(f"StreamForge.Host project not found at {PROJECT_DIR}")
+        pytest.skip(f"StreamsForge.Host project not found at {PROJECT_DIR}")
 
     # A publish takes ~2 minutes; SF_TEST_PUBLISH_DIR reuses one across runs while iterating.
     prebuilt = os.environ.get("SF_TEST_PUBLISH_DIR")
@@ -194,7 +194,7 @@ def engine():
             shutil.rmtree(data_dir, ignore_errors=True)
             pytest.skip(f"could not publish an isolated engine build: {exc}")
 
-    dll = os.path.join(publish_dir, "StreamForge.Host.dll")
+    dll = os.path.join(publish_dir, "StreamsForge.Host.dll")
     proc = subprocess.Popen(
         [
             DOTNET, dll,

@@ -1,4 +1,4 @@
-# StreamForge — Orleans flavor — Cloud Run v1 (Knative) Service manifest.
+# StreamsForge — Orleans flavor — Cloud Run v1 (Knative) Service manifest.
 #
 # Templated with ${IMAGE} (and optionally ${GEMINI_API_KEY}) — deploy.sh envsubst's this before
 # `gcloud run services replace`. Single-container, single-silo localhost clustering (decision D-A):
@@ -11,9 +11,9 @@
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: streamforge-orleans
+  name: streamsforge-orleans
   labels:
-    app: streamforge
+    app: streamsforge
     flavor: orleans
   annotations:
     run.googleapis.com/launch-stage: BETA
@@ -26,7 +26,7 @@ spec:
         autoscaling.knative.dev/minScale: "0"
         autoscaling.knative.dev/maxScale: "1"
         # Instance-based billing (CPU allocated for the whole instance lifetime, not just during
-        # requests): StreamForge does background work between requests — generators, pipelines,
+        # requests): StreamsForge does background work between requests — generators, pipelines,
         # table actors — and request-based CPU throttling would freeze the streams mid-demo.
         # Scale-to-zero above still applies, so you only pay while an instance is awake.
         run.googleapis.com/cpu-throttling: "false"

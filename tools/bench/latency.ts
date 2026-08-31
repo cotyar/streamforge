@@ -6,8 +6,8 @@
 // `tableDelta` ASSERT (weight === 1) on the seeded `order_states` table — identical on both runtimes
 // (same SeedCatalog, same shared endpoint/hub contract, decision D-B). `order_states` is
 // `SELECT ... stage_ts, ... FROM order_events LATEST BY (order_id)`
-// (shared/StreamForge.AppCore/SeedCatalog.cs): `stage_ts` is copied verbatim from the generator's own
-// `_ts` at event-creation time (shared/StreamForge.AppCore/Generators/MarketDataProfiles.cs:
+// (shared/StreamsForge.AppCore/SeedCatalog.cs): `stage_ts` is copied verbatim from the generator's own
+// `_ts` at event-creation time (shared/StreamsForge.AppCore/Generators/MarketDataProfiles.cs:
 // `evt["stage_ts"] = evt[EventRecord.TimestampField]`), i.e. it is the exact instant the synthetic
 // event was generated — NOT a receipt/processing timestamp — so
 // `latency_ms = client wall clock at delta arrival - row.stage_ts` is a genuine end-to-end number:

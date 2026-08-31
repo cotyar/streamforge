@@ -1,4 +1,0 @@
-<Solution>
-  <Project Path="StreamForge.Client.Tests/StreamForge.Client.Tests.csproj" />
-  <Project Path="StreamForge.Client/StreamForge.Client.csproj" />
-</Solution>

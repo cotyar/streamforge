@@ -1,4 +1,4 @@
-"""Contract tests against a real, isolated StreamForge instance (see conftest.py), parametrized
+"""Contract tests against a real, isolated StreamsForge instance (see conftest.py), parametrized
 over every live transport -- one set of assertions proving gRPC and all three SignalR wire modes
 are actually interchangeable, per the Transport interface's whole reason for existing.
 """
@@ -10,14 +10,14 @@ import uuid
 
 import pytest
 
-import streamforge
+import streamsforge
 
 TRANSPORTS = ["grpc", "signalr:ws", "signalr:sse", "signalr:lp"]
 
 
 @pytest.fixture(params=TRANSPORTS)
 def sf(request, engine):
-    client = streamforge.connect(
+    client = streamsforge.connect(
         url=engine["base_url"],
         grpc=engine["grpc"],
         user=engine["user"],
@@ -116,13 +116,13 @@ def test_on_change_callback_fires(sf, engine):
 def test_ingest_row_errors_on_bad_row(sf, engine):
     # A string where a Double is declared fails coercion under this source's default
     # OnCoercionFailure -- a real rejection, not a lenient null-fill.
-    with pytest.raises(streamforge.IngestRejected) as excinfo:
+    with pytest.raises(streamsforge.IngestRejected) as excinfo:
         _push(sf, engine, [{"trade_id": f"t-{uuid.uuid4().hex[:8]}", "desk": "Ops", "notional": "not-a-number"}])
     assert excinfo.value.row_errors or str(excinfo.value)
 
 
 def test_validate_rejects_bad_sql(sf):
-    with pytest.raises(streamforge.SqlError) as excinfo:
+    with pytest.raises(streamsforge.SqlError) as excinfo:
         sf.sql("SELECT nonexistent_column FROM nowhere_table", name=f"bad_{uuid.uuid4().hex[:6]}")
     err = excinfo.value
     assert err.diagnostics

@@ -1,9 +1,9 @@
 # sf-ts-consumer
 
-A standalone [bun](https://bun.sh) process proving polyglot reach over StreamForge's Dapr pub/sub
+A standalone [bun](https://bun.sh) process proving polyglot reach over StreamsForge's Dapr pub/sub
 (plan 005, wave W8-B) — no Dapr SDK, no npm dependencies, `Bun.serve()` is enough.
 
-It runs with its own Dapr sidecar (a separate `--app-id` from the main `streamforge-dapr` host) and
+It runs with its own Dapr sidecar (a separate `--app-id` from the main `streamsforge-dapr` host) and
 subscribes to two of the platform's frozen envelope topics (see `dapr/POLYGLOT.md`):
 
 - `sf-table-delta` → `TableDeltaEnvelope` (`{ table, seq, deltas: [{ row, weight }] }`)
@@ -59,7 +59,7 @@ are free afterwards (`lsof -i :8499` etc.) before starting anything else on thos
 
 ## Note on the shared pubsub component
 
-The shared `dapr/components/pubsub.yaml` was originally scoped to app-id `streamforge-dapr` only,
+The shared `dapr/components/pubsub.yaml` was originally scoped to app-id `streamsforge-dapr` only,
 which blocked every polyglot processor's sidecar (`ERR_PUBSUB_NOT_FOUND`). The scope was removed
 after this wave landed — all processors now run against `--resources-path ../../components`
 directly, as documented above. (Verification during the wave used a temporary local component copy,

@@ -1,9 +1,9 @@
 /**
- * @streamforge/react -- React bindings for @streamforge/client.
+ * @streamsforge/react -- React bindings for @streamsforge/client.
  *
- *   <StreamForgeProvider url="http://localhost:5199" user="admin" password="admin123!">
+ *   <StreamsForgeProvider url="http://localhost:5199" user="admin" password="admin123!">
  *     <LiveTablePanel name="trigger_monitor" />
- *   </StreamForgeProvider>
+ *   </StreamsForgeProvider>
  *
  * Nothing here re-implements the wire protocol: the provider owns one `connect()`ed `Client`,
  * the hooks own one `LiveTable` each (which already does subscribe -> buffer -> snapshot ->
@@ -11,8 +11,8 @@
  * hooks return. See README.md for the split, and clients/typescript for the client itself.
  */
 
-export { StreamForgeProvider, useStreamForge, useStreamForgeStatus } from "./provider.js";
-export type { StreamForgeProviderProps, StreamForgeStatus } from "./provider.js";
+export { StreamsForgeProvider, useStreamsForge, useStreamsForgeStatus } from "./provider.js";
+export type { StreamsForgeProviderProps, StreamsForgeStatus } from "./provider.js";
 
 export { useLiveTable, useLiveSql, useTables } from "./hooks.js";
 export type { LiveTableState, UseLiveTableOptions, UseLiveSqlOptions, TablesState } from "./hooks.js";

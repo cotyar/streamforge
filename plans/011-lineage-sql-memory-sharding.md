@@ -46,10 +46,10 @@ large one and depends on C's soak harness for its proof.
 
 ## Wave A — Lineage edges *(small, Sonnet 5)*
 
-**Root cause** — `orleans/src/StreamForge.Host/Grains/RegistryGrain.cs:55-59` adds
+**Root cause** — `orleans/src/StreamsForge.Host/Grains/RegistryGrain.cs:55-59` adds
 `SeedCatalog.Pipelines()` raw, while the block immediately below (`:61-82`) compiles every seeded
 *table* and assigns `StreamInputs`/`TableInputs`. Dapr has the identical asymmetry at
-`dapr/src/StreamForge.Dapr.Host/Catalog/CatalogStore.cs:61` vs `:66-90`. The only writers of
+`dapr/src/StreamsForge.Dapr.Host/Catalog/CatalogStore.cs:61` vs `:66-90`. The only writers of
 `SourceNames` are Create/Update (`RegistryGrain.cs:250,281` via `ApplyPipelineCompileResult` at
 `:670`; `CatalogStore.cs:149,178,514`). Starting a pipeline does not backfill it either —
 `PipelineGrain.StartAsync` compiles but keeps `SourceNames` local (`PipelineGrain.cs:57-63`).
@@ -141,7 +141,7 @@ Fix the seed: `order_states` (`SeedCatalog.cs:125-133`) is the demo that eats th
 it retention or stop seeding it Running — but it must not be a table whose stock configuration grows
 without bound.
 
-`EpochBuffer` (`shared/StreamForge.Engine/Dataflow/EpochBuffer.cs:31`) exposes `BatchCount`/`DeltaCount`
+`EpochBuffer` (`shared/StreamsForge.Engine/Dataflow/EpochBuffer.cs:31`) exposes `BatchCount`/`DeltaCount`
 "so a caller can apply backpressure" and **no caller reads either**; a stalled upstream pins the
 frontier and the buffer grows unbounded, as does `TableStageGrain._originByBatch` (`:31`, drained only
 inside the `observation.Advanced` branch). Wire the signal to a bound with a loud status, or state in
@@ -188,7 +188,7 @@ delta stream is the event log"). So the SQL path, the planner, the partitioned d
 downstream table-over-table subscriber are untouched.
 
 - `TableShardGrain`, key `{table}|{encodedShardKey}` — one `ConsolidationLedger` (reused as-is,
-  `shared/StreamForge.Engine/Runtime/ConsolidationLedger.cs`) for that key's rows plus that key's version
+  `shared/StreamsForge.Engine/Runtime/ConsolidationLedger.cs`) for that key's rows plus that key's version
   history via the existing pure `TableRowHistoryRetention`. Persists under the table's own
   `TablePersistenceMode`/`FlushMs`. **Critically: no `DelayDeactivation`** — an idle shard deactivates and
   its state lives on disk until the next lookup. That is the entire memory win.
@@ -204,7 +204,7 @@ downstream table-over-table subscriber are untouched.
 
 Explicit `ShardBy` columns, validated against `OutputFields` at upsert (same 409-style guard shape as
 `ValidateParallelism`, `RegistryGrain.cs:619-628`). `TableGroupKeyExtractor.ExtractIdentityColumns`
-(`shared/StreamForge.AppCore/History/TableRowHistory.cs:37`) is best-effort *textual* matching — fine for
+(`shared/StreamsForge.AppCore/History/TableRowHistory.cs:37`) is best-effort *textual* matching — fine for
 history's fallback, not fine as the thing that decides which grain owns a row. Use it only to
 **suggest a default** in the console, never to silently pick one.
 
@@ -221,7 +221,7 @@ history's fallback, not fine as the thing that decides which grain owns a row. U
 
 ### Surfaces
 
-Key-addressed read on the tables group (`shared/StreamForge.Api/Endpoints/TablesEndpoints.cs`), modelled
+Key-addressed read on the tables group (`shared/StreamsForge.Api/Endpoints/TablesEndpoints.cs`), modelled
 on the existing `POST /{id}/history/lookup` + `HistoryLookupRequest(Dictionary<string, object?> Row)`
 (`Dtos.cs:91`) — that endpoint is already the repo's precedent for "address a row by its identity
 columns". Per-key rows, per-key history, and shard metrics (shard count, active/resident shards). Console:

@@ -209,7 +209,7 @@ function EntityDefinitionCard({ entity }: { entity: DynamicEntityMetaDto }) {
 }
 
 function ConnectCard({ entity, grpcPort }: { entity: DynamicEntityMetaDto; grpcPort: number }) {
-  const grpcurlCmd = `grpcurl -plaintext localhost:${grpcPort} describe streamforge.dynamic.v1.${entity.messageName}`
+  const grpcurlCmd = `grpcurl -plaintext localhost:${grpcPort} describe streamsforge.dynamic.v1.${entity.messageName}`
   const genClientCmd = `./tools/generate-client.sh ${entity.kind} ${entity.id} --user editor --pass 'editor123!'`
 
   return (
@@ -437,11 +437,11 @@ function LiveDataCard({ entity }: { entity: DynamicEntityMetaDto }) {
 // ============================================================================
 
 const STATIC_SERVICE_FILE: Record<string, string> = {
-  SourceService: 'streamforge.proto',
-  PipelineService: 'streamforge.proto',
-  TableService: 'streamforge.proto',
-  StreamService: 'streamforge.proto',
-  DynamicStreamService: 'streamforge_dynamic.proto',
+  SourceService: 'streamsforge.proto',
+  PipelineService: 'streamsforge.proto',
+  TableService: 'streamsforge.proto',
+  StreamService: 'streamsforge.proto',
+  DynamicStreamService: 'streamsforge_dynamic.proto',
 }
 
 function ServiceDetail({ name, staticProtos, grpcPort }: { name: string; staticProtos: StaticProtoDto[]; grpcPort: number }) {
@@ -464,7 +464,7 @@ function ServiceDetail({ name, staticProtos, grpcPort }: { name: string; staticP
           </div>
           <div>
             <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Describe a message</p>
-            <SnippetRow text={`grpcurl -plaintext localhost:${grpcPort} describe streamforge.dynamic.v1.<MessageName>`} />
+            <SnippetRow text={`grpcurl -plaintext localhost:${grpcPort} describe streamsforge.dynamic.v1.<MessageName>`} />
           </div>
         </CardContent>
       </Card>
@@ -675,7 +675,7 @@ export function ApiExplorerPage() {
     <div>
       <Topbar
         title="API Explorer"
-        subtitle="Browse StreamForge's gRPC reflection surface: services, protobuf definitions, and live decoded data."
+        subtitle="Browse StreamsForge's gRPC reflection surface: services, protobuf definitions, and live decoded data."
       />
 
       <div className="flex">

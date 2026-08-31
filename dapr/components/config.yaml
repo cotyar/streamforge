@@ -1,7 +1,7 @@
 apiVersion: dapr.io/v1alpha1
 kind: Configuration
 metadata:
-  name: streamforge-dapr-config
+  name: streamsforge-dapr-config
 spec:
   tracing:
     samplingRate: "0"

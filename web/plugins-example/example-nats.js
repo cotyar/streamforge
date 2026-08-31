@@ -4,7 +4,7 @@
 //
 // This one replaces the generic descriptor form for the `nats` SOURCE with a hand-written editor. Delete
 // the third argument to `registerTransportEditor` to serve the sink half too.
-const { react, registerTransportEditor } = window.streamforge
+const { react, registerTransportEditor } = window.streamsforge
 const h = react.createElement
 
 function NatsEditor({ value, onChange, disabled, idPrefix }) {

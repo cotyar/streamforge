@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Plan 015 wave 2-B: the LIVE half of the authorization coverage work.
 #
-# orleans/tests/StreamForge.Host.Tests/AuthorizationCoverageTests.cs pins which policy is ATTACHED to
+# orleans/tests/StreamsForge.Host.Tests/AuthorizationCoverageTests.cs pins which policy is ATTACHED to
 # which route, by reading the EndpointDataSource without ever binding a port. That test cannot tell you
 # whether the policy is ENFORCED — a policy registered to require nothing at all satisfies it. This
 # script answers the other half: it starts an isolated instance, logs in as each of the three seeded
@@ -67,7 +67,7 @@ HOSTLOG="$DATADIR/host.log"
 log "=== authz matrix on :$HTTP_PORT (grpc :$GRPC_PORT), DataDir $DATADIR ==="
 
 (
-  cd "$REPO_ROOT" && exec "$DOTNET_BIN" run --project orleans/src/StreamForge.Host -- \
+  cd "$REPO_ROOT" && exec "$DOTNET_BIN" run --project orleans/src/StreamsForge.Host -- \
     --Http:Port "$HTTP_PORT" --Grpc:Port "$GRPC_PORT" --DataDir "$DATADIR"
 ) > "$HOSTLOG" 2>&1 &
 RUNNER_PID=$!

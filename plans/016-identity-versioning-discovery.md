@@ -101,7 +101,7 @@ for *self* edits.
 **Dependency extraction moves to the compiler.** New `SqlCompiler.ExtractReferences(sql)` (additive on
 `PublicApi.cs`) walking the existing internal AST for every FROM/JOIN/subquery/set-operation relation,
 returning `[]` on parse error. The AST is `internal`, which is why this must live in the Engine — and the
-Engine is exclusive, so that agent owns `StreamForge.Engine/**` alone that wave. `ImportPlanner` uses it for
+Engine is exclusive, so that agent owns `StreamsForge.Engine/**` alone that wave. `ImportPlanner` uses it for
 **new** entities; **existing** ones keep using persisted `TableInputs`/`StreamInputs`/`SourceNames`, which are
 exact post-compile facts and strictly better than any scan.
 

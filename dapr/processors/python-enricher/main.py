@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""StreamForge Dapr flavor — Python trades enricher (plan 005, wave W8-A).
+"""StreamsForge Dapr flavor — Python trades enricher (plan 005, wave W8-A).
 
 Pure Dapr pub/sub polyglot processor. Speaks nothing but HTTP to its own sidecar:
 
   1. Subscribes "sf-source-trades" (the egress copy of the seeded "trades" source that
-     GeneratorActor publishes — see dapr/src/StreamForge.Dapr.Host/Actors/GeneratorActor.cs).
+     GeneratorActor publishes — see dapr/src/StreamsForge.Dapr.Host/Actors/GeneratorActor.cs).
   2. For each SourceEventsEnvelope batch, derives 3 fields per trade: notional (price*qty),
      signedQty (a side classification: +qty on BUY, -qty on SELL), and avgPrice (a rolling
      per-symbol mean).
@@ -42,10 +42,10 @@ SF_PASS = os.environ.get("SF_PASS", "editor123!")
 
 PUBLISH_URL = f"http://localhost:{DAPR_HTTP_PORT}/v1.0/publish/{PUBSUB}/{SOURCES_TOPIC}"
 
-# Original "trades" fields (shared/StreamForge.AppCore/Generators/MarketDataProfiles.cs) plus the 3
+# Original "trades" fields (shared/StreamsForge.AppCore/Generators/MarketDataProfiles.cs) plus the 3
 # derived fields this enricher adds. FieldType values are the exact C# enum member names — the
 # shared REST surface's JsonStringEnumConverter has no naming policy, so it expects "Double", not
-# "double" (StreamForgeApiExtensions.cs's ConfigureHttpJsonOptions).
+# "double" (StreamsForgeApiExtensions.cs's ConfigureHttpJsonOptions).
 SOURCE_DEF = {
     "name": ENRICHED_SOURCE,
     "description": "Trades enriched by the Python polyglot processor (wave W8-A): notional, a "

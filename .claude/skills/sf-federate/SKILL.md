@@ -1,6 +1,6 @@
 ---
 name: sf-federate
-description: StreamForge instance discovery and gRPC federation — curl recipes for /api/meta/instance, the Discovery:Peers directory, probing a peer, and creating a federated grpc source addressed by peer name + entity name (no address, no GUID), plus @name named external endpoints for making the same catalog document portable across environments. Use when asked to federate two StreamForge instances, check what a running instance is/can do, or make a source's endpoint config environment-independent.
+description: StreamsForge instance discovery and gRPC federation — curl recipes for /api/meta/instance, the Discovery:Peers directory, probing a peer, and creating a federated grpc source addressed by peer name + entity name (no address, no GUID), plus @name named external endpoints for making the same catalog document portable across environments. Use when asked to federate two StreamsForge instances, check what a running instance is/can do, or make a source's endpoint config environment-independent.
 ---
 
 # sf-federate — instance discovery, peer federation, named endpoints

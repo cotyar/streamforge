@@ -3,11 +3,11 @@
 Plan 017 replaced the JVM Debezium dependency, for two databases, with a native .NET reader: **`postgres-cdc`**
 (Postgres logical replication over a slot + publication, decoded via `Npgsql.Replication`'s pgoutput plugin)
 and **`mssql-cdc`** (SQL Server's own CDC capture tables, read via `cdc.fn_cdc_get_all_changes_*` on a
-`binary(10)` LSN). Both live in `shared/StreamForge.Connectors.Database`
-([`PgCdcSource.cs`](../shared/StreamForge.Connectors.Database/PgCdcSource.cs),
-[`MsSqlCdcSource.cs`](../shared/StreamForge.Connectors.Database/MsSqlCdcSource.cs)), share one stamping
-vocabulary ([`CdcStamp.cs`](../shared/StreamForge.Connectors.Database/CdcStamp.cs)) and one LSN codec
-([`CdcLsn.cs`](../shared/StreamForge.Connectors.Database/CdcLsn.cs)), and are both `IPolledTransport`
+`binary(10)` LSN). Both live in `shared/StreamsForge.Connectors.Database`
+([`PgCdcSource.cs`](../shared/StreamsForge.Connectors.Database/PgCdcSource.cs),
+[`MsSqlCdcSource.cs`](../shared/StreamsForge.Connectors.Database/MsSqlCdcSource.cs)), share one stamping
+vocabulary ([`CdcStamp.cs`](../shared/StreamsForge.Connectors.Database/CdcStamp.cs)) and one LSN codec
+([`CdcLsn.cs`](../shared/StreamsForge.Connectors.Database/CdcLsn.cs)), and are both `IPolledTransport`
 implementations — CDC is still pull-shaped from this platform's point of view, one cycle at a time, even
 though the *source* database is doing the pushing internally.
 
@@ -19,16 +19,16 @@ built the way it was. Neither tells you how to *use* what already exists — tha
 
 | | You write | The platform gives you | Cost |
 |---|---|---|---|
-| **Standalone** (below) | The poll loop, cursor persistence, retry/backoff | The reader, the stamping, the preflight probe | Drags in `StreamForge.AppCore`'s dependency tail — see [the box below](#the-standalone-dependency-tax) |
-| **Inside StreamForge** ([below](#inside-streamforge)) | A source config (form or JSON/YAML) | The loop, the cursor, the schedule, the console, retries | None beyond running StreamForge itself |
+| **Standalone** (below) | The poll loop, cursor persistence, retry/backoff | The reader, the stamping, the preflight probe | Drags in `StreamsForge.AppCore`'s dependency tail — see [the box below](#the-standalone-dependency-tax) |
+| **Inside StreamsForge** ([below](#inside-streamsforge)) | A source config (form or JSON/YAML) | The loop, the cursor, the schedule, the console, retries | None beyond running StreamsForge itself |
 
-Read the standalone section even if you plan to run this inside StreamForge — the contract it documents
+Read the standalone section even if you plan to run this inside StreamsForge — the contract it documents
 (`PollAsync`, the cursor, the failure rule) is exactly what `PolledSourceCore` is doing on your behalf when
 the platform drives it, and understanding it makes the operational hazards further down make sense.
 
 ---
 
-## Standalone: a CDC reader with no StreamForge server
+## Standalone: a CDC reader with no StreamsForge server
 
 The entire contract is four calls: construct a reader, build a `SourceDefinition` with a `DbSourceConfig`,
 call `PollAsync(def, cursor, ct)` in your own loop, and **persist the returned cursor yourself.** Nothing
@@ -37,18 +37,18 @@ else — no server process, no Orleans, no Dapr, no NATS.
 ### The standalone dependency tax
 
 State this before anything else, because it's real and a `dotnet add reference` finds it in about 30
-seconds: **`StreamForge.Connectors.Database` is not a lightweight CDC library.** Its two direct package
+seconds: **`StreamsForge.Connectors.Database` is not a lightweight CDC library.** Its two direct package
 references are exactly what you'd expect — `Npgsql` and `Microsoft.Data.SqlClient` — but its two *project*
 references are not:
 
-- `StreamForge.AppCore` (needed for `IPolledTransport`, `PolledBatch`, `TransportDescriptor`) pulls in
+- `StreamsForge.AppCore` (needed for `IPolledTransport`, `PolledBatch`, `TransportDescriptor`) pulls in
   `Google.Protobuf`, `Cronos`, `NATS.Net`, `YamlDotNet`, `Grpc.Net.Client`, `Grpc.Reflection`, and a project
-  reference to `StreamForge.Engine` — the streaming SQL engine itself.
-- `StreamForge.Contracts` (needed for `SourceDefinition`, `DbSourceConfig`, `SourceKinds`) pulls in
+  reference to `StreamsForge.Engine` — the streaming SQL engine itself.
+- `StreamsForge.Contracts` (needed for `SourceDefinition`, `DbSourceConfig`, `SourceKinds`) pulls in
   `Microsoft.Orleans.Serialization.Abstractions`.
 
 None of that is optional today — `IPolledTransport` and `SourceDefinition` are declared where they are
-because a polled *and* a CDC connector are both citizens of the same registry the rest of StreamForge uses,
+because a polled *and* a CDC connector are both citizens of the same registry the rest of StreamsForge uses,
 not because a CDC-only consumer needs a streaming engine, a gRPC reflection client, or Orleans serialization
 attributes. Measured against the scratch console project used to verify this document:
 `dotnet list package --include-transitive` reports **2 direct and 46 transitive NuGet packages**, and a
@@ -130,9 +130,9 @@ time is the primary knob for a streaming read. If you're driving this standalone
 container (`wal_level=logical`) to verify every claim in this section:
 
 ```csharp
-using StreamForge.Abstractions;
-using StreamForge.AppCore.Transports;
-using StreamForge.Connectors.Database;
+using StreamsForge.Abstractions;
+using StreamsForge.AppCore.Transports;
+using StreamsForge.Connectors.Database;
 
 var source = new PgCdcSource(new PostgresDialect());
 
@@ -374,15 +374,15 @@ new DbSourceConfig
 ```
 
 **The complete program** — same shape as the Postgres one, same failure contract. **This one is
-compile-verified only**: it was built successfully against `StreamForge.Connectors.Database` (`dotnet
+compile-verified only**: it was built successfully against `StreamsForge.Connectors.Database` (`dotnet
 build` succeeded, 0 warnings, 0 errors), but no SQL Server instance was run against it for this document —
 pulling `mcr.microsoft.com/mssql/server:2022-latest` (~1.5 GB) was judged not worth the time for this pass.
 Nothing below is claimed to have executed against a live server.
 
 ```csharp
-using StreamForge.Abstractions;
-using StreamForge.AppCore.Transports;
-using StreamForge.Connectors.Database;
+using StreamsForge.Abstractions;
+using StreamsForge.AppCore.Transports;
+using StreamsForge.Connectors.Database;
 
 var source = new MsSqlCdcSource(new SqlServerDialect());
 
@@ -457,7 +457,7 @@ current tail — and, like Postgres, emits zero rows and persists that as the cu
 anything. `Snapshot = true` instead starts at `sys.fn_cdc_get_min_lsn`, i.e. whatever the capture table's
 retention window still has — see "Backfill is asymmetric" below before reaching for it.
 
-## Inside StreamForge
+## Inside StreamsForge
 
 Inside the platform, `IPolledTransport`/`PolledSourceCore` own everything the standalone loop above hand-rolls
 — the cursor is a driver-persisted field on the source, the schedule replaces `Task.Delay`, and a failed
@@ -590,10 +590,10 @@ under "the honest limit" below.
 
 ## Operational hazards (read this before production traffic)
 
-These apply whether you're running standalone or inside StreamForge — the reader behaves identically either
+These apply whether you're running standalone or inside StreamsForge — the reader behaves identically either
 way; only who is driving the poll loop differs.
 
-**An undrained Postgres slot pins WAL until the *source* database's disk fills.** Not StreamForge's disk —
+**An undrained Postgres slot pins WAL until the *source* database's disk fills.** Not StreamsForge's disk —
 the database being read from. A replication slot is a promise to the server: "don't discard WAL past this
 point, someone is coming back for it." If nothing ever comes back — a deleted source, a crashed consumer
 nobody restarted, a standalone program someone forgot about — the server keeps every byte of WAL since the
@@ -601,9 +601,9 @@ slot's `restart_lsn` indefinitely. `max_slot_wal_keep_size` is the server-side s
 size, PostgreSQL drops WAL past that bound and **invalidates the slot** (a hard failure the next read will
 see, not silent data loss) rather than filling the disk. Set to `-1` or `0` (both mean "unbounded" — the
 probe calls this out explicitly rather than making you look up what `0` means), the source database's disk
-is the *only* limit, and nothing will stop it filling. **A deleted StreamForge source does NOT drop its
+is the *only* limit, and nothing will stop it filling. **A deleted StreamsForge source does NOT drop its
 slot** — `IPolledTransport` has no "this source was deleted" notification (see plan 017's "Decisions" for
-why), so the slot StreamForge created keeps pinning WAL after the source that used it is gone. Drop it
+why), so the slot StreamsForge created keeps pinning WAL after the source that used it is gone. Drop it
 yourself:
 
 ```sql
@@ -613,7 +613,7 @@ SELECT pg_drop_replication_slot('orders_slot');
 — this fails if the slot is currently `active` (something is still reading from it); stop the reader first.
 
 **SQL Server CDC retention defaults to 3 days.** `sys.sp_cdc_cleanup_change_table` runs on that schedule by
-default and permanently deletes anything older. A consumer — standalone or a StreamForge source — that
+default and permanently deletes anything older. A consumer — standalone or a StreamsForge source — that
 stays stopped longer than the retention window has **lost that data**, and there is no recovering it from
 CDC; `MsSqlCdcPlanner.CheckRetention` compares the resolved starting LSN against `sys.fn_cdc_get_min_lsn` and
 **throws** rather than silently resuming from wherever retention still reaches — the exact same "loud
@@ -636,7 +636,7 @@ genuinely needs the deleted row's other columns, not by default.
 mechanism stores large column values (mostly `text`/`varchar`/`json`/`jsonb`/`bytea`/`numeric`, and arrays)
 out-of-line, and logical replication omits an *unchanged* TOASTed value from the WAL entirely when the
 table's replica identity doesn't force it in — there's genuinely nothing in the WAL record to decode. Rather
-than invent a StreamForge-specific placeholder, `CdcStamp.UnavailableValue` reuses **Debezium's own literal
+than invent a StreamsForge-specific placeholder, `CdcStamp.UnavailableValue` reuses **Debezium's own literal
 string**, on purpose: an operator's existing SQL written against a Debezium-fed table — anything that
 filters or special-cases this sentinel — keeps working unmodified against the native reader. Treat the
 literal string `__debezium_unavailable_value` as "unknown, not sent," never as the column's real content;
@@ -656,7 +656,7 @@ make structurally impossible.
 
 On Postgres specifically, an unrecognized pgoutput message (`TRUNCATE`, a type message, an origin message, a
 future message this reader doesn't know) never fails the cycle, but is **counted**, not silently absorbed —
-`PolledBatch.EnvelopeSkipped` rides into `ConnectorRuntimeStatus.EnvelopeSkippedTotal` inside StreamForge, and
+`PolledBatch.EnvelopeSkipped` rides into `ConnectorRuntimeStatus.EnvelopeSkippedTotal` inside StreamsForge, and
 a standalone consumer reading `PolledBatch.EnvelopeSkipped` directly gets the same number. SQL Server's
 reader is always `0` here — its `'all'` CDC row filter can only ever produce `__$operation` 1/2/4, and the one
 way that contract could break already fails the cycle loudly (a thrown exception) rather than needing a
@@ -672,7 +672,7 @@ counter.
   full-table snapshot — CDC retention is finite (3 days by default, see above), so this can only ever replay
   what hasn't aged out. For a true backfill, run the plain `mssql` polled kind first.
 
-**The honest limit, restated because it's the one thing that's easy to assume away:** a StreamForge source is
+**The honest limit, restated because it's the one thing that's easy to assume away:** a StreamsForge source is
 an append-only `EventRecord` stream. `_weight` on an inbound row — `-1` from `CdcStamp.WeightOf` on a
 delete — is just a column value, not a retraction the Engine's Z-sets act on; that machinery is computed
 *from* table SQL, not carried in from ingress. Neither CDC path, nor the Debezium-envelope path it sits next
@@ -687,7 +687,7 @@ source drops the key entirely — the row leaves `Snapshot()`, not just the quer
 filters. It is deliberately narrow: only a `LATEST BY` consumer knows what "the current row for a key" is,
 so a source with any OTHER shape of running consumer (a `GROUP BY`, a plain projection) rejects the
 retraction outright rather than admitting a delta that operator has no correct way to interpret — see
-`RetractConsumerValidation` in `shared/StreamForge.AppCore/Ingest/`. Nothing about the CDC readers above
+`RetractConsumerValidation` in `shared/StreamsForge.AppCore/Ingest/`. Nothing about the CDC readers above
 calls this automatically: a Postgres or SQL Server delete still arrives as one more `_op = "d"` event, not a
 push to this endpoint. An operator who wants a CDC delete to actually free the key, not just hide it, has to
 bridge the two explicitly — e.g. a small consumer of the `_op = 'd'` events that turns each one into its own
@@ -702,7 +702,7 @@ Factual, not a sales pitch — decide from this, don't take it on faith.
 | | This connector | Debezium |
 |---|---|---|
 | **Databases** | Postgres, SQL Server only | Postgres, SQL Server, MySQL, Oracle, MongoDB, and more |
-| **Deployment** | In-process .NET library, or a StreamForge `IPolledTransport` source | A separate JVM process (Kafka Connect or Debezium Server) |
+| **Deployment** | In-process .NET library, or a StreamsForge `IPolledTransport` source | A separate JVM process (Kafka Connect or Debezium Server) |
 | **Row shape** | Deliberately Debezium-compatible — same `_op` letters, same weight sign, same TOAST sentinel | The reference shape this connector copies |
 | **Schema history** | None | Tracks DDL history, so a consumer can reason about a column's type at the time a given event was produced |
 | **Connector catalog** | Two connectors | Dozens, actively maintained by a large community |
@@ -711,9 +711,9 @@ Factual, not a sales pitch — decide from this, don't take it on faith.
 
 **What this does not cover**, and does not intend to: MySQL, Oracle, MongoDB, and everything else Debezium
 speaks that this project has no client library for. `MappingSpec.Envelope = "debezium"` still exists inside
-StreamForge for exactly that case — Debezium Server emitting into a NATS source remains the right route for
+StreamsForge for exactly that case — Debezium Server emitting into a NATS source remains the right route for
 any database this connector doesn't speak natively; see
-[`CdcEnvelope`](../shared/StreamForge.AppCore/Connectors/Mapping/CdcEnvelope.cs) and
+[`CdcEnvelope`](../shared/StreamsForge.AppCore/Connectors/Mapping/CdcEnvelope.cs) and
 [`TRANSPORTS.md`](../TRANSPORTS.md#change-data-capture). The native pair is an *addition* for the two
 databases this connector already speaks, not a replacement for the Debezium path in general — it exists
 because a slot/capture-table reader was cheap to add for these two, not because Debezium was found wanting
@@ -725,5 +725,5 @@ for the rest.
   restates rather than duplicates.
 - [`plans/017-native-cdc.md`](../plans/017-native-cdc.md) — why this was built the way it was, what was cut,
   and what it cost.
-- [`shared/StreamForge.Connectors.Database/CdcPreflight.cs`](../shared/StreamForge.Connectors.Database/CdcPreflight.cs) —
+- [`shared/StreamsForge.Connectors.Database/CdcPreflight.cs`](../shared/StreamsForge.Connectors.Database/CdcPreflight.cs) —
   the preflight probe's full source; every diagnostic sentence it can produce is written there.

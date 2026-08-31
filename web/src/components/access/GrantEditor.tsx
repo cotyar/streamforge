@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
-/** The permission grammar's vocabulary, mirrored from `Actions` in StreamForge.Contracts/AccessModels.cs.
+/** The permission grammar's vocabulary, mirrored from `Actions` in StreamsForge.Contracts/AccessModels.cs.
  *  Offered as a datalist, never enforced: `action` is a free string with `*` wildcards on the server and
  *  a picker that refused `pipeline.*` would be lying about the grammar.
  *

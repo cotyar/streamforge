@@ -6,11 +6,11 @@
  *
  * Node-only, and deliberately never imported eagerly: index.ts reaches this module only via a
  * dynamic `import()` gated on a Node-runtime check, so a browser bundle that imports
- * `@streamforge/client` never pulls in `@grpc/grpc-js` (a browser cannot speak h2c gRPC at all --
+ * `@streamsforge/client` never pulls in `@grpc/grpc-js` (a browser cannot speak h2c gRPC at all --
  * see the package README).
  *
  * Proto loaded dynamically via @grpc/proto-loader (no generated stubs to keep in sync, unlike the
- * Python client's checked-in `_pb/streamforge_pb2*.py`) -- `keepCase: false` gives camelCase
+ * Python client's checked-in `_pb/streamsforge_pb2*.py`) -- `keepCase: false` gives camelCase
  * field names matching the REST DTOs' own convention (types.ts), and `longs: 'String'` avoids
  * silently truncating an int64 seq/weight to a JS double.
  *
@@ -26,12 +26,12 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { StreamForgeError } from "./errors.js";
+import { StreamsForgeError } from "./errors.js";
 import type { IngestAckDto } from "./ingest.js";
 import type { Transport } from "./transport.js";
 import type { Delta, Row } from "./zset.js";
 
-const PROTO_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "proto", "streamforge.proto");
+const PROTO_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "proto", "streamsforge.proto");
 
 // ---- Struct <-> Row conversion -------------------------------------------------------------
 
@@ -90,15 +90,15 @@ function rowToStruct(row: Row): ProtoStruct {
 
 // ---- proto loading (cached: loadSync parses + compiles descriptors, not free) ---------------
 
-interface StreamForgeV1Package {
+interface StreamsForgeV1Package {
   TableService: grpc.ServiceClientConstructor;
   StreamService: grpc.ServiceClientConstructor;
   IngestService: grpc.ServiceClientConstructor;
 }
 
-let cachedPackage: StreamForgeV1Package | null = null;
+let cachedPackage: StreamsForgeV1Package | null = null;
 
-function loadV1(): StreamForgeV1Package {
+function loadV1(): StreamsForgeV1Package {
   if (cachedPackage) return cachedPackage;
   const packageDef = protoLoader.loadSync(PROTO_PATH, {
     keepCase: false,
@@ -108,9 +108,9 @@ function loadV1(): StreamForgeV1Package {
     oneofs: true,
   });
   const pkg = grpc.loadPackageDefinition(packageDef) as unknown as {
-    streamforge: { v1: StreamForgeV1Package };
+    streamsforge: { v1: StreamsForgeV1Package };
   };
-  cachedPackage = pkg.streamforge.v1;
+  cachedPackage = pkg.streamsforge.v1;
   return cachedPackage;
 }
 
@@ -190,7 +190,7 @@ export class GrpcTransport implements Transport {
     for (const t of await this.listTables()) {
       if (t.name === name) return t.id;
     }
-    throw new StreamForgeError(`no such table '${name}'`);
+    throw new StreamsForgeError(`no such table '${name}'`);
   }
 
   async validate(sql: string): Promise<ValidateTableResponseWire> {
@@ -264,7 +264,7 @@ export class GrpcTransport implements Transport {
         }
       } catch (err) {
         if (signal.aborted) return; // an intentional cancel() surfaces as a CANCELLED error -- not a real failure
-        throw new StreamForgeError(`gRPC SubscribeTable('${tableName}') stream ended: ${String(err)}`);
+        throw new StreamsForgeError(`gRPC SubscribeTable('${tableName}') stream ended: ${String(err)}`);
       } finally {
         signal.removeEventListener("abort", onAbort);
       }
@@ -292,10 +292,10 @@ export class GrpcTransport implements Transport {
         call.end();
       });
       call.on("error", (err: Error) => {
-        if (!settled) reject(new StreamForgeError(`gRPC Ingest('${sourceName}') failed: ${err.message}`));
+        if (!settled) reject(new StreamsForgeError(`gRPC Ingest('${sourceName}') failed: ${err.message}`));
       });
       call.on("end", () => {
-        if (!settled) reject(new StreamForgeError(`gRPC Ingest('${sourceName}') stream closed with no ack`));
+        if (!settled) reject(new StreamsForgeError(`gRPC Ingest('${sourceName}') stream closed with no ack`));
       });
       call.write({
         sourceName,

@@ -1,12 +1,12 @@
 ---
 name: sf-sql
-description: StreamForge streaming-SQL dialect cheatsheet — grammar, pipeline vs table mode, and the semantic gotchas (-> vs ->>, windowed-subquery rule, LATEST BY). Use when writing or debugging pipeline/table SQL, seeds, or SQL-touching tests.
+description: StreamsForge streaming-SQL dialect cheatsheet — grammar, pipeline vs table mode, and the semantic gotchas (-> vs ->>, windowed-subquery rule, LATEST BY). Use when writing or debugging pipeline/table SQL, seeds, or SQL-touching tests.
 ---
 
 # sf-sql — dialect quick reference
 
 Full user docs: `orleans/docs/index.html` (§ Streaming SQL reference). Engine:
-`orleans/src/StreamForge.Engine` (tokenizer → parser → validator → planner; positioned
+`orleans/src/StreamsForge.Engine` (tokenizer → parser → validator → planner; positioned
 diagnostics, never exceptions). Validate cheaply via `POST /api/pipelines/validate` or
 `/api/tables/validate` (`{sql}` → diagnostics with line/col).
 

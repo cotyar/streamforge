@@ -1,8 +1,8 @@
-// Plan 021 wave 2 (021-F) — client for /api/environments (shared/StreamForge.Api/Endpoints/EnvironmentsEndpoints.cs).
+// Plan 021 wave 2 (021-F) — client for /api/environments (shared/StreamsForge.Api/Endpoints/EnvironmentsEndpoints.cs).
 // Plain JSON in and out, so this would ordinarily just reuse `api.get/post/del` — but every call here
 // goes through the `*Global` variants instead. Found live: EnvironmentSelectionMiddleware does not
 // exclude /api/environments from environment selection (unlike /api/auth/* and /api/meta/instance), so
-// a stale/deleted environment still named by X-StreamForge-Environment 404s this route exactly like any
+// a stale/deleted environment still named by X-StreamsForge-Environment 404s this route exactly like any
 // other — including the `list()` call EnvironmentPicker.tsx's recovery path depends on to discover that
 // very fact. The endpoint handlers never consult EnvironmentAmbient anyway (the directory is not part
 // of any one environment's catalog), so omitting the header changes nothing about what they return and

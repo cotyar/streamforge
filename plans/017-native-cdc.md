@@ -67,7 +67,7 @@ source at all. Opening a fresh `LogicalReplicationConnection` every cycle makes 
 construction: nothing is left running between cycles to leak. It also makes durability correct by
 construction the other way — `PgCdcSource.PollAsync` confirms the cursor `PolledSourceCore` has *already
 persisted*, before it starts streaming the next batch, so it can never acknowledge to Postgres data
-StreamForge has not durably recorded. `MsSqlCdcSource` shares the connection-per-cycle shape (a fresh ADO.NET
+StreamsForge has not durably recorded. `MsSqlCdcSource` shares the connection-per-cycle shape (a fresh ADO.NET
 connection per `PollAsync`) though it pays no confirm-handshake cost, since a capture table has no session
 to leak the way a replication slot does. The cost, paid on the Postgres side specifically: a real network
 handshake every cycle, and a latency floor at the schedule interval rather than sub-second tailing. The
@@ -124,7 +124,7 @@ and the exact failure modes buys more correctness here than a larger model reaso
 
 | Wave | Owns | Delivers | Model |
 |---|---|---|---|
-| **A · Contracts** | `shared/StreamForge.Contracts/ConnectorModels.cs` | `SourceKinds.PostgresCdc`/`MsSqlCdc`, and the six CDC fields added additively to the EXISTING `DbSourceConfig` (`SlotName`, `PublicationName`, `CaptureInstance`, `Tables`, `MaxPollMs`, `CreateSlotIfMissing`) as `[Id(18)]`–`[Id(23)]` | Sonnet 5 high |
+| **A · Contracts** | `shared/StreamsForge.Contracts/ConnectorModels.cs` | `SourceKinds.PostgresCdc`/`MsSqlCdc`, and the six CDC fields added additively to the EXISTING `DbSourceConfig` (`SlotName`, `PublicationName`, `CaptureInstance`, `Tables`, `MaxPollMs`, `CreateSlotIfMissing`) as `[Id(18)]`–`[Id(23)]` | Sonnet 5 high |
 | **B · CDC primitives** | `CdcStamp.cs`, `CdcLsn.cs` + their tests | `CdcStamp` — the one place that writes `_op`/`_weight`/`_ts`/`_table` and the unchanged-TOAST sentinel, reusing `CdcEnvelope`'s vocabulary on purpose so a native row is indistinguishable downstream from a Debezium-fed one. `CdcLsn` — the LSN codec for both dialects, including a byte-wise MSSQL comparison (a 10-byte LSN parsed as `ulong` silently loses its two high bytes and misorders exactly at a byte-boundary carry). Pure, no I/O | Sonnet 5 high |
 
 **Between rounds, the orchestrator placed `CdcPreflight.cs`** with its two method signatures and

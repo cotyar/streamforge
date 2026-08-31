@@ -35,8 +35,8 @@ done
 
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
 REGION="${REGION:-europe-west1}"
-AR_REPO="${AR_REPO:-streamforge}"
-SERVICE_NAME="${SERVICE_NAME:-streamforge-dapr}"
+AR_REPO="${AR_REPO:-streamsforge}"
+SERVICE_NAME="${SERVICE_NAME:-streamsforge-dapr}"
 GEMINI_API_KEY="${GEMINI_API_KEY:-}"
 DAPRD_TAG="1.18.1" # keep in lockstep with deploy/dapr/Dockerfile.daprd's FROM line
 
@@ -60,7 +60,7 @@ run() {
   fi
 }
 
-echo "== StreamForge Dapr flavor — Cloud Run deploy =="
+echo "== StreamsForge Dapr flavor — Cloud Run deploy =="
 echo "   project:       $PROJECT_ID"
 echo "   region:        $REGION"
 echo "   service:       $SERVICE_NAME"
@@ -75,7 +75,7 @@ run gcloud artifacts repositories create "$AR_REPO" \
   --project="$PROJECT_ID" \
   --location="$REGION" \
   --repository-format=docker \
-  --description="StreamForge container images" \
+  --description="StreamsForge container images" \
   --quiet || true
 
 run gcloud auth configure-docker "$AR_HOST" --quiet
@@ -102,7 +102,7 @@ run docker tag redis:7-alpine "$REDIS_IMAGE"
 run docker push "$REDIS_IMAGE"
 
 # 3. Render service.yaml (every image comes from this project's Artifact Registry).
-RENDERED="$(mktemp -t streamforge-dapr-service-XXXXXX.yaml)"
+RENDERED="$(mktemp -t streamsforge-dapr-service-XXXXXX.yaml)"
 trap 'rm -f "$RENDERED"' EXIT
 
 export APP_IMAGE DAPRD_IMAGE PLACEMENT_IMAGE REDIS_IMAGE REGION GEMINI_API_KEY

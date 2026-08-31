@@ -2,7 +2,7 @@
 
 Status: **DONE** (W0–W7 all landed). Results summary: four real connector kinds (`url`/`file`/
 `folder`/`grpc`-subscribe) and shared config import/export are live on both flavors, driven by a
-pure, runtime-free connector core (`shared/StreamForge.AppCore/Connectors/**`) with thin Orleans
+pure, runtime-free connector core (`shared/StreamsForge.AppCore/Connectors/**`) with thin Orleans
 (`ConnectorGrain`) and Dapr (`ConnectorActor`) drivers. W6 end-to-end evidence: URL polling with
 exact dedup (**50 items emitted, 50 served** across repeated polls of the same payload); an
 OpenAPI-derived schema exercised end to end through the pass-through mapping path; failure backoff
@@ -27,16 +27,16 @@ against the pre-006 baseline (511 / ~153). The parity matrix below did not mater
 plan: Dapr gRPC *serving* stays a permanent descope (plan 005 D-F), everything else landed on both
 flavors.
 
-**Hard gate (every commit):** `~/.dotnet/dotnet test orleans/StreamForge.sln` (511 pre-existing tests)
-AND `~/.dotnet/dotnet test dapr/StreamForge.Dapr.sln` (~153) — all green with pre-existing test `.cs`
+**Hard gate (every commit):** `~/.dotnet/dotnet test orleans/StreamsForge.sln` (511 pre-existing tests)
+AND `~/.dotnet/dotnet test dapr/StreamsForge.Dapr.sln` (~153) — all green with pre-existing test `.cs`
 files **unmodified** (`git diff --stat orleans/tests dapr/tests -- '*.cs'` shows only *new* files).
 `cd web && bun run build` green whenever `web/` is touched.
 
 ## Problem
 
-StreamForge sources are synthetic generators only. Real deployments ingest from the outside world:
+StreamsForge sources are synthetic generators only. Real deployments ingest from the outside world:
 HTTP APIs polled on a schedule, files and folders dropped by upstream systems, and *other
-StreamForge instances* (federation). Separately, the catalog (sources/tables/pipelines) lives only
+StreamsForge instances* (federation). Separately, the catalog (sources/tables/pipelines) lives only
 inside a running instance — there is no way to version it, review it, promote it between
 environments, or move it between the two runtime flavors. Plan 006 adds four real connector kinds
 and a composable import/export config format, with the connector core shared (pure, unit-testable,
@@ -44,7 +44,7 @@ runtime-free) and each flavor contributing only a thin driver.
 
 ## Current state (verified by reading; load-bearing facts)
 
-- `SourceDefinition` (`shared/StreamForge.Contracts/Models.cs:47`) — Ids 0–7 used, **next free
+- `SourceDefinition` (`shared/StreamsForge.Contracts/Models.cs:47`) — Ids 0–7 used, **next free
   `[Id]` = 8**. No kind concept; `GeneratorProfile` string + `EventsPerSecond` drive
   `MarketDataProfiles.GenerateEvent`. Sources are upsert-only (`ICatalogFacade.UpsertSourceAsync`);
   REST binds the raw `SourceDefinition` (no request DTOs); **PUT replaces the whole object**.
@@ -69,12 +69,12 @@ runtime-free) and each flavor contributing only a thin driver.
   (**sint64 zigzag**) / seq 3. Repeated = unpacked; `Json`+Children = nested message; `Json`
   schemaless = `google.protobuf.Struct`; null/missing omitted. Hand-decode patterns pinned in
   `WireRoundTripTests`/`RepeatedFieldWireRoundTripTests`. **There is no decoder** — encoder only.
-- gRPC: `streamforge.dynamic.v1.DynamicStreamService/SubscribeEntity(EntitySubscribeRequest{entity_key})
+- gRPC: `streamsforge.dynamic.v1.DynamicStreamService/SubscribeEntity(EntitySubscribeRequest{entity_key})
   → stream DynamicFrame{entity_key, payload, seq}`, `[Authorize(Policy="Viewer")]` (JWT in
   `Authorization: Bearer` metadata; obtainable via `POST /api/auth/login`, 12 h expiry). Served by
   the **Orleans flavor only** (:5299 + hand-rolled v1alpha reflection); Dapr gRPC serving is a
   plan-005 descope (:5499 reserved). `/api/{kind}/{key}/proto` (both flavors) returns a
-  StreamForge-generated self-contained proto with the *persisted* field numbers.
+  StreamsForge-generated self-contained proto with the *persisted* field numbers.
 - Source liveness metrics: none via REST today (only pipeline/table metrics endpoints); SPA
   convention for non-pushed data is 2 s polling (`useTableMetrics`).
 - Known live bug (plan 005): Orleans SignalR `tableDelta`/`pipelineResult` relay delivered 0
@@ -88,7 +88,7 @@ runtime-free) and each flavor contributing only a thin driver.
 
 ## Decisions
 
-**D-A — Connector core lives in `shared/StreamForge.AppCore/Connectors/` + `Config/`; no new
+**D-A — Connector core lives in `shared/StreamsForge.AppCore/Connectors/` + `Config/`; no new
 project.** AppCore is already the shared, runtime-free home (Protocol/Generators/Json/Search) that
 both flavors link and both test suites cover. "No runtime deps" = no Orleans/Dapr/ASP.NET; pure
 NuGet libs are fine. New packages (AppCore): **Cronos** (cron correctness beats a hand parser —
@@ -147,7 +147,7 @@ Derivation returns `(fields, diagnostics[])` — the UI shows both and the user 
 key, schema source. Schema paths, both landing on `(List<FieldDef>, FieldNumberMap)`:
 (a) **reflection** — v1alpha client walk of `FileDescriptorProto` (numbers included; robust);
 (b) **proto text** — from `/api/{kind}/{key}/proto` (URL or pasted), parsed by a parser scoped to
-**StreamForge-generated files only** (header-checked; arbitrary protos rejected with a clear
+**StreamsForge-generated files only** (header-checked; arbitrary protos rejected with a clear
 error). Decoding needs the **new `ProtoWireDecoder`** (AppCore/Protocol): exact counterpart of the
 encoder (scalar kinds, nested Children, unpacked repeated, Struct, event/delta envelopes, unknown
 fields skipped by wire type) with full encode→decode identity round-trip tests. Semantics
@@ -187,12 +187,12 @@ SQL is compiled through the real Engine compiler (same path as the validate endp
 composed catalog in scope; failures mark that entity `error` in the report without aborting the
 rest (`validate` mode reports everything; apply modes skip failed entities). Report:
 `{ mode, entries: [{kind, name, action: created|updated|deleted|skipped|error, diagnostics[]}] }`.
-Auth: export Viewer, import Editor, replace Admin. One implementation in `shared/StreamForge.Api`
+Auth: export Viewer, import Editor, replace Admin. One implementation in `shared/StreamsForge.Api`
 through `ICatalogFacade` only ⇒ both flavors, and cross-flavor moves, for free.
 
 ## Phases
 
-Ownership is exclusive per concurrent agent. All csproj/sln edits, `StreamForgeApiExtensions.cs`,
+Ownership is exclusive per concurrent agent. All csproj/sln edits, `StreamsForgeApiExtensions.cs`,
 and `web/src/api/types.ts` belong to the **orchestrator** (done between waves). Implementation
 agents: **Sonnet, maximum reasoning effort**, live verification on isolated ports (6xxx–9xxx, temp
 data dirs, instances killed after). Commits `006-Wn: …`; push after each stable wave.
@@ -238,7 +238,7 @@ comments per house style). **Acceptance:** both suites green (types dormant), bu
 - **2D Wire decode + remote schema + subscribe core** — `Protocol/ProtoWireDecoder.cs`
   (decode row/Event/Delta against FieldDef + FieldNumberMap; skip unknown fields by wire type) with
   **encode→decode identity tests for every kind incl. nested/repeated/Struct/envelopes** (new test
-  files beside the existing wire tests); `Connectors/Grpc/` (`ProtoTextSchemaParser` — StreamForge-
+  files beside the existing wire tests); `Connectors/Grpc/` (`ProtoTextSchemaParser` — StreamsForge-
   generated files only, header-checked, extracts fields+numbers+reserved; `ReflectionSchemaWalker` —
   FileDescriptorProto → FieldDef+numbers; `GrpcSubscriberCore` — channel, login/re-login, subscribe,
   frame→rows via decoder, reconnect hooks; I/O behind delegates so logic is testable pure).
@@ -261,7 +261,7 @@ assigned subfolders. **Done** (commit `e21bb79` — all 5 sub-agents landed).
   timer re-armed in `OnActivateAsync`; actor-state ConnectorState; emits envelopes to `sf-sources`
   + egress), orchestrator/supervisor dispatch, `DaprConnectorStatusFacade`, Program.cs. New unit
   tests for the pure orchestration/dispatch parts (house style: no sidecar in tests).
-- **3C Config endpoints** (owns new `shared/StreamForge.Api/Endpoints/ConfigEndpoints.cs`; mount
+- **3C Config endpoints** (owns new `shared/StreamsForge.Api/Endpoints/ConfigEndpoints.cs`; mount
   line pre-added by orchestrator) — `GET /api/config/export?format=json|yaml[&includeSecrets]`,
   `POST /api/config/import?mode=validate|merge|replace` accepting single doc / ordered array /
   multipart set; D-I/D-J semantics via `ICatalogFacade` + Engine compile; secrets masked per D-H.
@@ -334,7 +334,7 @@ always the one deliberate, permanent descope).
 | URL polling source (mapping + OpenAPI paths) | full | full (same core) |
 | Cron/interval scheduling + backoff + status surface | full | full |
 | File / folder polling (ledger persisted) | full (JSON file state) | full (Redis actor state) |
-| gRPC subscription source (subscribe a remote StreamForge) | full | full |
+| gRPC subscription source (subscribe a remote StreamsForge) | full | full |
 | Being a federation *server* (gRPC serving) | full (:5299) | **descoped** (no gRPC serving — plan 005 D-F stands) |
 | Config export/import + compose (shared endpoints) | full | full |
 | Cross-flavor config portability | export ⇄ import both directions | same |
@@ -346,9 +346,9 @@ always the one deliberate, permanent descope).
 Exactly-once ingestion (at-least-once with bounded dedup; documented); partial-file tailing;
 HTTP pagination-following / non-GET polling / OAuth flows (static headers only); retraction-aware
 federation (negative-weight deltas dropped at a source); parsing arbitrary third-party `.proto`
-files (StreamForge-generated only — use reflection otherwise); external OpenAPI `$ref`s; config
+files (StreamsForge-generated only — use reflection otherwise); external OpenAPI `$ref`s; config
 coverage of users/credentials or runtime state; encryption at rest for secrets; Engine changes of
-any kind (006 never touches `StreamForge.Engine`).
+any kind (006 never touches `StreamsForge.Engine`).
 
 ## Risks & mitigations
 

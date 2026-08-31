@@ -2,7 +2,7 @@
 
 **Status: DONE.** All waves A–M plus L·Docs landed: `IPolledTransport`/`PolledTransports`/`PolledSourceCore`,
 `CdcEnvelope`, the polled branch in both `ConnectorGrain` and `ConnectorActor`, `SinkSugar`,
-`shared/StreamForge.Connectors.Database/**`, the console editors, and the live-DB suite under
+`shared/StreamsForge.Connectors.Database/**`, the console editors, and the live-DB suite under
 `Tests/Integration/**`. Suites green at `cbbe5b0`: Orleans 2424, Dapr 695, excluding the 52 `DockerGate`
 tests, which skip without a local `postgres:17` / `mcr.microsoft.com/mssql/server:2022-latest` image.
 
@@ -46,14 +46,14 @@ a diamond conflict against a plugin's own copies is exactly what ALC isolation i
 has no diagnostic surface for it. It also means four deploy artefacts to update. The `Register()` seam keeps
 runtime loading open; this plan finally gives it a real second call site (the hosts), which it never had.
 
-**Connector config classes stay in `StreamForge.Contracts` with `[Secret]`.** `SecretWalk.IsContractClass`
+**Connector config classes stay in `StreamsForge.Contracts` with `[Secret]`.** `SecretWalk.IsContractClass`
 recurses only into types in the Contracts assembly, so an out-of-tree config class would export its password
 **in plaintext, silently** — precisely the failure plan 010 introduced `[Secret]` to eliminate. Keeping the
 POCO in Contracts (it is strings and ints; it has no Npgsql dependency) means masking, export and the console
 form all work with zero new machinery. Stated cost: a genuinely third-party plugin still cannot add its own
 `[Id(n)]` — it sends a PR or rides an existing slot, as `TransportRegistryTests`' `FizzTransport` already does.
 
-**`orleans/tests/StreamForge.Host.Tests/SecretWalkTests.cs` is edited — by design.** It reflects over every
+**`orleans/tests/StreamsForge.Host.Tests/SecretWalkTests.cs` is edited — by design.** It reflects over every
 class-typed property of `ConnectorConfig` and fails when a new one is not populated in `FullConnector()`. Its
 own comment says this is deliberate: *"if a future transport adds a config property to ConnectorConfig and
 nobody populates it here, this fails rather than letting the mask tests pass over a container they never
@@ -103,9 +103,9 @@ build` when `web/` is touched, and a live check on isolated ports (`--Http:Port 
 
 | Wave | Owns | Delivers | Model |
 |---|---|---|---|
-| **A · Contracts** | `shared/StreamForge.Contracts/ConnectorModels.cs`, `orleans/tests/.../SecretWalkTests.cs` | `SourceKinds.Postgres/MsSql`, `SinkKinds.Postgres/MsSql`, `DbSourceConfig`, `DbSinkConfig`, `ConnectorConfig.[Id(7)] Db`, `SinkSpec.[Id(4)] Db` + `[Id(5)] Name`, `ConnectorRuntimeStatus.[Id(9)] Cursor`, `MappingSpec.[Id(4)] Envelope` | Opus 5 high |
-| **B · Polled SPI** | `shared/StreamForge.AppCore/Transports/{IPolledTransport,PolledTransports,PolledSourceCore}.cs` (new), `TransportDescriptor.cs`, `Connectors/ConnectorPollCycle.cs`; new `PolledTransportRegistryTests.cs` | the SPI, registry, shared cycle core, `ExecuteRows`, descriptor flags (`Text`, `Polled`, `Mapping`, `CanProbe`) | Opus 5 high |
-| **C · Batch sink seam** | `shared/StreamForge.AppCore/Sinks/{IBatchSinkClient,SinkFanout}.cs` (new), `ISinkTransport.cs`; new `SinkFanoutTests.cs` | optional batch interface, the fan-out in ONE place, `ISinkTransport.Validate` as a default method | Sonnet 5 high |
+| **A · Contracts** | `shared/StreamsForge.Contracts/ConnectorModels.cs`, `orleans/tests/.../SecretWalkTests.cs` | `SourceKinds.Postgres/MsSql`, `SinkKinds.Postgres/MsSql`, `DbSourceConfig`, `DbSinkConfig`, `ConnectorConfig.[Id(7)] Db`, `SinkSpec.[Id(4)] Db` + `[Id(5)] Name`, `ConnectorRuntimeStatus.[Id(9)] Cursor`, `MappingSpec.[Id(4)] Envelope` | Opus 5 high |
+| **B · Polled SPI** | `shared/StreamsForge.AppCore/Transports/{IPolledTransport,PolledTransports,PolledSourceCore}.cs` (new), `TransportDescriptor.cs`, `Connectors/ConnectorPollCycle.cs`; new `PolledTransportRegistryTests.cs` | the SPI, registry, shared cycle core, `ExecuteRows`, descriptor flags (`Text`, `Polled`, `Mapping`, `CanProbe`) | Opus 5 high |
+| **C · Batch sink seam** | `shared/StreamsForge.AppCore/Sinks/{IBatchSinkClient,SinkFanout}.cs` (new), `ISinkTransport.cs`; new `SinkFanoutTests.cs` | optional batch interface, the fan-out in ONE place, `ISinkTransport.Validate` as a default method | Sonnet 5 high |
 
 ### Round 2 — five parallel waves
 
@@ -114,14 +114,14 @@ build` when `web/` is touched, and a live check on isolated ports (`--Http:Port 
 | **D · CDC unwrapper** | `AppCore/Connectors/Mapping/CdcEnvelope.cs` (new) + tests | A, B | Sonnet 5 high |
 | **E · Orleans driver** | `orleans/src/.../Grains/ConnectorGrain.cs`, `Services/NatsPublisherService.cs` + cluster test | B, C | Opus 5 high |
 | **F · Dapr driver** | `dapr/src/.../Actors/ConnectorActor.cs`, `Streaming/NatsSinkPublisherService.cs` + test | B, C | Opus 5 high |
-| **G · API + validation** | `shared/StreamForge.Api/Endpoints/{SourceSchemaService,TransportsEndpoints}.cs` + tests | B | Sonnet 5 high |
+| **G · API + validation** | `shared/StreamsForge.Api/Endpoints/{SourceSchemaService,TransportsEndpoints}.cs` + tests | B | Sonnet 5 high |
 | **K · `INSERT INTO` sugar** | `AppCore/Sql/SinkSugar.cs` (new), `Api/Endpoints/{Pipelines,Tables}Endpoints.cs`, `ConfigImportService.cs` + tests | A | Opus 5 high |
 
 ### Round 3
 
 | Wave | Owns | Depends | Model |
 |---|---|---|---|
-| **H · Database connectors** | `shared/StreamForge.Connectors.Database/**` + unit tests (no live DB) | A, B, C | Opus 5 high |
+| **H · Database connectors** | `shared/StreamsForge.Connectors.Database/**` + unit tests (no live DB) | A, B, C | Opus 5 high |
 | **I · Host wiring** | both `Program.cs` + `.csproj`, both `.sln` | E, F, H | Sonnet 5 high |
 
 ### Round 4
@@ -129,7 +129,7 @@ build` when `web/` is touched, and a live check on isolated ports (`--Http:Port 
 | Wave | Owns | Depends | Model |
 |---|---|---|---|
 | **J · Console** | `web/src/api/types.ts`, `components/sources/TransportConfigEditor.tsx`, `pages/SourcesPage.tsx`, `components/SinksEditor.tsx` | G, I | Sonnet 5 high |
-| **M · Live DB integration** | `shared/StreamForge.Connectors.Database.Tests/Integration/**` | H, I | Opus 5 high |
+| **M · Live DB integration** | `shared/StreamsForge.Connectors.Database.Tests/Integration/**` | H, I | Opus 5 high |
 
 ### Round 5
 
@@ -156,7 +156,7 @@ build` when `web/` is touched, and a live check on isolated ports (`--Http:Port 
   commits after a later-timestamped one — that is the honest argument for CDC.
 - `numeric`/`decimal` → `Double` loses precision; the probe reports it rather than silently rounding.
 - Schema discovery is a generic `ISchemaProbe` capability + `POST /api/transports/{kind}/probe`, so
-  `StreamForge.Api` learns nothing about databases.
+  `StreamsForge.Api` learns nothing about databases.
 - Upsert: `KeyColumns` explicit and required; the console prefills from
   `TableGroupKeyExtractor.Describe(sql).DeclaredKeys`. **"Deletes last" is not sufficient on its own** (wave H):
   a table UPDATE arrives as two deltas on the *same* key — `-1` old row, `+1` new row — so a sink honouring

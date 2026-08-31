@@ -1,5 +1,5 @@
 // ============================================================================
-// FROZEN API CONTRACT — mirrors StreamForge.Abstractions models + REST DTOs.
+// FROZEN API CONTRACT — mirrors StreamsForge.Abstractions models + REST DTOs.
 // The SPA track codes against exactly this; the Host serializes to match
 // (System.Text.Json camelCase).
 // ============================================================================
@@ -138,7 +138,7 @@ export interface ConnectorConfig {
   /** Plan 009 B1; set only for 'nats'-kind sources. */
   nats?: NatsSubConfig | null
   /** The platform's open, string-valued config bag (ConnectorConfig.Settings on the server): where an
-   *  OUT-OF-TREE source kind — one whose config class cannot live in StreamForge.Contracts — keeps its
+   *  OUT-OF-TREE source kind — one whose config class cannot live in StreamsForge.Contracts — keeps its
    *  fields. The console never reads a key of it by name; it renders whatever the kind's descriptor
    *  declares, and writes every value as a string (see TransportConfigEditor's SETTINGS_BAG). */
   settings?: Record<string, string> | null
@@ -200,7 +200,7 @@ export interface NatsPubConfig {
 }
 
 /** Plan 010: what the console needs to render a transport's config form, served by GET /api/transports.
- *  Mirrors StreamForge.AppCore.Transports.TransportDescriptor. A transport added to the backend gets a
+ *  Mirrors StreamsForge.AppCore.Transports.TransportDescriptor. A transport added to the backend gets a
  *  working editor here with no change to this file — the descriptor IS the form. */
 export interface TransportDescriptor {
   kind: string
@@ -279,7 +279,7 @@ export interface ConnectorRuntimeStatus {
    *  all — an ordinary source, nothing to show. `false` means it has one and it is down right now. `true`
    *  means the session is up and can accept a send. Deliberately three-valued: collapsing null and false
    *  would paint every non-duplex source as a broken session. See `ConnectorRuntimeStatus.DuplexReady`
-   *  (shared/StreamForge.Contracts/ConnectorModels.cs) for the server-side doc this mirrors. */
+   *  (shared/StreamsForge.Contracts/ConnectorModels.cs) for the server-side doc this mirrors. */
   duplexReady?: boolean | null
   /** Plan 019 D3: rows the outbound half accepted, scoped to the CURRENT session instance only — it
    *  resets to 0 on every reconnect (see `IDuplexSession.SentTotal`'s own doc). Not a lifetime total. */
@@ -893,7 +893,7 @@ export interface TablePartitionMetrics {
   frontierEpoch: number
   lastUpdateMs: number
   /** Plan 003 M4: this stage's real operator name (e.g. "Join" | "SemiAnti" | "Unnest" |
-   * "FilterProject" | "Reduce" | "LatestBy" — see StreamForge.Engine.Dataflow.TableStageKindLabel on the
+   * "FilterProject" | "Reduce" | "LatestBy" — see StreamsForge.Engine.Dataflow.TableStageKindLabel on the
    * backend). "" only in the (never-happens-in-practice) case the producing grain never learned its own
    * stage descriptor. */
   kind: string
@@ -953,7 +953,7 @@ export interface TableValidateResponse {
 // ============================================================================
 // Plan 008 W5: GET /api/pipelines/{id}/plan and GET /api/tables/{id}/plan — lineage + execution-plan
 // view for the console's React Flow page. Shape pinned verbatim against the backend
-// (shared/StreamForge.Api/Dtos.cs's ExecutionPlanResponse/PlanStageDto/PlanEdgeDto/PlanStageInEdgeDto) —
+// (shared/StreamsForge.Api/Dtos.cs's ExecutionPlanResponse/PlanStageDto/PlanEdgeDto/PlanStageInEdgeDto) —
 // do not rename fields without updating both sides. `physical` is true only when `stages`/`edges` carry
 // a real compiled stage/edge graph (a parallelism >= 2 table on the Orleans flavor whose plan shape
 // supports partitioning); otherwise they're empty arrays and `unavailableReason` explains why. A
@@ -966,7 +966,7 @@ export interface PlanStageInEdge {
   role: string
 }
 
-/** kind mirrors StreamForge.Engine.Dataflow.TableStageKind: 'Ingest' | 'Join' | 'SemiAnti' | 'Unnest' |
+/** kind mirrors StreamsForge.Engine.Dataflow.TableStageKind: 'Ingest' | 'Join' | 'SemiAnti' | 'Unnest' |
  * 'FilterProject' | 'Reduce' | 'LatestBy'. */
 export interface PlanStage {
   stageId: number
@@ -975,7 +975,7 @@ export interface PlanStage {
   inEdges: PlanStageInEdge[]
 }
 
-/** mode mirrors StreamForge.Engine.Dataflow.TableEdgeMode: 'Local' | 'HashPartition' | 'Broadcast' |
+/** mode mirrors StreamsForge.Engine.Dataflow.TableEdgeMode: 'Local' | 'HashPartition' | 'Broadcast' |
  * 'Gather'. fromStageId/toStageId == -1 mean "external input" / "terminal output" respectively, same as
  * the engine type. arrangeKeyFields is null for every non-arrangeable edge. */
 export interface PlanEdge {
@@ -1080,9 +1080,9 @@ export const CHAT_NOT_CONFIGURED_MESSAGE =
   'AI chat is not configured — set GEMINI_API_KEY (or Gemini:ApiKey) and restart.'
 
 // ============================================================================
-// Plan 008 W4: client-push ingress. Mirrors shared/StreamForge.Api/Dtos.cs's
+// Plan 008 W4: client-push ingress. Mirrors shared/StreamsForge.Api/Dtos.cs's
 // IngestEventsRequest/IngestAcceptedResponse/IngestErrorResponse/IngestStatusResponse and
-// StreamForge.Contracts/IngestModels.cs's IngestConfig.
+// StreamsForge.Contracts/IngestModels.cs's IngestConfig.
 //
 // NOTE the casing: the backend serializes enums as PascalCase strings (JsonStringEnumConverter with
 // no naming policy), exactly like TableSearchMode and TablePersistenceMode. Lowercasing these here
@@ -1242,7 +1242,7 @@ export interface NamedEndpoint {
   value: string
 }
 
-/** Plan 021 wave 2 (021-F) — mirrors shared/StreamForge.Contracts/EnvironmentModels.cs's
+/** Plan 021 wave 2 (021-F) — mirrors shared/StreamsForge.Contracts/EnvironmentModels.cs's
  *  EnvironmentRecord exactly. One row of `GET /api/environments`; the default environment is always
  *  present, always first, and always spelled `"default"` here (never the server's internal empty-string
  *  key). `entityCount` is -1 when the server did not count it. */
@@ -1254,7 +1254,7 @@ export interface EnvironmentRecord {
   entityCount: number
 }
 
-/** Body of `POST /api/environments` — matches shared/StreamForge.Api/Endpoints/EnvironmentsEndpoints.cs's
+/** Body of `POST /api/environments` — matches shared/StreamsForge.Api/Endpoints/EnvironmentsEndpoints.cs's
  *  CreateEnvironmentRequest. */
 export interface CreateEnvironmentRequest {
   name: string

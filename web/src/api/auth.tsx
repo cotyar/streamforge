@@ -56,7 +56,7 @@ export interface AuthContextValue {
 // is only the FALLBACK, for a server that sends no `permissions[]` at all — a pre-015 build, or one
 // rolled back to `Auth:Mode=legacy`. Against such a server the SPA must reproduce today's answer
 // exactly, so the floors are transcribed from the built-in role seeds in
-// shared/StreamForge.AppCore/Access/BuiltInRoleCatalog.cs, which are themselves the legacy policies
+// shared/StreamsForge.AppCore/Access/BuiltInRoleCatalog.cs, which are themselves the legacy policies
 // written out as grants (and pinned route-by-route by LegacyEquivalenceMatrixTests). Read it as: "the
 // lowest legacy role whose policy admits the route this action stands for."
 //

@@ -15,8 +15,8 @@ const STORAGE_KEY = 'sf.environment'
 const ENV_CHANGE_EVENT = 'sf-environment-change'
 
 /** How the default environment is spelled everywhere a human or the API sees it — matches
- * EnvKeys.DefaultDisplayName / EnvironmentRecord.Name server-side (shared/StreamForge.Contracts/EnvironmentModels.cs,
- * shared/StreamForge.AppCore/Environments/EnvKeys.cs). The SPA never stores the server's internal empty-string
+ * EnvKeys.DefaultDisplayName / EnvironmentRecord.Name server-side (shared/StreamsForge.Contracts/EnvironmentModels.cs,
+ * shared/StreamsForge.AppCore/Environments/EnvKeys.cs). The SPA never stores the server's internal empty-string
  * spelling; localStorage either holds a real environment name or nothing at all. */
 export const DEFAULT_ENVIRONMENT = 'default'
 

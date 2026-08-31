@@ -15,7 +15,7 @@
 # Redis here is ephemeral (no volume) — see README.md's "ephemeral Redis" note: every `up` is a cold
 # start that reseeds the demo catalog, same as deleting orleans' data/ dir. This is intentional (mirrors
 # the Cloud Run instance, which has no persistent disk either).
-name: streamforge-dapr
+name: streamsforge-dapr
 
 services:
   app:
@@ -68,7 +68,7 @@ services:
     command:
       - "/daprd"
       - "--app-id"
-      - "streamforge-dapr"
+      - "streamsforge-dapr"
       - "--app-port"
       - "8080"
       - "--app-protocol"

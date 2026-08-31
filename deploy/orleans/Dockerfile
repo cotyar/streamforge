@@ -1,13 +1,13 @@
-# StreamForge — Orleans flavor — Cloud Run / compose image.
+# StreamsForge — Orleans flavor — Cloud Run / compose image.
 #
 # Build from the REPO ROOT (context matters — the SPA and shared/ live outside orleans/):
-#   docker build --platform linux/amd64 -f deploy/orleans/Dockerfile -t streamforge-orleans .
+#   docker build --platform linux/amd64 -f deploy/orleans/Dockerfile -t streamsforge-orleans .
 #
 # --platform linux/amd64 matters even on Apple Silicon: grpc.tools' bundled protoc binary
 # segfaults (SIGSEGV, exit 139) under native linux/arm64 in this SDK image as of grpc.tools
 # 2.80.0 — amd64 builds fine (emulated locally via QEMU, native on Cloud Build/Cloud Run).
 #
-# Three stages: (1) bun builds the SPA, (2) dotnet SDK publishes StreamForge.Host, (3) a slim
+# Three stages: (1) bun builds the SPA, (2) dotnet SDK publishes StreamsForge.Host, (3) a slim
 # aspnet runtime bakes the publish output + SPA + docs together. See deploy/README.md for the
 # full local-run / Cloud Run story; see plans/007-cloudrun-admin-aichat.md decision D-A for why
 # this is one self-contained container (single-silo localhost clustering, ephemeral data dir).
@@ -18,8 +18,8 @@
 FROM oven/bun:1.4 AS web-build
 WORKDIR /src
 
-# The console is a member of the repo's bun WORKSPACE (root package.json): @streamforge/client and
-# @streamforge/tanstack-db are linked, not copied, and web's own prebuild compiles them. So the build
+# The console is a member of the repo's bun WORKSPACE (root package.json): @streamsforge/client and
+# @streamsforge/tanstack-db are linked, not copied, and web's own prebuild compiles them. So the build
 # context is the workspace root, not web/ — copying web/ alone leaves those two dependencies unresolvable.
 # Manifests first, so this layer caches across source-only changes.
 COPY package.json bun.lock ./
@@ -35,19 +35,19 @@ RUN bun run --cwd web build
 # → /src/web/dist
 
 # ---------------------------------------------------------------------------
-# Stage 2 — publish StreamForge.Host (and its shared/ + orleans project references)
+# Stage 2 — publish StreamsForge.Host (and its shared/ + orleans project references)
 # ---------------------------------------------------------------------------
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS dotnet-build
 WORKDIR /src
 
-# Only the pieces StreamForge.Host's ProjectReferences touch — shared/ + orleans/ — keeping the
+# Only the pieces StreamsForge.Host's ProjectReferences touch — shared/ + orleans/ — keeping the
 # dapr/ and web/ trees out of this stage's context entirely (irrelevant to this publish and, for
 # web/, already built by stage 1).
 COPY shared/ shared/
 COPY orleans/ orleans/
 COPY external/ycs/ external/ycs/
 
-RUN dotnet publish orleans/src/StreamForge.Host -c Release -o /app/publish
+RUN dotnet publish orleans/src/StreamsForge.Host -c Release -o /app/publish
 
 # ---------------------------------------------------------------------------
 # Stage 3 — runtime image
@@ -69,10 +69,10 @@ COPY orleans/docs ./docs
 # against the exact version this image runs instead of vendoring a file out of a host project.
 # Cheap (a handful of small text files) — no separate publishing pipeline built for it. Pull with
 # `docker cp <container>:/app/protos - | tar -x`, or `docker run --rm --entrypoint cat <image>
-# /app/protos/streamforge.proto`.
-COPY orleans/src/StreamForge.Host/Protos ./protos
+# /app/protos/streamsforge.proto`.
+COPY orleans/src/StreamsForge.Host/Protos ./protos
 
-# Absolute paths so StreamForgeApiOptions resolves them regardless of ContentRootPath — see
+# Absolute paths so StreamsForgeApiOptions resolves them regardless of ContentRootPath — see
 # Program.cs (Web:Dist was already configurable; Docs:File is the additive key this wave added,
 # mirroring the Dapr host's existing pattern one-for-one).
 ENV Web__Dist=/app/web-dist
@@ -105,4 +105,4 @@ EXPOSE 8080
 
 # Cloud Run injects PORT (default 8080 locally/compose too); shell form so ${PORT} expands, and
 # `exec` so dotnet becomes PID 1 (proper SIGTERM handling on `docker stop` / Cloud Run scale-down).
-ENTRYPOINT ["/bin/sh", "-c", "exec dotnet StreamForge.Host.dll --urls http://0.0.0.0:${PORT:-8080}"]
+ENTRYPOINT ["/bin/sh", "-c", "exec dotnet StreamsForge.Host.dll --urls http://0.0.0.0:${PORT:-8080}"]

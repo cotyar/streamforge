@@ -1,7 +1,7 @@
 """Pure unit tests for the Z-set reducer -- no engine, no network. Fixtures are handcrafted to
 exercise every hazard named in _zset.py's module docstring."""
 
-from streamforge._zset import ZSet, canonical_key, group_key_of
+from streamsforge._zset import ZSet, canonical_key, group_key_of
 
 
 def test_retract_assert_pair():

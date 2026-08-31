@@ -1,7 +1,7 @@
 # Wishlist from the ac-co OTC Terms demo
 
 Collected while building the hedge-fund demo (ac-co.ai-4 `apps/websites/otc-terms`
-+ `apps/office-addins/otc-addin`) against StreamForge. Ordered by value; every
++ `apps/office-addins/otc-addin`) against StreamsForge. Ordered by value; every
 item is small by design.
 
 Each section keeps the original report and records what shipped underneath it —
@@ -12,7 +12,7 @@ backfill and coordinator-mode inputs, both blocked on seams rather than unwritte
 
 ## 1. ✅ Configurable CORS origins (shipped 2026-08-15)
 
-`shared/StreamForge.Api/StreamForgeApiExtensions.cs` — the `SpaDev` policy was
+`shared/StreamsForge.Api/StreamsForgeApiExtensions.cs` — the `SpaDev` policy was
 hardcoded to `http://localhost:5173`. Now reads `Cors:AllowedOrigins` (env form
 `Cors__AllowedOrigins__0=…`) with the old value as the default. Used by
 `deploy/orleans/compose.demo.yaml`. `dotnet build` clean; behavior unchanged
@@ -41,13 +41,13 @@ always take the else-branch. An omitted `ELSE` supplies NULL. There is no simple
 `CASE expr WHEN value THEN …` form.
 
 Evaluation short-circuits, so an N-branch CASE does N tests, not N².
-Coverage: `orleans/tests/StreamForge.Engine.Tests/CaseExpressionTests.cs` (19
+Coverage: `orleans/tests/StreamsForge.Engine.Tests/CaseExpressionTests.cs` (19
 tests, both spellings). Console highlighting/formatting, `orleans/docs/index.html`,
 `orleans/README.md` and the `sf-sql` skill know about it.
 
 ## 3. ✅ `decimal` case in field coercion (real CDC bug)
 
-`shared/StreamForge.Engine/Runtime/FieldValueConversion.cs` — `TryToDouble` and
+`shared/StreamsForge.Engine/Runtime/FieldValueConversion.cs` — `TryToDouble` and
 `TryToLong` have no `case decimal`. Postgres `numeric` columns arrive from the
 CDC path as CLR `decimal` (`PgCdcSource.Cell` passes them through), so a
 declared `Double` field gets coercion-failure → NULL for every `numeric` column.
@@ -129,21 +129,21 @@ change already polls promptly, which is what the endpoint was a workaround for.
 
 ## 6. ✅ Honor `PORT` env in the from-source host
 
-`PORT=6199 dotnet run --project orleans/src/StreamForge.Host` ignored PORT and
+`PORT=6199 dotnet run --project orleans/src/StreamsForge.Host` ignored PORT and
 bound 5199/5299.
 
 **Shipped:** `PORT` moves the HTTP port and gRPC follows at `PORT+100` — the same
 +100 relationship the two defaults already have, so `PORT=7101` gives 7101/7201
 (verified by running it). `Http:Port`/`Grpc:Port` still win where set, so the two
 can always be split apart. The gRPC port is now resolved once and shared with
-`StreamForgeApiOptions`, which previously read it a second time from
+`StreamsForgeApiOptions`, which previously read it a second time from
 configuration and would have reported 5299 while Kestrel bound something else.
 
 ## 7. ✅ Console SQL editor: `LATEST BY` (and friends) parsed as a table alias
 
 `web/src/components/sqlScope.ts:147` — `CLAUSE_KEYWORDS` lacks `LATEST`,
 `UNNEST`, `UNION`, `IN`, `EXISTS` (all reserved in
-`shared/StreamForge.Engine/Sql/Parser.cs`), and `web/src/components/SqlEditor.tsx`
+`shared/StreamsForge.Engine/Sql/Parser.cs`), and `web/src/components/SqlEditor.tsx`
 `KEYWORDS` lacks `LATEST`/`UNNEST`/`IN`/`EXISTS`. So `FROM trades LATEST BY (id) WHERE `
 reads `LATEST` as an AS-less alias for `trades` and column completion after
 `WHERE` yields nothing — and every table-mode CDC mirror is written exactly that
@@ -169,11 +169,11 @@ can swap generator/aggregate implementations without touching table SQL.
 ## 8. ✅ Parametric, seedable "scenario generator" source with run-on-demand
 
 Today a generator is `SourceDefinition.GeneratorProfile` ∈ {trades, quotes,
-orders, generic} + `EventsPerSecond` (`shared/StreamForge.Contracts/Models.cs:55-57`);
+orders, generic} + `EventsPerSecond` (`shared/StreamsForge.Contracts/Models.cs:55-57`);
 `MarketDataProfiles.cs:52,206-241` synthesises values with `Random.Shared` (no
-seed), `orleans/src/StreamForge.Host/Grains/GeneratorGrain.cs:28-41` emits one
+seed), `orleans/src/StreamsForge.Host/Grains/GeneratorGrain.cs:28-41` emits one
 event per timer tick, and `IGeneratorGrain`
-(`orleans/src/StreamForge.Abstractions/GrainInterfaces.cs:24`) has no
+(`orleans/src/StreamsForge.Abstractions/GrainInterfaces.cs:24`) has no
 run-once/emit call. There is no way to say "give me a *batch* of N×K rows, now,
 reproducibly".
 
@@ -223,7 +223,7 @@ step < D` in the consuming table terminates it. The engine guarantees delivery
 and ordering only; termination is the user's job (like any dataflow iterate).
 
 Today this is not expressible: sinks are `nats | file | postgres | mssql`
-(`shared/StreamForge.Contracts/ConnectorModels.cs:136-150`), no HTTP sink, and
+(`shared/StreamsForge.Contracts/ConnectorModels.cs:136-150`), no HTTP sink, and
 the only feedback edge is NATS pub → NATS sub (out of process, no cycle guard).
 
 Wanted, smallest first:
@@ -257,7 +257,7 @@ rejected and nothing shows an operator why.
 ## 10. ✅ Statistical aggregates: STDDEV/VAR, PERCENTILE_CONT/MEDIAN, COUNT(DISTINCT)
 
 Aggregates are the closed set `COUNT, SUM, AVG, MIN, MAX`
-(`shared/StreamForge.Engine/Sql/Ast.cs:93-97` `AggregateNames.All`, factories
+(`shared/StreamsForge.Engine/Sql/Ast.cs:93-97` `AggregateNames.All`, factories
 `Runtime/Aggregators.cs:11-19` (stream) and `Runtime/ZAggregators.cs:14-22`
 (Z-set, `Apply(value, weight)`), name check in `Sql/Parser.cs:905`).
 
@@ -297,7 +297,7 @@ Scalars are a closed compile-time set: `Sql/Validator.cs:1182` `KnownFunctions`
 + arity/kind switches (`:1198-1212`) + `Runtime/ExpressionEvaluator.cs:188-219`
 `EvalFunction`; the seam is documented at `Runtime/FieldValueConversion.cs:6-11`.
 
-Wanted: a `StreamForge.Quant` set of scalar functions implemented on **QLNet**
+Wanted: a `StreamsForge.Quant` set of scalar functions implemented on **QLNet**
 (pure-.NET port of QuantLib, NuGet `QLNet`, BSD, no native libraries — ships in
 the Orleans container unchanged). First set, all doubles in, double out:
 - `BS_PRICE / BS_DELTA / BS_GAMMA / BS_VEGA / BS_THETA (spot, strike, t_years, r, q, vol, is_call)`
@@ -334,8 +334,8 @@ actual 1bp reprice, a par swap worth nothing, covered-interest parity.
 ## 12. ✅ Function / aggregate extension seam (makes 10–11 additive)
 
 `Aggregator`, `IZAggregator`, `KnownFunctions` and `EvalFunction` are all
-`internal`, so a `StreamForge.Quant` assembly cannot register anything without
-editing the Engine (or `InternalsVisibleTo` in `shared/StreamForge.Engine/AssemblyInfo.cs`).
+`internal`, so a `StreamsForge.Quant` assembly cannot register anything without
+editing the Engine (or `InternalsVisibleTo` in `shared/StreamsForge.Engine/AssemblyInfo.cs`).
 Wanted: a small public registry — `IScalarFunction { Name, Arity, ResultKind(args),
 Eval(args) }` and `IAggregateFactory { Name, CreateStream(), CreateZ() }` — that
 the Validator/Parser/Evaluator consult after the built-in switches. Console
@@ -383,7 +383,7 @@ being checked in turn for chains.
 
 ## 14. ✅ BUG: an aggregate created over an already-populated `LATEST BY` table collapses to zero
 
-`shared/StreamForge.Engine/Runtime/Ops/TableReduceOp.cs` — `Groups.Remove(key)`
+`shared/StreamsForge.Engine/Runtime/Ops/TableReduceOp.cs` — `Groups.Remove(key)`
 whenever a group's running weight touches zero; a group cannot carry negative
 weight. `LATEST BY` emits a bare assert (+1) on first sight of a key and
 retract(−1)+assert(+1) thereafter. So a GROUP BY table created *after* its
@@ -401,8 +401,8 @@ create time when an input `LATEST BY` table is non-empty, plus documented
 guidance. Workaround used: the consumer CROSS JOINs a *derived*
 `(SELECT … FROM src LATEST BY (k))` subquery — a nested operator with its own
 empty key map — instead of the materialized table
-(`apps/websites/otc-terms/lib/streamforge/provision-doc.ts`, and
-`lib/streamforge/rebuild.ts` documents which tables must never be recreated
+(`apps/websites/otc-terms/lib/streamsforge/provision-doc.ts`, and
+`lib/streamsforge/rebuild.ts` documents which tables must never be recreated
 warm).
 
 **Half shipped, and the half that was safe.** A group whose weight goes negative
@@ -462,7 +462,7 @@ the socket, not on rendering (the client already coalesces React flushes to
 containing all deltas of that epoch — and, optionally, collapse retract+assert
 of the same key within the batch to a single assert (net Z-set) — instead of
 one message per delta. This is also the client-visible half of #15. Pointers:
-`orleans/src/StreamForge.Host` hub + `Streams:PushCapacity`, `TABLES__FLUSHMS`
+`orleans/src/StreamsForge.Host` hub + `Streams:PushCapacity`, `TABLES__FLUSHMS`
 (default 250) — the flush interval exists but the message granularity does not.
 Ingest-side, the demo raised `MaxBatchRows`/`CapacityRows` to 5000/50000 and
 that half is fine.
@@ -547,14 +547,14 @@ instead, so nothing is blocked on them.
 
 ## 17. `POST /api/sources` should accept `eventsPerSecond: 0` for `generatorProfile: "scenario"`
 
-`shared/StreamForge.Api/Endpoints/SourceSchemaService.cs` — `SourceValidation.Validate`
+`shared/StreamsForge.Api/Endpoints/SourceSchemaService.cs` — `SourceValidation.Validate`
 adds `"eventsPerSecond must be > 0"` for any `kind: "generator"` source with
 `EventsPerSecond <= 0` (`:82-89`), and a scenario-profile source is generator-kind.
 But 0 is the only correct value for it: the profile's whole convention is that
 rows come from an explicit `POST /api/sources/{name}/run`, never from a tick.
 `SourceDefinition.Scenario`'s own doc comment says so in as many words —
 "EventsPerSecond is ignored (must be 0, by convention — nothing enforces it)"
-(`shared/StreamForge.Contracts/Models.cs:81-85`). Nothing enforces it; something
+(`shared/StreamsForge.Contracts/Models.cs:81-85`). Nothing enforces it; something
 enforces the opposite.
 
 Why it matters: `Validate` gates `POST`/`PUT /api/sources`
@@ -566,15 +566,15 @@ assistant cannot create one at all).
 
 The failure mode if you work around it with a positive rate is worse than the
 rejection. `GeneratorGrain.StartAsync` arms its tick timer for any
-`EventsPerSecond > 0` (`orleans/src/StreamForge.Host/Grains/GeneratorGrain.cs:59-66`),
+`EventsPerSecond > 0` (`orleans/src/StreamsForge.Host/Grains/GeneratorGrain.cs:59-66`),
 and `MarketDataProfiles.GenerateEvent`
-(`shared/StreamForge.AppCore/Generators/MarketDataProfiles.cs:52`) has no
+(`shared/StreamsForge.AppCore/Generators/MarketDataProfiles.cs:52`) has no
 `"scenario"` arm, so it falls through to `default: // generic` (`:206-216`), which
 honours the declared schema and fills it with random values. The source then
 accumulates random rows shaped exactly like path rows, interleaved with the real
 ones a run produces — a silent wrong-data outcome, not an error.
 
-Workaround in the demo: `apps/websites/otc-terms/lib/streamforge/provision-doc.ts`'s
+Workaround in the demo: `apps/websites/otc-terms/lib/streamsforge/provision-doc.ts`'s
 `buildMcGenSource()` is submitted through `/api/config/import` — at provisioning
 time, and again from `lib/mc-run.ts` (`syncGenSource`) whenever a run needs a
 custom per-desk vol map, since vol lives on the instrument list and is therefore
@@ -582,7 +582,7 @@ a catalog change rather than a per-run override.
 
 ## 18. `POST /api/sources/{name}/run` should support `rows: false` / a summary-only response
 
-`shared/StreamForge.Api/Endpoints/SourceRunEndpoints.cs:63` — the run endpoint
+`shared/StreamsForge.Api/Endpoints/SourceRunEndpoints.cs:63` — the run endpoint
 always echoes the whole generated batch back to the caller
 (`ScenarioRunResponse(result.Accepted, result.Rows)`, `:80`). For the demo's
 Monte-Carlo that is ~1.3 MB of JSON per simulated day (200 paths × 36
@@ -605,9 +605,9 @@ it is what pushed the presenter's MC beat's settle time up.
 
 A `step: true` scenario run keeps its per-RunId cursor in the generator's own
 memory: `GeneratorGrain._runStates`, a `Dictionary<string, ScenarioRunState>`
-keyed by RunId (`orleans/src/StreamForge.Host/Grains/GeneratorGrain.cs:42`,
+keyed by RunId (`orleans/src/StreamsForge.Host/Grains/GeneratorGrain.cs:42`,
 populated at `:130-138`), and the identical field in the Dapr flavour
-(`dapr/src/StreamForge.Dapr.Host/Actors/GeneratorActor.cs:115`). It is cleared in
+(`dapr/src/StreamsForge.Dapr.Host/Actors/GeneratorActor.cs:115`). It is cleared in
 exactly two places — `StartAsync` and `StopAsync` (`GeneratorGrain.cs:51,79`;
 `GeneratorActor.cs:148,173`). There is no expiry, and no way for a client to say
 "this run is finished": a completed run's state is indistinguishable from a
@@ -623,24 +623,24 @@ Wanted, either: a TTL on idle run state, or an explicit close/dispose call
 run-complete case could also free itself, which would cover the common path
 without a new endpoint.
 
-Workaround in the demo: none — the demo restarts StreamForge often enough
-(`lib/streamforge/rebuild.ts`) that it never bites. Which is exactly why it would
+Workaround in the demo: none — the demo restarts StreamsForge often enough
+(`lib/streamsforge/rebuild.ts`) that it never bites. Which is exactly why it would
 bite a real deployment first: the only thing keeping it invisible here is a
 lifecycle no production host has.
 
 ## 20. `GET /api/sql/functions` should enumerate the built-in statistical aggregates and mark 2-arg forms
 
-`shared/StreamForge.Api/Endpoints/SqlFunctionsEndpoints.cs:29-33` returns
+`shared/StreamsForge.Api/Endpoints/SqlFunctionsEndpoints.cs:29-33` returns
 `{ scalars, aggregates, registeredScalars, registeredAggregates }`, sourced from
 `SqlFunctions.BuiltInScalarNames` / `BuiltInAggregateNames`
-(`shared/StreamForge.Engine/Sql/SqlFunctions.cs:73-84`). But
+(`shared/StreamsForge.Engine/Sql/SqlFunctions.cs:73-84`). But
 `BuiltInAggregates` is still literally `["COUNT", "SUM", "AVG", "MIN", "MAX"]`
 (`:80`) — the pre-#10 set. The language moved and this list did not: the parser's
 own set is `AggregateNames.All`, which is those five *plus*
-`Runtime.StatAggregatorNames.All` (`shared/StreamForge.Engine/Sql/Ast.cs:95-96`),
+`Runtime.StatAggregatorNames.All` (`shared/StreamsForge.Engine/Sql/Ast.cs:95-96`),
 i.e. `VAR_SAMP`, `VAR_POP`, `STDDEV_SAMP`, `STDDEV_POP`, `VARIANCE`, `VAR`,
 `STDDEV`, `STDEV`, `MEDIAN` and `PERCENTILE_CONT`
-(`shared/StreamForge.Engine/Runtime/StatAggregators.cs:14-32`), alongside
+(`shared/StreamsForge.Engine/Runtime/StatAggregators.cs:14-32`), alongside
 `COUNT(DISTINCT x)`. All of them compile — verifiable from outside with
 `POST /api/tables/validate` (`TablesEndpoints.cs:214`), and the demo's own
 `mc_var` table is built on `PERCENTILE_CONT(0.05, pnl_usd)`, `MEDIAN` and

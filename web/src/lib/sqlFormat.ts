@@ -1,5 +1,5 @@
 /**
- * Dialect-aware SQL formatter for StreamForge's streaming-SQL grammar (see `.claude/skills/sf-sql`
+ * Dialect-aware SQL formatter for StreamsForge's streaming-SQL grammar (see `.claude/skills/sf-sql`
  * for the full grammar). Text-only and idempotent: it never adds/removes/reorders tokens, only
  * rewrites whitespace (collapsing runs, inserting line breaks + indentation) and the letter-case of
  * recognized dialect keywords/functions. String literals and `--` comments are never touched — see

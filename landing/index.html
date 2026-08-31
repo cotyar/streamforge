@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="StreamsForge is a streaming SQL platform for turning live events into continuously updated data products." />
+    <meta name="theme-color" content="oklch(0.11 0.02 176)" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <title>StreamsForge — SQL that stays in motion</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="grain" aria-hidden="true"></div>
+
+    <header class="site-header">
+      <a class="wordmark" href="#top" aria-label="StreamsForge home">
+        <svg viewBox="0 0 40 40" aria-hidden="true"><path d="M5 11.5h12.5L24 18l11-6.5M5 20h12.5L24 26l11-6M5 28.5h12.5L24 34l11-5.5" /></svg>
+        <span>Streams<span>Forge</span></span>
+      </a>
+      <button class="menu-button" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+      <nav id="site-nav" aria-label="Main navigation">
+        <a href="#why">Why StreamsForge</a>
+        <a href="#architecture">Architecture</a>
+        <a class="nav-docs" href="/docs/">Docs <span aria-hidden="true">↗</span></a>
+        <a href="#launch">Get started</a>
+      </nav>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <section class="hero" id="top">
+        <div class="hero-copy">
+          <p class="eyebrow"><span></span> Streaming SQL / built for live systems</p>
+          <h1>SQL that <em>stays</em><br />in motion.</h1>
+          <p class="hero-intro">Turn live events into continuously updated tables, decisions, and products—without pretending time stands still.</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#launch">Start a local instance <span aria-hidden="true">↘</span></a>
+            <a class="text-link" href="#architecture">See how it works <span aria-hidden="true">↓</span></a>
+            <a class="text-link docs-cta" href="/docs/">Read the docs <span aria-hidden="true">↗</span></a>
+          </div>
+          <div class="hero-notes" aria-label="Platform highlights">
+            <span><b>1 ms</b> p50 push transport</span>
+            <span><b>2 runtimes</b> one shared core</span>
+          </div>
+        </div>
+
+        <div class="hero-visual" aria-label="Illustration of streaming events flowing through SQL into live results">
+          <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+          <div class="signal signal-one"></div><div class="signal signal-two"></div><div class="signal signal-three"></div>
+          <div class="flow-card input-card">
+            <div class="card-label"><i></i>EVENT STREAM</div>
+            <div class="event-line"><span class="dot dot-gold"></span><code>trades</code><b>1,248/s</b></div>
+            <div class="event-line"><span class="dot dot-blue"></span><code>quotes</code><b>8,931/s</b></div>
+            <div class="event-line"><span class="dot dot-pink"></span><code>orders</code><b>309/s</b></div>
+          </div>
+          <div class="flow-card sql-card">
+            <div class="card-label"><i></i>CONTINUOUS QUERY</div>
+            <pre><span>SELECT</span> symbol,
+  SUM(price * qty) /
+  SUM(qty) <em>AS</em> vwap
+<span>FROM</span> trades
+<em>GROUP BY</em> symbol</pre>
+            <div class="query-status"><span></span> RUNNING <b>00:06:28</b></div>
+          </div>
+          <div class="flow-card output-card">
+            <div class="card-label"><i></i>LIVE TABLE</div>
+            <div class="table-head"><span>SYMBOL</span><span>VWAP</span><span>Δ</span></div>
+            <div class="table-row"><b>NVDA</b><span>186.42</span><em>+0.62%</em></div>
+            <div class="table-row"><b>MSFT</b><span>504.08</span><em>+0.14%</em></div>
+            <div class="table-row"><b>AAPL</b><span>241.73</span><em>+0.38%</em></div>
+          </div>
+          <div class="latency-chip"><span></span> 1 ms <small>p50</small></div>
+        </div>
+      </section>
+
+      <section class="marquee" aria-label="Platform capabilities">
+        <div><span>CONTINUOUS QUERIES</span><i>✦</i><span>LIVE TABLES</span><i>✦</i><span>DATAFLOWS</span><i>✦</i><span>CONNECTORS</span><i>✦</i><span>GOVERNANCE</span><i>✦</i><span>CONTINUOUS QUERIES</span><i>✦</i></div>
+      </section>
+
+      <section class="statement" id="why">
+        <p class="section-number">01 / THE PREMISE</p>
+        <h2>Your events are not rows that happen once.<br /><em>They are a changing world.</em></h2>
+        <p class="statement-copy">StreamsForge makes that world queryable. Write familiar SQL over an event stream and watch the resulting view update as every new fact arrives.</p>
+      </section>
+
+      <section class="capabilities" aria-label="Key capabilities">
+        <article class="capability capability-lead">
+          <p class="card-kicker">01</p>
+          <h3>One query.<br /><em>Always current.</em></h3>
+          <p>Windowed pipelines for in-flight events. Materialized tables for a live, retract-and-assert view of the world.</p>
+          <div class="mini-chart" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><svg viewBox="0 0 300 90"><path d="M0 72 C24 64, 30 45, 50 54 S80 24, 104 44 S138 65, 153 42 S180 14, 205 33 S238 43, 255 19 S279 19, 300 5" /></svg></div>
+        </article>
+        <article class="capability">
+          <p class="card-kicker">02</p>
+          <div class="cap-icon architecture-icon" aria-hidden="true"><i></i><i></i><i></i><b></b><b></b></div>
+          <h3>A core that travels.</h3>
+          <p>Run the same engine and console on Microsoft Orleans or Dapr. Compare runtime behavior from a common semantic base.</p>
+        </article>
+        <article class="capability">
+          <p class="card-kicker">03</p>
+          <div class="cap-icon lock-icon" aria-hidden="true">✦</div>
+          <h3>Built to be governed.</h3>
+          <p>Granular entitlements, approvals, and masked audit history make operating live data a deliberate act.</p>
+        </article>
+      </section>
+
+      <section class="architecture" id="architecture">
+        <div class="architecture-title"><p class="section-number">02 / THE SHAPE OF IT</p><h2>From signal<br />to <em>shared truth.</em></h2></div>
+        <div class="architecture-map">
+          <div class="map-row map-sources"><span class="map-label">INGRESS</span><div>Postgres</div><div>NATS</div><div>FIX</div><div>gRPC</div></div>
+          <div class="map-rail"><span></span><span></span><span></span><span></span></div>
+          <div class="map-engine"><span class="map-label">ENGINE</span><div class="engine-box"><i></i><b>StreamsForge Engine</b><small>SQL → dataflow → live deltas</small></div></div>
+          <div class="map-rail map-rail-down"><span></span><span></span><span></span></div>
+          <div class="map-row map-results"><span class="map-label">OUTCOMES</span><div>Tables</div><div>APIs</div><div>Streams</div></div>
+        </div>
+      </section>
+
+      <section class="proof">
+        <p class="section-number">03 / MEASURED, NOT ASSERTED</p>
+        <div class="proof-grid"><h2>Latency is an<br /><em>architectural fact.</em></h2><div><p>StreamsForge’s in-process push transport brings a live table delta to subscribers at a measured 1 ms p50—while retaining the standard pull transport when byte-for-byte Orleans behavior matters.</p><div class="metric"><b>1 <small>ms</small></b><span>p50 table delta<br />push transport</span></div></div></div>
+      </section>
+
+      <section class="launch" id="launch">
+        <p class="section-number">04 / START HERE</p>
+        <div class="launch-copy"><h2>Let the data<br />keep <em>moving.</em></h2><p>Start a local StreamsForge console, bring in an event stream, and write the first query that keeps answering itself.</p></div>
+        <div class="command-box"><div><span>terminal</span><code>$ docker compose -f deploy/orleans/compose.yaml up</code></div><button class="copy-button" type="button" data-copy="docker compose -f deploy/orleans/compose.yaml up">Copy command</button></div>
+        <p class="launch-note">The console is available at <code>http://localhost:6199</code>.</p>
+      </section>
+    </main>
+
+    <footer><a class="wordmark" href="#top"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M5 11.5h12.5L24 18l11-6.5M5 20h12.5L24 26l11-6M5 28.5h12.5L24 34l11-5.5" /></svg><span>Streams<span>Forge</span></span></a><p>Streaming SQL for a changing world.</p><a href="#top">Back to top ↑</a></footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

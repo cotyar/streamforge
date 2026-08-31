@@ -1,9 +1,9 @@
 /**
- * @streamforge/tanstack-db -- a TanStack DB collection backed by a StreamForge live table.
+ * @streamsforge/tanstack-db -- a TanStack DB collection backed by a StreamsForge live table.
  *
- * Layering, spelled out because it's easy to conflate the two: the StreamForge SERVER is the
+ * Layering, spelled out because it's easy to conflate the two: the StreamsForge SERVER is the
  * incremental-view-maintenance (IVM) engine -- it runs the differential dataflow and ships Z-set
- * deltas over the wire. `@streamforge/client`'s `LiveTable` is the CLIENT-side reducer that folds
+ * deltas over the wire. `@streamsforge/client`'s `LiveTable` is the CLIENT-side reducer that folds
  * those deltas into current rows (see its zset.ts doc comment for the reducer itself). This
  * package adds NO reduction logic of its own: it is a thin bridge that feeds an already-reduced
  * `LiveTable` into a TanStack DB `Collection` via `write()`/`begin()`/`commit()`, so a host app
@@ -15,11 +15,11 @@
  * types.d.ts`), not assumed from memory -- see the deviations noted inline below.
  */
 
-import { canonicalKey } from "@streamforge/client";
-import type { Client, LiveTable, Row } from "@streamforge/client";
+import { canonicalKey } from "@streamsforge/client";
+import type { Client, LiveTable, Row } from "@streamsforge/client";
 import type { CollectionConfig } from "@tanstack/db";
 
-export interface StreamForgeCollectionConfig {
+export interface StreamsForgeCollectionConfig {
   client: Client;
   /** Materialized table name, as passed to client.table(). */
   table: string;
@@ -35,21 +35,21 @@ export interface StreamForgeCollectionConfig {
 /**
  * Spread into TanStack DB's `createCollection()`:
  *
- *   const table = createCollection(streamForgeCollectionOptions({ client, table: "orders" }));
+ *   const table = createCollection(streamsForgeCollectionOptions({ client, table: "orders" }));
  *
  * No `startSync` is set here, so this follows TanStack DB's own lazy default: nothing connects to
- * StreamForge until something actually reads from the collection (a `.preload()`, a live query
+ * StreamsForge until something actually reads from the collection (a `.preload()`, a live query
  * that references it, etc.) -- the same "only sync what's queried" composition TanStack DB expects
  * of every collection, not something this package should override.
  */
-export function streamForgeCollectionOptions(config: StreamForgeCollectionConfig): CollectionConfig<Row, string> {
+export function streamsForgeCollectionOptions(config: StreamsForgeCollectionConfig): CollectionConfig<Row, string> {
   const { client, table, timeoutMs } = config;
 
   return {
-    id: `streamforge:${table}`,
+    id: `streamsforge:${table}`,
 
     // IDENTITY: this MUST be LiveTable's own canonical key (zset.ts's canonicalKey, re-exported
-    // by @streamforge/client), not a column we pick or a hash we invent. LiveTable already computes
+    // by @streamsforge/client), not a column we pick or a hash we invent. LiveTable already computes
     // this same string as the map key underlying `.entries()`'s `key` and `.row(key)` -- reusing it
     // verbatim is what keeps this collection's identity and the Z-set's identity the same scheme.
     // Two identity schemes over one dataset (e.g. a guessed `row.id`) is exactly the failure mode
@@ -83,7 +83,7 @@ export function streamForgeCollectionOptions(config: StreamForgeCollectionConfig
 
         // `touched` alone is now enough to drive insert/update/delete: `ZSet.apply()` (the
         // reducer inside LiveTable) reports every key whose presence or content actually changed --
-        // asserts, retractions, AND a group's superseded stale key alike (see @streamforge/client's
+        // asserts, retractions, AND a group's superseded stale key alike (see @streamsforge/client's
         // zset.ts `apply()` doc comment). That closed the gap this module used to paper over with
         // its own `groupIndex` side-index and a duplicate `client.tables()` call to re-resolve
         // `keyFields` (which `Client.table()` already resolves internally): a superseded row's OLD
@@ -164,7 +164,7 @@ export function streamForgeCollectionOptions(config: StreamForgeCollectionConfig
           // the same visibility any other un-awaited async failure gets), and leave the collection
           // parked at "loading" rather than pretending it's ready. A future @tanstack/db version
           // that adds a real async-error hook to SyncConfig should replace this.
-          console.error(`streamforge: table '${table}' failed to sync into a TanStack DB collection`, err);
+          console.error(`streamsforge: table '${table}' failed to sync into a TanStack DB collection`, err);
           throw err;
         });
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// `sf` — the StreamForge admin CLI (plan 013). Everything an operator does to a RUNNING instance
+// `sf` — the StreamsForge admin CLI (plan 013). Everything an operator does to a RUNNING instance
 // through the console, from a terminal instead: health, catalog, lifecycle, SQL validation,
 // rows/results (incl. plan 012's CSV), config export/import.
 //
@@ -21,10 +21,10 @@ import {
   type Kind,
 } from "./sfclient.ts";
 
-const USAGE = `sf — StreamForge admin CLI
+const USAGE = `sf — StreamsForge admin CLI
 
   sf health                                  instance health + who this token is
-  sf login [--user U] [--password P]         store a token in ~/.streamforge/token.json (0600)
+  sf login [--user U] [--password P]         store a token in ~/.streamsforge/token.json (0600)
   sf logout                                  remove THIS instance's stored token (others untouched)
   sf instance                                this instance's identity (anonymous — no login needed)
   sf peers                                   this instance's configured federation peers

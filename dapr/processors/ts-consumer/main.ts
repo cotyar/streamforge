@@ -1,4 +1,4 @@
-// StreamForge — polyglot pub/sub reach (plan 005, wave W8-B).
+// StreamsForge — polyglot pub/sub reach (plan 005, wave W8-B).
 //
 // A standalone bun process — no Dapr SDK, no npm deps, just Bun.serve() — that subscribes to two of
 // the platform's frozen pub/sub topics (dapr/POLYGLOT.md) via its own Dapr sidecar:
@@ -51,7 +51,7 @@ function printCounters() {
 }
 setInterval(printCounters, 10_000);
 
-// --- shape of the two envelopes we care about (mirrors shared/StreamForge.Contracts/Streaming/Envelopes.cs) ---
+// --- shape of the two envelopes we care about (mirrors shared/StreamsForge.Contracts/Streaming/Envelopes.cs) ---
 interface TableDeltaDto {
   row: Record<string, unknown>;
   weight: number;

@@ -61,7 +61,7 @@ for the record, not as live alternatives.
   `ConnectorRuntimeStatus.DuplexReady` to `false` and named the in-flight order's `ClOrdID` in
   `LastDuplexFailure` within seconds, with no silent counter.
 
-**Depends on**: 018 (the `fix` format, `shared/StreamForge.Connectors.Fix`, `QuickFIXn.Core` already
+**Depends on**: 018 (the `fix` format, `shared/StreamsForge.Connectors.Fix`, `QuickFIXn.Core` already
 carried), 010 (`IInboundTransport`), 014 (`IPolledTransport`, the out-of-core connector project precedent).
 
 ## The problem this exists to solve
@@ -69,8 +69,8 @@ carried), 010 (`IInboundTransport`), 014 (`IPolledTransport`, the out-of-core co
 `NewOrderSingle` out and `ExecutionReport` back travel the **same** FIX session: one TCP connection, one
 `SenderCompID`/`TargetCompID` pair, one pair of sequence-number streams. The platform's ingress and egress
 are two independent registries with independent config, independent lifetimes and independent teardown —
-`InboundTransports` (`shared/StreamForge.AppCore/Transports/InboundTransports.cs:29`) and `SinkTransports`
-(`shared/StreamForge.AppCore/Sinks/ISinkTransport.cs:79-80`). Configure a `fix` source and a `fix` sink
+`InboundTransports` (`shared/StreamsForge.AppCore/Transports/InboundTransports.cs:29`) and `SinkTransports`
+(`shared/StreamsForge.AppCore/Sinks/ISinkTransport.cs:79-80`). Configure a `fix` source and a `fix` sink
 against the same venue and you get **two logons with two sequence streams**, which a real counterparty will
 reject, and should.
 
@@ -85,15 +85,15 @@ Plan 019's earlier draft named the cluster-singleton guarantee as an open proble
 
 - There is **no bespoke singleton or leader-election mechanism anywhere in this repo** — no
   `StatelessWorker`, no `IPlacementDirector`, no election. `RegistryGrain`'s "singleton" is a doc-comment
-  convention meaning "one well-known key" (`orleans/src/StreamForge.Host/Grains/RegistryGrain.cs:24`).
+  convention meaning "one well-known key" (`orleans/src/StreamsForge.Host/Grains/RegistryGrain.cs:24`).
 - The sink publisher services are **plain `BackgroundService`s, not grains or actors** — Orleans
-  `orleans/src/StreamForge.Host/Services/NatsPublisherService.cs`, Dapr
-  `dapr/src/StreamForge.Dapr.Host/Streaming/NatsSinkPublisherService.cs`. Nothing guarantees one of them
+  `orleans/src/StreamsForge.Host/Services/NatsPublisherService.cs`, Dapr
+  `dapr/src/StreamsForge.Dapr.Host/Streaming/NatsSinkPublisherService.cs`. Nothing guarantees one of them
   cluster-wide; that is a non-issue today only because both flavours' documented topology is single-instance
   (`orleans/ARCHITECTURE.md:93-95`).
 - `ConnectorGrain` is keyed by source name and Orleans guarantees at most one activation per key
-  (`orleans/src/StreamForge.Host/Grains/ConnectorGrain.cs:84-86`); `ConnectorActor` gets the same from Dapr
-  actor placement (`dapr/src/StreamForge.Dapr.Host/Actors/ConnectorActor.cs:76-77`).
+  (`orleans/src/StreamsForge.Host/Grains/ConnectorGrain.cs:84-86`); `ConnectorActor` gets the same from Dapr
+  actor placement (`dapr/src/StreamsForge.Dapr.Host/Actors/ConnectorActor.cs:76-77`).
 
 So: **the FIX session is owned by the connector driver, which already holds the inbound half, and the
 outbound half is reached through it.** The singleton requirement is satisfied by the shape already in use
@@ -119,9 +119,9 @@ session, and **that** is when the grain-call hop — with its turn-rate bound �
 The outbound half is exposed as a sink kind whose `ISinkClient` **holds no connection**: it resolves the
 connector grain/actor by the source name in its `SinkSpec` and forwards. Everything downstream keeps
 working unchanged — `SinkSpec` still lives on `PipelineDefinition.Sinks`
-(`shared/StreamForge.Contracts/Models.cs:442`) and `TableDefinition.Sinks` (`Models.cs:568`), `SinkSelection`
-still decides eligibility (`shared/StreamForge.AppCore/Sinks/SinkSelection.cs:28-29`), `SinkFanout` still
-dispatches (`shared/StreamForge.AppCore/Sinks/SinkFanout.cs:43-64`).
+(`shared/StreamsForge.Contracts/Models.cs:442`) and `TableDefinition.Sinks` (`Models.cs:568`), `SinkSelection`
+still decides eligibility (`shared/StreamsForge.AppCore/Sinks/SinkSelection.cs:28-29`), `SinkFanout` still
+dispatches (`shared/StreamsForge.AppCore/Sinks/SinkFanout.cs:43-64`).
 
 This is what makes the 30-second signature churn harmless. `SinkSelection.Signature` is a content hash of
 the active sink list (`SinkSelection.cs:40-41`), compared on every refresh tick, and any field edit tears
@@ -138,7 +138,7 @@ error at save time**, not a runtime surprise. That check is the wave's job, in `
 
 `ISinkClient.PublishAsync` **never throws** and must not block past ~3s (`ISinkTransport.cs:6-13,24`), and
 `IBatchSinkClient` states plainly that a batch "does not buy reliability, acknowledgement or retry"
-(`shared/StreamForge.AppCore/Sinks/IBatchSinkClient.cs:13-14`). Callers await with no try/catch. That is not
+(`shared/StreamsForge.AppCore/Sinks/IBatchSinkClient.cs:13-14`). Callers await with no try/catch. That is not
 negotiable from inside this plan — four call sites depend on it (`NatsPublisherService.cs:158,249`,
 `NatsSinkPublisherService.cs:194,225`).
 
@@ -162,9 +162,9 @@ refuses to build.
 `DuplexTransports` joins `InboundTransports` and `PolledTransports`, same static-list shape and same
 rationale (`InboundTransports.cs:11-16`: DI cannot reach the connector driver, whose container is the
 runtime's, not the host's). `TransportCatalog` is today `(Inbound, Outbound)`
-(`shared/StreamForge.AppCore/Transports/TransportDescriptor.cs:140-142`) and `GET /api/transports` merges
+(`shared/StreamsForge.AppCore/Transports/TransportDescriptor.cs:140-142`) and `GET /api/transports` merges
 the two inbound registries into one list precisely so the console need not know there are several
-(`shared/StreamForge.Api/Endpoints/TransportsEndpoints.cs:34-48`). The draft of this decision said a duplex kind
+(`shared/StreamsForge.Api/Endpoints/TransportsEndpoints.cs:34-48`). The draft of this decision said a duplex kind
 would appear in **both** lists flagged `Duplex = true`. **Wave B corrected it, and its reading is the
 better one**: the flag means "this kind implements `IDuplexTransport`", which is true of an inbound kind
 like `fix` and false of the generic outbound proxy sink, since one proxy can point at any duplex source.
@@ -173,13 +173,13 @@ existing kind pickers (`web/src/pages/SourcesPage.tsx:383-384`,
 `web/src/components/SinksEditor.tsx:44-54`) keep working with no restructuring.
 
 `SourceValidation.IsKnownKind` and its unknown-kind error string gain the third registry
-(`shared/StreamForge.Api/Endpoints/SourceSchemaService.cs:32-33,64-72`).
+(`shared/StreamsForge.Api/Endpoints/SourceSchemaService.cs:32-33,64-72`).
 
 ### D5. Sequence-number persistence stops being optional
 
 Plan 018 defaults a market-data session to `ResetOnLogon=Y` and an in-memory store because losing the count
-costs some re-sent quotes (`shared/StreamForge.Contracts/ConnectorModels.cs:157-199`, store chosen at
-`shared/StreamForge.Connectors.Fix/FixMessageSource.cs:72-74`). On an order session the store **is** the
+costs some re-sent quotes (`shared/StreamsForge.Contracts/ConnectorModels.cs:157-199`, store chosen at
+`shared/StreamsForge.Connectors.Fix/FixMessageSource.cs:72-74`). On an order session the store **is** the
 record of what was sent. So for a duplex FIX session: `StorePath` is required, `ResetOnLogon` defaults to
 false, and validation refuses the in-memory combination outright — with the message saying why, because a
 silent default here is a gap the venue resolves by its own rules.
@@ -193,7 +193,7 @@ Plan 018 deliberately ships no dictionary (`UseDataDictionary=N`), and for inbou
 honest: unknown tags become `tag<N>` strings and groups are framed structurally. Outbound it is not —
 required-field validation per `MsgType` is not optional when the message is an order. The dictionary is
 introduced for **outbound construction and validation only**; the inbound parser
-(`shared/StreamForge.AppCore/Connectors/Formats/FixParser.cs`) keeps its dictionary-free behaviour
+(`shared/StreamsForge.AppCore/Connectors/Formats/FixParser.cs`) keeps its dictionary-free behaviour
 unchanged, so no existing test moves.
 
 ### D7. Order identity and execution-report correlation are ordinary platform features
@@ -209,7 +209,7 @@ should be an acceptance artefact, not a footnote.
 ### D8. Contracts — the exact next free ids
 
 Verified against the current files, additive-only per hard rule 1 and the assembly's own doc
-(`shared/StreamForge.Contracts/ConnectorModels.cs:3-7`):
+(`shared/StreamsForge.Contracts/ConnectorModels.cs:3-7`):
 
 | Type | Highest today | **Next free** |
 |---|---|---|
@@ -249,7 +249,7 @@ orchestrator between waves.
 | 019-B | The proxy sink client + `SinkTransports.Validate` refusing a sink whose named source is missing or not duplex; `SinkFanout`/`SinkSelection` untouched | Sonnet 5 high |
 | 019-C | Orleans: `ConnectorGrain` owns the duplex session; the send path, the failed-state status, and the turn-rate measurement of D1 | Sonnet 5 high |
 | 019-D | Dapr: the same in `ConnectorActor`. **The draft's parenthetical — "no generation counter needed, turns run to completion" — was wrong**: it holds for the actor's own state transitions but not for the background subscribe loop, whose async disposal runs outside every turn and can land after a restart has already published a new session. `DuplexSessions.Withdraw`'s identity check is what closes it | Sonnet 5 high |
-| 019-E | `shared/StreamForge.Connectors.Fix`: `IFixMessageSource` gains a send side, `ToApp` stops being a no-op (`FixMessageSource.cs:293-295`), `FixDuplexTransport` registered alongside the inbound one | Sonnet 5 high |
+| 019-E | `shared/StreamsForge.Connectors.Fix`: `IFixMessageSource` gains a send side, `ToApp` stops being a no-op (`FixMessageSource.cs:293-295`), `FixDuplexTransport` registered alongside the inbound one | Sonnet 5 high |
 | 019-F | The outbound FIX dictionary (D6) + required-field validation + `ClOrdID`/`OrigClOrdID` (D7) | Sonnet 5 high |
 | 019-G | Mandatory sequence persistence + validation + the documented recovery procedure (D5) | Sonnet 5 high |
 | 019-H | Console: duplex kind in both pickers, the rejects view, the failed-state badge | Sonnet 5 high |
@@ -277,7 +277,7 @@ A → (B ∥ C ∥ D) → E → (F ∥ G) → H → I. C and D are disjoint by f
 - **Loud failure**: stop the acceptor, publish an order, and assert the `ClOrdID` appears in the failed
   record and the connector's status is the failed state — no silent counter.
 - **Regression**: the registered-kinds assertion in
-  `shared/StreamForge.Connectors.Database.Tests/DatabaseConnectorsTests.cs` and
+  `shared/StreamsForge.Connectors.Database.Tests/DatabaseConnectorsTests.cs` and
   `TransportRegistryTests.cs`'s catalog-shape test both still pass unmodified.
 
 ## Not in this plan

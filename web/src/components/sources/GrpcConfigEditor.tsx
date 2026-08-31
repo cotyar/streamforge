@@ -58,7 +58,7 @@ export function buildGrpcConfig(state: GrpcFormState): GrpcSubConfig {
 }
 
 /**
- * grpc-kind connector config: the federation story (D-G) — subscribes a remote StreamForge
+ * grpc-kind connector config: the federation story (D-G) — subscribes a remote StreamsForge
  * instance's source/pipeline/table over gRPC. Credential fields are secrets (D-H, masked "***" on
  * every read); schema is fetched once via "Fetch schema from remote" and replaces the source's
  * Fields editor content, same UX contract as the OpenAPI derive flow on url-kind sources.
@@ -278,7 +278,7 @@ export function GrpcConfigEditor({
             className="font-mono text-xs"
             disabled={disabled}
             placeholder={
-              'Paste a StreamForge-generated .proto (from GET /api/{kind}/{key}/proto) — arbitrary third-party protos are rejected.'
+              'Paste a StreamsForge-generated .proto (from GET /api/{kind}/{key}/proto) — arbitrary third-party protos are rejected.'
             }
           />
         </Field>

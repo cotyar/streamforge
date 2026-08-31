@@ -41,10 +41,10 @@ entities, so two same-named tables in two environments are two grains with two s
 ### D1. The environment is the registry key, not a field on every entity
 
 The catalog is one singleton per flavour holding one blob — Orleans `RegistryGrain` at the fixed key
-`StreamConstants.RegistryKey` = `"catalog"` (`shared/StreamForge.Contracts/StreamConstants.cs:14`,
-state shape `orleans/src/StreamForge.Host/Grains/RegistryGrain.cs:13-23`), Dapr `RegistryActor` at the same
-actor id wrapping `CatalogStore` (`dapr/src/StreamForge.Dapr.Host/Actors/RegistryActor.cs:8-19`,
-`dapr/src/StreamForge.Dapr.Host/Catalog/CatalogStore.cs`).
+`StreamConstants.RegistryKey` = `"catalog"` (`shared/StreamsForge.Contracts/StreamConstants.cs:14`,
+state shape `orleans/src/StreamsForge.Host/Grains/RegistryGrain.cs:13-23`), Dapr `RegistryActor` at the same
+actor id wrapping `CatalogStore` (`dapr/src/StreamsForge.Dapr.Host/Actors/RegistryActor.cs:8-19`,
+`dapr/src/StreamsForge.Dapr.Host/Catalog/CatalogStore.cs`).
 
 Activate that grain at a **different key per environment** and three things isolate themselves, with no
 per-call filtering anywhere:
@@ -55,7 +55,7 @@ per-call filtering anywhere:
   (`RegistryGrain.cs:994-999`, `CatalogStore.cs:635,638`) merged in `CompileTableSql`
   (`RegistryGrain.cs:931-936`).
 - **Persistence**, because Orleans files are named per (stateName, grainId)
-  (`orleans/src/StreamForge.Host/Storage/JsonFileGrainStorage.cs:34-39`) and Dapr keys are
+  (`orleans/src/StreamsForge.Host/Storage/JsonFileGrainStorage.cs:34-39`) and Dapr keys are
   `{appId}||{ActorType}||{ActorId}||{stateName}` (`dapr/components/statestore.yaml:1-18`).
 
 The alternative — one catalog with an `Environment` column filtered on every read — was rejected: it makes
@@ -84,7 +84,7 @@ and the full existing suite passes **unmodified**.
 
 Twelve grain kinds key on the entity **name**, not its id — generator, connector, table, table history,
 table ingest, table stage, table output, arrangement, shard router, shard directory, shard, ingress stats
-(`orleans/src/StreamForge.Abstractions/GrainInterfaces.cs:23,65,129,173,186,210,236-244,302`,
+(`orleans/src/StreamsForge.Abstractions/GrainInterfaces.cs:23,65,129,173,186,210,236-244,302`,
 `ShardGrainInterfaces.cs:7,11,14`, `IngressStatsGrainInterfaces.cs:14`). Two environments with a table named
 `orders` would address one grain and one state file. `IPipelineGrain` is the exception, keyed by GUID
 (`GrainInterfaces.cs:14`).
@@ -94,7 +94,7 @@ One helper — `EnvKeys.Qualify(env, key)` in AppCore — is applied at the **50
 connector and ingress-stats sites. Two details that make it safe rather than clever:
 
 - The separator must not collide with the shard tier's own composite key, which already uses `|`
-  (`shared/StreamForge.AppCore/History/TableShardKeys.cs:57-80`). Use `:`.
+  (`shared/StreamsForge.AppCore/History/TableShardKeys.cs:57-80`). Use `:`.
 - `JsonFileGrainStorage` sanitizes grain-id characters outside `[A-Za-z0-9_.-]` to `_`
   (`JsonFileGrainStorage.cs:31-32,37`), so an environment name must be constrained at creation
   (`[a-z0-9-]{1,32}`, reserved: `default`, `catalog`, `users`) or two environments could sanitize to the
@@ -108,14 +108,14 @@ constructions — cheap, and the only thing that stops the rule rotting.
 
 There is **no per-request context object** in this codebase: endpoints take `ClaimsPrincipal` or
 `HttpContext` as minimal-API parameters directly, and the facade interfaces are declared frozen in their own
-doc comments because test fakes implement them (`shared/StreamForge.Contracts/Facades.cs:163,199`). Threading
+doc comments because test fakes implement them (`shared/StreamsForge.Contracts/Facades.cs:163,199`). Threading
 an environment parameter explicitly means touching ~66 endpoint handlers and breaking eight frozen facade
 interfaces and every fake behind them.
 
-Instead: middleware reads `X-StreamForge-Environment` (query `?env=` overrides, for a browser and a curl
+Instead: middleware reads `X-StreamsForge-Environment` (query `?env=` overrides, for a browser and a curl
 that cannot set headers), validates it against the environment registry, and stores it in an `AsyncLocal`
 that **only the facade implementations** read — the exact places that compose a grain key or an actor id
-(`orleans/src/StreamForge.Host/Facades/OrleansFacades.cs`, `dapr/src/StreamForge.Dapr.Host/Facades/DaprFacades.cs`).
+(`orleans/src/StreamsForge.Host/Facades/OrleansFacades.cs`, `dapr/src/StreamsForge.Dapr.Host/Facades/DaprFacades.cs`).
 Zero endpoint signatures change, zero contracts change, zero fakes change.
 
 **Cost, stated plainly because ambient state earns its reputation**: an `AsyncLocal` is invisible at the call
@@ -146,12 +146,12 @@ stream per environment, or a `staging` deploy wakes every `prod` subscriber.
 Dapr keeps its five fixed app-wide topics (`StreamingRuntimeSetup.cs:23-29`), because dispatch reads the
 entity name out of the envelope after receipt (`StreamingRuntimeSetup.cs:59-92`) — so the envelope's entity
 key becomes the qualified key and routing follows for free. The per-source egress prefix
-`sf-source-{name}` (`dapr/src/StreamForge.Dapr.Host/Ingest/DaprIngressFacade.cs:57`) takes the qualified
+`sf-source-{name}` (`dapr/src/StreamsForge.Dapr.Host/Ingest/DaprIngressFacade.cs:57`) takes the qualified
 name too.
 
 ### D7. Environments are created deliberately; a typo is a 404
 
-Implicit creation on first use would make `X-StreamForge-Environment: stagng` a successful deploy into a new
+Implicit creation on first use would make `X-StreamsForge-Environment: stagng` a successful deploy into a new
 empty environment nobody meant to make. A small `IEnvironmentRegistryGrain` / `EnvironmentRegistryActor`
 singleton holds the list with `Name`, `Description`, `CreatedAtMs`, `CreatedBy`. `default` always exists,
 cannot be created, cannot be deleted, cannot be renamed. Names are validated at creation per D3.
@@ -165,7 +165,7 @@ table (`ShardGrainInterfaces.cs:17-21`): the name is in every key.
 
 ### D8. The config document stays environment-free; the import request targets an environment
 
-`ConfigDocument` (`shared/StreamForge.AppCore/Config/ConfigDocument.cs:22-29`) gains **no** environment
+`ConfigDocument` (`shared/StreamsForge.AppCore/Config/ConfigDocument.cs:22-29`) gains **no** environment
 field. Putting one in would make a document deployable to exactly one place, which is the opposite of the
 requested use case — the whole point is to take the same document and deploy it into `staging`, then into
 `prod`. The environment is a property of the *import call*, exactly like the endpoint aliases plan 016
@@ -181,9 +181,9 @@ environments into one document is deliberately not offered — the result would 
 
 An authenticated `Editor` can point a header at any environment and edit it. Nothing in the current auth
 model can express otherwise: the JWT carries one `ClaimTypes.Role` and no scope
-(`shared/StreamForge.Api/Auth/JwtTokenService.cs:22-31`), `UserRecord` has no per-resource field
-(`shared/StreamForge.Contracts/Models.cs:951-960`), and the three policies are role strings
-(`shared/StreamForge.Api/StreamForgeApiExtensions.cs:85-88`).
+(`shared/StreamsForge.Api/Auth/JwtTokenService.cs:22-31`), `UserRecord` has no per-resource field
+(`shared/StreamsForge.Contracts/Models.cs:951-960`), and the three policies are role strings
+(`shared/StreamsForge.Api/StreamsForgeApiExtensions.cs:85-88`).
 
 So the docs say, in the same words, that environments prevent *collision and confusion*, not *access*.
 Plan 015's permission model gets the named hook: an entitlement scoped to an environment
@@ -229,7 +229,7 @@ G last.
   a table named `orders` exists in both with different ids; write rows into `staging`'s `orders` and assert
   `default`'s `orders` row count is unchanged; run `SELECT … FROM orders` in each and assert each reads its
   own; delete `staging` with `?force=true` and assert `default` is untouched and its grains still resolve.
-- **The unknown-environment gate**: `X-StreamForge-Environment: nope` returns 404 on a read and on a write,
+- **The unknown-environment gate**: `X-StreamsForge-Environment: nope` returns 404 on a read and on a write,
   and creates nothing.
 - **Cross-flavour**: the same script run against Orleans (`:5199`-shaped isolated instance) and Dapr.
 

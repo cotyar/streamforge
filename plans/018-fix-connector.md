@@ -4,7 +4,7 @@
 
 **What actually landed (2026-08-17), and where it diverged from the plan as written:**
 
-- **`orleans/tests/StreamForge.Host.Tests/SecretWalkTests.cs` gained one line**, not zero. That fixture is
+- **`orleans/tests/StreamsForge.Host.Tests/SecretWalkTests.cs` gained one line**, not zero. That fixture is
   a forcing function by its own doc comment — it is built by naming the properties rather than by
   reflection precisely so a NEW container on `ConnectorConfig` that nobody adds here shows up as a
   coverage gap instead of passing vacuously — and wave 014-A made the identical one-line addition
@@ -13,7 +13,7 @@
   `FixSourceConfig.Password`'s `[Secret]` attribute the same way it already covers every other credential
   field.
 - **The acceptance test starts its counterparty acceptor on the first *bindable* port in the 7xxx band**,
-  not a fixed one. Two reasons: `StreamForge.Connectors.Fix.Tests` is referenced from both `.sln` files, so
+  not a fixed one. Two reasons: `StreamsForge.Connectors.Fix.Tests` is referenced from both `.sln` files, so
   running the Orleans and Dapr suites back to back binds the same fixed port twice within minutes for no
   reason; and on macOS, ControlCenter's AirPlay Receiver listens on `*:7000` — a port in the reserved
   6xxx–9xxx band is not guaranteed free just because it looks unused. `FixAcceptanceTests` retries the
@@ -29,7 +29,7 @@
   observed live instance.
 
 **Depends on**: 010 (the `IInboundTransport` seam), 014 (`TransportFieldTypes.Text`, the
-`StreamForge.Connectors.Database` out-of-core project precedent)
+`StreamsForge.Connectors.Database` out-of-core project precedent)
 **Explicitly does NOT cover**: order entry. A FIX session that both sends orders and receives execution
 reports is [plan 019](019-fix-order-entry.md), and it is a different plan rather than a later wave of this
 one — see that document's first section for the three reasons.
@@ -43,7 +43,7 @@ Two things that are useful separately and better together:
    or `folder` source replays a FIX log off disk, a `url` source reads one over HTTP, and a `nats` source
    ingests FIX-over-NATS. No new source kind, no new transport, no dependency.
 2. **`fix` as a live source kind** — a receive-only FIX session (market data, drop-copy) as an
-   `IInboundTransport` in a new out-of-core project `shared/StreamForge.Connectors.Fix`, on
+   `IInboundTransport` in a new out-of-core project `shared/StreamsForge.Connectors.Fix`, on
    `QuickFIXn.Core`. It yields the raw FIX bytes off the wire and declares `FormatOf => FileFormats.Fix`,
    so it reuses (1)'s parser and the whole shared mapping/coercion/dedup path with nothing of its own.
 
@@ -59,7 +59,7 @@ version-specific parts (which tags exist, what they are called, what type they h
 static table in the parser covering the common FIX 4.2/4.4/5.0 set, with `tag<N>` and `string` as the
 fallback for everything else. Tags are globally unique across FIX versions by design — tag 35 is `MsgType`
 in every version — so one table is correct rather than a compromise. `QuickFIXn.Core` is a dependency of
-the **session** project only; `StreamForge.AppCore` gains nothing.
+the **session** project only; `StreamsForge.AppCore` gains nothing.
 
 **Repeating groups are parsed into nested JSON arrays, dictionary-free.** `NoMDEntries=2` followed by two
 entries becomes `"MDEntries": [{…},{…}]` — which is what makes `MappingSpec.ItemsPath` (`$.MDEntries[*]`)
@@ -122,11 +122,11 @@ the edit is bounded and enumerable. It is these ten places and nothing else:
 
 | # | File | Change |
 |---|---|---|
-| 1 | `shared/StreamForge.Contracts/ConnectorModels.cs` | `FileFormats.Fix = "fix"` |
-| 2 | `shared/StreamForge.AppCore/Connectors/Formats/FixParser.cs` | **new** — parser + tag table |
-| 3 | `shared/StreamForge.AppCore/Connectors/ConnectorPollCycle.cs` | one arm in `ParseAndExtract`'s switch |
-| 4 | `shared/StreamForge.Api/Endpoints/SourceSchemaService.cs` | `KnownFileFormats` + 3 error strings |
-| 5 | `shared/StreamForge.AppCore/Connectors/Nats/NatsInboundTransport.cs` | `KnownFormats`, its error string, descriptor `Options` |
+| 1 | `shared/StreamsForge.Contracts/ConnectorModels.cs` | `FileFormats.Fix = "fix"` |
+| 2 | `shared/StreamsForge.AppCore/Connectors/Formats/FixParser.cs` | **new** — parser + tag table |
+| 3 | `shared/StreamsForge.AppCore/Connectors/ConnectorPollCycle.cs` | one arm in `ParseAndExtract`'s switch |
+| 4 | `shared/StreamsForge.Api/Endpoints/SourceSchemaService.cs` | `KnownFileFormats` + 3 error strings |
+| 5 | `shared/StreamsForge.AppCore/Connectors/Nats/NatsInboundTransport.cs` | `KnownFormats`, its error string, descriptor `Options` |
 | 6 | `web/src/api/types.ts` | `FileFormat` union |
 | 7 | `web/src/components/sources/FileFolderConfigEditor.tsx` | `FILE_FORMATS` array |
 | 8 | `web/src/components/sources/UrlConfigEditor.tsx` | one `<SelectItem>` |
@@ -178,7 +178,7 @@ with the instance killed and its temp data dir removed. One logical change per c
 |---|---|---|---|
 | 018-A | The `fix` format: `FixParser` + tag/type/group/length tables, the switch arm, both validators, the NATS descriptor. Unit tests over real captured messages: a `35=W` snapshot with `NoMDEntries`, a `35=8` execution report, a `35=X` incremental refresh with nested `NoPartyIDs`, a `RawData` payload containing the delimiter, `|`-delimited and SOH-delimited inputs, a nested group, an unknown tag, a malformed frame. | items 1–5 | Sonnet 5 High |
 | 018-B | Console: the format appears in the url/file/folder pickers with an honest one-line description. | items 6–8 | Sonnet 5 High |
-| 018-C | `shared/StreamForge.Connectors.Fix` — `FixSourceConfig` in Contracts (`[Secret]` on `Password`), `FixInboundTransport : IInboundTransport`, `FixConnectors.RegisterAll()`, descriptor. Tests drive a **QuickFIX/n acceptor in-process** as the counterparty: logon, one `35=W`, one `35=X`, a `msgTypes` filter, a mid-session disconnect proving `SubscriberCore` reconnects. | new project + `SourceKinds.Fix` + `ConnectorConfig.[Id(8)] Fix` | Sonnet 5 High |
+| 018-C | `shared/StreamsForge.Connectors.Fix` — `FixSourceConfig` in Contracts (`[Secret]` on `Password`), `FixInboundTransport : IInboundTransport`, `FixConnectors.RegisterAll()`, descriptor. Tests drive a **QuickFIX/n acceptor in-process** as the counterparty: logon, one `35=W`, one `35=X`, a `msgTypes` filter, a mid-session disconnect proving `SubscriberCore` reconnects. | new project + `SourceKinds.Fix` + `ConnectorConfig.[Id(8)] Fix` | Sonnet 5 High |
 | 018-D | Host wiring: both `.sln` files, both host csprojs, `FixConnectors.RegisterAll()` beside `DatabaseConnectors.RegisterAll()` in both `Program.cs`. Live check: a source created over REST against an in-process acceptor, rows landing in a table. | sln/csproj/Program.cs ×2 | Sonnet 5 High |
 | 018-E | Docs: `TRANSPORTS.md` FIX section (including the group-framing ceiling and the `storePath`/volume note), `CLAUDE.md` paragraph, `plans/README.md` row, this file's status. | items 9–10 | Sonnet 5 High |
 
@@ -186,12 +186,12 @@ A ∥ B (the constant `"fix"` is pinned above, so B needs nothing from A). C aft
 
 ## Verification
 
-- **Format**: unit suite in `shared/StreamForge.AppCore.Tests` (or the Host test project, wherever
+- **Format**: unit suite in `shared/StreamsForge.AppCore.Tests` (or the Host test project, wherever
   `FormatParsers` is already covered) over the message shapes listed in wave A. A FIX log file replayed
   through a real `file` source end to end, rows visible in a table.
 - **Session**: no external venue and no Docker — QuickFIX/n runs both halves, so the acceptance test is a
   self-contained acceptor on a 6xxx port that logs on, publishes, and disconnects.
-- **Isolation**: both core solutions still build and pass **with `StreamForge.Connectors.Fix` removed from
+- **Isolation**: both core solutions still build and pass **with `StreamsForge.Connectors.Fix` removed from
   both `.sln` files** — the same property plan 014 asserts for the database project.
 - **No leak**: `GET /api/config/export` on a catalog containing a FIX source shows `***` for `password`.
 - **Regression**: `DatabaseConnectorsTests` asserts the exact set of registered polled kinds. FIX registers

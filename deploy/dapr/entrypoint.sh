@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Plan 007 W1B — app container entrypoint.
 #
-# StreamForge.Dapr.Host.Services.CatalogInitializationService seeds the demo catalog/users exactly
+# StreamsForge.Dapr.Host.Services.CatalogInitializationService seeds the demo catalog/users exactly
 # once, on ApplicationStarted, with NO retry loop (by design — see its own doc comment: "a failure
 # here just means the demo world isn't seeded yet"). That's correct for local dev (tools/run.sh starts
 # the Dapr sidecar, THEN execs the app as its child process), but this container topology has a real
@@ -57,7 +57,7 @@ term_handler() {
 trap term_handler TERM INT
 
 launch_app() {
-  dotnet StreamForge.Dapr.Host.dll --urls "http://0.0.0.0:${port}" &
+  dotnet StreamsForge.Dapr.Host.dll --urls "http://0.0.0.0:${port}" &
   app_pid=$!
 }
 
@@ -91,7 +91,7 @@ if [[ "$daprd_ready" == true ]]; then
   kill -TERM "$app_pid" 2>/dev/null
   wait "$app_pid" 2>/dev/null
   trap - TERM INT
-  exec dotnet StreamForge.Dapr.Host.dll --urls "http://0.0.0.0:${port}"
+  exec dotnet StreamsForge.Dapr.Host.dll --urls "http://0.0.0.0:${port}"
 fi
 
 wait "$app_pid"

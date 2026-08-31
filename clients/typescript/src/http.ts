@@ -1,10 +1,10 @@
 /**
- * fetch-based REST client with cached, self-refreshing StreamForge auth.
+ * fetch-based REST client with cached, self-refreshing StreamsForge auth.
  *
- * Ported from clients/python/src/streamforge/_http.py (itself a port of otc-terms'
- * lib/streamforge/server.ts sfFetch): the JWT is cached in memory for ~11h (the server issues
+ * Ported from clients/python/src/streamsforge/_http.py (itself a port of otc-terms'
+ * lib/streamsforge/server.ts sfFetch): the JWT is cached in memory for ~11h (the server issues
  * 12h tokens) and re-minted exactly once on any 401, then the request is retried once with the
- * fresh token -- if THAT also 401s, we throw rather than looping forever (a StreamForge restart
+ * fresh token -- if THAT also 401s, we throw rather than looping forever (a StreamsForge restart
  * invalidates every token minted before it, which is a normal event, but an auth system that is
  * actually broken should fail loudly, not spin).
  */
@@ -52,7 +52,7 @@ export class RestClient {
     if (this.token_ === null || this.expired()) {
       await this.login();
     }
-    if (this.token_ === null) throw new AuthError("StreamForge login did not return a token");
+    if (this.token_ === null) throw new AuthError("StreamsForge login did not return a token");
     return this.token_;
   }
 
@@ -72,8 +72,8 @@ export class RestClient {
   private async loginNow(): Promise<void> {
     if (!this.user || !this.password) {
       throw new AuthError(
-        "no StreamForge credentials configured -- pass user=/password= to connect(), or set " +
-          "STREAMFORGE_ADMIN_USER/STREAMFORGE_ADMIN_PASS",
+        "no StreamsForge credentials configured -- pass user=/password= to connect(), or set " +
+          "STREAMSFORGE_ADMIN_USER/STREAMSFORGE_ADMIN_PASS",
       );
     }
     const res = await fetch(`${this.baseUrl}/api/auth/login`, {
@@ -83,7 +83,7 @@ export class RestClient {
       body: JSON.stringify({ username: this.user, password: this.password }),
     });
     if (!res.ok) {
-      throw new AuthError(`StreamForge login failed: ${res.status} ${await res.text()}`);
+      throw new AuthError(`StreamsForge login failed: ${res.status} ${await res.text()}`);
     }
     const body = (await res.json()) as { token: string };
     this.token_ = body.token;
@@ -131,7 +131,7 @@ export class RestClient {
       headers.authorization = `Bearer ${await this.token()}`;
       res = await fetch(url, requestInit);
       if (res.status === 401) {
-        throw new AuthError(`StreamForge rejected the re-minted token for ${method} ${path}`);
+        throw new AuthError(`StreamsForge rejected the re-minted token for ${method} ${path}`);
       }
     }
     return res;

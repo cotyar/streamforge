@@ -7,7 +7,7 @@
 //
 //   bun test admin/
 //
-// The instance under test is a stub Bun.serve() that speaks just enough of the StreamForge REST API
+// The instance under test is a stub Bun.serve() that speaks just enough of the StreamsForge REST API
 // to answer these calls — the real API is covered by the .NET suites; what is unproven here is this
 // client's use of it.
 
@@ -29,14 +29,14 @@ import {
 } from "./sfclient.ts";
 import { formatImportReport } from "./sf.ts";
 
-// --- stub StreamForge instance ---------------------------------------------------------------------
+// --- stub StreamsForge instance ---------------------------------------------------------------------
 
 interface RecordedRequest {
   method: string;
   path: string;
   auth: string | null;
   body: string;
-  /** Plan 021 — X-StreamForge-Environment, or null when the client sent none at all (the default-env
+  /** Plan 021 — X-StreamsForge-Environment, or null when the client sent none at all (the default-env
    * "costs nothing" path — see sfclient.ts's request()). */
   env: string | null;
 }
@@ -285,7 +285,7 @@ describe("MCP protocol", () => {
     expect(res.jsonrpc).toBe("2.0");
     expect(result.protocolVersion).toBe("2025-03-26");
     expect(result.capabilities.tools).toBeDefined();
-    expect(result.serverInfo.name).toBe("streamforge-admin");
+    expect(result.serverInfo.name).toBe("streamsforge-admin");
     expect(typeof result.instructions).toBe("string");
     fresh.stop();
   });
@@ -628,7 +628,7 @@ describe("SfClient", () => {
     expect(normalizeEnv(" staging ")).toBe("staging");
   });
 
-  test("a client configured with no environment sends NO X-StreamForge-Environment header at all", async () => {
+  test("a client configured with no environment sends NO X-StreamsForge-Environment header at all", async () => {
     // D2: the default path costs nothing — not even the header naming it, matching the server's own
     // "no round trip" rule for the same case (EnvironmentSelectionMiddleware).
     const client = new SfClient({ url: STUB_URL, token: "t" });
@@ -704,7 +704,7 @@ describe("SfClient", () => {
 //
 // Every test below drives readStoredToken/writeStoredToken/readAllStoredTokens/removeStoredToken
 // through an EXPLICIT filePath argument pointed at a temp file — never the module's real TOKEN_FILE
-// (~/.streamforge/token.json) — so none of this can read or clobber a developer's actual login.
+// (~/.streamsforge/token.json) — so none of this can read or clobber a developer's actual login.
 
 describe("token store (one entry per instance)", () => {
   function tempTokenFile(): string {
@@ -833,7 +833,7 @@ describe("token store (one entry per instance)", () => {
 //
 // SF_TOKEN_FILE (test-only, same family as SF_URL/SF_TOKEN/SF_USER/SF_PASSWORD) repoints the real
 // `sf` binary's token store at a temp file for the duration of each subprocess, so these never touch
-// a developer's actual ~/.streamforge/token.json either.
+// a developer's actual ~/.streamsforge/token.json either.
 
 describe("sf login / instance / peers (CLI subprocess)", () => {
   async function runCliEnv(args: string[], env: Record<string, string>): Promise<{ code: number; stdout: string }> {

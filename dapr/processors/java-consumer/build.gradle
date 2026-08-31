@@ -1,6 +1,6 @@
-// StreamForge — polyglot pub/sub reach (plan 005, wave W8-B).
+// StreamsForge — polyglot pub/sub reach (plan 005, wave W8-B).
 //
-// A minimal buildable Java sample proving JVM-language polyglot reach over StreamForge's Dapr
+// A minimal buildable Java sample proving JVM-language polyglot reach over StreamsForge's Dapr
 // pub/sub (see dapr/POLYGLOT.md for the frozen wire contract). Deliberately small: the JDK's own
 // com.sun.net.httpserver.HttpServer for the HTTP surface (no Jetty/Spring/whatever), plus exactly
 // one small JSON dependency (Gson) since the JDK has no built-in JSON parser.
@@ -23,7 +23,7 @@ java {
 }
 
 application {
-    mainClass = "streamforge.consumer.Main"
+    mainClass = "streamsforge.consumer.Main"
 }
 
 tasks.named("test") {

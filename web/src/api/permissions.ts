@@ -1,4 +1,4 @@
-// Plan 015 wave 6 — the client-side twin of shared/StreamForge.AppCore/Access/PermissionEvaluator.cs.
+// Plan 015 wave 6 — the client-side twin of shared/StreamsForge.AppCore/Access/PermissionEvaluator.cs.
 //
 // WHY A TWIN AT ALL. The SPA has to decide what to render before it makes a request, and asking the
 // server "may I?" per button would be a round trip per button. So the *same* decision runs twice: once

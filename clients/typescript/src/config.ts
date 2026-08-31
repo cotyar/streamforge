@@ -1,6 +1,6 @@
 /**
- * Config resolution: explicit kwargs -> env. Ported from clients/python/src/streamforge/_config.py,
- * minus the `~/.config/streamforge/config.toml` layer (a Node/browser-isomorphic package has no
+ * Config resolution: explicit kwargs -> env. Ported from clients/python/src/streamsforge/_config.py,
+ * minus the `~/.config/streamsforge/config.toml` layer (a Node/browser-isomorphic package has no
  * uniform "home directory" story the way a Python CLI-adjacent tool does -- env and explicit
  * kwargs cover every deployment this client targets; add a file layer if a Node-only CLI wants one).
  */
@@ -27,10 +27,10 @@ export function resolveConfig(opts: {
   ingestKey?: string;
 }): ResolvedConfig {
   return {
-    baseUrl: opts.url ?? env("STREAMFORGE_BASE_URL"),
-    grpc: opts.grpc ?? env("STREAMFORGE_GRPC"),
-    user: opts.user ?? env("STREAMFORGE_ADMIN_USER"),
-    password: opts.password ?? env("STREAMFORGE_ADMIN_PASS"),
+    baseUrl: opts.url ?? env("STREAMSFORGE_BASE_URL"),
+    grpc: opts.grpc ?? env("STREAMSFORGE_GRPC"),
+    user: opts.user ?? env("STREAMSFORGE_ADMIN_USER"),
+    password: opts.password ?? env("STREAMSFORGE_ADMIN_PASS"),
     ingestKey: opts.ingestKey ?? env("SF_INGEST_KEY"),
   };
 }

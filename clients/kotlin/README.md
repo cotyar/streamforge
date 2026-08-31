@@ -1,13 +1,13 @@
-# streamforge-client (Kotlin)
+# streamsforge-client (Kotlin)
 
-A coroutines-first Kotlin client for StreamForge, mirroring the Python client's API surface
+A coroutines-first Kotlin client for StreamsForge, mirroring the Python client's API surface
 (`clients/python`) and design (`apps/websites/otc-terms/docs/python-client-design.md` in the
 `ac-co.ai-4` repo) but idiomatic to Kotlin: `Flow`/`StateFlow` instead of a reader thread,
 `suspend` instead of blocking calls, structured concurrency instead of manual thread/queue
 bookkeeping, a sealed exception hierarchy instead of one flat error type.
 
 ```kotlin
-val sf = StreamForge.connect(url = "http://localhost:6199", user = "admin", password = "admin123!")
+val sf = StreamsForge.connect(url = "http://localhost:6199", user = "admin", password = "admin123!")
                                                                          // transport = AUTO by default
 val t = sf.table("trigger_monitor")            // subscribes, snapshots, replays; suspends until ready
 t.rows                                          // List<Map<String, Any?>>, immutable snapshot
@@ -23,8 +23,8 @@ Two, behind one internal interface (`TableTransport`) -- `LiveTable` and the red
 which is underneath:
 
 - **gRPC (`Transport.GRPC`, default candidate under `AUTO`)** -- `io.grpc:grpc-kotlin-stub` +
-  `protobuf-gradle-plugin` compiling a private copy of `streamforge.proto`
-  (`src/main/proto/streamforge.proto`, `java_package`/`java_multiple_files` added for codegen
+  `protobuf-gradle-plugin` compiling a private copy of `streamsforge.proto`
+  (`src/main/proto/streamsforge.proto`, `java_package`/`java_multiple_files` added for codegen
   ergonomics only -- the wire contract is untouched). `StreamService.SubscribeTable` for deltas,
   `TableService.Rows/List` for the snapshot/catalog, bidi `IngestService.Ingest` for `push()`. One
   insecure h2c channel (`usePlaintext()`), matching how the engine runs from source. Auth is an
@@ -38,7 +38,7 @@ which is underneath:
   Polling itself.
 - **`Transport.AUTO`** tries gRPC first (a real `TableService.List` call, proving the channel AND
   the JWT work), falls back to SignalR on any failure, and always logs which one it got
-  (`java.util.logging`, logger name `"streamforge"`) -- a client that silently degrades is worse
+  (`java.util.logging`, logger name `"streamsforge"`) -- a client that silently degrades is worse
   than one that fails loudly. When gRPC is refused, the likely cause is the host having been
   started with `--urls`, which trips `Program.cs`'s guard so no gRPC port is bound at all -- start
   it with `--Http:Port`/`--Grpc:Port` instead.
@@ -60,7 +60,7 @@ still handles the case where a delta *does* arrive during the snapshot read.
 ## Change-notification latency and backpressure
 
 `LiveTable` publishes through `rowsFlow`, a `StateFlow<List<Row>>`, under a LEADING edge +
-TRAILING coalesce window (`flushWindow`, a `Duration` parameter on `StreamForgeClient.table()` /
+TRAILING coalesce window (`flushWindow`, a `Duration` parameter on `StreamsForgeClient.table()` /
 `.sql()`, default **16ms** -- one frame at 60Hz, the natural ceiling for a UI consumer that cannot
 display more than one frame per 16ms anyway). This is a **behavior change** from an earlier
 version of this client, which coalesced with an unconditional TRAILING-only 120ms window: every
@@ -96,14 +96,14 @@ publish is pending, for the same reason: it never stalls to wait out a window in
 
 A literal port of the Python client's `_zset.py` (whose module docstring is the fullest account of
 the hazards -- summed weights, group/supersession, the snapshot-race content heuristic). Tested
-against the shared cross-language fixture: `src/test/kotlin/streamforge/ZSetConformanceTest.kt`
+against the shared cross-language fixture: `src/test/kotlin/streamsforge/ZSetConformanceTest.kt`
 reads `../conformance/zset-cases.json` and runs the runner contract from that suite's README
 verbatim. **All 14 cases pass.**
 
 ## Public surface
 
-`StreamForge.connect(url, grpcTarget?, user?, password?, token?, ingestKey?, transport = AUTO):
-StreamForgeClient`, then on the client: `table(name, keyFields?, timeout, flushWindow = 16ms)`,
+`StreamsForge.connect(url, grpcTarget?, user?, password?, token?, ingestKey?, transport = AUTO):
+StreamsForgeClient`, then on the client: `table(name, keyFields?, timeout, flushWindow = 16ms)`,
 `snapshot(name, limit)`, `tables()`, `search(name, query, limit)`, `validate(sql)`, `sql(sql, name,
 keyFields?, timeout, flushWindow = 16ms)` (validate -> `POST /api/config/import?mode=merge` ->
 `table()`), `adhocTables()` / `dropAdhoc(name)` (refuses any name outside the `adhoc_` prefix),
@@ -111,7 +111,7 @@ keyFields?, timeout, flushWindow = 16ms)` (validate -> `POST /api/config/import?
 otherwise). `flushWindow` governs the returned `LiveTable`'s change-notification coalescing -- see
 "Change-notification latency and backpressure" below.
 
-Errors are a sealed hierarchy (`Errors.kt`): `StreamForgeException` (sealed base) ->
+Errors are a sealed hierarchy (`Errors.kt`): `StreamsForgeException` (sealed base) ->
 `AuthException`, `NotReadyException`, `IngestRejectedException` (carries `rowErrors`),
 `SqlException` (carries `diagnostics`, renders a caret under the offending column like the `/sql`
 editor does).
@@ -126,10 +126,10 @@ guess a key.
 
 ```bash
 gradle build                                  # compiles proto, main, tests; assembles the jar
-gradle test --tests "streamforge.ZSetConformanceTest"   # offline, no engine needed
-gradle test --tests "streamforge.LiveTableFlushTest"     # offline, no engine -- flushWindow behavior against a fake transport
-gradle test --tests "streamforge.ContractTest"           # boots an isolated engine on 9199/9299
-gradle test --tests "streamforge.LiveSmokeTest"           # read-only against localhost:6199
+gradle test --tests "streamsforge.ZSetConformanceTest"   # offline, no engine needed
+gradle test --tests "streamsforge.LiveTableFlushTest"     # offline, no engine -- flushWindow behavior against a fake transport
+gradle test --tests "streamsforge.ContractTest"           # boots an isolated engine on 9199/9299
+gradle test --tests "streamsforge.LiveSmokeTest"           # read-only against localhost:6199
 ```
 
 No standalone `kotlinc` is used -- `protobuf-gradle-plugin` downloads a matching `protoc` binary
@@ -140,7 +140,7 @@ under the ambient JDK 23.
 
 ### Contract-test fixture (`EngineFixture.kt`)
 
-Ported from `clients/python/tests/conftest.py`. Boots `orleans/src/StreamForge.Host` in isolation:
+Ported from `clients/python/tests/conftest.py`. Boots `orleans/src/StreamsForge.Host` in isolation:
 
 - Ports **9199/9299** (overridable via `SF_TEST_HTTP_PORT`/`SF_TEST_GRPC_PORT` -- several client
   tasks share this repo and were briefed onto the same defaults before being split up). Never

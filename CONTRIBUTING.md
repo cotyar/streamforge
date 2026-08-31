@@ -8,17 +8,17 @@ questions and small PRs are welcome; large redesigns are probably better as a fo
 1. **Both runtimes must stay green.** `shared/` is compiled into the Orleans flavor *and* the Dapr
    flavor, so a change there has to pass both suites:
    ```bash
-   dotnet test orleans/StreamForge.sln      # 1488 tests
-   dotnet test dapr/StreamForge.Dapr.sln    # 280 tests
+   dotnet test orleans/StreamsForge.sln      # 1488 tests
+   dotnet test dapr/StreamsForge.Dapr.sln    # 280 tests
    ```
 2. **Never edit an existing test to make a refactor pass.** Behavior-preserving changes keep the
    old assertions green, unmodified. New behavior gets new tests.
-3. **Public contracts evolve additively**: `shared/StreamForge.Engine/PublicApi.cs`, the
-   `StreamForge.Abstractions` members and `web/src/api/types.ts` take the next free `[Id(n)]` or an
+3. **Public contracts evolve additively**: `shared/StreamsForge.Engine/PublicApi.cs`, the
+   `StreamsForge.Abstractions` members and `web/src/api/types.ts` take the next free `[Id(n)]` or an
    optional field — existing members never change shape or numbering. Dynamic-protobuf field
    numbers persist in the registry and are never reused.
 4. **The Engine stays runtime-pure**: no Orleans, Dapr or ASP.NET types inside
-   `shared/StreamForge.Engine` — it is the semantic core both runtimes depend on.
+   `shared/StreamsForge.Engine` — it is the semantic core both runtimes depend on.
 
 ## Local setup
 
@@ -26,10 +26,10 @@ questions and small PRs are welcome; large redesigns are probably better as a fo
 
 ```bash
 cd web && bun install && bun run build
-dotnet run --project orleans/src/StreamForge.Host    # :5199, seeds a demo world on first run
+dotnet run --project orleans/src/StreamsForge.Host    # :5199, seeds a demo world on first run
 ```
 
-Delete `orleans/src/StreamForge.Host/data/` to reseed. The Dapr flavor needs `dapr init` once, then
+Delete `orleans/src/StreamsForge.Host/data/` to reseed. The Dapr flavor needs `dapr init` once, then
 `dapr/tools/run.sh` (:5399); `dapr/tools/reset.sh` is its reseed.
 
 ## Repo map

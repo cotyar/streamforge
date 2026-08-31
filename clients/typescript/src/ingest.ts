@@ -1,7 +1,7 @@
 /**
  * push(source, rows, ...) -- gRPC bidi when the client's live transport is gRPC (real HTTP/2
  * backpressure, design doc §3.1), REST POST /api/sources/{name}/events otherwise (ported from
- * pushEvents in otc-terms' lib/streamforge/server.ts via clients/python/src/streamforge/ingest.py).
+ * pushEvents in otc-terms' lib/streamsforge/server.ts via clients/python/src/streamsforge/ingest.py).
  * Prefers an ingest key over the admin JWT when one is configured, so a caller that only feeds a
  * source never needs to hold one (design doc §4) -- the REST route is anonymous with its own dual
  * check, and the gRPC IngestService checks the same header per-message.

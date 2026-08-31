@@ -1,4 +1,4 @@
-# Plan 001 — shadcn/ui migration + corporate branding for the StreamForge console
+# Plan 001 — shadcn/ui migration + corporate branding for the StreamsForge console
 
 **Written against commit:** `49d6979` (repo: `/Users/yuriyhabarov/work/crates-foundation`)
 **Scope root:** `/Users/yuriyhabarov/work/crates-foundation/orleans/web` — nothing outside it may be modified.
@@ -6,18 +6,18 @@
 
 ## Why
 
-The StreamForge web console (React 19 + Vite 8 + Tailwind v4 SPA) was built with hand-rolled Tailwind panels and an ad-hoc sky/violet dark palette. It works, but: inconsistent spacing/focus states, custom markup where battle-tested primitives exist (tables, dialogs, badges, empty states, toasts), and no corporate identity. Goal: migrate the UI to shadcn/ui components and re-theme it with official corporate branding, without changing ANY behavior, API call, or realtime wiring.
+The StreamsForge web console (React 19 + Vite 8 + Tailwind v4 SPA) was built with hand-rolled Tailwind panels and an ad-hoc sky/violet dark palette. It works, but: inconsistent spacing/focus states, custom markup where battle-tested primitives exist (tables, dialogs, badges, empty states, toasts), and no corporate identity. Goal: migrate the UI to shadcn/ui components and re-theme it with official corporate branding, without changing ANY behavior, API call, or realtime wiring.
 
 ## Design source of truth
 
 Read BEFORE coding:
-1. `/Users/yuriyhabarov/work/crates-foundation/orleans/design-system/streamforge/MASTER.md` — persisted design system. The **Colors table there is the authoritative corporate green ramp** (Spanish Viridian `#008755` primary, Bangladesh Green `#007348`, Medium Sea Green `#39A87B`, Green Sheen `#6ABB97`, Eton Blue `#8BC8AA`, near-black green-tinted background `#0A0F0D`, panel `#10161A`). Typography: **IBM Plex Sans** (headings+body), use **IBM Plex Mono** for numeric/tabular/SQL content. Dark theme ONLY. Subtle motion (150–300 ms transitions; no decorative animation).
+1. `/Users/yuriyhabarov/work/crates-foundation/orleans/design-system/streamsforge/MASTER.md` — persisted design system. The **Colors table there is the authoritative corporate green ramp** (Spanish Viridian `#008755` primary, Bangladesh Green `#007348`, Medium Sea Green `#39A87B`, Green Sheen `#6ABB97`, Eton Blue `#8BC8AA`, near-black green-tinted background `#0A0F0D`, panel `#10161A`). Typography: **IBM Plex Sans** (headings+body), use **IBM Plex Mono** for numeric/tabular/SQL content. Dark theme ONLY. Subtle motion (150–300 ms transitions; no decorative animation).
 2. shadcn skill rules (read these files): `/Users/yuriyhabarov/.claude/skills/shadcn/rules/styling.md`, `composition.md`, `forms.md`, `icons.md`. Follow the Critical Rules exactly (semantic tokens only, `gap-*` not `space-y-*`, `size-*`, `cn()`, full Card composition, `Empty` for empty states, `Skeleton` for loading, `Badge` for status, DialogTitle always present, icons via `data-icon` in buttons).
 3. Invoke the `shadcn-ui` skill (Skill tool) once before component work for integration guidance, and the `ui-ux-pro-max` skill reference `/Users/yuriyhabarov/.claude/skills/ui-ux-pro-max/references/quick-reference.md` §1 (accessibility) + §6 (typography/color) for contrast checks.
 
 ## Branding rules (hard)
 
-- Product wordmark: **StreamForge** with a "CORPORATE" text label in the sidebar header (stacked: small tracking-wide uppercase "CORPORATE" above the StreamForge wordmark) and on the login card. Text only — **do NOT reproduce or approximate the client logo graphic**.
+- Product wordmark: **StreamsForge** with a "CORPORATE" text label in the sidebar header (stacked: small tracking-wide uppercase "CORPORATE" above the StreamsForge wordmark) and on the login card. Text only — **do NOT reproduce or approximate the client logo graphic**.
 - Primary/interactive color = brand green `#008755`; hover/active `#007348`; success/"Running" uses the brand green; the old sky/violet accents are removed everywhere (including the login gradient, chart stroke, sparklines, SQL keyword color — chart/spark strokes become `#39A87B`/`#6ABB97` tints).
 - Status colors: Running = brand green, Stopped = neutral gray, Failed = `#E4574D`, warnings `#E6A93C`. Keep ≥4.5:1 contrast for text on `#0A0F0D`/`#10161A` (the MASTER.md foreground/muted values are pre-checked; don't darken them).
 

@@ -1,5 +1,5 @@
 /**
- * Contract-test fixture: boots an ISOLATED StreamForge instance on 8199/8299 (never 5199/5299 --
+ * Contract-test fixture: boots an ISOLATED StreamsForge instance on 8199/8299 (never 5199/5299 --
  * the live dev server -- and never 6199 -- the demo container), imports a tiny config (one
  * ingest source, one LATEST BY table, one aggregate over that derived LATEST BY), and tears it
  * down after the suite. Asserts the ports are free first and skips with a clear message rather
@@ -19,7 +19,7 @@ const FORBIDDEN_PORTS = new Set([5199, 5299, 6199]);
 
 const DOTNET = path.join(process.env.HOME ?? "", ".dotnet", "dotnet");
 const HERE = path.dirname(new URL(import.meta.url).pathname);
-const PROJECT_DIR = path.normalize(path.join(HERE, "..", "..", "..", "orleans", "src", "StreamForge.Host"));
+const PROJECT_DIR = path.normalize(path.join(HERE, "..", "..", "..", "orleans", "src", "StreamsForge.Host"));
 
 export const BASE_URL = `http://localhost:${HTTP_PORT}`;
 export const GRPC_TARGET = `localhost:${GRPC_PORT}`;
@@ -84,7 +84,7 @@ export function preflightSkipReason(): string | null {
     return `dotnet not found at ${DOTNET} -- cannot boot the contract-test engine`;
   }
   if (!existsSync(PROJECT_DIR)) {
-    return `StreamForge.Host project not found at ${PROJECT_DIR}`;
+    return `StreamsForge.Host project not found at ${PROJECT_DIR}`;
   }
   return null;
 }
@@ -230,7 +230,7 @@ export async function bootEngine(): Promise<Engine> {
     }
   }
 
-  const dll = path.join(publishDir, "StreamForge.Host.dll");
+  const dll = path.join(publishDir, "StreamsForge.Host.dll");
   // WebApplication.CreateBuilder takes its content root from the CURRENT DIRECTORY -- run the
   // DLL from anywhere else and appsettings.json is never found (Jwt:Key is null, every request
   // 500s including /api/healthz). See §"Two traps" in the task brief / conftest.py.

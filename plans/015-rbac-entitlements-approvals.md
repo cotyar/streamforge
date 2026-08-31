@@ -75,7 +75,7 @@ it must. `Auth:Mode = legacy|entitlements` is a one-flag rollback of the entire 
 **Testing takes no HTTP harness.** The decision lives in a pure `PermissionEvaluator` in AppCore, which both
 test projects already reference — so its tests run in **both** suites and prove cross-flavour parity for free,
 exactly as plan 005 did with `PasswordHasher`. The single highest-leverage test is an **endpoint-metadata**
-test: build a `WebApplication` in-process, call `MapStreamForgeApi`, read `EndpointDataSource`, never `Run()`,
+test: build a `WebApplication` in-process, call `MapStreamsForgeApi`, read `EndpointDataSource`, never `Run()`,
 never bind a port, never start a silo. That turns all 59 authorize sites into a table-driven assertion — today
 they are pinned by nothing. `WebApplicationFactory` is declined: it needs both `Program.cs` files startable
 without their runtimes, which is a refactor of the two most dangerous files in the repo.
@@ -128,7 +128,7 @@ tokens. It is now `.AllowAnonymous()`. That is the entire argument for this test
 before a single enforcement site was migrated.
 
 **The sweeper spike needed no code.** Both hosts already register hosted services
-(`orleans/src/StreamForge.Host/Program.cs` runs five, `dapr/src/StreamForge.Dapr.Host/Program.cs` runs
+(`orleans/src/StreamsForge.Host/Program.cs` runs five, `dapr/src/StreamsForge.Dapr.Host/Program.cs` runs
 `CatalogInitializationService`), so a `BackgroundService` sweeper is the one shape that works identically on
 a stack with no scheduler. Confirmed by reading the wiring, not by writing a throwaway service.
 

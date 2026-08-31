@@ -2,7 +2,7 @@
   "name": "sf-ts-consumer",
   "version": "1.0.0",
   "private": true,
-  "description": "StreamForge polyglot pub/sub consumer (plan 005, wave W8-B) — bun + Bun.serve, zero deps.",
+  "description": "StreamsForge polyglot pub/sub consumer (plan 005, wave W8-B) — bun + Bun.serve, zero deps.",
   "module": "main.ts",
   "type": "module",
   "scripts": {

@@ -50,7 +50,7 @@ export function DashboardPage() {
   }, [load])
 
   // Plan 021 wave 2 (021-F): the hub's "metrics" SignalR group is deliberately CLUSTER-WIDE, not
-  // qualified by environment (shared/StreamForge.Api/Hubs/StreamHub.cs's class remarks — it names no
+  // qualified by environment (shared/StreamsForge.Api/Hubs/StreamHub.cs's class remarks — it names no
   // entity, so there is nothing to qualify it with). That means `metrics` here can and does carry
   // pipelineIds that belong to a DIFFERENT environment than the one this page is currently showing —
   // confirmed live: switching to a freshly created, empty "staging" environment still pushed a nonzero

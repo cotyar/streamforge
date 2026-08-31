@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# StreamForge — Orleans flavor — Cloud Run deploy script.
+# StreamsForge — Orleans flavor — Cloud Run deploy script.
 #
 # PREPARES the deployment; per plan 007 ("prepare, not deploy") this script does NOT run itself
 # automatically anywhere — you run it by hand when you're ready to bill your own GCP project.
@@ -15,7 +15,7 @@
 # Steps:
 #   1. Build the image via `gcloud builds submit` (repo root context, deploy/orleans/Dockerfile)
 #      and push it to Artifact Registry at
-#      ${REGION}-docker.pkg.dev/${PROJECT_ID}/streamforge/orleans:${TAG}
+#      ${REGION}-docker.pkg.dev/${PROJECT_ID}/streamsforge/orleans:${TAG}
 #   2. Render deploy/orleans/service.yaml (envsubst ${IMAGE} / ${GEMINI_API_KEY}) and apply it
 #      with `gcloud run services replace`.
 #
@@ -58,10 +58,10 @@ if [[ -z "$TAG" ]]; then
     TAG="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo local)"
 fi
 
-REPOSITORY="streamforge"
+REPOSITORY="streamsforge"
 IMAGE_NAME="orleans"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${IMAGE_NAME}:${TAG}"
-SERVICE_NAME="streamforge-orleans"
+SERVICE_NAME="streamsforge-orleans"
 
 run() {
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -73,7 +73,7 @@ run() {
     fi
 }
 
-echo "== StreamForge Orleans → Cloud Run =="
+echo "== StreamsForge Orleans → Cloud Run =="
 echo "PROJECT_ID = $PROJECT_ID"
 echo "REGION     = $REGION"
 echo "IMAGE      = $IMAGE"
@@ -88,7 +88,7 @@ run gcloud artifacts repositories create "$REPOSITORY" \
     --project="$PROJECT_ID" \
     --location="$REGION" \
     --repository-format=docker \
-    --description="StreamForge container images" \
+    --description="StreamsForge container images" \
     --quiet || true
 
 echo
@@ -105,7 +105,7 @@ EOF
 
 echo
 echo "-- 3. render service.yaml and apply it --"
-RENDERED="$(mktemp -t streamforge-orleans-service.XXXXXX.yaml)"
+RENDERED="$(mktemp -t streamsforge-orleans-service.XXXXXX.yaml)"
 export IMAGE
 export GEMINI_API_KEY="${GEMINI_API_KEY:-}"
 if [[ "$DRY_RUN" -eq 1 ]]; then

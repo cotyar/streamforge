@@ -1,13 +1,13 @@
 ---
 name: sf-config
-description: StreamForge catalog config export/import workflow — curl recipes for export/import (JSON/YAML, includeSecrets, validate/merge/replace, multipart include sets), the compose/merge rule cheat-sheet, the report shape, and the gotchas. Use when asked to export, import, back up, promote, or move a StreamForge catalog (sources/pipelines/tables) between instances or flavors.
+description: StreamsForge catalog config export/import workflow — curl recipes for export/import (JSON/YAML, includeSecrets, validate/merge/replace, multipart include sets), the compose/merge rule cheat-sheet, the report shape, and the gotchas. Use when asked to export, import, back up, promote, or move a StreamsForge catalog (sources/pipelines/tables) between instances or flavors.
 ---
 
 # sf-config — catalog export/import quick reference
 
 Full user docs: `orleans/docs/index.html` (§ Configuration import/export). Endpoints (shared,
-byte-identical on both flavors): `shared/StreamForge.Api/Endpoints/ConfigEndpoints.cs` +
-`ConfigImportService.cs`. Engine: `shared/StreamForge.AppCore/Config/**` (`ConfigSerializer`,
+byte-identical on both flavors): `shared/StreamsForge.Api/Endpoints/ConfigEndpoints.cs` +
+`ConfigImportService.cs`. Engine: `shared/StreamsForge.AppCore/Config/**` (`ConfigSerializer`,
 `ConfigComposer`, `ImportPlanner`, `SecretsMasker`). What travels: **source/pipeline/table
 definitions only** — no ids, no users/credentials, no runtime state (connector dedup ledgers,
 counters, row data never leave the process this way).

@@ -40,15 +40,15 @@ missing.
 
 ### D1 · gRPC serving on `:5499` — the port is reserved and nothing listens
 
-`dapr/src/StreamForge.Dapr.Host/Program.cs` passes `GrpcStaticServices: []` and Kestrel maps only the
+`dapr/src/StreamsForge.Dapr.Host/Program.cs` passes `GrpcStaticServices: []` and Kestrel maps only the
 HTTP app port. The Orleans host maps seven gRPC services on `:5299`
-(`orleans/src/StreamForge.Host/Program.cs`). Called "phase 2" since plan 005, never revisited.
+(`orleans/src/StreamsForge.Host/Program.cs`). Called "phase 2" since plan 005, never revisited.
 
 Three consequences that read as separate bugs if you meet them without this context:
 
 - **`GET /api/meta/instance` reports a Dapr instance as gRPC-incapable.** `servesGrpc` is derived
   purely from `GrpcStaticServices.Count > 0`
-  (`shared/StreamForge.Api/Endpoints/MetaEndpoints.cs`), so the `endpoints.grpc` key is omitted and
+  (`shared/StreamsForge.Api/Endpoints/MetaEndpoints.cs`), so the `endpoints.grpc` key is omitted and
   `"grpc"` never appears in `capabilities`. A peer discovering a Dapr instance cannot federate *from*
   it. This is correct behaviour — it refuses to advertise a port nothing is listening on — and it is
   also the visible face of this debt item.
@@ -99,7 +99,7 @@ loud diagnostic, no back-fill. Both blockers its own doc comment used to name ar
   same as Orleans' identical `catch` in `AttachToTableInputAsync`.
 
 **Unverified claim, stated explicitly (see section 3 below):** this closes the code path — `dotnet
-build`/`dotnet test` on `dapr/StreamForge.Dapr.sln` are green, including new `TableAttachPolicyTests`
+build`/`dotnet test` on `dapr/StreamsForge.Dapr.sln` are green, including new `TableAttachPolicyTests`
 covering the epoch-cutoff filter — but the register-before-attach ordering argument itself (that a
 concurrent actor invocation genuinely queues rather than drops or interleaves) rests on Dapr's
 documented actor-turn concurrency model, not on a test against a live sidecar: no `TableActor` instance
@@ -167,7 +167,7 @@ D7 means re-delivering an edge's updates emits nothing. See plan 020's wave C ou
 Plan 014 database connectors, 015 entitlements/approvals/audit (`AccessPolicyActor`, `ApprovalActor`,
 `AuditLogActor`, and the shared sweeper), 016 peer discovery + `@name` endpoints, 017 CDC, 018 FIX,
 019 `fix-duplex`, 021 environments (`EnvironmentRegistryActor`, `CatalogFacadeFactory`). All wired in
-`dapr/src/StreamForge.Dapr.Host/Program.cs`. Present is not the same as verified — see section 3.
+`dapr/src/StreamsForge.Dapr.Host/Program.cs`. Present is not the same as verified — see section 3.
 
 ---
 
@@ -211,10 +211,10 @@ Two independent obstacles, and the second one is structural:
    containers exist. Running it pulls images and creates long-lived containers on the user's machine,
    which is theirs to authorize.
 2. **The Dapr flavor has no isolated-instance mode.** `dapr/components/statestore.yaml` pins
-   `scopes: [streamforge-dapr]`, so an isolated `--app-id` test instance — the pattern AGENTS.md
+   `scopes: [streamsforge-dapr]`, so an isolated `--app-id` test instance — the pattern AGENTS.md
    prescribes for Orleans' 6xxx–9xxx port instances — has no statestore in scope for actors at all and
    **panics the 1.18 sidecar**. Every Dapr live check must therefore run against the shared fixed-port
-   `streamforge-dapr` instance on `:5399`, reset via `tools/reset.sh` first. That is a much heavier
+   `streamsforge-dapr` instance on `:5399`, reset via `tools/reset.sh` first. That is a much heavier
    gate than Orleans', which is a large part of why it kept being skipped.
 
 ### How to close it

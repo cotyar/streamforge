@@ -104,5 +104,5 @@
       "meanMs": 1.898989898989899
     }
   },
-  "note": "Orleans side re-measured 2026-07-19 after fixing the StreamBridgeService startup race (see plans/005-dapr-port.md addendum + orleans/src/StreamForge.Host/Services/StreamBridgeService.cs) that previously made tableDelta/pipelineResult collect 0 samples; Dapr numbers unchanged (not re-run) from the original W9 measurement."
+  "note": "Orleans side re-measured 2026-07-19 after fixing the StreamBridgeService startup race (see plans/005-dapr-port.md addendum + orleans/src/StreamsForge.Host/Services/StreamBridgeService.cs) that previously made tableDelta/pipelineResult collect 0 samples; Dapr numbers unchanged (not re-run) from the original W9 measurement."
 }

@@ -1,19 +1,19 @@
 /**
- * Error types the client raises on purpose. Everything below extends StreamForgeError, so
- * `err instanceof StreamForgeError` catches the whole family. Transport/network errors that are
+ * Error types the client raises on purpose. Everything below extends StreamsForgeError, so
+ * `err instanceof StreamsForgeError` catches the whole family. Transport/network errors that are
  * NOT one of these (a raw grpc error, a fetch failure) are allowed to propagate as-is rather than
- * being wrapped and losing information -- ported 1:1 from clients/python/src/streamforge/errors.py.
+ * being wrapped and losing information -- ported 1:1 from clients/python/src/streamsforge/errors.py.
  */
 
-export class StreamForgeError extends Error {
+export class StreamsForgeError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "StreamForgeError";
+    this.name = "StreamsForgeError";
   }
 }
 
 /** Login failed, or a 401 survived the one-shot re-mint (see http.ts's RestClient.request). */
-export class AuthError extends StreamForgeError {
+export class AuthError extends StreamsForgeError {
   constructor(message: string) {
     super(message);
     this.name = "AuthError";
@@ -26,7 +26,7 @@ export class AuthError extends StreamForgeError {
  * gets no backfill, so subscribing to one nobody has pushed to yet blocks until data arrives or
  * this fires.
  */
-export class NotReady extends StreamForgeError {
+export class NotReady extends StreamsForgeError {
   constructor(message: string) {
     super(message);
     this.name = "NotReady";
@@ -34,7 +34,7 @@ export class NotReady extends StreamForgeError {
 }
 
 /** An ingest push was not accepted (non-202 REST, or a non-ACCEPTED gRPC outcome). */
-export class IngestRejected extends StreamForgeError {
+export class IngestRejected extends StreamsForgeError {
   readonly rowErrors: string[];
   constructor(message: string, rowErrors: string[] = []) {
     super(message);
@@ -56,7 +56,7 @@ export interface SqlDiagnostic {
  * diagnostic against `.sql` with a caret under the offending column -- the same "engine
  * explaining itself" the /sql page's editor shows, ported rather than flattened (design doc §2).
  */
-export class SqlError extends StreamForgeError {
+export class SqlError extends StreamsForgeError {
   readonly diagnostics: SqlDiagnostic[];
   readonly sql: string | undefined;
 

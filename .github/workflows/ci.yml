@@ -10,7 +10,7 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      # submodules: external/ycs is a ProjectReference of StreamForge.Connectors.Crdt.Tests — without it
+      # submodules: external/ycs is a ProjectReference of StreamsForge.Connectors.Crdt.Tests — without it
       # BOTH solutions fail to build (see AGENTS.md's build section).
       - uses: actions/checkout@v4
         with:
@@ -26,7 +26,7 @@ jobs:
 
       # The SPA is served by both hosts out of web/dist — build it first so a broken
       # front-end fails CI too, not just at deploy time. One install at the WORKSPACE ROOT: the
-      # console links @streamforge/client and @streamforge/tanstack-db from clients/, and web's
+      # console links @streamsforge/client and @streamsforge/tanstack-db from clients/, and web's
       # prebuild compiles both before tsc runs.
       - name: Build web console
         run: |
@@ -37,9 +37,9 @@ jobs:
         run: bun run --cwd clients/tanstack-db test && bun run --cwd clients/react test && bun test web/test admin/
 
       - name: Build + test — Orleans flavor
-        run: dotnet test orleans/StreamForge.sln -c Release --logger 'console;verbosity=normal'
+        run: dotnet test orleans/StreamsForge.sln -c Release --logger 'console;verbosity=normal'
 
       # Shares shared/** with the Orleans flavor: this is the regression gate that catches
       # a core change breaking the other runtime.
       - name: Build + test — Dapr flavor
-        run: dotnet test dapr/StreamForge.Dapr.sln -c Release --logger 'console;verbosity=normal'
+        run: dotnet test dapr/StreamsForge.Dapr.sln -c Release --logger 'console;verbosity=normal'

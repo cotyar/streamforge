@@ -12,7 +12,7 @@ import type { TransportConfigValue } from '@/components/sources/TransportConfigE
  * descriptor IS the form). This is the escape hatch for the cases that generic form can't express: a
  * topic browser, a connection tester, a query builder. A plugin is one ES module served from the host's
  * `ui-plugins/` directory (GET /api/ui-plugins), loaded at boot, which calls
- * `window.streamforge.registerTransportEditor(kind, Component)` — and from then on that kind's config
+ * `window.streamsforge.registerTransportEditor(kind, Component)` — and from then on that kind's config
  * panel is the plugin's component instead of the descriptor-driven one, in the source modal and in the
  * sinks editor alike.
  *
@@ -38,7 +38,7 @@ const editors = new Map<string, TransportEditor>()
 
 const key = (direction: TransportDirection | '*', kind: string) => `${direction}:${kind.toLowerCase()}`
 
-/** Exposed to plugins as `window.streamforge.registerTransportEditor`. Omit `direction` to serve both
+/** Exposed to plugins as `window.streamsforge.registerTransportEditor`. Omit `direction` to serve both
  *  halves of a kind that exists as a source AND a sink (nats, fix-duplex, …). */
 export function registerTransportEditor(kind: string, component: TransportEditor, direction?: TransportDirection): void {
   editors.set(key(direction ?? '*', kind), component)
@@ -67,7 +67,7 @@ export function clearTransportEditors(): void {
  */
 export const pluginHost = {
   /** Bumped when this object or TransportEditorProps changes shape, so a plugin can feature-detect
-   *  (`if ((window.streamforge?.apiVersion ?? 0) >= 2)`) instead of assuming. 1 → 2 added `api`, `live`
+   *  (`if ((window.streamsforge?.apiVersion ?? 0) >= 2)`) instead of assuming. 1 → 2 added `api`, `live`
    *  and `loadLiveTables`. */
   apiVersion: 2,
   react,
@@ -87,12 +87,12 @@ export const pluginHost = {
   },
 
   /**
-   * TanStack DB against a StreamForge table, loaded on demand: resolves
-   * `{ createCollection, createLiveQueryCollection, streamForgeCollectionOptions, connect }` — enough for
+   * TanStack DB against a StreamsForge table, loaded on demand: resolves
+   * `{ createCollection, createLiveQueryCollection, streamsForgeCollectionOptions, connect }` — enough for
    *
-   *   const { createCollection, streamForgeCollectionOptions, connect } = await sf.loadLiveTables()
+   *   const { createCollection, streamsForgeCollectionOptions, connect } = await sf.loadLiveTables()
    *   const client = await connect()            // this console's URL + session token, SignalR transport
-   *   const rows = createCollection(streamForgeCollectionOptions({ client, table: 'orders' }))
+   *   const rows = createCollection(streamsForgeCollectionOptions({ client, table: 'orders' }))
    *
    * `connect()` is memoized per page: one client, however many plugins ask. It is a SECOND connection
    * from the console's SignalR hub above — use `live.subscribeTable` when plain deltas are enough, and
@@ -108,14 +108,14 @@ async function loadLiveTables() {
   // console itself uses none of them.
   const [db, bridge, client] = await Promise.all([
     import('@tanstack/db'),
-    import('@streamforge/tanstack-db'),
-    import('@streamforge/client'),
+    import('@streamsforge/tanstack-db'),
+    import('@streamsforge/client'),
   ])
 
   return {
     createCollection: db.createCollection,
     createLiveQueryCollection: db.createLiveQueryCollection,
-    streamForgeCollectionOptions: bridge.streamForgeCollectionOptions,
+    streamsForgeCollectionOptions: bridge.streamsForgeCollectionOptions,
     /** Connects (once) with this console's origin and stored session token. `transport: 'signalr'`
      *  because the client's gRPC transport is Node-only. */
     connect: () => {
@@ -131,7 +131,7 @@ async function loadLiveTables() {
 
 declare global {
   interface Window {
-    streamforge?: typeof pluginHost
+    streamsforge?: typeof pluginHost
   }
 }
 

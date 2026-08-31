@@ -10,16 +10,16 @@
  * authorization/TTL/cap MECHANICS are already pinned server-side with a fake clock in
  * StreamHubAwarenessTests.cs; this suite is the wire-level check that this client's own encode/
  * decode of that contract (camelCase JSON, the `awarenessUpdate` push shape, HubException ->
- * StreamForgeError) actually matches what ships.
+ * StreamsForgeError) actually matches what ships.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { connect, StreamForgeError, type Client } from "../src/index.js";
+import { connect, StreamsForgeError, type Client } from "../src/index.js";
 import { bootEngine, preflightSkipReason, type Engine } from "./engine-fixture.js";
 
 const skipReason = preflightSkipReason();
 const describeOrSkip = skipReason ? describe.skip : describe;
-if (skipReason) console.warn(`streamforge awareness tests: SKIPPED -- ${skipReason}`);
+if (skipReason) console.warn(`streamsforge awareness tests: SKIPPED -- ${skipReason}`);
 
 describeOrSkip("awareness: isolated engine", () => {
   let engine: Engine;
@@ -48,7 +48,7 @@ describeOrSkip("awareness: isolated engine", () => {
   }, 20_000);
 
   test("a non-crdt-kind source refuses rather than joining an empty group", async () => {
-    await expect(client.awareness(engine.source, { clientId: "peer-x" })).rejects.toThrow(StreamForgeError);
+    await expect(client.awareness(engine.source, { clientId: "peer-x" })).rejects.toThrow(StreamsForgeError);
     await expect(client.awareness(engine.source, { clientId: "peer-x" })).rejects.toThrow(/not crdt-kind/);
   }, 20_000);
 

@@ -1,7 +1,7 @@
 {
-  "name": "@streamforge/react",
+  "name": "@streamsforge/react",
   "version": "0.2.0",
-  "description": "React bindings for @streamforge/client: a provider, live-table hooks and drop-in unstyled components.",
+  "description": "React bindings for @streamsforge/client: a provider, live-table hooks and drop-in unstyled components.",
   "type": "module",
   "license": "MIT",
   "main": "./dist/index.js",
@@ -22,17 +22,17 @@
     "test": "bun test"
   },
   "peerDependencies": {
-    "@streamforge/client": ">=0.1.0",
+    "@streamsforge/client": ">=0.1.0",
     "react": ">=18"
   },
   "peerDependenciesMeta": {
-    "@streamforge/client": {
+    "@streamsforge/client": {
       "optional": true
     }
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^18.0.0",
-    "@streamforge/client": "workspace:*",
+    "@streamsforge/client": "workspace:*",
     "@testing-library/react": "^16.1.0",
     "@types/bun": "^1.3.14",
     "@types/react": "^19.2.17",

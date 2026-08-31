@@ -139,7 +139,7 @@ if ! port_free 6199 || ! port_free 6299; then
 fi
 
 (
-  cd "$REPO_ROOT" && exec "$DOTNET_BIN" run --project orleans/src/StreamForge.Host -- \
+  cd "$REPO_ROOT" && exec "$DOTNET_BIN" run --project orleans/src/StreamsForge.Host -- \
     --Http:Port 6199 --Grpc:Port 6299 --DataDir "$ORLEANS_DATADIR"
 ) > "$RESULTS_DIR/orleans-host.log" 2>&1 &
 ORLEANS_PID=$!
@@ -209,7 +209,7 @@ else
 fi
 
 log "Tearing down Dapr instance..."
-dapr stop --app-id streamforge-dapr 2>/dev/null || true
+dapr stop --app-id streamsforge-dapr 2>/dev/null || true
 kill "$DAPR_PID" 2>/dev/null || true
 wait "$DAPR_PID" 2>/dev/null || true
 # Documented in dapr/ARCHITECTURE.md: `dapr stop` sometimes leaves the plain dotnet process holding

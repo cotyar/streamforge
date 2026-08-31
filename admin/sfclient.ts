@@ -1,8 +1,8 @@
-// StreamForge REST client — the one file that knows the API's shape. Shared by the CLI (sf.ts) and
+// StreamsForge REST client — the one file that knows the API's shape. Shared by the CLI (sf.ts) and
 // the MCP server (mcp.ts) so the two can never drift about what "start a table" means.
 //
 // Zero npm dependencies, same house rule as main.ts. Both runtime flavors serve the identical REST
-// surface (shared/StreamForge.Api), so a base URL is the whole difference between administering
+// surface (shared/StreamsForge.Api), so a base URL is the whole difference between administering
 // Orleans on :5199 and Dapr on :5399.
 
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -11,16 +11,16 @@ import { dirname, join } from "node:path";
 
 export const DEFAULT_URL = "http://localhost:5199";
 /** Plan 021 — the header `EnvironmentSelectionMiddleware` reads
- * (`shared/StreamForge.Api/Environments/EnvironmentSelectionMiddleware.cs`), duplicated here as a
+ * (`shared/StreamsForge.Api/Environments/EnvironmentSelectionMiddleware.cs`), duplicated here as a
  * string literal for the same "no cross-language sharing in this folder" reason `normalizeEnv` is. */
-export const ENV_HEADER = "X-StreamForge-Environment";
+export const ENV_HEADER = "X-StreamsForge-Environment";
 // SF_TOKEN_FILE is a TEST-ONLY knob, same family as SF_URL/SF_TOKEN/SF_USER/SF_PASSWORD: it lets a
 // `sf` subprocess (or an in-process SfClient) point its token store at a temp path instead of a
-// developer's real ~/.streamforge/token.json — the requirement plan 016 wave 5's prerequisite fix
+// developer's real ~/.streamsforge/token.json — the requirement plan 016 wave 5's prerequisite fix
 // carries (see admin/mcp.test.ts's "token store" suite). Every read/write below also accepts an
 // explicit `filePath` override for callers that already have a path in hand and would rather not go
 // through the environment at all.
-export const TOKEN_FILE = process.env.SF_TOKEN_FILE || join(homedir(), ".streamforge", "token.json");
+export const TOKEN_FILE = process.env.SF_TOKEN_FILE || join(homedir(), ".streamsforge", "token.json");
 
 /** The three catalog entity kinds, as they appear in REST paths. Sources are addressed by NAME,
  * pipelines and tables by ID — a REST-level asymmetry the callers would otherwise each rediscover. */
@@ -102,7 +102,7 @@ export interface ClientOptions {
   password?: string;
   /** Plan 021 — which environment's catalog this client addresses. `""`/`undefined`/the literal
    * `"default"` all mean the default environment, exactly like the server's own `EnvKeys.Normalize`
-   * (`shared/StreamForge.AppCore/Environments/EnvKeys.cs`) — this client does not import that file (no
+   * (`shared/StreamsForge.AppCore/Environments/EnvKeys.cs`) — this client does not import that file (no
    * npm deps, no cross-language sharing), so the three spellings are normalized here, independently,
    * to the same effect. */
   env?: string;

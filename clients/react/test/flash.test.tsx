@@ -2,7 +2,7 @@
  * Tests for hooks.ts's `flashKeys`: the "which rows just changed" accumulate-then-clear behaviour
  * added to `useLiveTable`/`useLiveSql`. Mirrors test/react.test.tsx's fake-Transport-plus-real-
  * LiveTable technique (a hand-rolled in-memory `Transport` driving a real `LiveTable`, rendered
- * under `<StreamForgeProvider client={...}>`) rather than importing from that file -- it's owned
+ * under `<StreamsForgeProvider client={...}>`) rather than importing from that file -- it's owned
  * by a concurrent agent this wave and must not be touched or depended on.
  *
  * Deliberately does NOT render through `LiveTableView`/`LiveTablePanel` (another agent is
@@ -12,9 +12,9 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { LiveTable, canonicalKey } from "@streamforge/client";
-import type { Client, Delta, Transport } from "@streamforge/client";
-import { StreamForgeProvider, useLiveTable } from "../src/index.js";
+import { LiveTable, canonicalKey } from "@streamsforge/client";
+import type { Client, Delta, Transport } from "@streamsforge/client";
+import { StreamsForgeProvider, useLiveTable } from "../src/index.js";
 
 afterEach(cleanup);
 
@@ -118,9 +118,9 @@ describe("useLiveTable flashKeys", () => {
     const table = await LiveTable.connect(transport, "prices", ["id"], 2_000);
 
     render(
-      <StreamForgeProvider client={fakeClient(table)}>
+      <StreamsForgeProvider client={fakeClient(table)}>
         <FlashProbe name="prices" />
-      </StreamForgeProvider>,
+      </StreamsForgeProvider>,
     );
 
     // First connection (not a reconnect) never synthesizes a touched set -- starts empty.
@@ -142,9 +142,9 @@ describe("useLiveTable flashKeys", () => {
     const table = await LiveTable.connect(transport, "prices", ["id"], 2_000);
 
     render(
-      <StreamForgeProvider client={fakeClient(table)}>
+      <StreamsForgeProvider client={fakeClient(table)}>
         <FlashProbe name="prices" />
-      </StreamForgeProvider>,
+      </StreamsForgeProvider>,
     );
     await waitFor(() => expect(screen.getByTestId("flash").textContent).toBe(""));
 
@@ -165,9 +165,9 @@ describe("useLiveTable flashKeys", () => {
     const table = await LiveTable.connect(transport, "prices", ["id"], 2_000);
 
     render(
-      <StreamForgeProvider client={fakeClient(table)}>
+      <StreamsForgeProvider client={fakeClient(table)}>
         <FlashProbe name="prices" />
-      </StreamForgeProvider>,
+      </StreamsForgeProvider>,
     );
     await waitFor(() => expect(screen.getByTestId("flash").textContent).toBe(""));
 

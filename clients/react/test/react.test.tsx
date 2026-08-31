@@ -4,7 +4,7 @@
  *
  * Owns:
  *  1. useLiveTable, wired through a REAL LiveTable (from clients/typescript) over a hand-rolled
- *     FakeTransport, rendered via <StreamForgeProvider client={fakeClient}> + <LiveTablePanel>.
+ *     FakeTransport, rendered via <StreamsForgeProvider client={fakeClient}> + <LiveTablePanel>.
  *     Deltas pushed AFTER the initial render must reach the DOM -- that's the whole point of the
  *     package, so it gets the most scrutiny of anything here.
  *  2. The wait state: a client whose table() promise never resolves must leave the panel showing
@@ -14,16 +14,16 @@
  *  4. Sparkline: empty/single/all-equal values must never emit "NaN" into the SVG markup -- that
  *     is exactly the regression worth catching, not the geometry itself.
  *
- * No fake data reaches these tests through StreamForgeProvider's own connect() path -- that would
+ * No fake data reaches these tests through StreamsForgeProvider's own connect() path -- that would
  * mean a real network handshake per test. Everything here uses `client` (the pre-built-client
- * escape hatch documented on StreamForgeProviderProps) instead, which is the supported way to test
+ * escape hatch documented on StreamsForgeProviderProps) instead, which is the supported way to test
  * against this package without a live engine.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { LiveTable } from "@streamforge/client";
-import type { Client, Delta, Row, Transport } from "@streamforge/client";
-import { LiveTablePanel, LiveTableView, Sparkline, StreamForgeProvider } from "../src/index.js";
+import { LiveTable } from "@streamsforge/client";
+import type { Client, Delta, Row, Transport } from "@streamsforge/client";
+import { LiveTablePanel, LiveTableView, Sparkline, StreamsForgeProvider } from "../src/index.js";
 
 afterEach(cleanup);
 
@@ -98,15 +98,15 @@ function fakeClient(table: LiveTable): Client {
   } as unknown as Client;
 }
 
-describe("useLiveTable via StreamForgeProvider + LiveTablePanel", () => {
+describe("useLiveTable via StreamsForgeProvider + LiveTablePanel", () => {
   test("shows the initial snapshot immediately, and a delta pushed after render reaches the DOM", async () => {
     const transport = new FakeTransport([[{ id: "a", price: 1 }, 1]]);
     const table = await LiveTable.connect(transport, "prices", ["id"], 2_000);
 
     render(
-      <StreamForgeProvider client={fakeClient(table)}>
+      <StreamsForgeProvider client={fakeClient(table)}>
         <LiveTablePanel name="prices" />
-      </StreamForgeProvider>,
+      </StreamsForgeProvider>,
     );
 
     // Initial snapshot row: LiveTable.connect() has already subscribed/snapshotted/replayed by
@@ -136,9 +136,9 @@ describe("useLiveTable wait state", () => {
     } as unknown as Client;
 
     render(
-      <StreamForgeProvider client={client}>
+      <StreamsForgeProvider client={client}>
         <LiveTablePanel name="prices" />
-      </StreamForgeProvider>,
+      </StreamsForgeProvider>,
     );
 
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Loading…"));

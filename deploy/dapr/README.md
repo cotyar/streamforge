@@ -1,4 +1,4 @@
-# StreamForge — Dapr flavor container deployment
+# StreamsForge — Dapr flavor container deployment
 
 Plan [`007-cloudrun-admin-aichat.md`](../../plans/007-cloudrun-admin-aichat.md), decision D-A, wave
 W1B. Packages the Dapr flavor (`dapr/`) as a self-contained, four-container stack — app + `daprd` +
@@ -9,7 +9,7 @@ so `localhost:6379`/`localhost:50005`/`localhost:3500` resolve the same way in b
 
 Never bind or kill the local dev ports (5199/5299/5399) or the `dapr init` containers
 (`dapr_redis`/`dapr_placement`/`dapr_scheduler`) — this stack is fully independent of them, on its own
-compose project (`streamforge-dapr`) and its own host port (**6399**).
+compose project (`streamsforge-dapr`) and its own host port (**6399**).
 
 ## Local: docker compose
 
@@ -58,7 +58,7 @@ network with no dependency on them.
 
 | File | Role |
 |---|---|
-| `Dockerfile.app` | Multi-stage: `oven/bun` builds `web/dist`, `mcr.microsoft.com/dotnet/sdk:10.0` publishes `StreamForge.Dapr.Host`, `mcr.microsoft.com/dotnet/aspnet:10.0` serves it. Bakes `web/dist` and `orleans/docs/` in, pointed at by `Web:Dist`/`Docs:File` (env `Web__Dist`/`Docs__File`). Binds `0.0.0.0:${PORT:-8080}`. |
+| `Dockerfile.app` | Multi-stage: `oven/bun` builds `web/dist`, `mcr.microsoft.com/dotnet/sdk:10.0` publishes `StreamsForge.Dapr.Host`, `mcr.microsoft.com/dotnet/aspnet:10.0` serves it. Bakes `web/dist` and `orleans/docs/` in, pointed at by `Web:Dist`/`Docs:File` (env `Web__Dist`/`Docs__File`). Binds `0.0.0.0:${PORT:-8080}`. |
 | `Dockerfile.daprd` | `FROM daprio/daprd:1.18.1` (pinned to the local `dapr --version` runtime) with `deploy/dapr/components/` baked in at `/components` — no volumes needed anywhere this image runs. |
 | `components/*.yaml` | Copies of `dapr/components/*` retargeted at `localhost:6379` (same instance's Redis container/sidecar) — see each file's own header comment for exactly what changed vs. the original. |
 | `compose.yaml` | Local stack: `app` (only container with a published port, `6399:8080`), `redis`/`placement`/`daprd` all `network_mode: "service:app"`. |
@@ -105,7 +105,7 @@ container set proven live via `compose.yaml`).
 
 ## Startup ordering — the app/daprd circular dependency, and how it's actually broken
 
-`StreamForge.Dapr.Host.Services.CatalogInitializationService` seeds the demo catalog/users **exactly
+`StreamsForge.Dapr.Host.Services.CatalogInitializationService` seeds the demo catalog/users **exactly
 once**, on `ApplicationStarted`, with **no retry loop** (by design — see its own doc comment: "a
 failure here just means the demo world isn't seeded yet"). That's correct for local dev
 (`tools/run.sh` starts the Dapr sidecar, then execs the app as its child process), but this
@@ -176,7 +176,7 @@ create-then-delete-source smoke test proves a real `RegistryActor` round trip th
 design, mirroring the Orleans flavor's own ephemeral-data-dir story (decision D-A) and Cloud Run's own
 lack of persistent disk for a `minScale: 0` service. Every fresh `docker compose up` (or every Cloud Run
 cold start after scale-to-zero) starts from an empty Redis, so `CatalogInitializationService` reseeds
-the demo catalog from scratch — same behavior as deleting `orleans/src/StreamForge.Host/data/` on that
+the demo catalog from scratch — same behavior as deleting `orleans/src/StreamsForge.Host/data/` on that
 flavor. This is acceptable for a demo platform (documented, not a bug); a persistent-Redis follow-up
 (Cloud Memorystore, or a mounted volume for local-only use) is out of scope for this wave.
 

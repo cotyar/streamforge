@@ -200,7 +200,7 @@ if [[ -n "$SHARD_BY" ]]; then
 fi
 
 (
-  cd "$REPO_ROOT" && exec "$DOTNET_BIN" run --project orleans/src/StreamForge.Host -- "${HOST_ARGS[@]}"
+  cd "$REPO_ROOT" && exec "$DOTNET_BIN" run --project orleans/src/StreamsForge.Host -- "${HOST_ARGS[@]}"
 ) > "$HOSTLOG" 2>&1 &
 RUNNER_PID=$!
 

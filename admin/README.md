@@ -1,4 +1,4 @@
-# StreamForge — Admin
+# StreamsForge — Admin
 
 Three admin surfaces, one folder, **zero npm dependencies** between them (the rule this folder has
 kept since plan 007):
@@ -26,13 +26,13 @@ It **never** binds, signals, or health-probes the local dev servers on **5199/52
 
 - the local docker-compose stacks (`deploy/orleans/compose.yaml` on host port **6199**,
   `deploy/dapr/compose.yaml` on host port **6399**), or
-- the Cloud Run services `streamforge-orleans` / `streamforge-dapr` (via `gcloud`).
+- the Cloud Run services `streamsforge-orleans` / `streamsforge-dapr` (via `gcloud`).
 
 ## Run
 
 ```bash
 cd admin && bun main.ts
-# → StreamForge admin listening on :5599 (mode=local)
+# → StreamsForge admin listening on :5599 (mode=local)
 ```
 
 Open <http://localhost:5599>.
@@ -44,7 +44,7 @@ Open <http://localhost:5599>.
 | `local` | `docker compose -f deploy/<flavor>/compose.yaml up -d --build` | `docker compose -f deploy/<flavor>/compose.yaml down` | `GET http://localhost:<6199\|6399>/healthz` |
 | `cloudrun` | `gcloud run services update <svc> --region $REGION --min-instances=1` | `gcloud run services update <svc> --region $REGION --min-instances=0` (scale to zero) | `gcloud run services describe <svc> --format json` → `status.url` → `GET <url>/healthz` |
 
-`<svc>` is `streamforge-orleans` or `streamforge-dapr` — must match (and does match)
+`<svc>` is `streamsforge-orleans` or `streamsforge-dapr` — must match (and does match)
 `metadata.name` in `deploy/orleans/service.yaml` / `deploy/dapr/service.yaml`.
 
 ## Env vars
@@ -80,7 +80,7 @@ that takes it — anything else is `400`. Nothing is ever shell-interpolated fro
 Two flavor cards (Orleans, Dapr), each with a status pill (ok/starting/down/unknown), the
 console/service URL, Start/Stop buttons (disabled while an operation is in flight for that
 flavor; Stop asks `confirm()` first), and a collapsible logs panel. The header shows the active
-mode. Neutral text wordmark only ("STREAMFORGE — CLUSTER ADMIN") — no client branding or logo
+mode. Neutral text wordmark only ("STREAMSFORGE — CLUSTER ADMIN") — no client branding or logo
 graphic, per repo brand rules.
 
 ## Notes / caveats
@@ -106,7 +106,7 @@ SF_URL=http://localhost:5399 bun admin/sf.ts ls tables    # the Dapr flavor, sam
 | Command | Does |
 |---|---|
 | `sf health` | Instance health + the identity this token carries |
-| `sf login [--user U]` | Stores a token for **this URL** in `~/.streamforge/token.json` (mode 600). Password from `--password`, `SF_PASSWORD`, or a no-echo prompt |
+| `sf login [--user U]` | Stores a token for **this URL** in `~/.streamsforge/token.json` (mode 600). Password from `--password`, `SF_PASSWORD`, or a no-echo prompt |
 | `sf logout` | Removes **this URL's** stored token only — every other logged-in instance is untouched |
 | `sf instance` | This instance's identity — id, flavor, version, endpoints, capabilities, plugins, catalog counts/warnings. **Anonymous**, like `/healthz`: works with no login and no stored token at all |
 | `sf peers` | This instance's configured federation peers, each with its last probe result (`configured` = never reached, `seen` = probed at least once) |
@@ -159,7 +159,7 @@ Five things that will otherwise cost you an afternoon:
 the listing filters server-side to the requester, the entitled approver and the administrator. Every one
 of these routes answers **503 with a sentence** while `Approvals:Enabled=false` (the shipped default).
 
-**Auth resolution order**: `--token`, `SF_TOKEN`, `~/.streamforge/token.json` (only when its stored
+**Auth resolution order**: `--token`, `SF_TOKEN`, `~/.streamsforge/token.json` (only when its stored
 URL matches the one being addressed — a token from another host is not silently sent), then a login
 with `SF_USER`/`SF_PASSWORD`. Only the JWT is ever written to disk, and only by an explicit
 `sf login`; no credential is. There are no default credentials in the code.
@@ -168,7 +168,7 @@ with `SF_USER`/`SF_PASSWORD`. Only the JWT is ever written to disk, and only by 
 
 Every command takes `--env <name>`, falling back to `SF_ENV`, falling back to the default
 environment — resolved the same way `--url`/`SF_URL` are. The default environment sends **no**
-`X-StreamForge-Environment` header at all (not even the literal string `"default"`): plan 021 D2 says
+`X-StreamsForge-Environment` header at all (not even the literal string `"default"`): plan 021 D2 says
 the default path costs nothing on the server, and that includes not making it look one up. Naming an
 environment that does not exist is a 404 on every route it touches — `sf` does not create one
 implicitly; use `sf environments create` first. `/api/auth/*` (login, logout, `me`) carries no
@@ -176,7 +176,7 @@ environment header regardless of `--env` — accounts are global, not partitione
 
 ### The token file holds one entry PER INSTANCE (plan 016 wave 5)
 
-`~/.streamforge/token.json` used to be a single `{ url, token, username, role }` object, so logging
+`~/.streamsforge/token.json` used to be a single `{ url, token, username, role }` object, so logging
 in to a second instance silently evicted the first — multi-instance administration (`sf instance` /
 `sf peers` against several hosts, or just juggling Orleans `:5199` and Dapr `:5399` day to day) was
 impossible. It is now `{ [url]: { url, token, username, role } }`, one entry per URL:
@@ -192,7 +192,7 @@ impossible. It is now `{ [url]: { url, token, username, role } }`, one entry per
 
 `SF_TOKEN_FILE` (test-only, same family as `SF_URL`/`SF_TOKEN`/`SF_USER`/`SF_PASSWORD`) repoints the
 store at a different path for the process's lifetime — how the test suite exercises `sf login`/
-`sf logout` without ever touching a real `~/.streamforge/token.json`. Leave it unset in normal use.
+`sf logout` without ever touching a real `~/.streamsforge/token.json`. Leave it unset in normal use.
 
 ## MCP server (plan 013)
 
@@ -205,7 +205,7 @@ that matters is pinned by `mcp.test.ts` rather than assumed.
 // Claude Code / Claude Desktop MCP config
 {
   "mcpServers": {
-    "streamforge": {
+    "streamsforge": {
       "command": "bun",
       "args": ["/abs/path/to/crates-foundation/admin/mcp.ts"],
       "env": { "SF_URL": "http://localhost:5199", "SF_USER": "admin", "SF_PASSWORD": "…", "SF_ENV": "staging" }

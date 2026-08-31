@@ -280,7 +280,7 @@ function asString(value: unknown): string {
 
 /** The property name of the platform's open, string-valued config bag (ConnectorConfig.Settings /
  *  SinkSpec.Settings) — what an out-of-tree transport declares as its `configProperty` when it has no
- *  typed config class in StreamForge.Contracts. */
+ *  typed config class in StreamsForge.Contracts. */
 export const SETTINGS_BAG = 'settings'
 
 /** `null`/`undefined` become "", everything else its plain spelling — `true`/`false` and invariant

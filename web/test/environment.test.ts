@@ -17,7 +17,7 @@ import {
 import { environmentHeader, ENVIRONMENT_HEADER } from '../src/api/client'
 
 describe('isValidEnvironmentName', () => {
-  // Mirrors EnvKeys.IsValidName's NamePattern (shared/StreamForge.AppCore/Environments/EnvKeys.cs):
+  // Mirrors EnvKeys.IsValidName's NamePattern (shared/StreamsForge.AppCore/Environments/EnvKeys.cs):
   // lower-case, digits, hyphens, 1-32 chars, starting with a letter or digit.
   test('accepts the server-legal shape', () => {
     expect(isValidEnvironmentName('staging')).toBe(true)
@@ -66,9 +66,9 @@ describe('client.ts environmentHeader()', () => {
   })
 
   test('the header name matches the server constant', () => {
-    // EnvironmentSelectionMiddleware.HeaderName in shared/StreamForge.Api/Environments/ — pinned as a
+    // EnvironmentSelectionMiddleware.HeaderName in shared/StreamsForge.Api/Environments/ — pinned as a
     // literal here (the SPA cannot import C#) so a rename on either side breaks a test instead of
     // silently talking past each other.
-    expect(ENVIRONMENT_HEADER).toBe('X-StreamForge-Environment')
+    expect(ENVIRONMENT_HEADER).toBe('X-StreamsForge-Environment')
   })
 })

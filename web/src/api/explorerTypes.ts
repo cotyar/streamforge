@@ -1,10 +1,10 @@
 // Types + client for the API Explorer page's own backend surface (GET /api/meta/*). Kept out of
 // ./types.ts (the frozen REST/hub contract shared with the rest of the console) since this is a
-// new, Explorer-only surface — see src/StreamForge.Host/Api/MetaEndpoints.cs for the DTOs this mirrors.
+// new, Explorer-only surface — see src/StreamsForge.Host/Api/MetaEndpoints.cs for the DTOs this mirrors.
 import { api, ApiError, environmentHeader, getStoredToken } from './client'
 
-/** Raw text of one of the two hand-authored static .proto files (streamforge.proto /
- * streamforge_dynamic.proto), served verbatim by GET /api/meta/protos/static. */
+/** Raw text of one of the two hand-authored static .proto files (streamsforge.proto /
+ * streamsforge_dynamic.proto), served verbatim by GET /api/meta/protos/static. */
 export interface StaticProtoDto {
   name: string
   text: string

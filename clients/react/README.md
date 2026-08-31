@@ -1,10 +1,10 @@
-# @streamforge/react
+# @streamsforge/react
 
-React bindings for `@streamforge/client`: a provider that owns one `Client` per subtree, hooks
+React bindings for `@streamsforge/client`: a provider that owns one `Client` per subtree, hooks
 (`useLiveTable`, `useLiveSql`, `useTables`) that mirror a `LiveTable`'s state into React state, and
 unstyled components (`LiveTableView`, `LiveTablePanel`, `Sparkline`) over the rows those hooks
 return. This package does **not** re-implement the wire protocol -- subscribe -> snapshot ->
-replay, the Z-set reduction, reconnect/backoff, all of it lives in `@streamforge/client`
+replay, the Z-set reduction, reconnect/backoff, all of it lives in `@streamsforge/client`
 (`clients/typescript`), and this package's whole job is gluing that class's lifecycle to React's.
 See that package's own README for the client itself; this one covers what's React-specific.
 
@@ -29,31 +29,31 @@ bun run build      # emits dist/
 ## Quick start
 
 ```tsx
-import { StreamForgeProvider, LiveTablePanel } from "@streamforge/react";
+import { StreamsForgeProvider, LiveTablePanel } from "@streamsforge/react";
 
 function App() {
   return (
-    <StreamForgeProvider url="http://localhost:5199" user="admin" password="admin123!">
+    <StreamsForgeProvider url="http://localhost:5199" user="admin" password="admin123!">
       <LiveTablePanel name="trigger_monitor" />
-    </StreamForgeProvider>
+    </StreamsForgeProvider>
   );
 }
 ```
 
-One `StreamForgeProvider` per app (or per subtree that should share a connection) `connect()`s
+One `StreamsForgeProvider` per app (or per subtree that should share a connection) `connect()`s
 exactly one `Client` and hands it to every `useLiveTable`/`useLiveSql`/`useTables` call below it --
 each `connect()` handshakes a transport (auth, then a gRPC channel or SignalR hub connection), so
 sharing one `Client` means that handshake happens once per subtree instead of once per hook. Each
 hook still opens its own `LiveTable` subscription over that shared `Client` -- what's shared is the
 connection underneath, not the per-table state. Props are `ConnectOptions` (`url`, `grpc`, `user`,
-`password`, `token`, `ingestKey`, `transport`, `verify` -- see `@streamforge/client`'s README) plus
+`password`, `token`, `ingestKey`, `transport`, `verify` -- see `@streamsforge/client`'s README) plus
 `children`.
 
 Already have a `Client` (e.g. one instantiated outside React, or shared with non-React code)? Pass
 it directly and the provider connects nothing and owns nothing:
 
 ```tsx
-<StreamForgeProvider client={existingClient}>...</StreamForgeProvider>
+<StreamsForgeProvider client={existingClient}>...</StreamsForgeProvider>
 ```
 
 ### Hooks-only path
@@ -62,7 +62,7 @@ Reach for `useLiveTable` directly (instead of `<LiveTablePanel>`) when you need 
 UI with the fetch -- a toolbar, a row-click handler, a second view over the same rows:
 
 ```tsx
-import { useLiveTable, LiveTableView } from "@streamforge/react";
+import { useLiveTable, LiveTableView } from "@streamsforge/react";
 
 function DeskExposure() {
   const { rows, loading, error } = useLiveTable("desk_exposure", { key: ["desk"] });
@@ -85,7 +85,7 @@ them. Scrolling back to the edge resumes following. Put a `<LiveTableView>` (or 
 inside it:
 
 ```tsx
-import { useLiveTable, LiveTableView, StreamView } from "@streamforge/react";
+import { useLiveTable, LiveTableView, StreamView } from "@streamsforge/react";
 
 function OrderLog() {
   const { rows, loading, error } = useLiveTable("orders");
@@ -137,7 +137,7 @@ three optional dependencies of this package, none of them shipping any CSS of th
   not a hand-rolled scorer) and RANKED: matching rows are re-sorted best-match-first via
   `compareItems`, unless an explicit column sort (`sortable`, clicked) is active, which wins instead.
   **This is a client-side filter over the rows already in memory, not a query.** It is a completely
-  different feature from `@streamforge/client`'s `client.search(name, query, limit)` -- a per-table
+  different feature from `@streamsforge/client`'s `client.search(name, query, limit)` -- a per-table
   opt-in server-side index (`Exact` or `Fuzzy` mode, maintained by the engine over the table's FULL
   contents, see that package's README and `web/src/pages/TableDetailPage.tsx`'s `SearchAndView` for
   the console's own use of it). Swapping one for the other silently would make rows "exist but not be
@@ -169,9 +169,9 @@ three optional dependencies of this package, none of them shipping any CSS of th
 ## Public surface
 
 ```ts
-<StreamForgeProvider url? grpc? user? password? token? ingestKey? transport? verify? client? children>
-useStreamForge() -> Client | null                    // null until connected; throws outside a provider
-useStreamForgeStatus() -> { client, connecting, error }
+<StreamsForgeProvider url? grpc? user? password? token? ingestKey? transport? verify? client? children>
+useStreamsForge() -> Client | null                    // null until connected; throws outside a provider
+useStreamsForgeStatus() -> { client, connecting, error }
 
 useLiveTable(name: string | undefined, opts?: { key?: string[]; timeoutMs?: number; flushMs?: number }) -> {
   rows: readonly Row[]; loading: boolean; error: Error | null; table: LiveTable | null;
@@ -197,7 +197,7 @@ that shouldn't spin.
 
 `opts.key` is the row-identity columns used for LATEST BY-style supersession (an updated row for
 the same key replaces the old one rather than appearing twice) -- forwarded straight to
-`client.table()`'s own `key` option; see `@streamforge/client`'s README and
+`client.table()`'s own `key` option; see `@streamsforge/client`'s README and
 `clients/typescript/src/zset.ts`'s module doc comment for what "identity" means here and why no
 column is ever guessed when it's omitted.
 
@@ -206,7 +206,7 @@ emits on the LEADING edge -- a lone update on an otherwise-quiet table reaches R
 and coalesces bursts into one emission per window, so this caps how often a component re-renders
 without adding latency when nothing is happening. Default 16ms (one frame at 60Hz: a browser cannot
 paint faster, so it is the natural ceiling); `0` re-renders per delta batch, which is only sane for a
-table nobody is hammering. See `@streamforge/client`'s README section on latency and backpressure for
+table nobody is hammering. See `@streamsforge/client`'s README section on latency and backpressure for
 the mechanics -- notably that this replaced an unconditional 120ms window that used to hand back the
 whole benefit of the engine's push-stream transport (p50 1ms on `tableDelta`).
 
@@ -254,7 +254,7 @@ names for a host stylesheet to target:
 
 ## Browser support: SignalR only, gRPC is Node-only
 
-This package runs entirely on top of `@streamforge/client`'s `connect()`, so the same rule applies
+This package runs entirely on top of `@streamsforge/client`'s `connect()`, so the same rule applies
 unchanged: a browser cannot speak h2c gRPC at all, so in a browser build `transport: "auto"`
 (the default) silently skips the gRPC attempt and goes straight to SignalR. See
 `clients/typescript/README.md`'s "gRPC is Node-only" and "Transports" sections for the full
@@ -277,7 +277,7 @@ dynamically-imported gRPC module) -- nothing about it changes here, so it isn't 
   whatever chrome sits around that (a search input, a column-visibility dropdown, pagination
   controls). Shipping that chrome here would mean styling it, which contradicts the whole point of
   this package.
-- **No TanStack DB in this package**, deliberately. StreamForge is already the
+- **No TanStack DB in this package**, deliberately. StreamsForge is already the
   incremental-view-maintenance engine (the Z-set reducer in `clients/typescript/src/zset.ts` **is**
   that layer -- retract/assert, weight summation, group-key supersession), so stacking TanStack DB's
   own IVM under these hooks would mean two systems independently deciding what a row's identity is
@@ -285,7 +285,7 @@ dynamically-imported gRPC module) -- nothing about it changes here, so it isn't 
   already IS the materialized, deduped view. `useLiveTable`'s plain `Row[]` is the integration point
   for state managers that just need data.
   What TanStack DB *does* buy -- client-side live queries JOINING several tables, and optimistic
-  mutations -- is real, and lives in its own optional package, `@streamforge/tanstack-db`
+  mutations -- is real, and lives in its own optional package, `@streamsforge/tanstack-db`
   (`clients/tanstack-db`): a bridge that feeds `LiveTable`'s touched-key deltas into a collection
   keyed by the Z-set's own canonical key, so there is still exactly one notion of row identity.
   Reach for it when you need those two things; reach for these hooks when you don't.
@@ -306,5 +306,5 @@ before those modules are first evaluated, which only a preload (not a same-file 
 No live engine is needed: tests drive `useLiveTable` through a hand-rolled in-memory `Transport`
 (implementing `clients/typescript`'s `Transport` interface directly, per its own doc comment) and a
 real `LiveTable`, wrapped in a minimal object cast to `Client` and handed to
-`<StreamForgeProvider client={...}>` -- the same pre-built-client escape hatch documented above,
+`<StreamsForgeProvider client={...}>` -- the same pre-built-client escape hatch documented above,
 not a mock of this package's own code.

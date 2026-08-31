@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { ZSet } from '@streamforge/client'
-import type { Row as LiveTableRow } from '@streamforge/client'
+import { ZSet } from '@streamsforge/client'
+import type { Row as LiveTableRow } from '@streamsforge/client'
 import type { ResultRow, TableRowDto } from '../api/types'
 import { tablesApi } from '../api/tables'
 import { subscribeTable } from '../realtime/hub'
 
 export interface LiveRow {
-  /** Canonical Z-set tuple identity -- see @streamforge/client's canonicalKey(). */
+  /** Canonical Z-set tuple identity -- see @streamsforge/client's canonicalKey(). */
   key: string
   row: ResultRow
   weight: number
@@ -19,7 +19,7 @@ export interface LiveRow {
  * source field order, which mirrors the SELECT list, so a table's first/leading column (e.g.
  * `symbol`) is reliably its grouping column without needing output-schema metadata -- imperfect
  * (silently wrong for a composite key or a global aggregate) but a safer default than never
- * superseding at all on a table that used to work. @streamforge/client's own default policy
+ * superseding at all on a table that used to work. @streamsforge/client's own default policy
  * deliberately does NOT guess a column (see its zset.ts docstring), so this is passed to `ZSet` as
  * an explicit `groupKeyFn` override -- console-specific policy layered on the package's shared
  * bookkeeping, not a fork of it. */
@@ -50,7 +50,7 @@ function createZSet(tableName: string, keyFields: readonly string[] | null | und
   if (!warnedMissingKeyFields.has(tableName)) {
     warnedMissingKeyFields.add(tableName)
     console.warn(
-      `streamforge: table '${tableName}' has no keyFields on the wire (this engine build predates wishlist #18) -- ` +
+      `streamsforge: table '${tableName}' has no keyFields on the wire (this engine build predates wishlist #18) -- ` +
         'falling back to the leading-column heuristic. Upgrade the engine to get the table\'s real row-identity key.',
     )
   }
@@ -61,7 +61,7 @@ function createZSet(tableName: string, keyFields: readonly string[] | null | und
  * Live view of a materialized table's rows.
  *
  * The Z-set reducer itself (canonical-row identity, weight summation, group supersession, the
- * content-based "already reflected" replay heuristic) lives in `@streamforge/client`'s `zset.ts`
+ * content-based "already reflected" replay heuristic) lives in `@streamsforge/client`'s `zset.ts`
  * now -- extracted from this hook, which used to hand-roll all of it inline. Read that module's
  * doc comment for the hazards it defends against (arrival order isn't guaranteed, `GET /rows`'s
  * `seq` and the hub's per-batch `seq` are different counters on different scales -- measured
@@ -113,7 +113,7 @@ export function useTableRows(
     }
 
     function flushToState() {
-      // @streamforge/client's Entry.row is `Row` (Record<string, unknown>); ResultRow is the
+      // @streamsforge/client's Entry.row is `Row` (Record<string, unknown>); ResultRow is the
       // narrower RowValue-typed shape this console's components expect. Every row on the wire is
       // JSON already, so this is a type-level narrowing, not a runtime conversion.
       setRows(zsetRef.current.entries() as unknown as LiveRow[])
@@ -136,7 +136,7 @@ export function useTableRows(
 
     // Subscribe via subscribeTable() BEFORE issuing the GET /rows request, buffering every
     // incoming delta batch instead of applying it -- see the reconciliation strategy in
-    // @streamforge/client's zset.ts docstring for why (a delta landing between the REST read and
+    // @streamsforge/client's zset.ts docstring for why (a delta landing between the REST read and
     // the hub subscribe ack must be neither dropped nor double-applied).
     const unsub = subscribeTable(tableName, (deltas, seq) => {
       if (buffering) {

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Plan 020 wave B. The Yjs .NET port, submodule-pinned at external/ycs on the
+         `parity-yjs-13.6.32` branch — see shared/StreamsForge.Connectors.Crdt.Tests's own csproj
+         comment and YcsPinTests for why that branch specifically. Referenced directly, the same way
+         wave A's test project referenced it before this project existed. -->
+    <ProjectReference Include="..\..\external\ycs\src\Ycs\Ycs.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Runtime-agnostic by construction: Contracts + AppCore only, exactly what
+         StreamsForge.Connectors.Fix and StreamsForge.Connectors.Database reference. No Orleans, no
+         Dapr, no ASP.NET — both hosts reference this one project (a later wave wires
+         SourceKinds.Crdt to a CrdtDocGrain that calls into it). -->
+    <ProjectReference Include="..\StreamsForge.AppCore\StreamsForge.AppCore.csproj" />
+    <ProjectReference Include="..\StreamsForge.Contracts\StreamsForge.Contracts.csproj" />
+  </ItemGroup>
+</Project>

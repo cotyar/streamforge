@@ -1,7 +1,7 @@
 {
-  "name": "@streamforge/tanstack-db",
+  "name": "@streamsforge/tanstack-db",
   "version": "0.1.0",
-  "description": "TanStack DB collection backed by a StreamForge live table.",
+  "description": "TanStack DB collection backed by a StreamsForge live table.",
   "type": "module",
   "license": "MIT",
   "main": "./dist/index.js",
@@ -22,11 +22,11 @@
     "test": "bun test"
   },
   "peerDependencies": {
-    "@streamforge/client": ">=0.1.0",
+    "@streamsforge/client": ">=0.1.0",
     "@tanstack/db": ">=0.1.0"
   },
   "devDependencies": {
-    "@streamforge/client": "workspace:*",
+    "@streamsforge/client": "workspace:*",
     "@tanstack/db": "^0.1.0",
     "@types/bun": "^1.3.14",
     "typescript": "^5.6.0"

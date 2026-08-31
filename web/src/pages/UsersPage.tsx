@@ -176,7 +176,7 @@ export function UsersPage() {
     <div>
       <Topbar
         title="Users"
-        subtitle="Manage StreamForge accounts and roles"
+        subtitle="Manage StreamsForge accounts and roles"
         action={
           <Button onClick={() => setModal({ mode: 'create' })}>
             <Plus data-icon="inline-start" /> New user
@@ -198,7 +198,7 @@ export function UsersPage() {
                 <UsersIcon />
               </EmptyMedia>
               <EmptyTitle>No users found</EmptyTitle>
-              <EmptyDescription>Add StreamForge accounts to grant access.</EmptyDescription>
+              <EmptyDescription>Add StreamsForge accounts to grant access.</EmptyDescription>
             </EmptyHeader>
           </Empty>
         ) : (

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Plan 005 (Dapr sibling runtime) W4: runs StreamForge.Dapr.Host under its Dapr sidecar.
+# Plan 005 (Dapr sibling runtime) W4: runs StreamsForge.Dapr.Host under its Dapr sidecar.
 #
 # Ports (never overlap the Orleans flavor's 5199/5299 — see AGENTS.md):
 #   app       5399  REST + SignalR + SPA (this script's --app-port)
@@ -21,10 +21,10 @@ if [[ ! -x "$DOTNET_BIN" ]]; then
 fi
 
 exec dapr run \
-  --app-id streamforge-dapr \
+  --app-id streamsforge-dapr \
   --app-port 5399 \
   --dapr-http-port 3599 \
   --dapr-grpc-port 4599 \
   --resources-path "$DAPR_DIR/components" \
   --config "$DAPR_DIR/components/config.yaml" \
-  -- "$DOTNET_BIN" run --project "$DAPR_DIR/src/StreamForge.Dapr.Host" "$@"
+  -- "$DOTNET_BIN" run --project "$DAPR_DIR/src/StreamsForge.Dapr.Host" "$@"

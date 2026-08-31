@@ -1,9 +1,9 @@
 ---
 name: sf-run
-description: Run, restart, reseed, and health-check a StreamForge host — Orleans flavor (:5199) or Dapr flavor (:5399). Use when asked to start/restart the server, reseed demo data, or confirm the stack is healthy.
+description: Run, restart, reseed, and health-check a StreamsForge host — Orleans flavor (:5199) or Dapr flavor (:5399). Use when asked to start/restart the server, reseed demo data, or confirm the stack is healthy.
 ---
 
-# sf-run — run / restart / reseed / health-check StreamForge
+# sf-run — run / restart / reseed / health-check StreamsForge
 
 dotnet is at `~/.dotnet/dotnet` (NOT on PATH). Never bind or kill ports 5199/5299 unless you are
 intentionally (re)starting the primary Orleans dev server; test instances go on 6xxx–9xxx. The Dapr
@@ -14,16 +14,16 @@ flavor's ports (5399 app, 3599/4599 sidecar) are separate — see its own sectio
 ```bash
 cd /Users/yuriyhabarov/work/crates-foundation/orleans
 cd web && bun run build && cd ..                      # only if web/ changed
-~/.dotnet/dotnet run --project src/StreamForge.Host   # run in background; :5199 + :5299
+~/.dotnet/dotnet run --project src/StreamsForge.Host   # run in background; :5199 + :5299
 ```
 
 If a Browser-pane preview is available, prefer `preview_start` with launch config name
-`"streamforge"` over raw Bash.
+`"streamsforge"` over raw Bash.
 
 ## Restart / reseed
 
 1. Stop the old process (`kill $(lsof -tnP -iTCP:5199 -sTCP:LISTEN)`).
-2. **Reseed only if wanted**: `rm -rf src/StreamForge.Host/data` — seeds apply solely to an empty
+2. **Reseed only if wanted**: `rm -rf src/StreamsForge.Host/data` — seeds apply solely to an empty
    data dir. This wipes user-created entities, field-number maps, and history.
 3. Rebuild if code changed, then start as above. Running tables resume automatically (topo-sorted;
    `Rebuilding` flag while operator state warms from live traffic).
@@ -31,7 +31,7 @@ If a Browser-pane preview is available, prefer `preview_start` with launch confi
 ## Isolated test instance (never for the primary ports)
 
 ```bash
-~/.dotnet/dotnet run --project src/StreamForge.Host \
+~/.dotnet/dotnet run --project src/StreamsForge.Host \
   --Http:Port 9199 --Grpc:Port 9299 --DataDir "$(mktemp -d)"
 # ...verify...; then kill it and confirm the port is free.
 ```
@@ -57,8 +57,8 @@ sidecar HTTP `3599` / gRPC `4599`. Never touches 5199/5299.
 
 ```bash
 cd /Users/yuriyhabarov/work/crates-foundation
-./dapr/tools/run.sh                 # dapr run --app-id streamforge-dapr --app-port 5399 ...
-# Ctrl-C, or from another shell: dapr stop --app-id streamforge-dapr
+./dapr/tools/run.sh                 # dapr run --app-id streamsforge-dapr --app-port 5399 ...
+# Ctrl-C, or from another shell: dapr stop --app-id streamsforge-dapr
 ```
 
 Restart / reseed:

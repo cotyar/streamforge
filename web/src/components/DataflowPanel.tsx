@@ -43,7 +43,7 @@ function lagClasses(frontierEpoch: number, maxFrontier: number): string {
  *
  * Stage columns are labeled `Stage {id} · {kind}` — TablePartitionMetrics.kind (plan 003 M4) carries the
  * real operator name (Join/SemiAnti/Unnest/FilterProject/Reduce/LatestBy — see
- * StreamForge.Engine.Dataflow.TableStageKindLabel on the backend). The leading/trailing caps are still
+ * StreamsForge.Engine.Dataflow.TableStageKindLabel on the backend). The leading/trailing caps are still
  * drawn as structural end-caps (the graph's known entry/exit points) rather than data-bearing columns,
  * since neither is represented in the partition metrics array (ingest runs at partition count 1 and
  * isn't tracked per-partition; the terminal gather isn't a TableStageGrain at all) — but their labels

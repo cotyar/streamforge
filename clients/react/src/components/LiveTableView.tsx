@@ -33,8 +33,8 @@
  */
 import { useEffect, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { canonicalKey } from "@streamforge/client";
-import type { Row } from "@streamforge/client";
+import { canonicalKey } from "@streamsforge/client";
+import type { Row } from "@streamsforge/client";
 import { flexRender, getCoreRowModel, getFilteredRowModel, getSortedRowModel, useReactTable } from "@tanstack/react-table";
 import type {
   ColumnDef,
@@ -146,7 +146,7 @@ export interface LiveTableViewProps {
   sortable?: boolean;
   /**
    * Fuzzy, RANKED (match-sorter `rankItem`) filter over the rows currently in memory --
-   * NOT the server-side search `@streamforge/client`'s `client.search(name, query, limit)` runs
+   * NOT the server-side search `@streamsforge/client`'s `client.search(name, query, limit)` runs
    * (a per-table opt-in index, `Exact`/`Fuzzy` mode, maintained by the engine over the FULL table).
    * The two are deliberately separate: silently swapping one for the other would make rows "exist
    * but not be findable" whenever this view only holds a page/window of the real table. undefined

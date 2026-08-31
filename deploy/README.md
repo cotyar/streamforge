@@ -1,4 +1,4 @@
-# StreamForge — container images & Cloud Run prep
+# StreamsForge — container images & Cloud Run prep
 
 Two runtime flavors, one container each (plan [`007-cloudrun-admin-aichat.md`](../plans/007-cloudrun-admin-aichat.md),
 decision D-A). Both are **self-contained**: SPA + docs + published host baked into one image, no
@@ -7,7 +7,7 @@ prints/applies gcloud commands when you run it yourself; nothing here runs autom
 
 ## Orleans flavor — `deploy/orleans/`
 
-Single container: bun builds the SPA, the dotnet SDK publishes `StreamForge.Host`, a slim
+Single container: bun builds the SPA, the dotnet SDK publishes `StreamsForge.Host`, a slim
 `aspnet:10.0` runtime bakes the publish output + `web/dist` + `orleans/docs/` together. Single-silo
 localhost clustering (Orleans membership, not a real cluster) — this is why Cloud Run
 `max-instances` is pinned to **1** in `service.yaml`; do not raise it without first replacing
@@ -50,7 +50,7 @@ deploy/orleans/deploy.sh --project my-project --region europe-west1
 
 Defaults: `PROJECT_ID` from `gcloud config get-value project`, `REGION=europe-west1`, `TAG`=git
 short SHA. Builds via `gcloud builds submit` (repo-root context) to Artifact Registry at
-`${REGION}-docker.pkg.dev/${PROJECT_ID}/streamforge/orleans`, then renders
+`${REGION}-docker.pkg.dev/${PROJECT_ID}/streamsforge/orleans`, then renders
 `deploy/orleans/service.yaml` (envsubst `${IMAGE}` / `${ANTHROPIC_API_KEY}`) and applies it with
 `gcloud run services replace`. Nothing in this repo assumes any particular GCP project — the
 `total-casing-445522-j8` project configured in local `gcloud` is the user's own, and `deploy.sh`

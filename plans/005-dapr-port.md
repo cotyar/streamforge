@@ -7,7 +7,7 @@ runtimes) — Dapr p50/p90/p99/max = **7 / 9 / 13 / 16 ms** (397 samples). The s
 Orleans originally collected **0 samples**, surfacing a live Orleans-flavor SignalR relay bug found
 during this wave (`tableDelta`/`pipelineResult` never delivered to subscribers on a freshly booted
 instance). **Post-wave addendum (2026-07-19): root-caused and fixed.** Root cause was a startup race
-in `orleans/src/StreamForge.Host/Services/StreamBridgeService.cs` — its one-time enumeration of
+in `orleans/src/StreamsForge.Host/Services/StreamBridgeService.cs` — its one-time enumeration of
 Running pipelines/tables at boot could run before `Program.cs`'s fire-and-forget registry-seeding
 callback populated the catalog, permanently starving those two subscriptions (sources self-heal via
 a 30s refresh; pipelines/tables never did). Confirmed via git-bisect against `ad7652d` (pre-005) that
@@ -15,7 +15,7 @@ this race predates plan 005 entirely — it is not a restructure regression, and
 master ruled out the originally-suspected cross-assembly Orleans serializer codegen (W1) as the
 cause. Fix: `StreamBridgeService` now awaits `registry.EnsureInitializedAsync()` itself before
 enumerating, making the race harmless (idempotent call, Orleans serializes both callers' turns).
-Regression test: `orleans/tests/StreamForge.Host.Tests/StreamBridgeServiceStartupRaceTests.cs`. With
+Regression test: `orleans/tests/StreamsForge.Host.Tests/StreamBridgeServiceStartupRaceTests.cs`. With
 the fix, Orleans `tableDelta` now measures p50/p90/p99/max = **122 / 209 / 499 / 608 ms** (379
 samples, `tools/bench/results/latest.json`) — real numbers, not the supplementary `sourceEvent`
 proxy this wave originally had to fall back on; see `dapr/ARCHITECTURE.md`'s bug section and
@@ -34,13 +34,13 @@ p50/p90/p99/max = **1 / 2 / 6 / 6 ms** — ahead of the Dapr flavor's 7ms. Knobs
 only — P=1 tables like the benchmarked one never had a flush window). Full history + corrected
 scoreboard: `orleans/docs/comparison.html`, design rationale: `orleans/DESIGN.md` D13.
 
-**Hard gate (every commit):** `~/.dotnet/dotnet test orleans/StreamForge.sln` — all 511 tests green
+**Hard gate (every commit):** `~/.dotnet/dotnet test orleans/StreamsForge.sln` — all 511 tests green
 with test `.cs` files **unmodified** (`git diff --stat orleans/tests -- '*.cs'` empty). Test
 *csproj* files may change ProjectReference paths only.
 
 ## Problem
 
-StreamForge exists in one flavor: Orleans grains, one process, .NET-only participants. Client
+StreamsForge exists in one flavor: Orleans grains, one process, .NET-only participants. Client
 conversations keep hitting two walls:
 
 1. **Polyglot processing.** Teams want to attach Java/Kotlin/Python/TypeScript processors to the
@@ -62,12 +62,12 @@ The repo was layered for exactly this (DESIGN.md D1 — "the single most load-be
 
 | Asset | Orleans coupling | Reuse verdict |
 |---|---|---|
-| `StreamForge.Engine` (SQL compiler, both executors, Z-set ops, Dataflow primitives; ~393 tests) | **none** | move to `shared/` wholesale |
-| `Abstractions/Models.cs` + `StreamConstants.cs` (all DTOs) | serialization attrs only | move to `shared/StreamForge.Contracts` (attrs kept — see D-A below) |
+| `StreamsForge.Engine` (SQL compiler, both executors, Z-set ops, Dataflow primitives; ~393 tests) | **none** | move to `shared/` wholesale |
+| `Abstractions/Models.cs` + `StreamConstants.cs` (all DTOs) | serialization attrs only | move to `shared/StreamsForge.Contracts` (attrs kept — see D-A below) |
 | `Abstractions/GrainInterfaces.cs` | `IGrainWithStringKey` | stays Orleans-side; interfaces re-based onto shared facades |
-| Host `Grpc/Dynamic/*` (descriptor factory, wire encoder, proto builder, field-number map) — all except the two `using Orleans` services | none (grep-verified) | move to `shared/StreamForge.AppCore` |
-| Host `Search/TableSearchIndex`, `Generators/MarketDataProfiles`, `Grains/TableRowHistory.cs` (retention math), `Auth/PasswordHasher` | none | move to `shared/StreamForge.AppCore` |
-| Host `Api/*Endpoints.cs`, `Hubs/StreamHub`, `Auth/JwtTokenService`, JWT/policy/CORS wiring in `Program.cs` | reach grains via `IClusterClient` only | move to `shared/StreamForge.Api` behind runtime-neutral facades |
+| Host `Grpc/Dynamic/*` (descriptor factory, wire encoder, proto builder, field-number map) — all except the two `using Orleans` services | none (grep-verified) | move to `shared/StreamsForge.AppCore` |
+| Host `Search/TableSearchIndex`, `Generators/MarketDataProfiles`, `Grains/TableRowHistory.cs` (retention math), `Auth/PasswordHasher` | none | move to `shared/StreamsForge.AppCore` |
+| Host `Api/*Endpoints.cs`, `Hubs/StreamHub`, `Auth/JwtTokenService`, JWT/policy/CORS wiring in `Program.cs` | reach grains via `IClusterClient` only | move to `shared/StreamsForge.Api` behind runtime-neutral facades |
 | `web/` SPA (relative URLs + vite proxy; frozen contract `types.ts` ⇔ `Dtos.cs`) | none | move to repo root; both hosts serve the same `web/dist` |
 | Registry/User seed catalogs | embedded in grains | extract data to `AppCore/SeedCatalog`; both runtimes seed the same demo world |
 
@@ -79,9 +79,9 @@ Verified enablers: no test touches endpoints or `Program.cs`;
 ## Decisions
 
 **D-A — Contracts keep Orleans attributes; codegen bridges from the Orleans side.**
-`shared/StreamForge.Contracts` references `Microsoft.Orleans.Serialization.Abstractions` (attribute
+`shared/StreamsForge.Contracts` references `Microsoft.Orleans.Serialization.Abstractions` (attribute
 types only — no runtime, no analyzers) plus `<Using Include="Orleans"/>` so `Models.cs` moves
-byte-identical. The Orleans-side `StreamForge.Abstractions` keeps `Microsoft.Orleans.Sdk` and adds
+byte-identical. The Orleans-side `StreamsForge.Abstractions` keeps `Microsoft.Orleans.Sdk` and adds
 `[assembly: Orleans.GenerateCodeForDeclaringAssembly(typeof(SourceDefinition))]`, so serializers
 for the shared DTOs are generated into the Orleans assembly. *Tradeoff*: the Dapr flavor carries a
 benign attribute-package dependency; the alternative (≈22 hand-maintained surrogate types with
@@ -92,14 +92,14 @@ against. Rejected.
 Contracts (`ICatalogFacade`, `IUserStoreFacade`, `IPipelineReadFacade`, `ITableReadFacade`,
 `ITableHistoryFacade`, `IArrangementMetaFacade`); grain interfaces **inherit** them (so existing
 test fakes still compile — zero test edits); endpoints, `StreamHub`, JWT service and the
-auth/policy/CORS/OpenAPI wiring move to `shared/StreamForge.Api`
-(`AddStreamForgeApi`/`MapStreamForgeApi`). Orleans registers facades as grain-proxy singletons +
+auth/policy/CORS/OpenAPI wiring move to `shared/StreamsForge.Api`
+(`AddStreamsForgeApi`/`MapStreamsForgeApi`). Orleans registers facades as grain-proxy singletons +
 a thin keyed adapter; Dapr registers actor-proxy adapters. The frozen contract
 (`Dtos.cs` ⇔ `web/src/api/types.ts`) is now enforced by construction: both hosts run the same
 endpoint code.
 
 **D-C — Namespaces frozen in place.** Moved files keep their namespaces verbatim — including
-`StreamForge.Host.Grpc.Dynamic` and `StreamForge.Host.Search` living inside shared assemblies.
+`StreamsForge.Host.Grpc.Dynamic` and `StreamsForge.Host.Search` living inside shared assemblies.
 Ugly, deliberate: 20+ test files import these namespaces and the hard gate forbids touching them.
 A cosmetic rename is deferred work requiring explicit sign-off.
 
@@ -147,7 +147,7 @@ GeneratorActor ──batch──▶ sf-sources ───────────
                           DaprStreamBridge ──▶ SignalR /hubs/stream ──▶ same SPA (:5399)
 ```
 
-One process (`StreamForge.Dapr.Host` + sidecar): REST/SignalR/SPA on **:5399**, gRPC reserved
+One process (`StreamsForge.Dapr.Host` + sidecar): REST/SignalR/SPA on **:5399**, gRPC reserved
 **:5499**, sidecar HTTP/gRPC on 3599/4599. Ports 5199/5299 never touched.
 
 ## Phases
@@ -156,8 +156,8 @@ Ownership is exclusive per concurrent agent; csproj/sln files are owned by W0 (o
 two agents ever edit them. Commits `005-Wn: …`; push after each stable wave.
 
 ### W0 — Solution restructure skeleton (orchestrator, serial)
-`git mv` Engine → `shared/StreamForge.Engine`; create `shared/{Contracts,AppCore,Api}` csproj
-skeletons; re-point `orleans/StreamForge.sln` + test csproj ProjectReference paths.
+`git mv` Engine → `shared/StreamsForge.Engine`; create `shared/{Contracts,AppCore,Api}` csproj
+skeletons; re-point `orleans/StreamsForge.sln` + test csproj ProjectReference paths.
 **Acceptance:** build + 511 green; working tree clean.
 
 ### W1 — Contracts split + facades (~1 day, exclusive Contracts/Abstractions ownership)
@@ -177,8 +177,8 @@ interfaces + tiny Host adapters (still zero test edits).
 seeds byte-identical (LifecycleSeed cluster tests).
 
 ### W3 — Shared Api + Orleans adapters (~1–2 days, serial, owns Host Api/Hubs/Auth/Program)
-Endpoints/hub/JWT move to `shared/StreamForge.Api` with bodies verbatim modulo
-`IClusterClient` → facade; `StreamForgeApiOptions` carries host-specific facts (protos dir, gRPC
+Endpoints/hub/JWT move to `shared/StreamsForge.Api` with bodies verbatim modulo
+`IClusterClient` → facade; `StreamsForgeApiOptions` carries host-specific facts (protos dir, gRPC
 port + service list, docs file, SPA dist). Orleans facade adapters + slimmed `Program.cs`.
 **Acceptance:** 511 green; scripted live parity smoke on an isolated port — login ×3 roles, CRUD +
 validate for sources/pipelines/tables, rows/search/history, proto download, SignalR
@@ -186,8 +186,8 @@ validate for sources/pipelines/tables, rows/search/history, proto download, Sign
 
 ### W4 — Dapr host skeleton (~1–2 days, serial, owns `dapr/**`)
 `dapr init` (docker present; check 6379 first). Components: `pubsub.redis`, `state.redis`
-(`actorStateStore`, scoped key prefix), config. `StreamForge.Dapr.Host` on 5399 using shared
-`AddStreamForgeApi`/`MapStreamForgeApi`; `RegistryActor` + `UserStoreActor` (shared `SeedCatalog`,
+(`actorStateStore`, scoped key prefix), config. `StreamsForge.Dapr.Host` on 5399 using shared
+`AddStreamsForgeApi`/`MapStreamsForgeApi`; `RegistryActor` + `UserStoreActor` (shared `SeedCatalog`,
 `PasswordHasher`, field-number map via shared `FieldNumberMap` logic — numbers are forever on this
 flavor too); Dapr facade adapters; `run.sh`/`reset.sh`. Decide the reentrancy policy here, in a
 short design note.

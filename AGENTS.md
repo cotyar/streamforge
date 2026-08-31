@@ -1,6 +1,6 @@
 # crates-foundation — Agent Instructions
 
-Streaming-SQL platform ("StreamForge") in two runtime flavors: `orleans/` (**primary**, complete —
+Streaming-SQL platform ("StreamsForge") in two runtime flavors: `orleans/` (**primary**, complete —
 Microsoft Orleans 10) and `dapr/` (Dapr, for polyglot processing and runtime comparison — feature-complete
 in code, but behind on live verification: read [`dapr/PARITY.md`](dapr/PARITY.md) before claiming anything
 about it, and land new work on Orleans first). Both
@@ -11,13 +11,13 @@ which also covers **console UI plugins**: an out-of-tree library can replace the
 own source/sink kind with its own React editor by dropping one ES module in the host's `ui-plugins/`
 directory (`GET /api/ui-plugins`, `Ui:PluginsPath`), with no change under `web/` — the plugin gets the
 console's own React, authenticated `api`, its single SignalR connection (`live.subscribe*`) and a lazy
-`loadLiveTables()` (TanStack DB) off `window.streamforge`, `apiVersion: 2`. The SERVER half is the same
-shape: an `IStreamForgePlugin` in the host's `plugins/` directory (`Plugins:Path`) registers its own
+`loadLiveTables()` (TanStack DB) off `window.streamsforge`, `apiVersion: 2`. The SERVER half is the same
+shape: an `IStreamsForgePlugin` in the host's `plugins/` directory (`Plugins:Path`) registers its own
 transports at startup, and its config lives in the open **`settings` bag**
 (`ConnectorConfig.Settings`/`SinkSpec.Settings`, a string dictionary — masked by the kind's own
 descriptor, since `SecretWalk` cannot see into a dictionary; a kind whose plugin is absent masks its
 WHOLE bag, failing closed). So an out-of-tree kind adds a config dimension without touching
-`StreamForge.Contracts`; the one thing the bag cannot express is a nested optional group. Operator-facing
+`StreamsForge.Contracts`; the one thing the bag cannot express is a nested optional group. Operator-facing
 install instructions: `orleans/docs/index.html` §§ Server plugins & out-of-tree kinds / Console UI
 plugins. Architecture:
 [`orleans/ARCHITECTURE.md`](orleans/ARCHITECTURE.md) · [`dapr/ARCHITECTURE.md`](dapr/ARCHITECTURE.md)
@@ -34,7 +34,7 @@ appends CSV or NDJSON to a path on the host (append-only, header fixed for the l
 detail pages) download the same rows. One writer, `CsvFormatter`, behind all of it.
 
 **Native CDC** (plan 017): `postgres-cdc` and `mssql-cdc` are two more `IPolledTransport` source kinds,
-living in `shared/StreamForge.Connectors.Database` alongside the plain `postgres`/`mssql` kinds — a
+living in `shared/StreamsForge.Connectors.Database` alongside the plain `postgres`/`mssql` kinds — a
 source reads the database's own change log (Postgres logical replication, SQL Server capture tables)
 instead of polling a cursor column. Their operational hazards (an undrained Postgres slot pinning WAL,
 SQL Server's 3-day CDC retention default, `REPLICA IDENTITY FULL`) are written down in
@@ -43,7 +43,7 @@ SQL Server's 3-day CDC retention default, `REPLICA IDENTITY FULL`) are written d
 **FIX** (plan 018): `format: "fix"` is a fifth payload format — tag=value, delimiter sniffed, no FIX
 dictionary (a static table of the common 4.2/4.4/5.0 tags, unknown tags fall back to `tag<N>` strings),
 repeating groups parsed into nested JSON arrays — usable by any `url`/`file`/`folder`/`nats` source; and
-`fix` is also a live, receive-only session source kind, `shared/StreamForge.Connectors.Fix` on
+`fix` is also a live, receive-only session source kind, `shared/StreamsForge.Connectors.Fix` on
 `QuickFIXn.Core`, an `IInboundTransport` out of the core like the database connectors. No FIX dictionary
 ships with the platform (`UseDataDictionary=N`); order entry is deliberately a separate plan
 ([`019`](plans/019-fix-order-entry.md)). The session's operational hazards (the drop-oldest bridge
@@ -79,8 +79,8 @@ itself. Scope is the NAME because ids are `Guid("n")` and match no `prod-*` gran
 not execute) and a day-sharded audit log whose `truncated` counter exists so silence is never read as
 absence. Masked `beforeJson`/`afterJson` are opt-in (`?includeChanges=true` + `access.read`) — a
 credential rotation reads `"***" → "***"`, the key's presence is the signal. Routes:
-`shared/StreamForge.Api/Endpoints/{AccessEndpoints,ApprovalsEndpoints,AuditEndpoints}.cs`; the pure
-decision: `shared/StreamForge.AppCore/Access/PermissionEvaluator.cs`. Operator recipes and the full
+`shared/StreamsForge.Api/Endpoints/{AccessEndpoints,ApprovalsEndpoints,AuditEndpoints}.cs`; the pure
+decision: `shared/StreamsForge.AppCore/Access/PermissionEvaluator.cs`. Operator recipes and the full
 gotcha list: the `sf-access` skill and `orleans/docs/index.html` § Roles, entitlements & approvals.
 
 **Name resolution, versioning & discovery** (plan 016): every `GET /api/{sources|pipelines|tables}/{key}`
@@ -126,7 +126,7 @@ boot (so already-Running entities resume everywhere), but its three seed blocks 
 `_env == EnvKeys.Default` — otherwise creating an empty `staging` and restarting would fill it with the
 demo catalog, and force-deleting an environment's contents would silently re-seed them on the next boot.
 Environments are a **namespace, not a security boundary** until 015's grants are scoped to one (the
-plan's D9) — any authenticated Editor can point `X-StreamForge-Environment` at any environment today.
+plan's D9) — any authenticated Editor can point `X-StreamsForge-Environment` at any environment today.
 Full routes, the console picker, force-delete semantics and the gotcha list: `orleans/docs/index.html`
 § Environments; contributor-facing key composition: `orleans/ARCHITECTURE.md` / `dapr/ARCHITECTURE.md`;
 the `/sf-env` skill; per-wave outcomes and the found-and-not-fixed list at the end of
@@ -137,10 +137,10 @@ the `/sf-env` skill; per-wave outcomes and the found-and-not-fixed list at the e
 - **dotnet**: `~/.dotnet/dotnet` (SDK 10.0.3xx). It is **NOT on PATH** — always use the full path.
 - **JS tooling**: **bun ≥ 1.4, never npm.** The repo root is a **bun workspace** (`package.json`,
   members `web` + `clients/{typescript,tanstack-db,react}`) with ONE `bun.lock`: the local
-  `@streamforge/*` packages are LINKED, so an edit in `clients/typescript` is what `web` compiles
+  `@streamsforge/*` packages are LINKED, so an edit in `clients/typescript` is what `web` compiles
   against. Before that they were `file:` deps, which bun COPIES — and since `dist/` is gitignored, a
   fresh clone copied a package with no build output and `bun run build` failed on
-  `Cannot find module '@streamforge/client'`. `web`'s `prebuild` compiles both client packages, so
+  `Cannot find module '@streamsforge/client'`. `web`'s `prebuild` compiles both client packages, so
   `bun run build` in `web/` (or `bun run --cwd web build` from the root) is one command from a clean
   checkout. Bun 1.4 links workspaces **isolated** (pnpm-style), so a package must DECLARE every module
   it imports or augments — an undeclared transitive dependency that used to be hoisted into reach now
@@ -149,39 +149,39 @@ the `/sf-env` skill; per-wave outcomes and the found-and-not-fixed list at the e
   running — never bind or kill it. Dapr flavor: app `5399` (REST/SignalR/SPA), gRPC reserved `5499`
   (not yet served — phase 2), sidecar HTTP `3599` / gRPC `4599`; run via `dapr/tools/run.sh` (dapr
   runtime 1.18.x, containers `dapr_redis`/`dapr_placement`/`dapr_scheduler` from `dapr init`), reseed
-  via `dapr/tools/reset.sh` + restart, stop via `dapr stop --app-id streamforge-dapr`. Test instances:
+  via `dapr/tools/reset.sh` + restart, stop via `dapr stop --app-id streamsforge-dapr`. Test instances:
   pick 6xxx–9xxx via `--Http:Port … --Grpc:Port … --DataDir <temp>` and kill them when done.
   Containerized stacks (plan 007): orleans compose `6199`, dapr compose `6399`, admin app `5599` —
   these are the *container* ports; never confuse them with (or bind over) the dev servers above.
-- Seeds apply only to an **empty data dir** (`orleans/src/StreamForge.Host/data/`; delete to
+- Seeds apply only to an **empty data dir** (`orleans/src/StreamsForge.Host/data/`; delete to
   reseed). Logins: `admin/admin123!`, `editor/editor123!`, `viewer/viewer123!`.
-- Git: remote `origin` = public `github.com/cotyar/streamforge`, branch `master`. Commit
+- Git: remote `origin` = public `github.com/cotyar/streamsforge`, branch `master`. Commit
   messages end with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`. Push after stable
   committed waves.
 
 ## Build / test / run
 
 One git submodule, `external/ycs` (plan 020): a fresh clone must run `git submodule update --init`
-or **both solutions fail to build** — `StreamForge.Connectors.Crdt.Tests` ProjectReferences it. It is
+or **both solutions fail to build** — `StreamsForge.Connectors.Crdt.Tests` ProjectReferences it. It is
 pinned to the fork's `parity-yjs-13.6.32` branch, NOT `main`; see that project's csproj for why.
 
 ```bash
-~/.dotnet/dotnet build orleans/StreamForge.sln
-~/.dotnet/dotnet test  orleans/StreamForge.sln     # 2424 tests — the whole suite must be green
-~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln
-~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln   # 695 tests — the whole suite must be green
+~/.dotnet/dotnet build orleans/StreamsForge.sln
+~/.dotnet/dotnet test  orleans/StreamsForge.sln     # 2424 tests — the whole suite must be green
+~/.dotnet/dotnet build dapr/StreamsForge.Dapr.sln
+~/.dotnet/dotnet test  dapr/StreamsForge.Dapr.sln   # 695 tests — the whole suite must be green
 cd clients/typescript && bun test  # 14 contract + conformance/live-table; boots its own engine on 8199/8299
 bun install                       # once, at the REPO ROOT — one workspace, one lockfile
-cd web && bun run build           # prebuild compiles @streamforge/client + @streamforge/tanstack-db
-~/.dotnet/dotnet run --project orleans/src/StreamForge.Host   # :5199 + :5299
+cd web && bun run build           # prebuild compiles @streamsforge/client + @streamsforge/tanstack-db
+~/.dotnet/dotnet run --project orleans/src/StreamsForge.Host   # :5199 + :5299
 cd dapr && ./tools/run.sh                                      # :5399 (needs `dapr init` done once)
 ```
-Both counts EXCLUDE the 52 live-database tests (`StreamForge.Connectors.Database.Tests/Integration/**`,
+Both counts EXCLUDE the 52 live-database tests (`StreamsForge.Connectors.Database.Tests/Integration/**`,
 shared by both solutions), which `DockerGate` skips with a stated reason unless a Docker daemon answers
 and the backend's image (`postgres:17`, `mcr.microsoft.com/mssql/server:2022-latest`) is already local —
 "0 integration tests ran" must never read as "integration passed".
 
-**Kestrel binds IPv4-only, deliberately** (`orleans/src/StreamForge.Host/Program.cs`). `ListenAnyIP`
+**Kestrel binds IPv4-only, deliberately** (`orleans/src/StreamsForge.Host/Program.cs`). `ListenAnyIP`
 binds the IPv6 wildcard in dual-stack mode, and on macOS 26.5 / .NET 10.0.302 an IPv4-mapped accept
 throws `System.ArgumentException: The supplied System.Net.SocketAddress is an invalid size…` **unhandled
 inside Kestrel's accept loop** — which kills the whole listener ("The connection listener failed to accept
@@ -250,7 +250,7 @@ either containerized stack (or Cloud Run services with `MODE=cloudrun`) and poll
 AI control chat: `POST /api/chat` + SPA "AI Control" page on both flavors, Google Gemini function
 calling over the catalog facades — needs `GEMINI_API_KEY` (or `Gemini:ApiKey`), returns a clear 503
 without it; capped per login session by `ChatRateLimiter` (`Chat:MaxRequestsPerSession`, default 10,
-≤0 disables), 429 past that. Chat logic lives in `shared/StreamForge.Api/Chat/`.
+≤0 disables), 429 past that. Chat logic lives in `shared/StreamsForge.Api/Chat/`.
 
 **Admin CLI + MCP server** (plan 013, `admin/`, zero npm deps like the rest of that folder):
 `bun admin/sf.ts <health|login|ls|get|start|stop|create|delete|rows|results|validate|config|api>`
@@ -260,7 +260,7 @@ SDK). Both share `admin/sfclient.ts`. Tests: `bun test admin/` (21).
 
 **Dapr flavor extras**: `dapr/tools/run.sh` starts the sidecar'd host on 5399 (sidecar 3599/4599);
 `dapr/tools/reset.sh` SCANs and deletes this app's Redis keys to reseed (the Dapr-flavor equivalent
-of deleting Orleans' `data/`); `dapr stop --app-id streamforge-dapr` stops it. Polyglot processors
+of deleting Orleans' `data/`); `dapr stop --app-id streamsforge-dapr` stops it. Polyglot processors
 (`dapr/processors/{python-enricher,ts-consumer,java-consumer}/`, each with its own `README.md` and
 own sidecar/ports) prove the pub/sub contract (`dapr/POLYGLOT.md`) works from outside .NET:
 `dapr run --app-id sf-enricher --app-port 8399 --dapr-http-port 3899 --dapr-grpc-port 4899
@@ -270,11 +270,11 @@ invocations with their own ports for `ts-consumer` (`bun run main.ts`) and `java
 
 ## Hard rules (learned the expensive way)
 
-1. **Frozen contracts, additive evolution.** `orleans/src/StreamForge.Engine/PublicApi.cs`,
-   existing `StreamForge.Abstractions` members, and `web/src/api/types.ts` change additively only
+1. **Frozen contracts, additive evolution.** `orleans/src/StreamsForge.Engine/PublicApi.cs`,
+   existing `StreamsForge.Abstractions` members, and `web/src/api/types.ts` change additively only
    (next free `[Id(n)]`, optional fields). Never edit existing test expectations to make a
    refactor pass — behavior-preserving refactors keep the old tests green *unmodified*.
-2. **The Engine stays pure.** No Orleans/Dapr/ASP.NET types inside `StreamForge.Engine` — it is
+2. **The Engine stays pure.** No Orleans/Dapr/ASP.NET types inside `StreamsForge.Engine` — it is
    the shared semantic core both runtimes depend on.
 3. **Grain reentrancy**: `RegistryGrain` is non-reentrant with a `[MayInterleave]` allowlist.
    Any orchestrator↔worker call cycle deadlocks without allowlisting — check before adding cycles.
@@ -285,7 +285,7 @@ invocations with their own ports for `ts-consumer` (`bun run main.ts`) and `java
    entity **id** even when resolved by name.
 6. **SQL fine print**: aggregate JSON with `->` not `->>` (text sums to zero); pipeline-mode
    subqueries must be windowed; `LATEST BY` is table-mode only. Full list: DESIGN.md §D11.
-7. **Branding is neutral**: plain "StreamForge" wordmark only — every trace of the original
+7. **Branding is neutral**: plain "StreamsForge" wordmark only — every trace of the original
    client's name was removed from the pages, the docs and the plans (2026-08-04/09, pre-open-source);
    do not reintroduce any client name, and never reproduce a client logo graphic. Theme via tokens (`sf.theme`, light default); no raw hex outside the
    sanctioned `--sql-*`/`--chart-*` vars.
@@ -295,7 +295,7 @@ invocations with their own ports for `ts-consumer` (`bun run main.ts`) and `java
 - Orchestrator sequences **waves of parallel subagents** (Sonnet, maximum effort) with **strictly
   disjoint file ownership** per concurrent agent; anything shared (csproj, Program.cs, types.ts)
   is pre-assigned to exactly one owner or edited by the orchestrator between waves.
-- Engine-exclusive work serializes (one agent owns `StreamForge.Engine/**` at a time); host/web
+- Engine-exclusive work serializes (one agent owns `StreamsForge.Engine/**` at a time); host/web
   tracks run in parallel with it.
 - Every agent brief includes verification gates: build + **full** test suite (including the other
   flavor's regression suite once `shared/` exists) + live checks against a self-started instance

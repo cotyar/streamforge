@@ -1,5 +1,5 @@
 /**
- * Live-table hooks over `@streamforge/client`. Each hook owns exactly one `LiveTable` (via
+ * Live-table hooks over `@streamsforge/client`. Each hook owns exactly one `LiveTable` (via
  * `client.table()`/`client.sql()`) for as long as it's mounted with a given `name`/`sql` -- the
  * subscribe -> snapshot -> replay dance, the Z-set reduction, and the ~120ms onChange coalescing
  * all live in `LiveTable` itself (see clients/typescript/src/live-table.ts); this file's only job
@@ -22,8 +22,8 @@
  */
 
 import { useEffect, useState } from "react";
-import type { LiveTable, Row, TableDefinitionDto } from "@streamforge/client";
-import { useStreamForge } from "./provider.js";
+import type { LiveTable, Row, TableDefinitionDto } from "@streamsforge/client";
+import { useStreamsForge } from "./provider.js";
 
 /** How long touched keys stay in `flashKeys` after the most recent batch that touched them --
  * matches web/src/hooks/useTableRows.ts's own flash-highlight window so both surfaces feel the
@@ -81,7 +81,7 @@ function errorOf(err: unknown): Error {
 
 /** Live view of one materialized table. `name` undefined => idle (no rows, not loading). */
 export function useLiveTable(name: string | undefined, opts: UseLiveTableOptions = {}): LiveTableState {
-  const client = useStreamForge();
+  const client = useStreamsForge();
   const [state, setState] = useState<LiveTableState>(IDLE_STATE);
   // opts.key is an array -- a caller passing `key={['symbol']}` inline builds a fresh array every
   // render, so comparing it by reference in the effect's deps would reconnect on every render.
@@ -95,7 +95,7 @@ export function useLiveTable(name: string | undefined, opts: UseLiveTableOptions
     }
     if (!client) {
       // Waiting for the provider's client is NOT an error -- this effect re-runs once
-      // useStreamForge() stops returning null, since `client` is a dependency below.
+      // useStreamsForge() stops returning null, since `client` is a dependency below.
       setState({ rows: [], loading: true, error: null, table: null, flashKeys: EMPTY_FLASH_KEYS });
       return;
     }
@@ -163,7 +163,7 @@ export function useLiveTable(name: string | undefined, opts: UseLiveTableOptions
 
 /** Ad-hoc SQL: validate -> import -> LiveTable, via client.sql(). `sql` undefined => idle. */
 export function useLiveSql(sql: string | undefined, opts: UseLiveSqlOptions): LiveTableState {
-  const client = useStreamForge();
+  const client = useStreamsForge();
   const [state, setState] = useState<LiveTableState>(IDLE_STATE);
   const { name, timeoutMs, flushMs } = opts;
   // Same reasoning as useLiveTable's keyDep -- see the comment there.
@@ -234,7 +234,7 @@ export function useLiveSql(sql: string | undefined, opts: UseLiveSqlOptions): Li
 
 /** The catalog's table definitions, one-shot per client. */
 export function useTables(): TablesState {
-  const client = useStreamForge();
+  const client = useStreamsForge();
   const [state, setState] = useState<TablesState>({ tables: [], loading: true, error: null });
 
   useEffect(() => {

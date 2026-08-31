@@ -1,5 +1,5 @@
 /**
- * StreamForgeProvider -- owns exactly one `@streamforge/client` `Client` for the subtree below
+ * StreamsForgeProvider -- owns exactly one `@streamsforge/client` `Client` for the subtree below
  * it, so every `useLiveTable`/`useLiveSql`/`useTables` call in that subtree shares one
  * connection instead of each hook independently reconnecting (each `connect()` handshakes a
  * transport, per connect.ts -- doing that once per table would be wasteful and, worse, would
@@ -13,7 +13,7 @@
  *     and the `.then` handler checks it and closes the orphan instead of calling setState (a
  *     setState after unmount/after superseding effect would either warn or, worse, resurrect a
  *     connection nothing references).
- *  2. Inline props (`<StreamForgeProvider url={url} user={user}>`) build a fresh `ConnectOptions`
+ *  2. Inline props (`<StreamsForgeProvider url={url} user={user}>`) build a fresh `ConnectOptions`
  *     object every render. Keying the effect on that object's identity would reconnect on every
  *     parent re-render. Keying it on the *values* of the primitive fields that actually matter to
  *     `connect()` (see `optionsKey` below) instead makes the effect re-run only when the caller's
@@ -22,22 +22,22 @@
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { connect } from "@streamforge/client";
-import type { Client, ConnectOptions } from "@streamforge/client";
+import { connect } from "@streamsforge/client";
+import type { Client, ConnectOptions } from "@streamsforge/client";
 
-export interface StreamForgeProviderProps extends ConnectOptions {
+export interface StreamsForgeProviderProps extends ConnectOptions {
   children: ReactNode;
   /** Optional pre-built client. When given, the provider does NOT connect or close it -- the caller owns its lifetime. */
   client?: Client;
 }
 
-export interface StreamForgeStatus {
+export interface StreamsForgeStatus {
   client: Client | null; // null until connected
   connecting: boolean;
   error: Error | null;
 }
 
-const StreamForgeContext = createContext<StreamForgeStatus | null>(null);
+const StreamsForgeContext = createContext<StreamsForgeStatus | null>(null);
 
 /** connect()'s entire behavior is determined by these primitive fields -- see ConnectOptions in
  * clients/typescript/src/index.ts. Stringifying them (rather than the ConnectOptions object
@@ -47,7 +47,7 @@ function optionsKey(opts: ConnectOptions): string {
   return JSON.stringify([opts.url, opts.grpc, opts.user, opts.password, opts.token, opts.ingestKey, opts.transport, opts.verify]);
 }
 
-export function StreamForgeProvider(props: StreamForgeProviderProps): ReactElement {
+export function StreamsForgeProvider(props: StreamsForgeProviderProps): ReactElement {
   const { children, client: providedClient, ...connectOptions } = props;
   const key = useMemo(
     () => optionsKey(connectOptions),
@@ -55,7 +55,7 @@ export function StreamForgeProvider(props: StreamForgeProviderProps): ReactEleme
     [connectOptions.url, connectOptions.grpc, connectOptions.user, connectOptions.password, connectOptions.token, connectOptions.ingestKey, connectOptions.transport, connectOptions.verify],
   );
 
-  const [status, setStatus] = useState<StreamForgeStatus>(() =>
+  const [status, setStatus] = useState<StreamsForgeStatus>(() =>
     providedClient ? { client: providedClient, connecting: false, error: null } : { client: null, connecting: true, error: null },
   );
 
@@ -94,22 +94,22 @@ export function StreamForgeProvider(props: StreamForgeProviderProps): ReactEleme
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, providedClient]);
 
-  return <StreamForgeContext.Provider value={status}>{children}</StreamForgeContext.Provider>;
+  return <StreamsForgeContext.Provider value={status}>{children}</StreamsForgeContext.Provider>;
 }
 
-function useStreamForgeContext(): StreamForgeStatus {
-  const ctx = useContext(StreamForgeContext);
+function useStreamsForgeContext(): StreamsForgeStatus {
+  const ctx = useContext(StreamsForgeContext);
   if (ctx === null) {
-    throw new Error("useStreamForge()/useStreamForgeStatus() called outside a <StreamForgeProvider>");
+    throw new Error("useStreamsForge()/useStreamsForgeStatus() called outside a <StreamsForgeProvider>");
   }
   return ctx;
 }
 
 /** Throws a clear Error when used outside a provider. Returns null while still connecting. */
-export function useStreamForge(): Client | null {
-  return useStreamForgeContext().client;
+export function useStreamsForge(): Client | null {
+  return useStreamsForgeContext().client;
 }
 
-export function useStreamForgeStatus(): StreamForgeStatus {
-  return useStreamForgeContext();
+export function useStreamsForgeStatus(): StreamsForgeStatus {
+  return useStreamsForgeContext();
 }

@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>StreamsForge.Client</RootNamespace>
+    <!-- Kept in step with the sibling clients (they are deliberately symmetric): 0.2.0 is the
+         leading-edge change-notification window plus WatchAsync. Without this the assembly would
+         claim 1.0.0 by SDK default, overstating its stability. -->
+    <Version>0.2.0</Version>
+    <!-- Client library only: not coupled to any StreamsForge.Host/StreamsForge.Contracts project
+         reference. Its gRPC types are compiled fresh from the .proto below, in this assembly. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.Net.Client" Version="2.80.0" />
+    <PackageReference Include="Grpc.Tools" Version="2.80.0" PrivateAssets="All" />
+    <PackageReference Include="Google.Protobuf" Version="3.31.1" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Single source of truth: the engine's own .proto, compiled here with Grpc.Tools. No
+         ProjectReference to StreamsForge.Host/StreamsForge.Contracts: this is the only coupling
+         to the server, and it is a build-time codegen input, not a binary/project reference. -->
+    <Protobuf Include="../../../orleans/src/StreamsForge.Host/Protos/streamsforge.proto"
+              ProtoRoot="../../../orleans/src/StreamsForge.Host/Protos"
+              GrpcServices="Client" />
+  </ItemGroup>
+
+</Project>

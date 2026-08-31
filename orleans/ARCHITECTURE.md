@@ -1,4 +1,4 @@
-# StreamForge — Architecture (Orleans implementation)
+# StreamsForge — Architecture (Orleans implementation)
 
 Streaming-SQL platform on Microsoft Orleans 10 / .NET 10. Users declaratively define **sources**
 (synthetic generators), **pipelines** (windowed streaming SQL) and **materialized tables**
@@ -16,20 +16,20 @@ Plan 005 (Dapr sibling runtime) extracted the runtime-agnostic core to repo-root
 flavors — `orleans/` (this document) and `dapr/` (`../dapr/ARCHITECTURE.md`) — build against the
 identical Engine/Contracts/AppCore/Api assemblies. Paths below are current as of that extraction;
 namespaces inside the moved files are frozen in place (decision D-C, plan 005) even where that
-means an Orleans-flavored namespace (e.g. `StreamForge.Host.Grpc.Dynamic`) lives in a shared
+means an Orleans-flavored namespace (e.g. `StreamsForge.Host.Grpc.Dynamic`) lives in a shared
 assembly — cosmetic, deliberate, and out of scope to rename.
 
 | Project | Depends on | Role |
 |---|---|---|
-| `../shared/StreamForge.Engine` | **nothing** (pure C#) | SQL compiler + executors + dataflow primitives. **Zero Orleans/Dapr dependencies by design.** *Shared with the Dapr flavor*: reused wholesale, byte-identical — the same `SqlCompiler`/`TableExecutor`/`PipelineExecutor` compile and run every pipeline and table on both runtimes. |
-| `../shared/StreamForge.Contracts` | `Microsoft.Orleans.Serialization.Abstractions` (attribute types only, decision D-A) | DTO/model contracts (`Models.cs`, `StreamConstants.cs`), runtime-neutral facade interfaces (`Facades.cs`: `ICatalogFacade`, `IUserStoreFacade`, `IPipelineReadFacade`, `ITableReadFacade`, `ITableHistoryFacade`, `IArrangementMetaFacade`), and the Dapr pub/sub envelope records (`Streaming/Envelopes.cs`). Evolution is **additive-only** (next free `[Id]`). *Shared with the Dapr flavor*: identical DTOs and facade contracts; the Dapr flavor's actor interfaces implement the same facades this repo's grain interfaces inherit. The Orleans `[GenerateSerializer]`/`[Id(n)]` attributes ride along as a benign dependency on the Dapr side (no Orleans runtime, no analyzers) rather than hand-maintaining ~22 parallel surrogate types. |
-| `src/StreamForge.Abstractions` | Orleans.Sdk + Contracts | Grain interfaces only (`GrainInterfaces.cs`) — each inherits the matching Contracts facade, so grain proxies double as facade implementations with zero test-visible change. `[assembly: Orleans.GenerateCodeForDeclaringAssembly(typeof(SourceDefinition))]` here generates serializers for the shared Contracts DTOs into this Orleans assembly. **Orleans-only** — the Dapr flavor has no equivalent project; its actor interfaces live directly in `dapr/src/StreamForge.Dapr.Host/Actors/`. |
-| `../shared/StreamForge.AppCore` | Engine + Contracts (no Orleans/Dapr) | Orleans-free logic that used to live in this repo's `Host/`: dynamic protobuf machinery (`Protocol/` — descriptor factory, wire encoder, proto file builder), fuzzy/exact search (`Search/`), generator profiles (`Generators/MarketDataProfiles.cs`), row-history retention math (`History/`), `Auth/PasswordHasher`, `Json/JsonValueNormalizer`, and `SeedCatalog` (the demo world both flavors seed identically). *Shared with the Dapr flavor*: reused wholesale — every table/pipeline compiles via the same `Protocol`/`Search`/`History` code on both runtimes, and both seed from the same `SeedCatalog`. |
-| `../shared/StreamForge.Api` | Contracts + AppCore (no Orleans/Dapr) | REST endpoints (`Endpoints/*.cs`), the SignalR hub (`Hubs/StreamHub.cs`), JWT issuance (`Auth/JwtTokenService.cs`), and `AddStreamForgeApi`/`MapStreamForgeApi` (auth/policy/CORS/OpenAPI wiring, `/docs`, SPA static-file serving) — bodies reach the catalog/read-side only through the Contracts facades, never a concrete grain or actor type. *Shared with the Dapr flavor*: byte-identical endpoint code; this is what makes the frozen REST/SignalR contract enforced by construction rather than by convention (decision D-B). `/docs` is mapped only when `StreamForgeApiOptions.DocsFilePath` is non-null — the Orleans host is the only one that sets it (see "Surfaces" below). |
-| `src/StreamForge.Host` | AppCore + Api + Abstractions + Orleans + ASP.NET | Co-hosted silo + web server (one process): grains (`Grains/`), the Orleans facade-proxy adapters, `Program.cs` wiring. **Orleans-only** — the Dapr counterpart is `dapr/src/StreamForge.Dapr.Host` (actors instead of grains, Redis instead of JSON-file storage). |
-| `tests/StreamForge.Engine.Tests` | Engine (+ TestingHost for 2 smoke tests) | ~393 tests: compiler, executors, dataflow, determinism replays. Runs unmodified against `shared/StreamForge.Engine` — this suite is the proof the Engine move was behavior-preserving. |
-| `tests/StreamForge.Host.Tests` | Host | ~118 tests: protobuf machinery, history retention, real `TestCluster` integration (seeds, partitioned tables, arrangements, frontiers). |
-| `../web/` | — (bun, React 19, Vite, Tailwind v4, shadcn/ui) | Console SPA, moved to repo root in plan 005 W2 (was `orleans/web/`). Talks REST + SignalR only — no Orleans coupling. *Shared with the Dapr flavor*: the exact same built `web/dist` is served by both hosts (`StreamForgeApiOptions.SpaDistPath`) — one build, two runtimes, verified via the frozen `types.ts` ⇔ `Dtos.cs` contract. |
+| `../shared/StreamsForge.Engine` | **nothing** (pure C#) | SQL compiler + executors + dataflow primitives. **Zero Orleans/Dapr dependencies by design.** *Shared with the Dapr flavor*: reused wholesale, byte-identical — the same `SqlCompiler`/`TableExecutor`/`PipelineExecutor` compile and run every pipeline and table on both runtimes. |
+| `../shared/StreamsForge.Contracts` | `Microsoft.Orleans.Serialization.Abstractions` (attribute types only, decision D-A) | DTO/model contracts (`Models.cs`, `StreamConstants.cs`), runtime-neutral facade interfaces (`Facades.cs`: `ICatalogFacade`, `IUserStoreFacade`, `IPipelineReadFacade`, `ITableReadFacade`, `ITableHistoryFacade`, `IArrangementMetaFacade`), and the Dapr pub/sub envelope records (`Streaming/Envelopes.cs`). Evolution is **additive-only** (next free `[Id]`). *Shared with the Dapr flavor*: identical DTOs and facade contracts; the Dapr flavor's actor interfaces implement the same facades this repo's grain interfaces inherit. The Orleans `[GenerateSerializer]`/`[Id(n)]` attributes ride along as a benign dependency on the Dapr side (no Orleans runtime, no analyzers) rather than hand-maintaining ~22 parallel surrogate types. |
+| `src/StreamsForge.Abstractions` | Orleans.Sdk + Contracts | Grain interfaces only (`GrainInterfaces.cs`) — each inherits the matching Contracts facade, so grain proxies double as facade implementations with zero test-visible change. `[assembly: Orleans.GenerateCodeForDeclaringAssembly(typeof(SourceDefinition))]` here generates serializers for the shared Contracts DTOs into this Orleans assembly. **Orleans-only** — the Dapr flavor has no equivalent project; its actor interfaces live directly in `dapr/src/StreamsForge.Dapr.Host/Actors/`. |
+| `../shared/StreamsForge.AppCore` | Engine + Contracts (no Orleans/Dapr) | Orleans-free logic that used to live in this repo's `Host/`: dynamic protobuf machinery (`Protocol/` — descriptor factory, wire encoder, proto file builder), fuzzy/exact search (`Search/`), generator profiles (`Generators/MarketDataProfiles.cs`), row-history retention math (`History/`), `Auth/PasswordHasher`, `Json/JsonValueNormalizer`, and `SeedCatalog` (the demo world both flavors seed identically). *Shared with the Dapr flavor*: reused wholesale — every table/pipeline compiles via the same `Protocol`/`Search`/`History` code on both runtimes, and both seed from the same `SeedCatalog`. |
+| `../shared/StreamsForge.Api` | Contracts + AppCore (no Orleans/Dapr) | REST endpoints (`Endpoints/*.cs`), the SignalR hub (`Hubs/StreamHub.cs`), JWT issuance (`Auth/JwtTokenService.cs`), and `AddStreamsForgeApi`/`MapStreamsForgeApi` (auth/policy/CORS/OpenAPI wiring, `/docs`, SPA static-file serving) — bodies reach the catalog/read-side only through the Contracts facades, never a concrete grain or actor type. *Shared with the Dapr flavor*: byte-identical endpoint code; this is what makes the frozen REST/SignalR contract enforced by construction rather than by convention (decision D-B). `/docs` is mapped only when `StreamsForgeApiOptions.DocsFilePath` is non-null — the Orleans host is the only one that sets it (see "Surfaces" below). |
+| `src/StreamsForge.Host` | AppCore + Api + Abstractions + Orleans + ASP.NET | Co-hosted silo + web server (one process): grains (`Grains/`), the Orleans facade-proxy adapters, `Program.cs` wiring. **Orleans-only** — the Dapr counterpart is `dapr/src/StreamsForge.Dapr.Host` (actors instead of grains, Redis instead of JSON-file storage). |
+| `tests/StreamsForge.Engine.Tests` | Engine (+ TestingHost for 2 smoke tests) | ~393 tests: compiler, executors, dataflow, determinism replays. Runs unmodified against `shared/StreamsForge.Engine` — this suite is the proof the Engine move was behavior-preserving. |
+| `tests/StreamsForge.Host.Tests` | Host | ~118 tests: protobuf machinery, history retention, real `TestCluster` integration (seeds, partitioned tables, arrangements, frontiers). |
+| `../web/` | — (bun, React 19, Vite, Tailwind v4, shadcn/ui) | Console SPA, moved to repo root in plan 005 W2 (was `orleans/web/`). Talks REST + SignalR only — no Orleans coupling. *Shared with the Dapr flavor*: the exact same built `web/dist` is served by both hosts (`StreamsForgeApiOptions.SpaDistPath`) — one build, two runtimes, verified via the frozen `types.ts` ⇔ `Dtos.cs` contract. |
 
 ## Engine: SQL → running operators
 
@@ -162,8 +162,8 @@ environment (`ConnectionEnv`, read off `HttpContext.Items` — see `EnvironmentS
 doc for why a hub connection can't read the ambient directly). The one exception is the `"metrics"` group,
 left deliberately cluster-wide — see `StreamHub.SubscribeMetrics`'s own doc comment for the argument.
 
-**`RegistryGrainKeys.RegistryFor`** (`orleans/src/StreamForge.Host/Facades/RegistryGrainKeys.cs`) is the
-one place `StreamForge.Host` turns "which environment" into "which `IRegistryGrain`" — every
+**`RegistryGrainKeys.RegistryFor`** (`orleans/src/StreamsForge.Host/Facades/RegistryGrainKeys.cs`) is the
+one place `StreamsForge.Host` turns "which environment" into "which `IRegistryGrain`" — every
 `GetGrain<IRegistryGrain>(StreamConstants.RegistryKey)` call site in this codebase became
 `client.RegistryFor(env)` / `factory.RegistryFor(env)` instead, so there is exactly one place that
 composes the qualified registry key. Which environment a caller passes is decided at the call site: a
@@ -178,8 +178,8 @@ act on every environment (the four boot-time sweeps, `IngestDrainPumpService`) e
 |---|---|---|
 | REST | `:5199 /api/*` | Full CRUD + validate + rows/search/history/metrics + proto downloads + `/api/meta/*`. JWT (HS256, 12 h), policies Viewer ⊂ Editor ⊂ Admin. OpenAPI at `/openapi/v1.json`, interactive reference at `/scalar`. |
 | SignalR | `:5199 /hubs/stream` | Per-entity subscriptions (`pipeline:{id}`, `source:{name}`, `table:{name}`, `metrics`); token via `access_token` query. |
-| SPA + docs | `:5199 /`, `/docs`, `/explorer` | Console (neutral StreamForge branding, light default, `sf.theme`), interactive user docs, API Explorer (reflection surface UI). |
-| gRPC | `:5299` (cleartext h2c) | Static control plane `streamforge.v1` (CRUD/validate/Struct-row streaming) + hand-implemented **dynamic reflection**: every source/table/compiling-pipeline published as typed `streamforge.dynamic.v1` messages; `DynamicStreamService.SubscribeEntity` streams typed `{Entity}Event`/`{Entity}Delta` bytes. Same JWT as metadata. |
+| SPA + docs | `:5199 /`, `/docs`, `/explorer` | Console (neutral StreamsForge branding, light default, `sf.theme`), interactive user docs, API Explorer (reflection surface UI). |
+| gRPC | `:5299` (cleartext h2c) | Static control plane `streamsforge.v1` (CRUD/validate/Struct-row streaming) + hand-implemented **dynamic reflection**: every source/table/compiling-pipeline published as typed `streamsforge.dynamic.v1` messages; `DynamicStreamService.SubscribeEntity` streams typed `{Entity}Event`/`{Entity}Delta` bytes. Same JWT as metadata. |
 | Typed clients | `GET /api/{kind}/{id-or-name}/proto` + `tools/generate-client.sh` | Self-contained proto3 per entity → scaffolded, built .NET client lib with typed `IAsyncEnumerable` subscribe. Field numbers persist in the registry (evolution-safe, never reused) so generated clients survive schema edits. |
 
 ## Request/data flow (one glance)
@@ -202,7 +202,7 @@ A source's `Kind` (`generator | url | file | folder | grpc`, default `generator`
 driver, dispatched by `RegistryGrain` (`IsGeneratorKind` — `null`/empty/`"generator"` keeps the
 pre-006 `IGeneratorGrain` path; every other kind goes to `IConnectorGrain`). All the real logic —
 scheduling, backoff, mapping/format parsing, OpenAPI derivation, dedup/ledger tracking, gRPC
-subscribing — lives in `shared/StreamForge.AppCore/Connectors/**`, pure and runtime-free (no
+subscribing — lives in `shared/StreamsForge.AppCore/Connectors/**`, pure and runtime-free (no
 Orleans types), unit-tested directly. `ConnectorPollCycle` (`Connectors/ConnectorPollCycle.cs`) is
 the shared step function for the three polled kinds (`url`/`file`/`folder`):
 `FormatParsers`/`RecordExtractor` (via `JsonPathLite` + `MappingSpec`) turn a fetched payload into
@@ -213,7 +213,7 @@ failure backoff) decide when the next cycle runs. `grpc` is not a poll — `Grpc
 `DynamicStreamService`, decoding frames with the new `ProtoWireDecoder` (the encoder's exact
 counterpart, `AppCore/Protocol/ProtoWireDecoder.cs`).
 
-`ConnectorGrain` (`orleans/src/StreamForge.Host/Grains/ConnectorGrain.cs`, key = source name) is
+`ConnectorGrain` (`orleans/src/StreamsForge.Host/Grains/ConnectorGrain.cs`, key = source name) is
 the thin driver: `[PersistentState("connector", …)]` holds `SourceDefinition`, `Running`, the
 dedup/ledger trackers' persistable snapshots, and every `ConnectorRuntimeStatus` field. url/file/
 folder kinds run on a **one-shot grain timer** re-armed after every fire at the freshly computed
@@ -230,8 +230,8 @@ through the same door `GeneratorGrain` uses — one `EventRecord` per row onto
 `(StreamConstants.SourcesNamespace, sourceName)` — so pipelines/tables/SignalR/SPA all work
 unchanged for a connector-kind source.
 
-**Config import/export** (`shared/StreamForge.Api/Endpoints/ConfigEndpoints.cs` +
-`ConfigImportService.cs`, `shared/StreamForge.AppCore/Config/**`) is one implementation shared by
+**Config import/export** (`shared/StreamsForge.Api/Endpoints/ConfigEndpoints.cs` +
+`ConfigImportService.cs`, `shared/StreamsForge.AppCore/Config/**`) is one implementation shared by
 both flavors through `ICatalogFacade` only: `ConfigComposer` resolves `include` chains and merges
 documents (later wins per `(kind, name)` entity, shallow field override — D-I), `ImportPlanner`
 diffs a composed document against the live catalog into an apply-ordered plan (sources → tables
@@ -245,7 +245,7 @@ value on write — the same masking logic backs both `SourcesEndpoints` (per-ent
 JSONPath-lite subset, OpenAPI type map, merge rules, import modes) — this section is structure only.
 
 **Federation**: a `grpc`-kind source subscribing to `DynamicStreamService/SubscribeEntity` on
-*another* StreamForge instance (Orleans or Dapr) is how one instance's table/pipeline/source becomes
+*another* StreamsForge instance (Orleans or Dapr) is how one instance's table/pipeline/source becomes
 another's source. Being a federation *server* (accepting `SubscribeEntity` calls) stays Orleans-only
 (`:5299`) — the Dapr flavor has no gRPC serving (plan 005 D-F stands); it can only be the
 *subscriber* side. `GrpcSubscriberCore.ResolveMessageIdentAsync` resolves a `table:{id}`/
@@ -258,8 +258,8 @@ name.
 ## Build / run / verify
 
 ```bash
-~/.dotnet/dotnet test orleans/StreamForge.sln          # 511 tests
+~/.dotnet/dotnet test orleans/StreamsForge.sln          # 511 tests
 cd web && bun run build                                # SPA (bun only, never npm)
-~/.dotnet/dotnet run --project orleans/src/StreamForge.Host   # :5199 + :5299
+~/.dotnet/dotnet run --project orleans/src/StreamsForge.Host   # :5199 + :5299
 # config: --Http:Port --Grpc:Port --DataDir   ·  logins: admin/editor/viewer + "123!"
 ```

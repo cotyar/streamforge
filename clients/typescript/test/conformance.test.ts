@@ -8,7 +8,7 @@
  *   for b in case.liveBatches: z.apply(b.deltas)
  *   assert rows(z) == case.expectedRows, order-insensitive
  *
- * All 14 cases must pass -- this is the one piece of logic every StreamForge client (this one,
+ * All 14 cases must pass -- this is the one piece of logic every StreamsForge client (this one,
  * Python, the console's own useTableRows.ts, the Excel add-in) must agree on bit-for-bit.
  */
 

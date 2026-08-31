@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="xunit" Version="2.9.*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\shared\StreamsForge.Engine\StreamsForge.Engine.csproj" />
+    <ProjectReference Include="..\..\..\shared\StreamsForge.Contracts\StreamsForge.Contracts.csproj" />
+    <ProjectReference Include="..\..\..\shared\StreamsForge.AppCore\StreamsForge.AppCore.csproj" />
+    <ProjectReference Include="..\..\src\StreamsForge.Dapr.Host\StreamsForge.Dapr.Host.csproj" />
+  </ItemGroup>
+</Project>

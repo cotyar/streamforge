@@ -1,13 +1,13 @@
-// Tiny typed fetch wrapper against the StreamForge REST API.
+// Tiny typed fetch wrapper against the StreamsForge REST API.
 // Base URL is empty — Vite dev server proxies /api to the backend host.
 import { getStoredEnvironment, needsEnvironmentSelector } from '../lib/environment'
 
 export const AUTH_STORAGE_KEY = 'sf.auth'
 
-/** The header EnvironmentSelectionMiddleware.cs reads (shared/StreamForge.Api/Environments/). Exported
+/** The header EnvironmentSelectionMiddleware.cs reads (shared/StreamsForge.Api/Environments/). Exported
  * so the five raw-fetch call sites that bypass `request()` below (csv.ts, config.ts, explorerTypes.ts,
  * ingest.ts) inject the identical header rather than each hardcoding the string. */
-export const ENVIRONMENT_HEADER = 'X-StreamForge-Environment'
+export const ENVIRONMENT_HEADER = 'X-StreamsForge-Environment'
 
 /** `{}` for the default environment (D2: costs nothing — no header at all), else the one header that
  * selects a non-default environment on every route the middleware does not exclude. */
@@ -137,7 +137,7 @@ export const api = {
 
   // Plan 021 wave 2 (021-F) — found live: the environment DIRECTORY is not part of any one
   // environment's catalog (EnvironmentsEndpoints.cs's handlers never read EnvironmentAmbient — see
-  // shared/StreamForge.Api/Endpoints/EnvironmentsEndpoints.cs), but EnvironmentSelectionMiddleware does
+  // shared/StreamsForge.Api/Endpoints/EnvironmentsEndpoints.cs), but EnvironmentSelectionMiddleware does
   // not exclude /api/environments the way it excludes /api/auth/* and /api/meta/instance, so it 404s
   // that route too whenever the CURRENTLY SELECTED environment is invalid. That is exactly the moment
   // EnvironmentPicker's recovery path (validate() in EnvironmentPicker.tsx) calls this route to find out

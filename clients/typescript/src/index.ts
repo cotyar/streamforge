@@ -1,7 +1,7 @@
 /**
- * @streamforge/client -- TypeScript client for StreamForge live tables.
+ * @streamsforge/client -- TypeScript client for StreamsForge live tables.
  *
- *   import { connect } from '@streamforge/client'
+ *   import { connect } from '@streamsforge/client'
  *   const sf = await connect()                 // env, or explicit url/user/password
  *   const t = await sf.table('trigger_monitor') // subscribes, snapshots, replays
  *   t.rows                                       // Row[], frozen, current state
@@ -16,7 +16,7 @@
  */
 
 import { resolveConfig } from "./config.js";
-import { AuthError, StreamForgeError } from "./errors.js";
+import { AuthError, StreamsForgeError } from "./errors.js";
 import type { GrpcIngestCapable } from "./ingest.js";
 import * as ingestModule from "./ingest.js";
 import { RestClient } from "./http.js";
@@ -29,7 +29,7 @@ import type { Transport } from "./transport.js";
 import type { Row } from "./zset.js";
 import type { ConfigImportReport, TableDefinitionDto, TableValidateResponse } from "./types.js";
 
-export { StreamForgeError, AuthError, NotReady, SqlError, IngestRejected, type SqlDiagnostic } from "./errors.js";
+export { StreamsForgeError, AuthError, NotReady, SqlError, IngestRejected, type SqlDiagnostic } from "./errors.js";
 export { LiveTable, type ChangeListener } from "./live-table.js";
 export { ZSet, canonicalKey, groupKeyOf, type Row, type Delta, type Entry } from "./zset.js";
 export type { Transport } from "./transport.js";
@@ -92,7 +92,7 @@ function isNodeRuntime(): boolean {
 
 function defaultGrpcTarget(baseUrl: string): string {
   // Guesses the gRPC port from the REST base_url following Program.cs's own PORT/PORT+100
-  // convention. Only a fallback -- pass grpc= (or STREAMFORGE_GRPC) whenever the two ports don't
+  // convention. Only a fallback -- pass grpc= (or STREAMSFORGE_GRPC) whenever the two ports don't
   // follow that relationship, e.g. an explicit --Http:Port/--Grpc:Port pair that isn't +100 apart.
   const u = new URL(baseUrl);
   const httpPort = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
@@ -192,14 +192,14 @@ export class Client {
 export async function connect(opts: ConnectOptions = {}): Promise<Client> {
   const transportOpt = opts.transport ?? "auto";
   if (!VALID_TRANSPORTS.has(transportOpt)) {
-    throw new StreamForgeError(
+    throw new StreamsForgeError(
       `unknown transport '${transportOpt}' -- expected grpc, signalr, signalr:ws, signalr:sse, signalr:lp or auto`,
     );
   }
 
   const cfg = resolveConfig(opts);
   if (!cfg.baseUrl) {
-    throw new StreamForgeError("no base URL: pass url=, or set STREAMFORGE_BASE_URL");
+    throw new StreamsForgeError("no base URL: pass url=, or set STREAMSFORGE_BASE_URL");
   }
 
   const http = new RestClient({ baseUrl: cfg.baseUrl, user: cfg.user, password: cfg.password, token: opts.token, verify: opts.verify });
@@ -208,7 +208,7 @@ export async function connect(opts: ConnectOptions = {}): Promise<Client> {
   if (transportOpt === "grpc" || transportOpt === "auto") {
     if (!isNodeRuntime()) {
       if (transportOpt === "grpc") {
-        throw new StreamForgeError(
+        throw new StreamsForgeError(
           "gRPC transport requires Node -- a browser cannot speak h2c gRPC. Use transport: 'signalr' (or omit " +
             "transport and let 'auto' fall back for you) instead.",
         );
@@ -224,13 +224,13 @@ export async function connect(opts: ConnectOptions = {}): Promise<Client> {
         grpcTransport = candidate;
       } catch (err) {
         if (transportOpt === "grpc") {
-          throw new StreamForgeError(
+          throw new StreamsForgeError(
             `gRPC channel to ${target} refused. If the host was started with --urls, Program.cs's guard binds ` +
               "no gRPC port at all -- start it with --Http:Port/--Grpc:Port instead (design doc §3.2). " +
               `Underlying error: ${String(err)}`,
           );
         }
-        console.warn(`streamforge: gRPC unavailable (${String(err)}), falling back to SignalR`);
+        console.warn(`streamsforge: gRPC unavailable (${String(err)}), falling back to SignalR`);
       }
     }
   }
@@ -247,7 +247,7 @@ export async function connect(opts: ConnectOptions = {}): Promise<Client> {
     chosen = hub.name;
   }
 
-  console.info(`streamforge: connected via ${chosen} transport (${cfg.baseUrl})`);
+  console.info(`streamsforge: connected via ${chosen} transport (${cfg.baseUrl})`);
 
   return new Client(http, grpcTransport, liveTransport, cfg.ingestKey, chosen);
 }

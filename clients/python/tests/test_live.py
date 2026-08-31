@@ -12,8 +12,8 @@ import time
 
 import pytest
 
-from streamforge._transport import CancellableIterator
-from streamforge.live import LiveTable
+from streamsforge._transport import CancellableIterator
+from streamsforge.live import LiveTable
 
 _STOP = object()
 

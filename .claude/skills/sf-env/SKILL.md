@@ -1,6 +1,6 @@
 ---
 name: sf-env
-description: StreamForge environment isolation — curl recipes for creating/listing/selecting/force-deleting a named environment (a partition inside one running server, not a second deployment), the X-StreamForge-Environment header and ?env= override, and the rules that bite. Use when asked to set up, select, isolate, or tear down a StreamForge environment (e.g. staging vs prod inside one instance), or to explain why an entity in one environment can't see another's.
+description: StreamsForge environment isolation — curl recipes for creating/listing/selecting/force-deleting a named environment (a partition inside one running server, not a second deployment), the X-StreamsForge-Environment header and ?env= override, and the rules that bite. Use when asked to set up, select, isolate, or tear down a StreamsForge environment (e.g. staging vs prod inside one instance), or to explain why an entity in one environment can't see another's.
 ---
 
 # sf-env — environment isolation (create, select, force-delete)
@@ -24,7 +24,7 @@ host per deployment; the two are unrelated features that happen to share the Eng
   route, and `/api/environments` itself. That last exclusion is deliberate recovery, not an oversight —
   without it, a client whose selected environment gets force-deleted 404s on every route including the
   one it would use to discover its selection is gone.
-- **`?env=` overrides `X-StreamForge-Environment` when both are present** — for a browser navigation, an
+- **`?env=` overrides `X-StreamsForge-Environment` when both are present** — for a browser navigation, an
   `<img>`/download link, or a `curl` that would rather not set a header.
 - **Naming `default` (or nothing) costs nothing**: no environment-registry lookup, no per-request ambient
   write. Naming anything else validates against the registry first — a typo'd header is a 404, never an
@@ -75,14 +75,14 @@ curl -s -X POST $B/api/environments -H "Authorization: Bearer $T" -d '{"name":"s
 ## Selecting one
 
 ```bash
-curl -s $B/api/tables -H "Authorization: Bearer $T" -H 'X-StreamForge-Environment: staging' | jq .
+curl -s $B/api/tables -H "Authorization: Bearer $T" -H 'X-StreamsForge-Environment: staging' | jq .
 # [] — staging's own, disjoint table list
 
-curl -s $B/api/tables -H "Authorization: Bearer $T" -H 'X-StreamForge-Environment: nope' -w '\n%{http_code}\n'
+curl -s $B/api/tables -H "Authorization: Bearer $T" -H 'X-StreamsForge-Environment: nope' -w '\n%{http_code}\n'
 # -> 404 "environment 'nope' does not exist" — refused before any catalog call
 
 curl -s -X POST "$B/api/environments?env=staging" -H "Authorization: Bearer $T" \
-     -H 'X-StreamForge-Environment: nope' -w '\n%{http_code}\n'
+     -H 'X-StreamsForge-Environment: nope' -w '\n%{http_code}\n'
 # ?env= wins — the bogus header is never consulted, and /api/environments ignores the selector entirely
 ```
 

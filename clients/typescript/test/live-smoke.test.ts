@@ -25,7 +25,7 @@ async function demoReachable(): Promise<boolean> {
 
 const reachable = await demoReachable();
 const describeOrSkip = reachable ? describe : describe.skip;
-if (!reachable) console.warn(`streamforge live smoke: SKIPPED -- ${DEMO_URL}/api/healthz not reachable`);
+if (!reachable) console.warn(`streamsforge live smoke: SKIPPED -- ${DEMO_URL}/api/healthz not reachable`);
 
 describeOrSkip("live smoke: demo at :6199", () => {
   test("connects (auto -> signalr, since :6199 has no gRPC port bound)", async () => {
@@ -79,7 +79,7 @@ describeOrSkip("live smoke: demo at :6199", () => {
       unsubscribe();
 
       expect(table.seq).toBeGreaterThanOrEqual(seqAtSubscribe);
-      console.log(`streamforge live smoke: trigger_monitor seq ${seqAtSubscribe} -> ${table.seq}, sawChange=${sawChange}`);
+      console.log(`streamsforge live smoke: trigger_monitor seq ${seqAtSubscribe} -> ${table.seq}, sawChange=${sawChange}`);
     } finally {
       await client.close();
     }

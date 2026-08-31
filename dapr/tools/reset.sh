@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Plan 005 (Dapr sibling runtime) W4: wipes this app's Redis-backed state (catalog + users actor state,
 # and later pub/sub consumer-group bookkeeping) so the next `run.sh` reseeds the demo world from empty —
-# the Dapr-flavor equivalent of "delete orleans/src/StreamForge.Host/data/ to reseed" (AGENTS.md).
+# the Dapr-flavor equivalent of "delete orleans/src/StreamsForge.Host/data/ to reseed" (AGENTS.md).
 #
 # Scoped to THIS app only: the statestore component sets keyPrefix=appid (see
 # dapr/components/statestore.yaml), so every key this app ever writes — actor state
-# ("streamforge-dapr||RegistryActor||catalog||catalog", "streamforge-dapr||UserStoreActor||users||users",
-# etc.) — starts with "streamforge-dapr". SCAN (not KEYS) so this is safe against a large keyspace shared
+# ("streamsforge-dapr||RegistryActor||catalog||catalog", "streamsforge-dapr||UserStoreActor||users||users",
+# etc.) — starts with "streamsforge-dapr". SCAN (not KEYS) so this is safe against a large keyspace shared
 # with other apps on the same dev Redis.
 set -euo pipefail
 
-APP_ID="streamforge-dapr"
+APP_ID="streamsforge-dapr"
 REDIS_CONTAINER="${REDIS_CONTAINER:-dapr_redis}"
 
 if ! docker ps --format '{{.Names}}' | grep -qx "$REDIS_CONTAINER"; then

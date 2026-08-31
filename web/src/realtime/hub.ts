@@ -119,7 +119,7 @@ function resolveTransport(): signalR.HttpTransportType | undefined {
   }
 }
 
-/** Plan 021 wave 2 (021-F): a WebSocket/SSE connection cannot carry the `X-StreamForge-Environment`
+/** Plan 021 wave 2 (021-F): a WebSocket/SSE connection cannot carry the `X-StreamsForge-Environment`
  * header (see client.ts), so the hub takes `?env=<name>` instead — the same override
  * EnvironmentSelectionMiddleware.cs documents for "a browser navigation or any other caller that
  * cannot set a header on the request that matters", and the one the middleware stamps onto

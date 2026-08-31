@@ -1,4 +1,4 @@
-# StreamForge — Orleans flavor — local compose parity for the Cloud Run image.
+# StreamsForge — Orleans flavor — local compose parity for the Cloud Run image.
 #
 #   docker compose -f deploy/orleans/compose.yaml up -d --build
 #   curl http://localhost:6199/healthz
@@ -8,7 +8,7 @@
 # same container the admin app (plan 007 D-C) drives locally and the same image `deploy.sh`
 # ships to Cloud Run (plan 007 decision D-A) — compose IS the local parity check for that image.
 services:
-  streamforge-orleans:
+  streamsforge-orleans:
     build:
       context: ../..
       dockerfile: deploy/orleans/Dockerfile
@@ -17,7 +17,7 @@ services:
       # architecture and builds fine there (via emulation locally, natively on Cloud Build/Run).
       platforms:
         - linux/amd64
-    image: streamforge-orleans:local
+    image: streamsforge-orleans:local
     platform: linux/amd64
     ports:
       - "6199:8080"

@@ -1,6 +1,6 @@
 ---
 name: sf-verify
-description: Full StreamForge verification sweep — builds, complete test suites, and live end-to-end checks. Use before committing non-trivial changes, after merges, or when asked "is everything still green?".
+description: Full StreamsForge verification sweep — builds, complete test suites, and live end-to-end checks. Use before committing non-trivial changes, after merges, or when asked "is everything still green?".
 ---
 
 # sf-verify — the green bar, end to end
@@ -13,10 +13,10 @@ not by builds).
 
 ```bash
 cd /Users/yuriyhabarov/work/crates-foundation
-~/.dotnet/dotnet build orleans/StreamForge.sln          # 0 errors
-~/.dotnet/dotnet test  orleans/StreamForge.sln          # Engine ~393 + Host ~118, all green
-~/.dotnet/dotnet build dapr/StreamForge.Dapr.sln        # 0 errors
-~/.dotnet/dotnet test  dapr/StreamForge.Dapr.sln        # ~153 tests, all green
+~/.dotnet/dotnet build orleans/StreamsForge.sln          # 0 errors
+~/.dotnet/dotnet test  orleans/StreamsForge.sln          # Engine ~393 + Host ~118, all green
+~/.dotnet/dotnet build dapr/StreamsForge.Dapr.sln        # 0 errors
+~/.dotnet/dotnet test  dapr/StreamsForge.Dapr.sln        # ~153 tests, all green
 cd web && bun run build                                 # tsc + vite clean (bun, never npm)
 ```
 
@@ -29,7 +29,7 @@ it in isolation before concluding red.
 ## 2. Live sweep (isolated instance, fresh temp DataDir so seeds exist)
 
 ```bash
-~/.dotnet/dotnet run --project orleans/src/StreamForge.Host \
+~/.dotnet/dotnet run --project orleans/src/StreamsForge.Host \
   --Http:Port 9199 --Grpc:Port 9299 --DataDir "$(mktemp -d)" &   # never 5199/5299
 ```
 
@@ -75,7 +75,7 @@ as admin (`admin/admin123!`) via curl, confirm at minimum:
   you ever see 0 events with growing REST metrics again, suspect a fresh-boot subscription race
   first.)
 
-Kill the instance (`dapr stop --app-id streamforge-dapr` + explicit process kill if the plain
+Kill the instance (`dapr stop --app-id streamsforge-dapr` + explicit process kill if the plain
 `dotnet run` process outlives the sidecar teardown — a known Dapr CLI quirk) and confirm
 5399/3599/4599 are free.
 

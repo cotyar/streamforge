@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Plan 020 wave A pinned the submodule branch here directly (see YcsPinTests's own doc comment
+         for why parity-yjs-13.6.32, not main, matters). Wave B adds shared/StreamsForge.Connectors.Crdt,
+         which itself references Ycs.csproj — so this project references THAT instead of Ycs.csproj
+         directly, and gets Ycs (and Contracts/AppCore) transitively. YcsPinTests is untouched and stays
+         green: it only needs the `Ycs` namespace, which still resolves transitively. -->
+    <ProjectReference Include="..\StreamsForge.Connectors.Crdt\StreamsForge.Connectors.Crdt.csproj" />
+    <!-- TEST-ONLY. CrdtProjector deliberately does NOT reference this project (see its class doc: a
+         database connector has no business being a dependency of a CRDT document, and it would drag
+         Npgsql + Microsoft.Data.SqlClient in for four string constants). The TEST references it so
+         DiffOpAndWeightLiteralsMatchCdcStampsSpelling can assert against CdcStamp's real declared
+         values instead of a copy of them — a pin that says "keep these in step" without reading the
+         other side is a comment, not a test. -->
+    <ProjectReference Include="..\StreamsForge.Connectors.Database\StreamsForge.Connectors.Database.csproj" />
+  </ItemGroup>
+</Project>

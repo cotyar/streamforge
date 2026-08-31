@@ -1,13 +1,13 @@
 ---
 name: sf-access
-description: StreamForge entitlements, groups, approvals and audit — curl recipes for the /api/access document, the effective-permissions view, disabling a login, filing/voting on approvals, and reading the audit log, plus the rule cheat-sheet and the gotchas. Use when asked to grant, revoke, scope or audit access, disable a user, set up approvals, or explain why a caller got a 403.
+description: StreamsForge entitlements, groups, approvals and audit — curl recipes for the /api/access document, the effective-permissions view, disabling a login, filing/voting on approvals, and reading the audit log, plus the rule cheat-sheet and the gotchas. Use when asked to grant, revoke, scope or audit access, disable a user, set up approvals, or explain why a caller got a 403.
 ---
 
 # sf-access — entitlements, approvals, audit quick reference
 
 Full user docs: `orleans/docs/index.html` (§ Roles, entitlements & approvals). Endpoints (shared,
-identical on both flavours): `shared/StreamForge.Api/Endpoints/{AccessEndpoints,ApprovalsEndpoints,
-AuditEndpoints}.cs`. The decision itself: `shared/StreamForge.AppCore/Access/PermissionEvaluator.cs`
+identical on both flavours): `shared/StreamsForge.Api/Endpoints/{AccessEndpoints,ApprovalsEndpoints,
+AuditEndpoints}.cs`. The decision itself: `shared/StreamsForge.AppCore/Access/PermissionEvaluator.cs`
 (pure, unit-tested in both suites). Plan: `plans/015-rbac-entitlements-approvals.md`.
 
 ## The rules that bite

@@ -11,6 +11,6 @@ spec:
     - name: redisPassword
       value: ""
 # Deliberately UNSCOPED (W8): the polyglot premise is that any local sidecar'd process — the host
-# (streamforge-dapr), the python enricher (sf-enricher), the ts/java consumers — publishes and
+# (streamsforge-dapr), the python enricher (sf-enricher), the ts/java consumers — publishes and
 # subscribes through this same component. Topics: sf-sources, sf-pipeline-out, sf-table-delta,
 # sf-lifecycle, sf-metrics + per-source egress sf-source-{name}. Contract: dapr/POLYGLOT.md.

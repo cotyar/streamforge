@@ -1,4 +1,4 @@
-# StreamForge
+# StreamsForge
 
 An enterprise streaming-platform foundation on **Microsoft Orleans 10** (.NET 10): declarative streaming pipelines in a SQL-like dialect — joins, temporal windows, grouping, filtering, projections — managed through a React console with live results and per-resource entitlements. Zero external infrastructure: localhost clustering, in-memory Orleans streams, JSON-file persistence.
 
@@ -7,7 +7,7 @@ An enterprise streaming-platform foundation on **Microsoft Orleans 10** (.NET 10
 ```bash
 # prerequisites: .NET 10 SDK (installed at ~/.dotnet), bun
 cd web && bun install && bun run build && cd ..
-~/.dotnet/dotnet run --project src/StreamForge.Host        # http://localhost:5199
+~/.dotnet/dotnet run --project src/StreamsForge.Host        # http://localhost:5199
 ```
 
 Open http://localhost:5199 and log in:
@@ -20,7 +20,7 @@ Open http://localhost:5199 and log in:
 
 Frontend dev mode: `cd web && bun run dev` → http://localhost:5173 (proxies to :5199).
 
-Tests: `~/.dotnet/dotnet test tests/StreamForge.Engine.Tests` (86 tests: parser, validator, expression semantics, all five join types, all three window kinds, aggregates, late events, plus an Orleans TestingHost end-to-end smoke test).
+Tests: `~/.dotnet/dotnet test tests/StreamsForge.Engine.Tests` (86 tests: parser, validator, expression semantics, all five join types, all three window kinds, aggregates, late events, plus an Orleans TestingHost end-to-end smoke test).
 
 ## What it does
 
@@ -80,10 +80,10 @@ Orleans silo (same process, localhost clustering, memory streams)
 
 | project | contents |
 |---|---|
-| `src/StreamForge.Engine` | Pure C# streaming-SQL engine: tokenizer → recursive-descent parser → validator (positioned diagnostics) → planner → interpreted operators. No Orleans dependency. |
-| `src/StreamForge.Abstractions` | Grain interfaces + `[GenerateSerializer]` models. |
-| `src/StreamForge.Host` | Co-hosted silo + API: grains, JSON-file grain storage, JWT auth (PBKDF2), REST endpoints, SignalR hub + stream bridge, market-data generators. |
-| `tests/StreamForge.Engine.Tests` | 86 xunit tests incl. Orleans TestingHost smoke test. |
+| `src/StreamsForge.Engine` | Pure C# streaming-SQL engine: tokenizer → recursive-descent parser → validator (positioned diagnostics) → planner → interpreted operators. No Orleans dependency. |
+| `src/StreamsForge.Abstractions` | Grain interfaces + `[GenerateSerializer]` models. |
+| `src/StreamsForge.Host` | Co-hosted silo + API: grains, JSON-file grain storage, JWT auth (PBKDF2), REST endpoints, SignalR hub + stream bridge, market-data generators. |
+| `tests/StreamsForge.Engine.Tests` | 86 xunit tests incl. Orleans TestingHost smoke test. |
 | `web/` | Vite + React SPA: dashboard, SQL editor with live diagnostics, visual pipeline builder, live results/chart, sources with live tape, user management. |
 
 ## Access control

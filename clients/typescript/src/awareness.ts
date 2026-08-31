@@ -1,7 +1,7 @@
 /**
  * Plan 020 wave G -- ephemeral presence/liveness for a CRDT document ("who is looking at this
  * document right now"), off by default server-side (`CrdtSourceConfig.Awareness` must be set) and
- * scoped to the SignalR hub only -- see `shared/StreamForge.Api/Hubs/StreamHub.cs` and
+ * scoped to the SignalR hub only -- see `shared/StreamsForge.Api/Hubs/StreamHub.cs` and
  * `AwarenessRegistry.cs` for the server side this speaks to.
  *
  * This is deliberately its OWN `HubConnection`, independent of whichever transport `connect()`
@@ -18,10 +18,10 @@
  */
 
 import * as signalR from "@microsoft/signalr";
-import { StreamForgeError } from "./errors.js";
+import { StreamsForgeError } from "./errors.js";
 import type { RestClient } from "./http.js";
 
-/** Mirrors `AwarenessEntry` (shared/StreamForge.Api/Hubs/AwarenessRegistry.cs) as the SignalR JSON
+/** Mirrors `AwarenessEntry` (shared/StreamsForge.Api/Hubs/AwarenessRegistry.cs) as the SignalR JSON
  * protocol serializes it -- camelCase, ISO-8601 timestamps (`DateTimeOffset`'s default
  * `System.Text.Json` shape). `identity` is always the OTHER caller's authenticated name, never
  * something they chose -- see that record's own doc comment for why. */
@@ -82,7 +82,7 @@ export class AwarenessSession {
 
   /**
    * Connects, joins `sourceName`'s awareness group, and starts an internal heartbeat loop. Throws
-   * a `StreamForgeError` when the server refuses the join -- no source by that name, the source is
+   * a `StreamsForgeError` when the server refuses the join -- no source by that name, the source is
    * not crdt-kind, the source has no `CrdtAwarenessConfig` (awareness is off, the default), or the
    * document is already at its configured cap. The refusal message is the server's own
    * `HubException.Message` (`AccessGuard`'s reason, or the specific config/cap complaint) --
@@ -122,7 +122,7 @@ export class AwarenessSession {
     try {
       await conn.start();
     } catch (err) {
-      throw new StreamForgeError(`SignalR connection for awareness on '${this.sourceName}' failed to start: ${String(err)}`);
+      throw new StreamsForgeError(`SignalR connection for awareness on '${this.sourceName}' failed to start: ${String(err)}`);
     }
 
     let snapshot: { ttlSeconds: number; maxEntries: number; peers: AwarenessPeer[] };
@@ -130,7 +130,7 @@ export class AwarenessSession {
       snapshot = await conn.invoke("SubscribeAwareness", this.sourceName, this.clientId, label);
     } catch (err) {
       await conn.stop();
-      throw new StreamForgeError(`SignalR SubscribeAwareness('${this.sourceName}') refused: ${String(err)}`);
+      throw new StreamsForgeError(`SignalR SubscribeAwareness('${this.sourceName}') refused: ${String(err)}`);
     }
 
     this.connection = conn;

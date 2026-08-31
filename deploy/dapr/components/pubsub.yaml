@@ -17,6 +17,6 @@ spec:
 #
 # Deliberately left UNSCOPED, same as the original: the polyglot premise (dapr/POLYGLOT.md) is that any
 # sidecar'd process could publish/subscribe through this component. In THIS containerized stack only the
-# app (streamforge-dapr) is present — polyglot processors are explicitly NOT part of the Cloud Run
+# app (streamsforge-dapr) is present — polyglot processors are explicitly NOT part of the Cloud Run
 # service (see deploy/dapr/README.md) — but the component stays unscoped rather than diverging from the
 # original's shape for no reason.

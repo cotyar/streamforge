@@ -1,4 +1,4 @@
-# StreamForge — Design Decisions (Orleans implementation)
+# StreamsForge — Design Decisions (Orleans implementation)
 
 ADR-style record of the choices that shaped the codebase, with the rejected alternatives and the
 known ceilings. Structure lives in [ARCHITECTURE.md](ARCHITECTURE.md); phase-by-phase execution
@@ -123,7 +123,7 @@ Pinned, tested, and documented rather than fudged:
     case-insensitively, and every OTHER non-empty, non-`"0"` string (garbage included, e.g. `"abc"`)
     coerces to `true`. This isn't a design choice made for the SQL function in isolation — it's
     `FieldValueCoercion.TryToBool`'s existing inbound-ingest rule, and the SQL function shares the
-    exact same canonical implementation (`StreamForge.Engine.Runtime.FieldValueConversion`) so the two
+    exact same canonical implementation (`StreamsForge.Engine.Runtime.FieldValueConversion`) so the two
     can never drift apart. A stricter "true/false/0/1 else NULL" rule was the original intent but was
     dropped once it became clear it would mean two different bool-coercion rules for the same field
     kind depending on which code path hit it.
@@ -474,7 +474,7 @@ and being precise about which is the difference between a measurement and a slog
 | copy | where | D2 |
 |---|---|---|
 | the **persisted mirror** — `TableGrainState.Snapshot`, rewritten every `FlushMs`, resident for the life of the activation | `TableGrain` | **REMOVED** on a sharded table |
-| the **executor's own ledger** — `TableExecutorImpl`, and for the motivating shape `TableLatestByOp.Current` | `StreamForge.Engine` | **kept**, and out of reach |
+| the **executor's own ledger** — `TableExecutorImpl`, and for the motivating shape `TableLatestByOp.Current` | `StreamsForge.Engine` | **kept**, and out of reach |
 | the **coordinator ledger** — `_coordinatorLedger`, `Parallelism >= 2` only | `TableGrain` | **kept** |
 
 The executor's ledger is what the SQL is *computed from*; shedding it means sharding **execution**, which

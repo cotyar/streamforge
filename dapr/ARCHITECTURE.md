@@ -1,4 +1,4 @@
-# StreamForge — Architecture (Dapr implementation, W9 / final snapshot)
+# StreamsForge — Architecture (Dapr implementation, W9 / final snapshot)
 
 Plan [`../plans/005-dapr-port.md`](../plans/005-dapr-port.md) — this document describes the Dapr
 flavor as it exists at the plan's final wave (W9): a full sibling runtime of the Orleans flavor
@@ -10,9 +10,9 @@ remains genuinely out of scope for this flavor, by design.
 ## What exists
 
 ```
-StreamForge.Dapr.Host (:5399)                    Dapr sidecar (3599 HTTP / 4599 gRPC)
-├─ shared/StreamForge.Api                         ├─ statestore (Redis, actorStateStore, keyPrefix=appid)
-│  (AddStreamForgeApi/MapStreamForgeApi —          └─ pubsub (Redis, topics: sf-sources, sf-pipeline-out,
+StreamsForge.Dapr.Host (:5399)                    Dapr sidecar (3599 HTTP / 4599 gRPC)
+├─ shared/StreamsForge.Api                         ├─ statestore (Redis, actorStateStore, keyPrefix=appid)
+│  (AddStreamsForgeApi/MapStreamsForgeApi —          └─ pubsub (Redis, topics: sf-sources, sf-pipeline-out,
 │   REST/SignalR/SPA, JWT, RBAC, byte-identical       sf-table-delta, sf-lifecycle, sf-metrics)
 │   to the Orleans flavor)
 ├─ Actors/
@@ -36,7 +36,7 @@ StreamForge.Dapr.Host (:5399)                    Dapr sidecar (3599 HTTP / 4599 
 Live today: login (admin/editor/viewer), full source/pipeline/table CRUD + validate, table
 `Parallelism > 1` rejection (409), user admin CRUD + self-delete rejection, `/api/meta/grpc` +
 `/api/meta/protos/static` + `/api/meta/arrangements` (shape-correct, empty), pipeline/table/source
-`.proto` downloads (real proto text — the shared descriptor machinery in `shared/StreamForge.AppCore`
+`.proto` downloads (real proto text — the shared descriptor machinery in `shared/StreamsForge.AppCore`
 doesn't care which runtime called it), the console SPA served at `/`, `/scalar` (OpenAPI/Scalar UI),
 seeded generators/pipelines/tables running for real (not just catalog entries) with live SignalR
 events, and row history. See each numbered section below for the wave that landed it.
@@ -45,7 +45,7 @@ events, and row history. See each numbered section below for the wave that lande
 
 | Orleans grain | Dapr actor | Notes |
 |---|---|---|
-| `RegistryGrain` (`"catalog"`) | `RegistryActor` (`"catalog"`) | Catalog CRUD/validation logic factored into `Catalog/CatalogStore.cs` — a plain, actor-framework-free class the actor delegates to (unit-tested directly, no sidecar needed: `dapr/tests/StreamForge.Dapr.Tests/CatalogStoreTests.cs`). |
+| `RegistryGrain` (`"catalog"`) | `RegistryActor` (`"catalog"`) | Catalog CRUD/validation logic factored into `Catalog/CatalogStore.cs` — a plain, actor-framework-free class the actor delegates to (unit-tested directly, no sidecar needed: `dapr/tests/StreamsForge.Dapr.Tests/CatalogStoreTests.cs`). |
 | `UserStoreGrain` (`"users"`) | `UserStoreActor` (`"users"`) | Same PBKDF2 credential store (shared `PasswordHasher`), same seed data (shared `SeedCatalog.Users`). |
 | `GeneratorGrain` | `GeneratorActor` (key = source name) | Batched-tick synthetic event publisher, real and live — see "Generators (W5-A)" below. |
 | `PipelineGrain` | `PipelineActor` (key = pipeline id) | Compiles + runs the pipeline's streaming SQL via the shared Engine, publishes `sf-pipeline-out`/`sf-metrics`, real and live — see "Pipelines (W6)" below. |
@@ -67,9 +67,9 @@ mutation cost matters (it won't at demo scale).
 
 The Redis `statestore` component (`components/statestore.yaml`) sets `actorStateStore: "true"` (required
 for Dapr actors to use it at all) and `keyPrefix: appid`, which scopes every key under this app's id
-(`streamforge-dapr||...`) — confirmed live: after a run, `redis-cli --scan --pattern 'streamforge-dapr*'`
-lists exactly `streamforge-dapr||RegistryActor||catalog||catalog` and
-`streamforge-dapr||UserStoreActor||users||users`. This is what makes `tools/reset.sh`'s scoped SCAN safe
+(`streamsforge-dapr||...`) — confirmed live: after a run, `redis-cli --scan --pattern 'streamsforge-dapr*'`
+lists exactly `streamsforge-dapr||RegistryActor||catalog||catalog` and
+`streamsforge-dapr||UserStoreActor||users||users`. This is what makes `tools/reset.sh`'s scoped SCAN safe
 on a Redis instance potentially shared with other apps.
 
 ### Serialization
@@ -89,7 +89,7 @@ This was **not** the default and had to be discovered live: the Dapr .NET SDK's 
 (`SetStatusRequest`, `ValidateCredentialsRequest`, the shared Contracts DTOs, etc., all meant for
 System.Text.Json). Enums (`PipelineStatus`, `FieldType`, ...) serialize as plain ints on this internal
 wire — independent of the public REST/SignalR JSON contract, which
-`StreamForgeApiExtensions.AddStreamForgeApi` configures separately with `JsonStringEnumConverter`. Since
+`StreamsForgeApiExtensions.AddStreamsForgeApi` configures separately with `JsonStringEnumConverter`. Since
 the actor wire is internal-only (never observed by the SPA or any REST/gRPC client), this divergence is
 harmless.
 
@@ -126,7 +126,7 @@ stage-grid dataflow) is Orleans-only. `ITableReadFacade.GetSnapshotFrontierEpoch
 
 ### Seed status: sources, pipelines, AND tables are all honestly `Running` now (W5-A, W6, W7-A)
 
-`shared/StreamForge.AppCore/SeedCatalog` marks several demo pipelines/tables `Running` (the Orleans flavor
+`shared/StreamsForge.AppCore/SeedCatalog` marks several demo pipelines/tables `Running` (the Orleans flavor
 resumes them for real on boot, per `RegistryGrain.EnsureInitializedAsync`). On the Dapr flavor through W4,
 **no runtime at all** existed behind a Running status — no generator publishing events, no pipeline/table
 actually computing anything, so `CatalogStore.EnsureInitialized` overrode every seeded pipeline/table to
@@ -207,7 +207,7 @@ parameters on the original call, or via pub/sub, instead.
 One `GeneratorActor` per source (actor type `"GeneratorActor"`, key = the source's name) — a Dapr
 timer-driven synthetic event publisher built on the same `MarketDataProfiles` used by Orleans'
 `GeneratorGrain`. `Actors/GeneratorActor.cs`; the batching math is a separately unit-tested pure function,
-`Actors/GeneratorBatching.NextBatchCount` (`dapr/tests/StreamForge.Dapr.Tests/GeneratorBatchingTests.cs`).
+`Actors/GeneratorBatching.NextBatchCount` (`dapr/tests/StreamsForge.Dapr.Tests/GeneratorBatchingTests.cs`).
 
 **Batched ticks, not per-event (decision D-E).** Every actor timer fire and every pub/sub publish is a
 sidecar round-trip, unlike Orleans' in-silo grain timer + in-process stream push. `GeneratorActor` ticks on
@@ -259,11 +259,11 @@ string format is unchanged: `"NotifySourceChanged:{name}:{enabled}"`, now built 
 ## Pipelines (W6)
 
 One `PipelineActor` per running pipeline (actor type `"PipelineActor"`, key = the pipeline's `Id`) —
-compiles the pipeline's streaming SQL via the shared `StreamForge.Engine` (same compile path
+compiles the pipeline's streaming SQL via the shared `StreamsForge.Engine` (same compile path
 `PipelineGrain.StartAsync` uses: build a schema dictionary from every known source, `SqlCompiler.Compile`),
 executes it against batches of routed events, and publishes emitted rows + periodic metrics to Dapr
 pub/sub — a byte-for-byte mirror of `PipelineGrain`'s watermark-tick/publish cadence
-(`orleans/src/StreamForge.Host/Grains/PipelineGrain.cs`), translated from Orleans streams to the fixed-topic
+(`orleans/src/StreamsForge.Host/Grains/PipelineGrain.cs`), translated from Orleans streams to the fixed-topic
 transport (decision D-D). `Actors/PipelineActor.cs`; `Actors/IPipelineActor.cs`.
 
 **Acyclic by construction (same discipline as `GeneratorActor`).** `PipelineActor` never resolves
@@ -322,7 +322,7 @@ method body. `PipelineActor.ProcessEventsAsync` therefore re-normalizes (`JsonVa
 before constructing an `EventRecord`; skipping this would silently break every pipeline, since
 `PipelineEventRouter` is the only path events ever reach a running `PipelineActor`. Proven explicitly by
 round-tripping an already-normalized envelope through the actor wire's own serializer configuration:
-`dapr/tests/StreamForge.Dapr.Tests/PipelineActorWireNormalizationTests.cs`.
+`dapr/tests/StreamsForge.Dapr.Tests/PipelineActorWireNormalizationTests.cs`.
 
 **Live-verified (see the wave's report for the full transcript):** a fresh seed's four `Running` pipelines
 (a single-source tumbling-window VWAP, a two-source `WITHIN`-join spread, a nested-CTE hot-symbol VWAP, and
@@ -338,16 +338,16 @@ host reproduces the same boot-resume with no REST call either time, proving the 
 
 One `TableActor` per running table (actor type `"TableActor"`, key = the table's `Name` — same key
 Orleans' `ITableGrain` uses), CLASSIC (Parallelism==1) PATH ONLY — the Dapr counterpart of
-`TableGrain`'s `StartClassicAsync`/read-side machinery (`orleans/src/StreamForge.Host/Grains/TableGrain.cs`).
+`TableGrain`'s `StartClassicAsync`/read-side machinery (`orleans/src/StreamsForge.Host/Grains/TableGrain.cs`).
 Partitioned execution (Parallelism 2-16, frontier-consistent reads, shared arrangements) is Orleans-only
 (decision D-F); `CatalogStore.ValidateParallelism` already rejects anything but `1` at CRUD time, and
 `TableActor.StartAsync` asserts it again defensively. `Actors/ITableActor.cs`, `Actors/TableActor.cs`.
 
 **Compilation and Z-set execution are the identical shared code the Orleans grain uses.** `TableCompilation.TryCompile`
 (extracted the same way `PipelineCompilation.TryCompile` was in W6 — testable without any actor/timer/
-sidecar machinery, see `dapr/tests/StreamForge.Dapr.Tests/TableCompilationTests.cs`) builds stream/table
+sidecar machinery, see `dapr/tests/StreamsForge.Dapr.Tests/TableCompilationTests.cs`) builds stream/table
 schema dictionaries from the full `TableStartRequest.Sources`/`Tables` lists and calls
-`StreamForge.Engine.SqlCompiler.CompileTable` — the exact same entry point `TableGrain.StartClassicAsync`
+`StreamsForge.Engine.SqlCompiler.CompileTable` — the exact same entry point `TableGrain.StartClassicAsync`
 calls. The resulting `TableExecutor` is the same Z-set (DBSP-style) incremental-view-maintenance engine
 either runtime uses; nothing about the SQL semantics differs between flavors.
 
@@ -360,7 +360,7 @@ BOTH a second `ISourceEventsSink` (alongside `PipelineEventRouter`) and a second
 `sf-sources`, and the natural generalization of that same "additive sink" pattern to `sf-table-delta`.
 Two independent in-memory routing tables, split by input kind (`_byStreamSource`/`_byUpstreamTable`), so a
 table subscribed to a stream source never shows up as a consumer of an upstream TABLE of the same name and
-vice versa — proven directly in `dapr/tests/StreamForge.Dapr.Tests/TableEventRouterTests.cs`
+vice versa — proven directly in `dapr/tests/StreamsForge.Dapr.Tests/TableEventRouterTests.cs`
 (`Register_SplitsSubscriptionsByKind_StreamVsTable`). A table must never receive its own output deltas
 back (defensive — the SQL compiler would never legitimately produce a self-referential `TableInputs`
 entry): `OnTableDeltaAsync` filters through a pure, separately-tested `TableEventRouter.ExcludeSelf` static
@@ -413,7 +413,7 @@ turn is still executing, any `TableEventRouter`-issued call the fresh registrati
 SAME actor id queues behind that turn (Dapr actors process one invocation at a time per actor id) rather
 than being dropped (unregistered) or interleaved with it. See `Actors/TableActor.cs`'s
 `RegisterRouterAndAttachToTableInputsAsync` doc comment for the full protocol and
-`dapr/tests/StreamForge.Dapr.Tests/TableAttachPolicyTests.cs` for the epoch-cutoff filter this relies on
+`dapr/tests/StreamsForge.Dapr.Tests/TableAttachPolicyTests.cs` for the epoch-cutoff filter this relies on
 to make a delta admitted during that queued window neither lost nor double-counted.
 
 **Snapshot/search/seq design — mirrors `TableGrain`'s classic path field-for-field:**
@@ -431,7 +431,7 @@ to make a delta admitted during that queued window neither lost nor double-count
   `StreamBridgeService` invents its own `_tableSeq` locally per SignalR subscription, `DaprStreamBridge`
   here only relays the value `TableActor` already stamped (see that class's own doc comment). Verified
   against real compiled-Engine output (not synthetic data) in
-  `dapr/tests/StreamForge.Dapr.Tests/TableDeltaSequencingTests.cs`.
+  `dapr/tests/StreamsForge.Dapr.Tests/TableDeltaSequencingTests.cs`.
 - *Restart-resume limitation — identical to `TableGrain`'s, not a new one.* The persisted snapshot only
   ever captures OUTPUT rows, never operator internal state (join indexes, GROUP BY accumulators), so
   `ActivateExecutor` (shared by `StartAsync` and `OnActivateAsync`'s self-heal branch) detects a non-empty
@@ -471,7 +471,7 @@ same re-normalization `PipelineActor` already does (proven again here for symmet
 never has to handle (a pipeline never consumes another table's deltas) — `TableDeltaEnvelope.Deltas[].Row`
 crosses the identical Dapr actor-invocation wire and needs the identical treatment. Both proven by
 round-tripping an already-normalized envelope through the actor wire's own serializer configuration in
-`dapr/tests/StreamForge.Dapr.Tests/TableActorWireNormalizationTests.cs`.
+`dapr/tests/StreamsForge.Dapr.Tests/TableActorWireNormalizationTests.cs`.
 
 **Concurrency bug found and fixed live, upstream of this wave's own code:** `Streaming/SourceRateSampler.cs`
 (W5-B) kept its per-source "last relayed" timestamps in a plain, unsynchronized `Dictionary` shared as a
@@ -519,7 +519,7 @@ worked around.
 
 One `TableHistoryActor` per table that has ever had row history configured (actor type
 "TableHistoryActor", key = the table's Name) — the Dapr counterpart of Orleans' `TableHistoryGrain`
-(`orleans/src/StreamForge.Host/Grains/TableHistoryGrain.cs`), fed by the `sf-table-delta` topic — decision
+(`orleans/src/StreamsForge.Host/Grains/TableHistoryGrain.cs`), fed by the `sf-table-delta` topic — decision
 D-D's fixed-topic transport, and decision D7's framing that **the delta stream IS the event log** (no
 separate history-specific stream/subscription; row history is opt-in downstream consumption of the exact
 same envelope `TableActor` already publishes for every table). `Actors/ITableHistoryActor.cs`,
@@ -529,12 +529,12 @@ same envelope `TableActor` already publishes for every table). `Actors/ITableHis
 mirrors `TableHistoryGrainState` field-for-field (HistoryEnabled/Mode/Limit/ByField/WindowMs,
 `IdentityColumns`, the `Entries` version-history dictionary, the monotonic `Seq` counter); all
 identity-key derivation and retention application goes through the exact same pure, Orleans-free classes
-the grain calls — `StreamForge.Host.Grains.TableGroupKeyExtractor` / `RowKeyCodec` /
-`TableRowHistoryRetention` (`shared/StreamForge.AppCore/History/TableRowHistory.cs`, moved there from Host
+the grain calls — `StreamsForge.Host.Grains.TableGroupKeyExtractor` / `RowKeyCodec` /
+`TableRowHistoryRetention` (`shared/StreamsForge.AppCore/History/TableRowHistory.cs`, moved there from Host
 by plan 005's W2 AppCore extraction, namespace frozen per decision D-C). The actor shell's own
 state-transition/query logic is further extracted to a pure `TableHistoryApplication` class (mirroring
 `PipelineCompilation`/`GeneratorBatching`'s own extraction rationale — testable without any actor/timer/
-sidecar machinery; see `dapr/tests/StreamForge.Dapr.Tests/TableHistoryApplicationTests.cs`), so
+sidecar machinery; see `dapr/tests/StreamsForge.Dapr.Tests/TableHistoryApplicationTests.cs`), so
 `TableHistoryActor` itself is a thin shell: activation/state load-save, timer arm/disarm, and the
 `ITableHistoryActor` method signatures.
 
@@ -584,7 +584,7 @@ singleton — deliberately NOT a constructor-injected dependency of `DaprLifecyc
 static-shared-instance precedent instead.
 
 **Key-codec parity with the REST endpoint — verified, not assumed.** The shared endpoint
-(`shared/StreamForge.Api/Endpoints/TablesEndpoints.cs`'s `POST /{id}/history/lookup` handler) derives the
+(`shared/StreamsForge.Api/Endpoints/TablesEndpoints.cs`'s `POST /{id}/history/lookup` handler) derives the
 row-identity lookup key ITSELF, from the request's raw row, via the same
 `TableGroupKeyExtractor.ExtractIdentityColumns(def.Sql)` + `RowKeyCodec.EncodeIdentity` calls
 `TableHistoryActor.ResetAsync` makes for live deltas — **the endpoint, not the grain/actor, owns key
@@ -592,7 +592,7 @@ derivation**, identically on both runtimes (decision D-B: one shared endpoint bo
 DaprTableHistoryFacade.GetHistoryAsync(tableName, key, limit)` therefore receives an ALREADY-ENCODED key
 and does no derivation of its own — it just forwards to `ITableHistoryActor.GetHistoryAsync`. Because both
 derivations run the identical pure function against the identical `TableDefinition.Sql`, the two keys are
-guaranteed to match; `dapr/tests/StreamForge.Dapr.Tests/TableHistoryKeyCodecParityTests.cs` proves this
+guaranteed to match; `dapr/tests/StreamsForge.Dapr.Tests/TableHistoryKeyCodecParityTests.cs` proves this
 end-to-end (endpoint-style key lookup finds the entry the actor accumulated from live deltas), including the
 no-GROUP-BY whole-row-fallback case.
 
@@ -622,7 +622,7 @@ source's `Kind` can change on an update (e.g. `generator` → `url`), so both pa
 unconditional stop before the correct one starts, rather than tracking the previous `Kind`
 separately.
 
-`ConnectorActor` (`dapr/src/StreamForge.Dapr.Host/Actors/ConnectorActor.cs`, actor type
+`ConnectorActor` (`dapr/src/StreamsForge.Dapr.Host/Actors/ConnectorActor.cs`, actor type
 `"ConnectorActor"`, key = source name) is the Dapr counterpart of `ConnectorGrain`: url/file/folder
 kinds are a **one-shot actor timer**, re-armed after every fire at the freshly computed next-due
 time (Dapr's actor timer treats `period == Timeout.InfiniteTimeSpan` as a genuine one-shot); `grpc`
@@ -642,7 +642,7 @@ subscriber task calls back into **this same actor type** via a fresh `IConnector
 background thread, not from inside an in-flight turn, so from the Dapr runtime's perspective it is an
 ordinary new inbound invocation, not a reentrant self-call.
 
-**Config export/import** (`shared/StreamForge.Api/Endpoints/ConfigEndpoints.cs` — see the Orleans
+**Config export/import** (`shared/StreamsForge.Api/Endpoints/ConfigEndpoints.cs` — see the Orleans
 architecture doc for the full compose/merge/apply-order contract) is byte-identical code on this
 flavor too, reached through the same `ICatalogFacade`; connector *definitions* travel via export/
 import like any other source, but runtime state — dedup ledgers, connector counters/status — is
@@ -650,15 +650,15 @@ never exported and stays entirely per-flavor (Redis actor state here, a JSON gra
 Orleans), verified W6.
 
 **Statestore scoping caveat**: the shared `dapr/components/statestore.yaml` pins `keyPrefix: appid`
-and `scopes: [streamforge-dapr]` (see "Decisions made this wave" above) — every actor's state,
-`ConnectorActor` included, is reachable only under app-id `streamforge-dapr`. An isolated-app-id test
+and `scopes: [streamsforge-dapr]` (see "Decisions made this wave" above) — every actor's state,
+`ConnectorActor` included, is reachable only under app-id `streamsforge-dapr`. An isolated-app-id test
 instance (a different `--app-id` for test isolation, the pattern AGENTS.md documents for Orleans'
 arbitrary-port instances) has no statestore component in scope for actors at all, which panics the
-1.18 sidecar rather than degrading gracefully — a known environmental limitation, not a StreamForge
-bug: connector/actor-level tests on this flavor run against the shared fixed-port `streamforge-dapr`
+1.18 sidecar rather than degrading gracefully — a known environmental limitation, not a StreamsForge
+bug: connector/actor-level tests on this flavor run against the shared fixed-port `streamsforge-dapr`
 instance (reset via `tools/reset.sh` first for a clean slate), never an isolated app-id.
 
-**Federation**: this flavor can run a `grpc`-kind source subscribing to *any* StreamForge instance's
+**Federation**: this flavor can run a `grpc`-kind source subscribing to *any* StreamsForge instance's
 `DynamicStreamService` — including the Orleans flavor's, proven live in W6 (Dapr `:5399` subscribed
 the Orleans flavor's `positions` table by id, over both gRPC reflection and proto-text schema paths;
 `eventsEmittedTotal` climbed 418→498 in 10 s of real cross-runtime traffic). Being a federation
@@ -738,7 +738,7 @@ were never actually run — live in [`PARITY.md`](PARITY.md), added 2026-08-20.)
   clear 409; `/api/meta/arrangements` always returns `[]`; `frontierEpoch` is always `null`.
 - **gRPC serving** (phase 2, decision D-F): `:5499` is reserved but nothing listens on it yet;
   `GET /api/meta/grpc` reports it with an empty static-service list (shape preserved). `/proto`
-  downloads work today regardless (the shared descriptor machinery in `shared/StreamForge.AppCore`
+  downloads work today regardless (the shared descriptor machinery in `shared/StreamsForge.AppCore`
   doesn't care which runtime called it) — only the live gRPC *serving* endpoint is phase 2.
 - **`/docs`**: served — the same flavor-aware `orleans/docs/index.html` (+ sibling pages like `comparison.html`) the Orleans host serves; the original W4 null-`DocsFilePath` descope was removed once the docs covered both runtimes (post-plan-005 addendum).
 
@@ -756,7 +756,7 @@ and `pipelineMetrics` worked correctly in the same session.
 
 **Root cause (confirmed by direct repro + git-bisect against `ad7652d`, the pre-005 commit): a
 startup race, present on both sides of the 005 restructure — not a 005 regression.**
-`orleans/src/StreamForge.Host/Program.cs` kicks off registry seeding
+`orleans/src/StreamsForge.Host/Program.cs` kicks off registry seeding
 (`RegistryGrain.EnsureInitializedAsync`, which both seeds the catalog *and* starts every
 already-`Running` pipeline/table grain) from a fire-and-forget `ApplicationStarted` callback. That
 callback races `StreamBridgeService.ExecuteAsync`'s own `ApplicationStarted`-gated enumeration of
@@ -782,10 +782,10 @@ before enumerating pipelines/tables/sources, instead of trusting that Program.cs
 call got there first. `EnsureInitializedAsync` is idempotent and Orleans serializes both callers'
 calls to it (not `[MayInterleave]`), so whichever caller's turn runs first does the real seed+start
 and the other is a fast no-op — the race becomes harmless. This bug is specific to the Orleans
-flavor's `StreamBridgeService` (`orleans/src/StreamForge.Host/Services/StreamBridgeService.cs`); the
+flavor's `StreamBridgeService` (`orleans/src/StreamsForge.Host/Services/StreamBridgeService.cs`); the
 Dapr flavor's equivalent (`DaprStreamBridge`) was never affected (no equivalent race — see
-`dapr/src/StreamForge.Dapr.Host` startup sequencing) and delivered `tableDelta` correctly throughout.
-Regression coverage: `orleans/tests/StreamForge.Host.Tests/StreamBridgeServiceStartupRaceTests.cs`
+`dapr/src/StreamsForge.Dapr.Host` startup sequencing) and delivered `tableDelta` correctly throughout.
+Regression coverage: `orleans/tests/StreamsForge.Host.Tests/StreamBridgeServiceStartupRaceTests.cs`
 (a `TestCluster`-based test that starts `StreamBridgeService` before anything has seeded the
 registry — the losing side of the race — and asserts `tableDelta`/`pipelineResult` still relay).
 See `orleans/docs/comparison.html`'s "Measured latency" section for the re-measured, now-real Orleans
@@ -801,14 +801,14 @@ pub/sub round-trips here), which is the honest framing for client conversations.
 # Prereqs: dapr init already run (containers dapr_redis on 6379, dapr_placement, dapr_scheduler);
 # ~/.dotnet/dotnet is the SDK (NOT on PATH).
 cd dapr
-./tools/run.sh                       # dapr run --app-id streamforge-dapr --app-port 5399 ...
+./tools/run.sh                       # dapr run --app-id streamsforge-dapr --app-port 5399 ...
 # Ctrl-C, or from another shell:
-dapr stop --app-id streamforge-dapr
+dapr stop --app-id streamsforge-dapr
 
 ./tools/reset.sh                     # wipes this app's Redis keys (scoped SCAN, see above)
 ./tools/run.sh                       # next boot reseeds from empty state
 
-~/.dotnet/dotnet test dapr/StreamForge.Dapr.sln     # 102 tests as of W6 (JsonValueNormalizer, CatalogStore,
+~/.dotnet/dotnet test dapr/StreamsForge.Dapr.sln     # 102 tests as of W6 (JsonValueNormalizer, CatalogStore,
                                                      # streaming dispatch/normalization, generator batching,
                                                      # pipeline compilation/result-ring/router/actor-wire)
 ```

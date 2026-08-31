@@ -3,7 +3,7 @@
 **Status: PLANNED.**
 
 **Depends on**: 010 (`IInboundTransport`, the registry seam this plan deliberately does *not* fit into —
-see D3), 014 (the out-of-core connector project precedent, `StreamForge.Connectors.Database`), 015 for
+see D3), 014 (the out-of-core connector project precedent, `StreamsForge.Connectors.Database`), 015 for
 wave D only (field-level authorization has nothing to hang off until entitlements exist).
 
 **External dependency, new to this repository**: [`cotyar/ycs`](https://github.com/cotyar/ycs) — a fork of
@@ -41,7 +41,7 @@ around it.
 
 **D1 · The CRDT does not enter the dataflow.** Differential dataflow needs a deterministic
 `(data, time, diff)` stream with monotone logical time; a CRDT converges precisely by *not* having one. So
-a `YDoc` never crosses into `StreamForge.Engine`, never appears in a plan, and the SQL dialect gains
+a `YDoc` never crosses into `StreamsForge.Engine`, never appears in a plan, and the SQL dialect gains
 nothing CRDT-shaped. What crosses is what every other source produces: `EventRecord` rows on
 `(StreamConstants.SourcesNamespace, sourceName)`.
 
@@ -86,7 +86,7 @@ stamped into `CrdtDocGrain`'s state on `StartAsync` and are **never** fetched fr
 needs the current schema" is the natural way to reintroduce the deadlock.
 
 **D6 · If a loop is ever closed, reuse `LoopbackHub` + `SinkStepGuard`.** Both live in
-`shared/StreamForge.AppCore/` and are already exercised over hundreds of turns by `LoopbackCycleTests`. No
+`shared/StreamsForge.AppCore/` and are already exercised over hundreds of turns by `LoopbackCycleTests`. No
 new cycle-breaking mechanism.
 
 **D7 · Idempotence is free, and is the point.** Re-applying an already-merged update changes no state, so
@@ -154,7 +154,7 @@ its temp dir removed afterwards. Never 5199/5299/5399.
 
 | Wave | Owns | Delivers | Model | Depends |
 |---|---|---|---|---|
-| **B · Sync core** | `shared/StreamForge.Connectors.Crdt/**`, `orleans/src/.../Grains/CrdtDocGrain.cs`, `SourceKinds.Crdt` + `CrdtSourceConfig` (additive `[Id(n)]`) | The document grain on `ConnectorGrain`'s shape, the projector with every hazard above handled and tested (tombstone convention first), store-and-forward update ingestion modelled on `StreamForge.Connectors.Fix`'s bridge, and the idempotence test D7 names | Sonnet 5 high | A |
+| **B · Sync core** | `shared/StreamsForge.Connectors.Crdt/**`, `orleans/src/.../Grains/CrdtDocGrain.cs`, `SourceKinds.Crdt` + `CrdtSourceConfig` (additive `[Id(n)]`) | The document grain on `ConnectorGrain`'s shape, the projector with every hazard above handled and tested (tombstone convention first), store-and-forward update ingestion modelled on `StreamsForge.Connectors.Fix`'s bridge, and the idempotence test D7 names | Sonnet 5 high | A |
 
 ### Round 3
 
@@ -178,7 +178,7 @@ its temp dir removed afterwards. Never 5199/5299/5399.
 
 **Why awareness is last, not first.** In this platform a new transport *kind* costs one registry line —
 `SourceValidation`, config export/import, secret masking and the SPA form all pick it up automatically. A
-new *message type* is the opposite: a DTO, `StreamBridgeService`, `DaprStreamBridge`, `streamforge.proto`,
+new *message type* is the opposite: a DTO, `StreamBridgeService`, `DaprStreamBridge`, `streamsforge.proto`,
 four hand-written language clients, possibly `zset-cases.json` with four reducers, and
 `web/src/hooks/useTableRows.ts`. Worse, the platform has **no ephemeral, non-journalled channel at all** —
 that is a new concept, not a new instance of an existing one. Wave G is therefore scoped to SignalR and one
@@ -268,7 +268,7 @@ asked for "a test that round-trips a v1 update through Ycs and asserts the bytes
 by real Yjs" — that test already exists upstream, and duplicating it here would be re-testing somebody
 else's library.
 
-So `shared/StreamForge.Connectors.Crdt.Tests/YcsPinTests.cs` (4 tests) tests **the pin** instead:
+So `shared/StreamsForge.Connectors.Crdt.Tests/YcsPinTests.cs` (4 tests) tests **the pin** instead:
 - a v1 update produced by real Yjs decodes to the expected values, nested Y-types included;
 - re-encoding converges to the same document — byte equality is deliberately **not** asserted, because
   Yjs guarantees no such thing across versions and pinning it would turn a legal encoder change into a
@@ -279,7 +279,7 @@ So `shared/StreamForge.Connectors.Crdt.Tests/YcsPinTests.cs` (4 tests) tests **t
   state identical to after the first. It is the property the entire store-and-forward design rests on and
   it costs four lines to pin.
 
-**No empty library was created.** Wave B owns `shared/StreamForge.Connectors.Crdt`; until it exists the
+**No empty library was created.** Wave B owns `shared/StreamsForge.Connectors.Crdt`; until it exists the
 test project references `external/ycs/src/Ycs/Ycs.csproj` directly. `Ycs.csproj` is deliberately **not**
 listed in either solution — a `ProjectReference` builds only its `net10.0` target, whereas a solution
 entry would build all three (`netstandard2.0`, `net8.0`, `net10.0`) on every build forever.
@@ -306,7 +306,7 @@ inexpressible, and deletion is the half of this feature that goes wrong silently
 `_weight` are already spoken by CDC (`CdcStamp`) and already understood by the database sink planner. A
 third spelling would have meant every consumer learning it.
 
-**The projector** (`shared/StreamForge.Connectors.Crdt`) handles every hazard the plan's "the projection
+**The projector** (`shared/StreamsForge.Connectors.Crdt`) handles every hazard the plan's "the projection
 is the dangerous part" section names, each with its own test: reserved-column rename (`_ts` → `doc_ts`,
 never passed through, never silently dropped), recursive flattening on a dotted path, `YText` as its plain
 string, undeclared keys dropped rather than guessed, coercion through the platform's own
@@ -518,9 +518,9 @@ re-derives `DocBytes` from the live `_doc`, so an uncaptured attribution write w
 compaction or restart.
 
 **One thing the agent flagged, and the orchestrator reverted.** To call the inspector from the endpoint it
-had added a `ProjectReference` from `StreamForge.Api` to `StreamForge.Connectors.Crdt`. That assembly
+had added a `ProjectReference` from `StreamsForge.Api` to `StreamsForge.Connectors.Crdt`. That assembly
 referenced only Engine/Contracts/AppCore, and the boundary is deliberate — `SourceSchemaService`'s own doc
-comment says it **duplicates literals rather than reference** `StreamForge.Connectors.Database` "because
+comment says it **duplicates literals rather than reference** `StreamsForge.Connectors.Database` "because
 this assembly does not depend on that connector project". The reference would have pulled `Ycs`, and with
 it the `external/ycs` submodule, into the shared API assembly of **both** flavours, including the one that
 does not run CRDT at all (D9). The coupling was a single call to a pure function, so the inspection DTOs
@@ -541,8 +541,8 @@ deadline, and the two `HttpSinkClientTests` carry both a 5s deadline and a `GetF
 solution builds; docs gained a `#crdt-authz` section covering both new flags, the coarse-role-floor
 interaction, the decidability boundary and the deletion-attribution gap.
 
-**Note on the build:** `orleans/StreamForge.sln` could not complete a standard build during this wave —
-`MSB3027`, another session's host (PID 21175, port 6199) holding `orleans/src/StreamForge.Host/data/state/*.json`
+**Note on the build:** `orleans/StreamsForge.sln` could not complete a standard build during this wave —
+`MSB3027`, another session's host (PID 21175, port 6199) holding `orleans/src/StreamsForge.Host/data/state/*.json`
 open. That process was **not** killed. Verification used `-p:EnableDefaultContentItems=false`, which skips
 copying those live state files into `bin/` and changes nothing about compilation.
 

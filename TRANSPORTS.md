@@ -1,6 +1,6 @@
 # Adding a transport
 
-A **transport** is how bytes get into StreamForge (a source kind) or out of it (a sink kind). NATS is the
+A **transport** is how bytes get into StreamsForge (a source kind) or out of it (a sink kind). NATS is the
 reference implementation of both directions; this document is the recipe for the next one.
 
 Built in today: `nats` inbound and outbound, and (plan 012) a `file` sink that appends rows to a local
@@ -9,7 +9,7 @@ holds for a destination that is not a broker at all. `FileSinkTransport`/`FileSi
 reading next to the NATS pair: same interfaces, same fire-and-forget contract, a third of the code.
 
 The design goal is stated as a test, not as a promise:
-[`TransportRegistryTests`](orleans/tests/StreamForge.Host.Tests/TransportRegistryTests.cs) registers a
+[`TransportRegistryTests`](orleans/tests/StreamsForge.Host.Tests/TransportRegistryTests.cs) registers a
 transport the repository has never heard of and asserts the platform validates it, masks its credentials,
 drives its messages into rows, and offers it in the console. If a hardcoded per-kind branch ever creeps back
 in, those tests fail.
@@ -20,7 +20,7 @@ in, those tests fail.
 
 | You write | You do **not** touch |
 |---|---|
-| A config class in `shared/StreamForge.Contracts/ConnectorModels.cs` | `SecretsMasker` — secrets are found by `[Secret]` |
+| A config class in `shared/StreamsForge.Contracts/ConnectorModels.cs` | `SecretsMasker` — secrets are found by `[Secret]` |
 | One `IInboundTransport` and/or one `ISinkTransport` | `SourceValidation` — transports validate themselves |
 | One line in `InboundTransports` / `SinkTransports` | `ConnectorGrain` (Orleans) and `ConnectorActor` (Dapr) |
 | — | `NatsPublisherService` / `NatsSinkPublisherService` |
@@ -36,7 +36,7 @@ masking, eligibility filtering, form rendering — are now shared.
 
 ### 1. The config contract
 
-`shared/StreamForge.Contracts/ConnectorModels.cs`. Additive only: the **next free `[Id(n)]`**, never a
+`shared/StreamsForge.Contracts/ConnectorModels.cs`. Additive only: the **next free `[Id(n)]`**, never a
 renumber (field numbers are forever — see `CLAUDE.md`).
 
 ```csharp
@@ -66,7 +66,7 @@ public sealed class RvSubConfig
 **`[Secret]` is the whole secrets story.** It makes the value mask as `***` on every read path (GET, list,
 config export), and makes a written `***` restore the stored value on PUT. Getting this wrong used to mean a
 credential exported in plaintext, silently; now the failure mode is a compile-visible missing attribute, and
-[`SecretWalkTests`](orleans/tests/StreamForge.Host.Tests/SecretWalkTests.cs) fails if a known slot loses it.
+[`SecretWalkTests`](orleans/tests/StreamsForge.Host.Tests/SecretWalkTests.cs) fails if a known slot loses it.
 
 Do **not** mark identifiers (`Username`, `Url`, `Subject`) — masking an identifier makes the form unusable and
 the export unreadable.
@@ -113,7 +113,7 @@ internal sealed class RvSubscription(RvSubConfig cfg) : IInboundSubscription
 }
 ```
 
-**Contract you get for free**, all in [`SubscriberCore`](shared/StreamForge.AppCore/Transports/SubscriberCore.cs):
+**Contract you get for free**, all in [`SubscriberCore`](shared/StreamsForge.AppCore/Transports/SubscriberCore.cs):
 
 - Reconnect forever with the D-E backoff (`min(30s · 2^(k-1), 15 min)`); a *clean* end of the stream
   reconnects immediately with no backoff and resets the failure counter.
@@ -130,7 +130,7 @@ connection errors — throwing is how you ask for a reconnect.
 
 ### 3. Register it
 
-`shared/StreamForge.AppCore/Transports/InboundTransports.cs`:
+`shared/StreamsForge.AppCore/Transports/InboundTransports.cs`:
 
 ```csharp
 private static readonly List<IInboundTransport> Registered = [new NatsInboundTransport(), new RvInboundTransport()];
@@ -165,7 +165,7 @@ public sealed class RvSinkTransport : ISinkTransport
 own timeout. Both publisher services await it with no try/catch, deliberately — a sink that stalls would
 stall the pipeline it is attached to. Count failures internally (`SinkPublishCounters`), report them through
 the throttled `onFailure` callback, and drop. Copy
-[`NatsSinkClient`](shared/StreamForge.AppCore/Sinks/NatsSinkClient.cs) — its per-publish linked
+[`NatsSinkClient`](shared/StreamsForge.AppCore/Sinks/NatsSinkClient.cs) — its per-publish linked
 `CancellationTokenSource` is what makes "never blocks" true against a disconnected broker.
 
 Register in `SinkTransports.Registered`, same as above.
@@ -193,7 +193,7 @@ exactly the key `default`'s own generator is attached at — `staging`'s rows la
 and the publish **reported success**. Not a missing feature; a working cross-environment write, found
 while chasing an unrelated loopback inconsistency.
 
-`SinkEnvironmentScoping.Scope` (`shared/StreamForge.AppCore/Sinks/SinkEnvironmentScoping.cs`) is the fix:
+`SinkEnvironmentScoping.Scope` (`shared/StreamsForge.AppCore/Sinks/SinkEnvironmentScoping.cs`) is the fix:
 called at sink-client construction, it qualifies `Loopback.TargetSourceName` / `Duplex.SourceName` by the
 entity's own environment and returns a cloned `SinkSpec` — never written back to the catalog, the same
 rule plan 016 gives `@name` endpoints, so an export from `staging` stays importable into `prod`. The
@@ -215,8 +215,8 @@ config still carries.
 
 Everything above is **push**-shaped: something else decides when a message exists, and `SubscribeAsync`
 yields until it throws. A database table is the opposite — nothing arrives until you ask — and plan 014
-added a second seam for exactly that: [`IPolledTransport`](shared/StreamForge.AppCore/Transports/IPolledTransport.cs),
-implemented today by `StreamForge.Connectors.Database` (postgres, mssql, postgres-cdc, mssql-cdc).
+added a second seam for exactly that: [`IPolledTransport`](shared/StreamsForge.AppCore/Transports/IPolledTransport.cs),
+implemented today by `StreamsForge.Connectors.Database` (postgres, mssql, postgres-cdc, mssql-cdc).
 
 **It is a *sibling* of `IInboundTransport`, not a generalization of it — on purpose.** `IInboundTransport.Open`
 hands back an async enumerable, which means the polling loop (and its cursor — the one piece of state that
@@ -249,7 +249,7 @@ public sealed record PolledBatch(IReadOnlyList<Dictionary<string, object?>> Rows
   inside one `PollAsync` call would put those intermediate cursors back in memory, which is the exact
   failure this whole seam exists to avoid.
 - **The load-bearing rule: a failed cycle keeps the OLD cursor** — enforced once, in
-  [`PolledSourceCore`](shared/StreamForge.AppCore/Transports/PolledSourceCore.cs), not by each transport,
+  [`PolledSourceCore`](shared/StreamsForge.AppCore/Transports/PolledSourceCore.cs), not by each transport,
   because a transport bug is exactly the case the rule has to protect against, and a rule enforced by the
   code that might be buggy protects nothing. **Throwing from `PollAsync` is therefore a normal, expected
   outcome** — a database is down far more often than a config is wrong — not something your transport needs
@@ -264,7 +264,7 @@ public sealed record PolledBatch(IReadOnlyList<Dictionary<string, object?>> Rows
   what `TransportDescriptor.Mapping = false` tells the console: stop offering a mapping editor for this kind.
 - **`ISchemaProbe` is an optional capability**, not a second interface every polled transport must implement.
   `POST /api/transports/{kind}/probe` looks for it on the registered transport and 400s when it is absent —
-  which is how schema discovery reaches the console without `StreamForge.Api` learning what a database (or
+  which is how schema discovery reaches the console without `StreamsForge.Api` learning what a database (or
   anything else pull-shaped) actually is; it knows a probe returns fields and diagnostic notes, and nothing
   further. `TransportDescriptor.CanProbe` is what lets the console render the "Discover" button honestly
   instead of hopefully.
@@ -277,13 +277,13 @@ instead of polling anything — see below.
 
 ### Change data capture
 
-**Using either kind — standalone with no StreamForge server, or as a source inside StreamForge, with the
+**Using either kind — standalone with no StreamsForge server, or as a source inside StreamsForge, with the
 worked examples and every operational hazard below spelled out in full — is [`docs/cdc.md`](docs/cdc.md).**
 This section stays the *recipe* (what you'd change to add a third native CDC dialect); that document is the
 *user guide* for the two that already exist.
 
-The native CDC pair is `postgres-cdc` ([`PgCdcSource`](shared/StreamForge.Connectors.Database/PgCdcSource.cs))
-and `mssql-cdc` ([`MsSqlCdcSource`](shared/StreamForge.Connectors.Database/MsSqlCdcSource.cs)), both
+The native CDC pair is `postgres-cdc` ([`PgCdcSource`](shared/StreamsForge.Connectors.Database/PgCdcSource.cs))
+and `mssql-cdc` ([`MsSqlCdcSource`](shared/StreamsForge.Connectors.Database/MsSqlCdcSource.cs)), both
 `IPolledTransport` like their cursor-polled siblings — CDC is still pull-shaped from this platform's point
 of view, one cycle at a time, even though the *source* database is doing the pushing internally.
 
@@ -294,7 +294,7 @@ of view, one cycle at a time, even though the *source* database is doing the pus
 **The operational hazards, stated where an operator will actually read them (the descriptor `Help` text, not
 just here):**
 
-- An **undrained Postgres slot pins WAL until the *source* database's disk fills** — not StreamForge's disk,
+- An **undrained Postgres slot pins WAL until the *source* database's disk fills** — not StreamsForge's disk,
   the database being read from. `max_slot_wal_keep_size` is the server-side safety valve; it is not a
   substitute for keeping the source running.
 - **SQL Server CDC retention defaults to 3 days.** A source left stopped longer than that has permanently
@@ -331,7 +331,7 @@ The native kinds are an *addition* to that path, not a replacement for it: they 
 already speaks Postgres and SQL Server natively, so a slot/capture-table reader was cheap; nothing about it
 extends to a database this project has no client for.
 
-**The honest limit, restated so it does not get lost between the two paths:** a StreamForge source is an
+**The honest limit, restated so it does not get lost between the two paths:** a StreamsForge source is an
 append-only `EventRecord` stream — `_weight` on an *inbound* row is just a column, a value like any other,
 whichever path stamped it. The Engine's Z-set weights that make a table a genuine multiset are computed
 *from* table SQL, not carried in from ingress. So neither `postgres-cdc`/`mssql-cdc` nor the Debezium
@@ -339,7 +339,7 @@ envelope path retracts the row a delete removed; it arrives as one more event (`
 on the Debezium path) sitting in the stream next to every insert and update that came before it. The working
 pattern is `LATEST BY <key>` + `WHERE _op <> 'd'` on the downstream table — which **hides** a deleted key
 from query results but does **not free it**: the tombstone event, and everything before it, is still sitting
-in the source's history. See [`CdcEnvelope`](shared/StreamForge.AppCore/Connectors/Mapping/CdcEnvelope.cs)'s
+in the source's history. See [`CdcEnvelope`](shared/StreamsForge.AppCore/Connectors/Mapping/CdcEnvelope.cs)'s
 class doc for the canonical wording — this section restates it rather than diverging from it.
 
 ---
@@ -358,7 +358,7 @@ independently is the point.
 ### The `fix` format
 
 `format: "fix"` sits alongside `ndjson`/`json`/`csv`, parsed by
-[`FixParser`](shared/StreamForge.AppCore/Connectors/Formats/FixParser.cs) into the same
+[`FixParser`](shared/StreamsForge.AppCore/Connectors/Formats/FixParser.cs) into the same
 one-`JsonElement`-per-item shape the other three parsers already produce.
 
 - **tag=value, delimiter sniffed.** A real session speaks SOH (`\x01`); logs, tickets and test fixtures
@@ -410,10 +410,10 @@ produces something no counterparty would accept.
 ### The `fix` source kind
 
 A persistent FIX session — market data, drop-copy — as an `IInboundTransport`, living out of the core in
-[`shared/StreamForge.Connectors.Fix`](shared/StreamForge.Connectors.Fix) on `QuickFIXn.Core` 1.14.1,
+[`shared/StreamsForge.Connectors.Fix`](shared/StreamsForge.Connectors.Fix) on `QuickFIXn.Core` 1.14.1,
 registered the same way TIBCO Rendezvous would be (see "Transports whose client library cannot ship in
 this repo", below): `QuickFIXn.Core` is a dependency of this one out-of-core project, not of
-`StreamForge.AppCore`. This platform is always the FIX **initiator**, dialing out to the config's
+`StreamsForge.AppCore`. This platform is always the FIX **initiator**, dialing out to the config's
 `host`/`port`; the counterparty is always the acceptor.
 
 **Receive-only, on purpose — order entry is a separate plan.** A FIX session that both sends orders and
@@ -486,7 +486,7 @@ top-of-book and fanning its `MDEntries` group into one row per quote:
     "fix": {
       "host": "fix.venue.example.com",
       "port": 9880,
-      "senderCompId": "STREAMFORGE",
+      "senderCompId": "STREAMSFORGE",
       "targetCompId": "VENUE",
       "beginString": "FIX.4.4",
       "heartBtIntSeconds": 30,
@@ -518,7 +518,7 @@ of each.
 
 ### `fix-duplex` — a bidirectional session (plan 019): configuring the two halves
 
-`fix-duplex` (plan 019, [`shared/StreamForge.Connectors.Fix/FixDuplexTransport.cs`](shared/StreamForge.Connectors.Fix/FixDuplexTransport.cs))
+`fix-duplex` (plan 019, [`shared/StreamsForge.Connectors.Fix/FixDuplexTransport.cs`](shared/StreamsForge.Connectors.Fix/FixDuplexTransport.cs))
 is one live FIX session with an inbound half (execution reports, rejects, anything the venue sends back)
 and an outbound half (orders, cancels, replaces) — the third transport seam after `IInboundTransport` and
 `IPolledTransport`, `IDuplexTransport`. It is declared as **two entities that meet in the middle**:
@@ -585,7 +585,7 @@ sent as given; a venue reject for the duplicate is an ordinary first-class inbou
 platform-reserved columns, and the mapper must skip them.** A hand-built `Dictionary<string, object?>` in
 a unit test carries only the columns the test wrote. A REAL row — the only kind a `duplex` sink ever
 forwards in production — always carries `_ts` and `_source` (every row the engine produces has them;
-`StreamForge.Engine.PublicApi.EventRecord`'s own doc comment: "Reserved keys: `_ts`… `_source`"), and a
+`StreamsForge.Engine.PublicApi.EventRecord`'s own doc comment: "Reserved keys: `_ts`… `_source`"), and a
 row sourced from a TABLE's delta stream additionally carries `_weight` (`SinkStepGuard.RowOf` stamps it
 so a retraction is not indistinguishable from an insert downstream). Before wave 019-I2's live drop-copy
 check — the first check to send an order through a real `TableDefinition`'s SQL output rather than call
@@ -608,9 +608,9 @@ actually landed" for the fuller account.
   "connector": {
     "fix": {
       "host": "oms.venue.example.com", "port": 9881,
-      "senderCompId": "STREAMFORGE", "targetCompId": "VENUE",
+      "senderCompId": "STREAMSFORGE", "targetCompId": "VENUE",
       "beginString": "FIX.4.4", "heartBtIntSeconds": 30,
-      "resetOnLogon": false, "storePath": "/var/lib/streamforge/fix/fixoe.store",
+      "resetOnLogon": false, "storePath": "/var/lib/streamsforge/fix/fixoe.store",
       "generateClOrdId": false
     },
     "mapping": { "itemsPath": "$", "fields": [
@@ -638,7 +638,7 @@ correlation table, verified live end-to-end in `plans/019-fix-order-entry.md`'s 
 
 ### `fix-duplex` — mandatory sequence-number persistence, and how to recover (plan 019 D5)
 
-`fix-duplex` (plan 019, [`shared/StreamForge.Connectors.Fix/FixDuplexTransport.cs`](shared/StreamForge.Connectors.Fix/FixDuplexTransport.cs))
+`fix-duplex` (plan 019, [`shared/StreamsForge.Connectors.Fix/FixDuplexTransport.cs`](shared/StreamsForge.Connectors.Fix/FixDuplexTransport.cs))
 is the same `FixSourceConfig` as the receive-only `fix` kind above, dialed the same way, but it also sends —
 and that changes what `storePath`/`resetOnLogon` are allowed to be. Above, `storePath` empty + `resetOnLogon`
 true is **the right default for market data**: resending yesterday's quotes is worse than not resending them,
@@ -720,7 +720,7 @@ in-memory store outright rather than merely recommending against it.
 
 ## The console form
 
-`Describe()` returns a [`TransportDescriptor`](shared/StreamForge.AppCore/Transports/TransportDescriptor.cs),
+`Describe()` returns a [`TransportDescriptor`](shared/StreamsForge.AppCore/Transports/TransportDescriptor.cs),
 served from `GET /api/transports` (Viewer). The SPA renders it with one generic component
 ([`TransportConfigEditor.tsx`](web/src/components/sources/TransportConfigEditor.tsx)) — there is no
 per-transport React code, and adding one requires no change under `web/` at all.
@@ -777,7 +777,7 @@ files themselves.
 
 ```csharp
 // YourCompany.Orion.dll, dropped in <host binaries>/plugins/ (or wherever `Plugins:Path` points)
-public sealed class OrionPlugin : IStreamForgePlugin      // StreamForge.AppCore.Plugins
+public sealed class OrionPlugin : IStreamsForgePlugin      // StreamsForge.AppCore.Plugins
 {
     public string Name => "Orion connector 1.2.0";
     public void Register() => InboundTransports.Register(new OrionInboundTransport());
@@ -795,7 +795,7 @@ the host's.
 ### Config with no config class: the `settings` bag
 
 The one thing an out-of-tree kind cannot do is add a property to `ConnectorConfig`/`SinkSpec` — those live
-in `StreamForge.Contracts`, in this repo, and every typed config class is there for a reason
+in `StreamsForge.Contracts`, in this repo, and every typed config class is there for a reason
 (`SecretWalk` only recurses into types from that assembly, so a config class declared elsewhere would
 export its password in plaintext). The bag closes that from the other side:
 
@@ -830,7 +830,7 @@ stores, exports, imports and renders without knowing a single key. What it buys,
 - **Secrets still mask**, but by DESCRIPTOR, not by attribute: a field declared
   `Type = TransportFieldTypes.Secret` is masked as `"***"` on every read path and follows the same
   "sending `***` back keeps the stored value" rule as every typed credential. `SettingsBag`'s readers are
-  in `StreamForge.AppCore.Transports`.
+  in `StreamsForge.AppCore.Transports`.
 - **A kind nobody registered masks its WHOLE bag.** With no descriptor there is no way to tell a hostname
   from a password, and the platform fails closed — so an export taken on a host where the plugin is not
   installed is unhelpful rather than a leak.
@@ -839,7 +839,7 @@ stores, exports, imports and renders without knowing a single key. What it buys,
   else — call `NamedEndpoints.Resolve` on the value at connect time, exactly like a typed config does.
 - **The ceiling: no nested optional group.** A descriptor group with an `ObjectKey` (a nullable nested
   object — "core NATS vs a JetStream consumer") cannot be expressed in a flat bag. A kind that genuinely
-  needs one needs a typed class in `StreamForge.Contracts`, i.e. a PR here.
+  needs one needs a typed class in `StreamsForge.Contracts`, i.e. a PR here.
 
 ### Schema discovery works for push kinds too
 
@@ -854,7 +854,7 @@ stores, exports, imports and renders without knowing a single key. What it buys,
 
 For the kinds the generic form can't express — a topic browser, a connection tester, a query builder — a
 library outside this repo can ship its own React editor and have the console load it. Nothing under `web/`
-changes, and no StreamForge assembly is rebuilt.
+changes, and no StreamsForge assembly is rebuilt.
 
 A plugin is **one ES module** in the host's `ui-plugins/` directory (`<host output dir>/ui-plugins/`, or
 wherever `Ui:PluginsPath` points). Ship it from a connector package as content copied to the output
@@ -863,7 +863,7 @@ directory and a `PackageReference` installs the UI along with the transport. The
 
 ```js
 // ui-plugins/rv.js — see web/plugins-example/example-nats.js for a complete one.
-const { react, registerTransportEditor } = window.streamforge
+const { react, registerTransportEditor } = window.streamsforge
 registerTransportEditor('rv', RvEditor, 'inbound')  // omit 'inbound' to serve the sink half too
 ```
 
@@ -872,15 +872,15 @@ disabled, idPrefix, direction }` — and replaces `TransportConfigEditor`'s outp
 source modal and the sinks editor alike (they both render through that one component, which is why one
 registration covers both).
 
-`window.streamforge` also hands over what the console already has, so a plugin never pays for a second
-copy of it (`apiVersion` is `2`; feature-detect with `(window.streamforge?.apiVersion ?? 0) >= 2`):
+`window.streamsforge` also hands over what the console already has, so a plugin never pays for a second
+copy of it (`apiVersion` is `2`; feature-detect with `(window.streamsforge?.apiVersion ?? 0) >= 2`):
 
 | Member | What it is |
 | --- | --- |
 | `react` | The console's own React. A bundled second copy breaks hooks. |
 | `api` | Authenticated REST — `get`/`post`/`put`/`del`, bearer token AND the selected environment header, `ApiError.status` on failure. |
 | `live` | `subscribeTable` / `subscribeSource` / `subscribePipeline` on the console's ONE SignalR connection. A plugin that opened its own client would mean a second socket, a second auth handshake and a second subscription for the same rows. |
-| `loadLiveTables()` | Lazily resolves `{ createCollection, createLiveQueryCollection, streamForgeCollectionOptions, connect }` — TanStack DB over a StreamForge table, for a plugin that wants query/join on top of raw deltas. Dynamically imported, so a console that loads no plugin never downloads it; `connect()` is memoized and uses this console's origin + session token. |
+| `loadLiveTables()` | Lazily resolves `{ createCollection, createLiveQueryCollection, streamsForgeCollectionOptions, connect }` — TanStack DB over a StreamsForge table, for a plugin that wants query/join on top of raw deltas. Dynamically imported, so a console that loads no plugin never downloads it; `connect()` is memoized and uses this console's origin + session token. |
 
 Rules that bite:
 
@@ -888,7 +888,7 @@ Rules that bite:
   editor doesn't show (an optional group's nested object, a secret) and a bare `{[key]: v}` deletes them.
 - **Secrets stay secrets-lite**: on `isEdit` a stored value reads back as `***`, and sending `***`
   unchanged keeps it. An editor that "helpfully" clears that field wipes the credential on save.
-- **`window.streamforge.react` is the console's own React** — use it rather than bundling a second copy,
+- **`window.streamsforge.react` is the console's own React** — use it rather than bundling a second copy,
   which would break hooks. `apiVersion` (1) is bumped only if those props change shape.
 - **Validation still lives in `Validate()` on the backend.** A plugin that also validates is a second
   validator that drifts, exactly as above.
@@ -908,7 +908,7 @@ transport.
 Plan 016 wave 6. Any config field holding a host, URL or connection string can be authored as `@name`
 instead of a literal — the **whole** value, never a substring (`nats://user@host:4222` is left exactly as
 written; only a value that is *entirely* `@` + a name counts). `NamedEndpoints.Resolve(value)`
-(`shared/StreamForge.AppCore/Discovery/NamedEndpoints.cs`) turns it into whatever this environment has
+(`shared/StreamsForge.AppCore/Discovery/NamedEndpoints.cs`) turns it into whatever this environment has
 configured under `Endpoints:<name>` — read once at host startup from `--Endpoints:<name>=…` /
 `Endpoints__NAME` / an `Endpoints` object in `appsettings.json`, never from the catalog — and throws a
 message naming both the missing endpoint and every name this environment does know. `TryResolve` is the
@@ -939,19 +939,19 @@ kind's own docs if its endpoint-shaped field is the sort that might hold one.
 ## Transports whose client library cannot ship in this repo
 
 TIBCO Rendezvous is the motivating case: `TIBCO.Rendezvous` is not on public NuGet — it ships with a
-licensed Rendezvous installation and wraps a native library. Putting it in `shared/StreamForge.AppCore`
+licensed Rendezvous installation and wraps a native library. Putting it in `shared/StreamsForge.AppCore`
 would make the main build require a license.
 
 Put it in its own project that neither solution references, and register from host startup — either by
 editing that host (when the project is in this repo but unreferenced by the main build):
 
 ```csharp
-// orleans/src/StreamForge.Host/Program.cs — before the host starts serving.
+// orleans/src/StreamsForge.Host/Program.cs — before the host starts serving.
 InboundTransports.Register(new RvInboundTransport());
 SinkTransports.Register(new RvSinkTransport());
 ```
 
-…or, when it is not in this repo at all, by shipping an `IStreamForgePlugin` and dropping the DLL in
+…or, when it is not in this repo at all, by shipping an `IStreamsForgePlugin` and dropping the DLL in
 `plugins/` — see [An out-of-tree kind](#an-out-of-tree-kind-install-dont-fork) above, which is the same
 registration one file later.
 
@@ -962,7 +962,7 @@ a built-in.
 
 ## What is deliberately *not* pluggable
 
-**The `grpc` source kind stays its own branch** in both drivers. It subscribes to a remote StreamForge and
+**The `grpc` source kind stays its own branch** in both drivers. It subscribes to a remote StreamsForge and
 decodes typed protobuf frames against a schema fetched by reflection — it never asks "what format is this
 payload", which is the question this seam is built around. Bending it into `IInboundTransport` would mean
 widening the interface for exactly one implementation. `IInboundTransport` is the subject/topic +
@@ -1007,9 +1007,9 @@ from. What runs is still one explicit `Register()` call, written by the plugin's
 - [ ] `IInboundTransport` / `ISinkTransport` implemented, including `Describe()` — **or**, for a pull-shaped
       kind, `IPolledTransport` (plus `ISchemaProbe` if it can discover its own schema)
 - [ ] Registered in `InboundTransports` / `SinkTransports` / `PolledTransports` (or, out-of-tree, from an
-      `IStreamForgePlugin` in `plugins/` — and then config in the `settings` bag rather than a new property
+      `IStreamsForgePlugin` in `plugins/` — and then config in the `settings` bag rather than a new property
       on `ConnectorConfig`)
-- [ ] `~/.dotnet/dotnet test orleans/StreamForge.sln` and `dapr/StreamForge.Dapr.sln` — both suites green,
+- [ ] `~/.dotnet/dotnet test orleans/StreamsForge.sln` and `dapr/StreamsForge.Dapr.sln` — both suites green,
       **no existing test file modified**
 - [ ] `cd web && bun run build` — should need no source change; it is a check that nothing regressed
 - [ ] Only if the generic form genuinely can't express the kind: a UI plugin (see

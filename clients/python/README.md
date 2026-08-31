@@ -1,6 +1,6 @@
-# streamforge-client
+# streamsforge-client
 
-Sync-first Python client for [StreamForge](../../README.md) live tables: subscribe to a
+Sync-first Python client for [StreamsForge](../../README.md) live tables: subscribe to a
 materialized table, get a `pandas.DataFrame` that's always current, ad-hoc SQL, and pushing rows
 into an ingest source -- all without a browser.
 
@@ -16,9 +16,9 @@ uv pip install -e '.[dev]'
 ## Quickstart
 
 ```python
-import streamforge
+import streamsforge
 
-sf = streamforge.connect(url="http://localhost:5199", grpc="localhost:5299", user="admin", password="admin123!")
+sf = streamsforge.connect(url="http://localhost:5199", grpc="localhost:5299", user="admin", password="admin123!")
 
 t = sf.table("trigger_monitor")          # subscribes, snapshots, replays; blocks until ready
 t.rows                                   # list[dict], thread-safe copy of the current state
@@ -36,18 +36,18 @@ sf.snapshot("mc_path_pnl")               # one-shot REST read, no subscription, 
 ## Config
 
 Resolved in this order (first hit wins, per field): explicit `connect()` kwargs -> environment ->
-`~/.config/streamforge/config.toml`.
+`~/.config/streamsforge/config.toml`.
 
 | kwarg | env | toml key |
 |---|---|---|
-| `url` | `STREAMFORGE_BASE_URL` | `base_url` |
-| `grpc` | `STREAMFORGE_GRPC` | `grpc` |
-| `user` | `STREAMFORGE_ADMIN_USER` | `user` |
-| `password` | `STREAMFORGE_ADMIN_PASS` | `password` |
+| `url` | `STREAMSFORGE_BASE_URL` | `base_url` |
+| `grpc` | `STREAMSFORGE_GRPC` | `grpc` |
+| `user` | `STREAMSFORGE_ADMIN_USER` | `user` |
+| `password` | `STREAMSFORGE_ADMIN_PASS` | `password` |
 | -- | `SF_INGEST_KEY` | `ingest_key` |
 
 ```toml
-# ~/.config/streamforge/config.toml
+# ~/.config/streamsforge/config.toml
 base_url = "http://localhost:5199"
 grpc = "localhost:5299"
 user = "admin"
@@ -83,7 +83,7 @@ sf.adhoc()              # DataFrame of adhoc_* tables
 sf.drop_adhoc("adhoc_by_cp")
 ```
 
-A rejected query raises `streamforge.SqlError`; `str(err)` renders the offending line with a
+A rejected query raises `streamsforge.SqlError`; `str(err)` renders the offending line with a
 caret, and `.diagnostics` carries the engine's raw `{message, line, column, severity}` list.
 
 ## Ingest
@@ -152,7 +152,7 @@ growing without bound the way a naive producer/consumer queue would under a slow
 
 ## Protobuf stubs
 
-`src/streamforge/_pb/` is generated from `orleans/src/StreamForge.Host/Protos/streamforge.proto`
+`src/streamsforge/_pb/` is generated from `orleans/src/StreamsForge.Host/Protos/streamsforge.proto`
 and **committed**, so installing the package needs no codegen step. Regenerate after a proto
 change:
 

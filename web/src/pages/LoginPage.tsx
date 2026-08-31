@@ -57,7 +57,7 @@ export function LoginPage() {
         <Card>
           <CardHeader>
             <CardTitle>Sign in</CardTitle>
-            <CardDescription>Enter your StreamForge credentials to continue.</CardDescription>
+            <CardDescription>Enter your StreamsForge credentials to continue.</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit}>

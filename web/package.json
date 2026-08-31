@@ -1,5 +1,5 @@
 {
-  "name": "streamforge-web",
+  "name": "streamsforge-web",
   "version": "0.1.0",
   "scripts": {
     "dev": "vite",
@@ -14,8 +14,8 @@
     "@streamdown/code": "^1.1.1",
     "@streamdown/math": "^1.0.2",
     "@streamdown/mermaid": "^1.0.2",
-    "@streamforge/client": "workspace:*",
-    "@streamforge/tanstack-db": "workspace:*",
+    "@streamsforge/client": "workspace:*",
+    "@streamsforge/tanstack-db": "workspace:*",
     "@tanstack/db": "^0.1.12",
     "@xyflow/react": "^12.11.2",
     "class-variance-authority": "^0.7.1",

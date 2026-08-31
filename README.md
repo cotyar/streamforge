@@ -1,4 +1,4 @@
-# StreamForge
+# StreamsForge
 
 **Streaming SQL over live event streams — implemented twice, on Microsoft Orleans and on Dapr,
 against one shared core.** Write a `SELECT` over a stream, get a continuously-updated result or a
@@ -8,7 +8,7 @@ The interesting part isn't that it runs. It's that the *same* SQL engine, REST/S
 console run on two very different distributed runtimes — so the comparison between them is measured
 rather than argued.
 
-![StreamForge dashboard](docs/img/dashboard.png)
+![StreamsForge dashboard](docs/img/dashboard.png)
 
 ## The measured bit
 
@@ -38,7 +38,7 @@ Or from source (needs the .NET 10 SDK and [bun](https://bun.sh)):
 ```bash
 git submodule update --init            # external/ycs — the Yjs CRDT port; the build needs it
 cd web && bun install && bun run build && cd ..
-dotnet run --project orleans/src/StreamForge.Host   # http://localhost:5199
+dotnet run --project orleans/src/StreamsForge.Host   # http://localhost:5199
 ```
 
 First start seeds a demo world — 6 market-data sources, 7 pipelines, 5 materialized tables — and
@@ -100,11 +100,11 @@ web/        React 19 + Tailwind 4 + shadcn console, served by both hosts
 
 The Engine is pure: no runtime types cross into it, which is what makes the two-runtime comparison
 honest. Everything above it — REST, SignalR, auth, the console — is written once in `shared/` and
-registered by both hosts with a single `AddStreamForgeApi()`.
+registered by both hosts with a single `AddStreamsForgeApi()`.
 
 Deeper: [architecture](orleans/ARCHITECTURE.md) · [design rationale](orleans/DESIGN.md) ·
 [Dapr flavor](dapr/ARCHITECTURE.md) · [adding a transport](TRANSPORTS.md) ·
-[using the native CDC readers, standalone or inside StreamForge](docs/cdc.md) ·
+[using the native CDC readers, standalone or inside StreamsForge](docs/cdc.md) ·
 [execution plans the system was built from](plans/README.md).
 
 ## What this is not
@@ -122,8 +122,8 @@ Deeper: [architecture](orleans/ARCHITECTURE.md) · [design rationale](orleans/DE
 ## Tests
 
 ```bash
-dotnet test orleans/StreamForge.sln     # 897
-dotnet test dapr/StreamForge.Dapr.sln   # 181
+dotnet test orleans/StreamsForge.sln     # 897
+dotnet test dapr/StreamsForge.Dapr.sln   # 181
 ```
 
 Both suites must be green for any change to `shared/` — that's the regression gate that keeps the

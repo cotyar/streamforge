@@ -18,7 +18,7 @@
  */
 
 import * as signalR from "@microsoft/signalr";
-import { StreamForgeError } from "./errors.js";
+import { StreamsForgeError } from "./errors.js";
 import type { RestClient } from "./http.js";
 import * as tablesModule from "./tables.js";
 import type { Transport } from "./transport.js";
@@ -169,7 +169,7 @@ export class SignalRTransport implements Transport {
       } catch {
         // best-effort: if SubscribeTable itself failed, the server likely never registered us
       }
-      throw new StreamForgeError(`SignalR SubscribeTable('${tableName}') failed to establish: ${String(err)}`);
+      throw new StreamsForgeError(`SignalR SubscribeTable('${tableName}') failed to establish: ${String(err)}`);
     }
 
     const iterate = async function* (): AsyncGenerator<readonly [Delta[], number]> {
@@ -181,7 +181,7 @@ export class SignalRTransport implements Transport {
           }
           if (signal.aborted) return;
           if (ended) {
-            if (endError) throw new StreamForgeError(`SignalR subscription for '${tableName}' ended: ${endError.message}`);
+            if (endError) throw new StreamsForgeError(`SignalR subscription for '${tableName}' ended: ${endError.message}`);
             return;
           }
           await new Promise<void>((resolve) => {
@@ -225,7 +225,7 @@ export async function probeSignalRMode(http: RestClient): Promise<SignalRMode> {
       await probe.close();
       return mode;
     } catch (err) {
-      console.warn(`streamforge: signalr:${mode} unavailable (${String(err)}), trying next mode`);
+      console.warn(`streamsforge: signalr:${mode} unavailable (${String(err)}), trying next mode`);
     }
   }
   return "lp";

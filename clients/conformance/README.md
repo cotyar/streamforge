@@ -1,7 +1,7 @@
 # Z-set reducer conformance suite
 
 `zset-cases.json` is the shared, language-neutral test set for the one piece of logic every
-StreamForge client must get right: reducing a Z-set delta stream into live rows, across the race
+StreamsForge client must get right: reducing a Z-set delta stream into live rows, across the race
 between `SubscribeTable` and the initial `GET /rows` snapshot.
 
 It exists because that logic is currently reimplemented per language — `clients/python`,

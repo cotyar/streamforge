@@ -1,8 +1,9 @@
 {
-  "name": "streamforge",
+  "name": "streamsforge",
   "private": true,
   "description": "Workspace root. Exists so the local packages link instead of copy — see the comment in AGENTS.md's build section.",
   "workspaces": [
+    "landing",
     "web",
     "clients/typescript",
     "clients/tanstack-db",

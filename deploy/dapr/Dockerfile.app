@@ -3,7 +3,7 @@
 # deploy/dapr/) so this stage can COPY across shared/, dapr/src/, web/, and orleans/docs/ — see
 # ../../.dockerignore for what's excluded from that context.
 #
-#   docker build -f deploy/dapr/Dockerfile.app -t streamforge-dapr-app .
+#   docker build -f deploy/dapr/Dockerfile.app -t streamsforge-dapr-app .
 #
 # Runs identically under `docker compose -f deploy/dapr/compose.yaml up` and as the ingress container of
 # the Cloud Run multi-container service in deploy/dapr/service.yaml (see deploy/dapr/README.md).
@@ -25,14 +25,14 @@ RUN bun run --cwd web build
 # ---- Stage 2: .NET publish --------------------------------------------------------------------------
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS dotnet-build
 WORKDIR /src
-# Preserve the repo's relative directory layout — StreamForge.Dapr.Host.csproj's ProjectReference
-# entries point at ..\..\..\shared\* (dapr/src/StreamForge.Dapr.Host -> repo root -> shared), so the
+# Preserve the repo's relative directory layout — StreamsForge.Dapr.Host.csproj's ProjectReference
+# entries point at ..\..\..\shared\* (dapr/src/StreamsForge.Dapr.Host -> repo root -> shared), so the
 # copied tree must keep the same shape for those relative paths to resolve inside the build context.
 COPY shared/ shared/
 COPY dapr/src/ dapr/src/
-WORKDIR /src/dapr/src/StreamForge.Dapr.Host
-RUN dotnet restore StreamForge.Dapr.Host.csproj
-RUN dotnet publish StreamForge.Dapr.Host.csproj -c Release -o /app/publish --no-restore
+WORKDIR /src/dapr/src/StreamsForge.Dapr.Host
+RUN dotnet restore StreamsForge.Dapr.Host.csproj
+RUN dotnet publish StreamsForge.Dapr.Host.csproj -c Release -o /app/publish --no-restore
 
 # ---- Stage 3: runtime ----------------------------------------------------------------------------
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
@@ -40,7 +40,7 @@ WORKDIR /app
 
 COPY --from=dotnet-build /app/publish ./
 # Baked-in static assets (decision D-A): the SPA and the shared docs page, pointed at by the two config
-# keys StreamForge.Dapr.Host.Program.cs already reads (Web:Dist / Docs:File, env-mapped as Web__Dist /
+# keys StreamsForge.Dapr.Host.Program.cs already reads (Web:Dist / Docs:File, env-mapped as Web__Dist /
 # Docs__File — ASP.NET Core's double-underscore convention for nested config keys).
 COPY --from=web-build /src/web/dist ./web-dist
 COPY orleans/docs/ ./docs/

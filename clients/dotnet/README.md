@@ -1,19 +1,19 @@
-# StreamForge.Client (.NET)
+# StreamsForge.Client (.NET)
 
-.NET client for StreamForge live tables: gRPC and SignalR behind one `ITransport`, a `LiveTable`
+.NET client for StreamsForge live tables: gRPC and SignalR behind one `ITransport`, a `LiveTable`
 that keeps one table's Z-set current, ad-hoc SQL, and ingest. Targets `net10.0`.
 
 It has **no ProjectReference to the engine**. The only coupling is build-time codegen: `Grpc.Tools`
-compiles the engine's own `orleans/src/StreamForge.Host/Protos/streamforge.proto` into this
+compiles the engine's own `orleans/src/StreamsForge.Host/Protos/streamsforge.proto` into this
 assembly, so the wire contract cannot drift from the server's, while the client stays shippable on
 its own. See `clients/python/README.md` and `clients/typescript/README.md` for the shared design all
-StreamForge clients implement; this file covers what is .NET-specific.
+StreamsForge clients implement; this file covers what is .NET-specific.
 
 ## Build & test
 
 ```bash
-~/.dotnet/dotnet build clients/dotnet/StreamForge.Client.slnx
-~/.dotnet/dotnet test  clients/dotnet/StreamForge.Client.slnx
+~/.dotnet/dotnet build clients/dotnet/StreamsForge.Client.slnx
+~/.dotnet/dotnet test  clients/dotnet/StreamsForge.Client.slnx
 ```
 
 `dotnet` lives at `~/.dotnet/dotnet` and is **not on PATH** in this repo — always the full path.
@@ -21,9 +21,9 @@ StreamForge clients implement; this file covers what is .NET-specific.
 ## Quick start
 
 ```csharp
-using StreamForge.Client;
+using StreamsForge.Client;
 
-await using var sf = await StreamForgeClient.ConnectAsync(new ConnectOptions
+await using var sf = await StreamsForgeClient.ConnectAsync(new ConnectOptions
 {
     Url = "http://localhost:5199",
     User = "admin",
@@ -46,9 +46,9 @@ Every string option falls back to an environment variable when left null (explic
 
 | Option | Environment variable |
 | --- | --- |
-| `Url` | `STREAMFORGE_BASE_URL` |
-| `GrpcTarget` | `STREAMFORGE_GRPC`, then `Url`'s host with **port + 100** |
-| `User` / `Password` | `STREAMFORGE_ADMIN_USER` / `STREAMFORGE_ADMIN_PASS` |
+| `Url` | `STREAMSFORGE_BASE_URL` |
+| `GrpcTarget` | `STREAMSFORGE_GRPC`, then `Url`'s host with **port + 100** |
+| `User` / `Password` | `STREAMSFORGE_ADMIN_USER` / `STREAMSFORGE_ADMIN_PASS` |
 | `IngestKey` | `SF_INGEST_KEY` |
 
 `Token` supplies a pre-minted JWT and skips login until it expires (~11h). `IngestKey` is preferred
@@ -130,7 +130,7 @@ audit log of every batch; a caller that needs to see every one must use `Changed
 ## Reducer and cross-language conformance
 
 `ZSet` is this client's own copy of the reducer (canonical-row identity, weight summation, group
-supersession, the replay "already reflected" check). Every StreamForge client implements it
+supersession, the replay "already reflected" check). Every StreamsForge client implements it
 independently, and `ConformanceTests` runs the shared `clients/conformance/zset-cases.json` suite
 against this one — which is what turns "these agree" into something that fails on the same named
 case in every language instead of drifting quietly.
@@ -171,7 +171,7 @@ materialized table: tables are computed by the engine, never written to directly
 ## Public surface
 
 ```csharp
-StreamForgeClient.ConnectAsync(ConnectOptions, CancellationToken) -> StreamForgeClient
+StreamsForgeClient.ConnectAsync(ConnectOptions, CancellationToken) -> StreamsForgeClient
 client.TransportName                                     // "grpc" | "signalr:ws" | ":sse" | ":lp"
 client.TableAsync(name, keyFields?, timeout?, flush?, ct) -> LiveTable
 client.SnapshotAsync(name, limit?, ct)                   // one-shot read, no subscription
@@ -187,11 +187,11 @@ table.WatchAsync(ct)                                     // IAsyncEnumerable<Row
 table.Value(column, keys) / table.WaitForAsync(predicate, timeout, ct)
 ```
 
-Errors: `StreamForgeException` is the base; `AuthException`, `NotReadyException` (a brand-new table
+Errors: `StreamsForgeException` is the base; `AuthException`, `NotReadyException` (a brand-new table
 that nobody has pushed to yet never fills — this is expected, not a failure of the client),
 `IngestRejectedException`, `SqlException`.
 
-Both `StreamForgeClient` and `LiveTable` are `IAsyncDisposable` — `await using` is the intended
+Both `StreamsForgeClient` and `LiveTable` are `IAsyncDisposable` — `await using` is the intended
 shape.
 
 ## Tests

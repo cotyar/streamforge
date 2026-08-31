@@ -135,7 +135,7 @@ describe('decide', () => {
 
   // ---------------------------------------------------------- specificity on the approval axis (wave 8)
   //
-  // These are the same cases shared/StreamForge.AppCore.Tests/Access/PermissionEvaluatorTests.cs pins
+  // These are the same cases shared/StreamsForge.AppCore.Tests/Access/PermissionEvaluatorTests.cs pins
   // for PermissionEvaluator.Specificity. A divergence here is a security bug no .NET suite can see —
   // the SPA would offer a plain "Delete" button for an action the server will answer with
   // "requires approval", or hide one the operator is entitled to use outright.
@@ -213,7 +213,7 @@ describe('decide', () => {
 describe('old-server fallback (no permissions[] at all)', () => {
   // AuthProvider does the falling back; what is pinned here is the TABLE it falls back to, which must
   // reproduce the legacy ASP.NET policies exactly — the same route-by-route mapping
-  // shared/StreamForge.AppCore.Tests/Access/LegacyEquivalenceMatrixTests.cs pins on the server, and the
+  // shared/StreamsForge.AppCore.Tests/Access/LegacyEquivalenceMatrixTests.cs pins on the server, and the
   // same one BuiltInRoleCatalog seeds the three built-in roles from.
   const { minRoleFor, ROLE_ORDER } = __testing
   const admits = (role: 'Viewer' | 'Editor' | 'Admin', action: string) =>

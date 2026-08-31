@@ -2,7 +2,7 @@
 
 A Python trades enricher — plan 005 (Dapr sibling runtime), wave W8-A. This is the polyglot-reach
 demo the Dapr flavor exists for: a non-.NET process participating in the platform through nothing
-but its own Dapr sidecar's HTTP API, no shared assemblies, no StreamForge code in the loop at all.
+but its own Dapr sidecar's HTTP API, no shared assemblies, no StreamsForge code in the loop at all.
 
 ## What it does
 
@@ -65,7 +65,7 @@ the republished envelope on `sf-sources` (or run the full console/host stack and
 
 ## Note on the shared pubsub component
 
-The shared `dapr/components/pubsub.yaml` was originally scoped to app-id `streamforge-dapr` only,
+The shared `dapr/components/pubsub.yaml` was originally scoped to app-id `streamsforge-dapr` only,
 which blocked every polyglot processor's sidecar (`ERR_PUBSUB_NOT_FOUND`). The scope was removed
 after this wave landed — all processors now run against `--resources-path ../../components`
 directly, as documented above. (Verification during the wave used a temporary local component copy,

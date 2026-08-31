@@ -1,5 +1,5 @@
 /**
- * Contract tests against a real, isolated StreamForge engine (see engine-fixture.ts), run once
+ * Contract tests against a real, isolated StreamsForge engine (see engine-fixture.ts), run once
  * per transport -- the whole justification for the Transport interface (design doc §3.6/§8):
  * implementations that agree on every assertion are interchangeable, and one that drifts fails on
  * the same line the others pass.
@@ -15,7 +15,7 @@ import { bootEngine, preflightSkipReason, type Engine } from "./engine-fixture.j
 
 const skipReason = preflightSkipReason();
 const describeOrSkip = skipReason ? describe.skip : describe;
-if (skipReason) console.warn(`streamforge contract tests: SKIPPED -- ${skipReason}`);
+if (skipReason) console.warn(`streamsforge contract tests: SKIPPED -- ${skipReason}`);
 
 describeOrSkip("contract: isolated engine", () => {
   let engine: Engine;

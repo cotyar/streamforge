@@ -1,4 +1,4 @@
-// StreamForge Kotlin client (design doc: apps/websites/otc-terms/docs/python-client-design.md,
+// StreamsForge Kotlin client (design doc: apps/websites/otc-terms/docs/python-client-design.md,
 // Python-specific choices ignored -- this module is coroutines-first, not thread-first).
 //
 // Two live transports behind one `TableTransport` interface: gRPC via grpc-kotlin (generated
@@ -84,7 +84,7 @@ protobuf {
 tasks.test {
     useJUnitPlatform()
     // The conformance suite and the contract tests read sibling directories
-    // (../conformance/zset-cases.json, ../../orleans/src/StreamForge.Host) relative to the
+    // (../conformance/zset-cases.json, ../../orleans/src/StreamsForge.Host) relative to the
     // project directory, matching clients/python/tests' own layout assumption.
     workingDir = projectDir
     testLogging {

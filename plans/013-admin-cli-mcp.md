@@ -7,12 +7,12 @@ of this stuff."*
 
 ## What "the admin part" is here
 
-Everything an operator does to a running StreamForge instance through the console, done from a
+Everything an operator does to a running StreamsForge instance through the console, done from a
 terminal or by an agent instead: health, the catalog (sources / pipelines / tables), entity
 lifecycle (start / stop / delete), SQL validation before committing to a definition, reading rows
 and results (including the plan 012 CSV), and catalog config export / import.
 
-Both flavors expose the identical REST surface (`shared/StreamForge.Api`), so one client covers
+Both flavors expose the identical REST surface (`shared/StreamsForge.Api`), so one client covers
 Orleans on `:5199` and Dapr on `:5399` with nothing but a different base URL.
 
 ## Shape: three files, zero dependencies
@@ -36,7 +36,7 @@ the server half of the tools flow is four methods (`initialize`, `notifications/
 ## Auth
 
 `SF_URL` (default `http://localhost:5199`), and a token from — in order — `--token`, `SF_TOKEN`,
-`~/.streamforge/token.json` (written by `sf login`, mode 600), or a `SF_USER`/`SF_PASSWORD` login
+`~/.streamsforge/token.json` (written by `sf login`, mode 600), or a `SF_USER`/`SF_PASSWORD` login
 performed on the spot. No credential is ever written to disk; only the JWT the server issued is,
 and only by an explicit `sf login`. There are no default credentials in the code — the seeded
 logins live in the repo docs, not in the tool.

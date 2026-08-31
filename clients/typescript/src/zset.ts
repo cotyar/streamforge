@@ -3,7 +3,7 @@
  * console), itself the reference implementation the Python client's `_zset.py` also ported from.
  * Pure functions/state, no I/O: this module never touches a socket, so it is testable with
  * handcrafted fixtures alone (see ../test/conformance.test.ts, which runs it against
- * ../conformance/zset-cases.json -- the cross-language conformance suite every StreamForge
+ * ../conformance/zset-cases.json -- the cross-language conformance suite every StreamsForge
  * client must pass).
  *
  * Hazards, and why the code below looks the way it does (mirrors _zset.py's module docstring):

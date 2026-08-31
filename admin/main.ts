@@ -1,4 +1,4 @@
-// StreamForge — cluster admin app (plan 007 D-C).
+// StreamsForge — cluster admin app (plan 007 D-C).
 //
 // Single Bun.serve() process, ZERO npm dependencies. Fires up either flavor's containerized stack
 // on command, shows live health, shuts it down. Two drivers behind the same start/status/stop/logs
@@ -45,8 +45,8 @@ const COMPOSE_FILE: Record<Flavor, string> = {
 };
 const LOCAL_PORT: Record<Flavor, number> = { orleans: 6199, dapr: 6399 };
 const CLOUD_RUN_SERVICE: Record<Flavor, string> = {
-  orleans: "streamforge-orleans",
-  dapr: "streamforge-dapr",
+  orleans: "streamsforge-orleans",
+  dapr: "streamsforge-dapr",
 };
 
 // PROJECT_ID resolution is deferred (cached) — only ever needed in cloudrun mode.
@@ -340,7 +340,7 @@ Bun.serve({
   },
 });
 
-console.log(color.bold(`StreamForge admin listening on :${ADMIN_PORT}  (mode=${MODE}${MODE === "cloudrun" ? ` region=${REGION}` : ""})`));
+console.log(color.bold(`StreamsForge admin listening on :${ADMIN_PORT}  (mode=${MODE}${MODE === "cloudrun" ? ` region=${REGION}` : ""})`));
 console.log(color.gray(`repo root: ${REPO_ROOT}`));
 if (MODE !== "cloudrun") {
   console.log(color.gray(`local drivers: orleans -> ${COMPOSE_FILE.orleans} (:${LOCAL_PORT.orleans}), dapr -> ${COMPOSE_FILE.dapr} (:${LOCAL_PORT.dapr})`));

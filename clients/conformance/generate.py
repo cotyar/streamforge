@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate zset-cases.json — the cross-language conformance suite for the Z-set reducer.
 
-Every StreamForge client (Python, .NET, TypeScript, Kotlin, and the two in-app copies in
+Every StreamsForge client (Python, .NET, TypeScript, Kotlin, and the two in-app copies in
 web/src/hooks/useTableRows.ts and the otc-terms add-in) reduces the same delta stream, and they
 have historically been independent hand-written ports of each other. This file is the single
 place where "they agree" stops being a claim and becomes a test: each case is a snapshot, the
@@ -29,7 +29,7 @@ client that mishandles it fails here rather than in production (wishlist #20).
 import json, os, sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python", "src"))
-from streamforge._zset import ZSet  # noqa: E402
+from streamsforge._zset import ZSet  # noqa: E402
 
 
 def d(row, weight):

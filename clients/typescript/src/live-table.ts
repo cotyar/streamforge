@@ -25,7 +25,7 @@
  * flash-highlight effect, an unrelated concern).
  */
 
-import { NotReady, StreamForgeError } from "./errors.js";
+import { NotReady, StreamsForgeError } from "./errors.js";
 import type { Transport } from "./transport.js";
 import { ZSet, type Delta, type Entry, type Row } from "./zset.js";
 
@@ -239,7 +239,7 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
     this.iterDone = true;
     for (const w of this.iterWaiters.splice(0)) w({ value: undefined, done: true });
     for (const w of this.readyWaiters.splice(0)) {
-      w.reject(new StreamForgeError(`'${this.tableName}' was closed before it became ready`));
+      w.reject(new StreamsForgeError(`'${this.tableName}' was closed before it became ready`));
     }
   }
 
@@ -268,7 +268,7 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
         this.readyFlag = false;
         this.reconnectsCount += 1;
         console.warn(
-          `streamforge: ${this.tableName} reader error (reconnect #${this.reconnectsCount} in ${backoff}ms): ${String(err)}`,
+          `streamsforge: ${this.tableName} reader error (reconnect #${this.reconnectsCount} in ${backoff}ms): ${String(err)}`,
         );
         await sleep(backoff, this.readerAbort.signal);
         if (this.closed) return;
@@ -319,7 +319,7 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
         snapshotResult = winner.v;
       } else {
         if (winner.v.done) {
-          throw new StreamForgeError(`'${this.tableName}' subscription ended before the initial snapshot`);
+          throw new StreamsForgeError(`'${this.tableName}' subscription ended before the initial snapshot`);
         }
         buffered.push(winner.v.value);
         pendingNext = iter.next();
@@ -365,7 +365,7 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
       const { value, done } = await pendingNext;
       if (done) {
         if (this.closed) return;
-        throw new StreamForgeError(`'${this.tableName}' subscription stream ended`);
+        throw new StreamsForgeError(`'${this.tableName}' subscription stream ended`);
       }
       const [deltas, seq] = value;
       const touched = this.zset.apply(deltas);
@@ -428,7 +428,7 @@ export class LiveTable implements AsyncIterable<readonly Row[]> {
       try {
         cb(rows, touched);
       } catch (err) {
-        console.error(`streamforge: onChange callback for '${this.tableName}' raised`, err);
+        console.error(`streamsforge: onChange callback for '${this.tableName}' raised`, err);
       }
     }
     if (this.iterWaiters.length > 0) {

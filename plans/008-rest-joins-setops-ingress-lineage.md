@@ -6,7 +6,7 @@ Depends on: 005 (shared core + both flavors), 006 (connectors), 007 (containers,
 
 ## Problem
 
-The repository went public (`github.com/cotyar/streamforge`) and five gaps surfaced:
+The repository went public (`github.com/cotyar/streamsforge`) and five gaps surfaced:
 
 1. **The console's API Explorer documents only gRPC.** Scalar/OpenAPI are already mounted at
    `/scalar` and `/openapi/v1.json`, but nothing in the SPA tells a visitor how to read a table, a
@@ -72,8 +72,8 @@ this document records the decisions and the acceptance criteria.
 
 ## Acceptance criteria
 
-- Both suites green after every wave: `~/.dotnet/dotnet test orleans/StreamForge.sln` and
-  `dapr/StreamForge.Dapr.sln`. Baseline at plan time: **897 + 181**.
+- Both suites green after every wave: `~/.dotnet/dotnet test orleans/StreamsForge.sln` and
+  `dapr/StreamsForge.Dapr.sln`. Baseline at plan time: **897 + 181**.
 - Test files are never edited; new files only. **One pre-approved exception**: W2 deletes exactly two
   `[Fact]` methods in `TableValidatorTests.cs` (`CrossJoinIsForbiddenInTableMode`,
   `LeftJoinIsNotSupportedInTableMode`) which assert the restriction being lifted — a pure subtraction,

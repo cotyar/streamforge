@@ -25,7 +25,7 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
   return headers
 }
 
-/** Server sets `Content-Disposition: attachment; filename="streamforge-config.json"; filename*=...`
+/** Server sets `Content-Disposition: attachment; filename="streamsforge-config.json"; filename*=...`
  * (ASP.NET's Results.File(fileDownloadName:) format) — pull the plain filename= param, falling back
  * to the format-derived default if the header is ever missing (e.g. a proxy strips it). */
 function filenameFromContentDisposition(header: string | null, fallback: string): string {
@@ -63,7 +63,7 @@ export async function exportConfig(format: ConfigFormat, includeSecrets: boolean
   }
 
   const blob = await res.blob()
-  const filename = filenameFromContentDisposition(res.headers.get('Content-Disposition'), `streamforge-config.${format}`)
+  const filename = filenameFromContentDisposition(res.headers.get('Content-Disposition'), `streamsforge-config.${format}`)
   return { blob, filename }
 }
 

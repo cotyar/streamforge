@@ -16,7 +16,7 @@
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: streamforge-dapr
+  name: streamsforge-dapr
   labels:
     cloud.googleapis.com/location: ${REGION}
   annotations:
@@ -86,7 +86,7 @@ spec:
           command: ["/daprd"]
           args:
             - "--app-id"
-            - "streamforge-dapr"
+            - "streamsforge-dapr"
             - "--app-port"
             - "8080"
             - "--app-protocol"

@@ -1,6 +1,6 @@
 ---
 name: sf-client-gen
-description: Generate and use a typed gRPC client library for any StreamForge entity (source/pipeline/table) via the proto-download + codegen pipeline. Use when asked for a typed client, proto file, or programmatic consumption of an entity's stream.
+description: Generate and use a typed gRPC client library for any StreamsForge entity (source/pipeline/table) via the proto-download + codegen pipeline. Use when asked for a typed client, proto file, or programmatic consumption of an entity's stream.
 ---
 
 # sf-client-gen — typed clients from live entities
@@ -20,7 +20,7 @@ PATH="$HOME/.dotnet:$PATH" ./tools/generate-client.sh \
 ```
 
 Output dir contains: `entity.proto`, `GeneratedClient.csproj` (Google.Protobuf + Grpc.Net.Client +
-Grpc.Tools, already **built**), and `StreamForgeClient.cs` with:
+Grpc.Tools, already **built**), and `StreamsForgeClient.cs` with:
 - `LoginAsync(httpBase, user, pass)` → JWT (login is REST-only).
 - `SubscribeAsync(grpcBase, jwt)` → typed `IAsyncEnumerable<{Entity}Event|{Entity}Delta>`
   (sources/pipelines get `…Event` = row+seq+ts_ms; tables get `…Delta` = row+weight+seq, negative
@@ -34,8 +34,8 @@ To run a quick probe, flip `<OutputType>` to `Exe`, add a `Program.cs` iterating
 - `GET /api/{sources|pipelines|tables}/{id-or-name}/proto` (Viewer JWT) — the proto file
   (404 unknown; 409 + diagnostics for non-compiling pipelines).
 - gRPC `:5299`, cleartext h2c, JWT as `Authorization: Bearer` metadata. Reflection is live from
-  the catalog: `grpcurl -plaintext localhost:5299 list` / `describe streamforge.dynamic.v1.<Msg>`.
-- Generic typed stream: `streamforge.dynamic.v1.DynamicStreamService/SubscribeEntity` with
+  the catalog: `grpcurl -plaintext localhost:5299 list` / `describe streamsforge.dynamic.v1.<Msg>`.
+- Generic typed stream: `streamsforge.dynamic.v1.DynamicStreamService/SubscribeEntity` with
   `entity_key` = `source:{name}` | `pipeline:{id-or-unique-name}` | `table:{id-or-name}`;
   `DynamicFrame.payload` holds the typed message bytes (schema snapshotted at subscribe — re-subscribe
   after schema edits).
@@ -49,5 +49,5 @@ To run a quick probe, flip `<OutputType>` to `Exe`, add a `Program.cs` iterating
   (the generated wrapper already does this).
 - Two pipelines with identical *derived proto names* would collide in reflection (first wins) —
   not reachable with seeds, avoid punctuation-only name variants.
-- Machinery lives in `orleans/src/StreamForge.Host/Grpc/Dynamic/` (descriptor factory, wire
+- Machinery lives in `orleans/src/StreamsForge.Host/Grpc/Dynamic/` (descriptor factory, wire
   encoder, proto builder — Orleans-free; slated for `shared/`).

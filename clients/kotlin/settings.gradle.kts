@@ -1,1 +1,1 @@
-rootProject.name = "streamforge-client"
+rootProject.name = "streamsforge-client"
