@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "skills": {
+    "canvas-design": {
+      "source": "jetbrains/skills",
+      "sourceType": "github",
+      "skillPath": "canvas-design/SKILL.md",
+      "computedHash": "d3bbf029f59c5fa4928c216f1040d413c517875799a8f4435249bbfeb8f4ee29"
+    },
+    "doc": {
+      "source": "jetbrains/skills",
+      "sourceType": "github",
+      "skillPath": "doc/SKILL.md",
+      "computedHash": "6ddca69d039cae8a3b365ed4004b131a8167512f6fca88e40f1253a189a2ec1c"
+    },
+    "doc-coauthoring": {
+      "source": "jetbrains/skills",
+      "sourceType": "github",
+      "skillPath": "doc-coauthoring/SKILL.md",
+      "computedHash": "7a52065828fe0975f4d07404f20bfb456357509a674839f5dbff4bd0c0c9dcda"
+    },
+    "frontend-design": {
+      "source": "jetbrains/skills",
+      "sourceType": "github",
+      "skillPath": "frontend-design/SKILL.md",
+      "computedHash": "46a26717c7c8de8dd764fba82c8f369fa0da37da404d40ba8802d82084bd535f"
+    },
+    "modern-web-guidance": {
+      "source": "jetbrains/skills",
+      "sourceType": "github",
+      "skillPath": "modern-web-guidance/SKILL.md",
+      "computedHash": "7096f5783f26574f28ef89e03d471dbb7096b4d6b5f0f724bd82f6a443cca714"
+    },
+    "refactoring-code": {
+      "source": "jetbrains/skills",
+      "sourceType": "github",
+      "skillPath": "refactoring-code/SKILL.md",
+      "computedHash": "4b874fe1b4e4a51f27b4232caff1ee87ad5cbe06fbf71b6d9e02fce2c3615e08"
+    },
+    "vercel-deploy": {
+      "source": "jetbrains/skills",
+      "sourceType": "github",
+      "skillPath": "vercel-deploy/SKILL.md",
+      "computedHash": "c6925ef781c79c3b5194574c178772d90e5e4559a3f4eeed0fcb5d0ea7c684ec"
+    },
+    "vercel-react-best-practices": {
+      "source": "jetbrains/skills",
+      "sourceType": "github",
+      "skillPath": "react-best-practices/SKILL.md",
+      "computedHash": "8f3dd38b1d48187cacb567e3907d867dd148623da32c2bacdb846691218729c0"
+    },
+    "vite": {
+      "source": "jetbrains/skills",
+      "sourceType": "github",
+      "skillPath": "vite/SKILL.md",
+      "computedHash": "e52d6f3d40e75401dedd2a6037b20c224409cddd8a0c7ab266c8b427225a5338"
+    },
+    "web-design-guidelines": {
+      "source": "jetbrains/skills",
+      "sourceType": "github",
+      "skillPath": "antfu-web-design-guidelines/SKILL.md",
+      "computedHash": "f463980fa5c5ab035a966eb73c83ba17cd53fcc734a0a05829a2ce709668ad81"
+    }
+  }
+}
