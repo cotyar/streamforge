@@ -49,7 +49,10 @@ chunk is simply never fetched in a browser build, since nothing ever calls into 
 ## Transports
 
 `connect({ transport })` accepts `"grpc" | "signalr" | "signalr:ws" | "signalr:sse" | "signalr:lp"
-| "auto"` (default). `"signalr"` is an alias for `"signalr:ws"`. `"auto"` tries gRPC (Node only),
+| "ws" | "sse" | "auto"` (default). `"ws"`/`"sse"` are the **plain** (non-SignalR) transports
+for a server speaking the bare `tableDelta` contract over a raw WebSocket / Server-Sent Events
+stream -- `@streamsforge/server` (`server/`), the embeddable Bun/Hono/Next.js dataset layer; the
+wire shape is in `plain-transport.ts`. They are never picked by `"auto"`. `"signalr"` is an alias for `"signalr:ws"`. `"auto"` tries gRPC (Node only),
 then SignalR ws -> sse -> lp, and **always logs which one it got** (`console.info`) -- a client
 that silently degrades and lets a caller believe it's on the fast path is worse than one that
 fails loudly.

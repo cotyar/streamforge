@@ -7,13 +7,14 @@
     "web",
     "clients/typescript",
     "clients/tanstack-db",
-    "clients/react"
+    "clients/react",
+    "server"
   ],
   "engines": {
     "bun": ">=1.4.0"
   },
   "scripts": {
     "build": "bun run --cwd web build",
-    "test": "bun run --cwd clients/typescript test && bun run --cwd clients/tanstack-db test && bun run --cwd clients/react test && bun test web/test admin/"
+    "test": "bun run --cwd clients/typescript test && bun run --cwd clients/tanstack-db test && bun run --cwd clients/react test && bun run --cwd server test && bun test web/test admin/"
   }
 }

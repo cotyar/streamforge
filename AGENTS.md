@@ -252,6 +252,14 @@ calling over the catalog facades — needs `GEMINI_API_KEY` (or `Gemini:ApiKey`)
 without it; capped per login session by `ChatRateLimiter` (`Chat:MaxRequestsPerSession`, default 10,
 ≤0 disables), 429 past that. Chat logic lives in `shared/StreamsForge.Api/Chat/`.
 
+**JS embeddable server** (`server/`, `@streamsforge/server`, workspace member): the dataset layer
+(Z-set table registry + `tableDelta` fan-out + the REST routes `@streamsforge/client` needs) as one
+Web-standard `fetch(Request)` handler -- drops into `Bun.serve` (SSE + WebSocket), Hono, or a
+Next.js route handler (SSE only; route handlers cannot upgrade). No SQL engine: the "executor" is a
+`sf.source(name, rows => table.upsert(...))` handler. The client's `transport: "ws" | "sse"`
+(`clients/typescript/src/plain-transport.ts`) speaks to it; never chosen by `"auto"`. Wire
+contract + embedding recipes: `server/README.md`. Tests: `bun run --cwd server test` (5).
+
 **Admin CLI + MCP server** (plan 013, `admin/`, zero npm deps like the rest of that folder):
 `bun admin/sf.ts <health|login|ls|get|start|stop|create|delete|rows|results|validate|config|api>`
 administers a running instance over REST (`SF_URL`, default :5199 — point it at :5399 for Dapr);

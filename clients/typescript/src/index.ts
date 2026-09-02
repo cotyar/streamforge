@@ -24,6 +24,7 @@ import { LiveTable } from "./live-table.js";
 import * as sqlModule from "./sql.js";
 import * as tablesModule from "./tables.js";
 import { SignalRTransport, probeSignalRMode, type SignalRMode } from "./signalr-transport.js";
+import { PlainTransport, type PlainMode } from "./plain-transport.js";
 import { AwarenessSession, type AwarenessOptions } from "./awareness.js";
 import type { Transport } from "./transport.js";
 import type { Row } from "./zset.js";
@@ -33,11 +34,14 @@ export { StreamsForgeError, AuthError, NotReady, SqlError, IngestRejected, type 
 export { LiveTable, type ChangeListener } from "./live-table.js";
 export { ZSet, canonicalKey, groupKeyOf, type Row, type Delta, type Entry } from "./zset.js";
 export type { Transport } from "./transport.js";
+export { PlainTransport, type PlainMode } from "./plain-transport.js";
 export { ADHOC_PREFIX, adhocTableName } from "./sql.js";
 export type { ConfigImportReport, TableDefinitionDto, TableValidateResponse } from "./types.js";
 export { AwarenessSession, type AwarenessPeer, type AwarenessOptions, type AwarenessListener } from "./awareness.js";
 
-export type TransportName = "grpc" | "signalr" | "signalr:ws" | "signalr:sse" | "signalr:lp" | "auto";
+/** `ws` / `sse` are the plain (non-SignalR) transports -- for `@streamsforge/server` or any
+ * server speaking the bare tableDelta contract (plain-transport.ts). Never chosen by "auto". */
+export type TransportName = "grpc" | "signalr" | "signalr:ws" | "signalr:sse" | "signalr:lp" | "ws" | "sse" | "auto";
 
 const SIGNALR_MODES: Partial<Record<TransportName, SignalRMode>> = {
   signalr: "ws",
@@ -45,7 +49,7 @@ const SIGNALR_MODES: Partial<Record<TransportName, SignalRMode>> = {
   "signalr:sse": "sse",
   "signalr:lp": "lp",
 };
-const VALID_TRANSPORTS = new Set<TransportName>(["grpc", "auto", "signalr", "signalr:ws", "signalr:sse", "signalr:lp"]);
+const VALID_TRANSPORTS = new Set<TransportName>(["grpc", "auto", "signalr", "signalr:ws", "signalr:sse", "signalr:lp", "ws", "sse"]);
 
 export interface ConnectOptions {
   url?: string;
@@ -193,7 +197,7 @@ export async function connect(opts: ConnectOptions = {}): Promise<Client> {
   const transportOpt = opts.transport ?? "auto";
   if (!VALID_TRANSPORTS.has(transportOpt)) {
     throw new StreamsForgeError(
-      `unknown transport '${transportOpt}' -- expected grpc, signalr, signalr:ws, signalr:sse, signalr:lp or auto`,
+      `unknown transport '${transportOpt}' -- expected grpc, signalr, signalr:ws, signalr:sse, signalr:lp, ws, sse or auto`,
     );
   }
 
@@ -240,6 +244,9 @@ export async function connect(opts: ConnectOptions = {}): Promise<Client> {
   if (grpcTransport) {
     liveTransport = grpcTransport;
     chosen = "grpc";
+  } else if (transportOpt === "ws" || transportOpt === "sse") {
+    liveTransport = new PlainTransport(http, transportOpt as PlainMode);
+    chosen = transportOpt;
   } else {
     const mode = SIGNALR_MODES[transportOpt] ?? (await probeSignalRMode(http));
     const hub = new SignalRTransport(http, mode);
