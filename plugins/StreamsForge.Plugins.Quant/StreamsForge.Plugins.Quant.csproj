@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <!-- StreamsForge.* stays referenced by name — never merged, see ILRepack.Plugins.targets. -->
+    <ProjectReference Include="..\..\shared\StreamsForge.AppCore\StreamsForge.AppCore.csproj" />
+    <!-- The pricing library this plugin exists to carry. Merged into the plugin DLL (below) because,
+         unlike AppCore, the host no longer ships StreamsForge.Quant or QLNet on its own once this
+         plugin replaces the host's direct reference. -->
+    <ProjectReference Include="..\..\shared\StreamsForge.Quant\StreamsForge.Quant.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Everything this plugin brings that the host does NOT already ship, by assembly file base name
+         (no extension) — see ILRepack.Plugins.targets for what this drives. -->
+    <PluginMergeAssembly Include="StreamsForge.Quant" />
+    <PluginMergeAssembly Include="QLNet" />
+  </ItemGroup>
+</Project>

@@ -197,6 +197,54 @@ public class OutOfTreeKindTests
     }
 
     // ------------------------------------------------------------------
+    // The plugin loader — embedded console UI modules (one DLL instead of a DLL plus a loose .js).
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void A_plugin_dll_with_an_embedded_ui_plugins_resource_is_reported_and_served_from_the_assembly()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"sf-plugins-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.Copy(FixturePluginDllPath(), Path.Combine(dir, "test-kind-fixture.dll"));
+
+            var report = StreamsForgePlugins.LoadFrom(dir);
+
+            Assert.Contains(report, l => l.StartsWith("plugin 'test-kind-plugin' (", StringComparison.Ordinal) && l.EndsWith("registered", StringComparison.Ordinal));
+            Assert.Contains("plugin 'test-kind-plugin' provides ui module 'test-kind.js'", report);
+
+            var module = StreamsForgePlugins.UiModules.Last(m => m.FileName == "test-kind.js");
+            Assert.Equal("ui-plugins/test-kind.js", module.ResourceName);
+
+            using var stream = module.Assembly.GetManifestResourceStream(module.ResourceName);
+            Assert.NotNull(stream);
+            using var reader = new StreamReader(stream!);
+            Assert.Contains("registerTransportEditor('ui-fixture-kind'", reader.ReadToEnd(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>Locates the fixture plugin built by the sibling
+    /// <c>StreamsForge.AppCore.Tests.PluginFixture</c> project (referenced with
+    /// <c>ReferenceOutputAssembly="false"</c> so it never loads into THIS test process on its own — see
+    /// that project's csproj for why).</summary>
+    private static string FixturePluginDllPath()
+    {
+        // "bin" only — "obj/**/ref" and "obj/**/refint" hold the compiler's metadata-only reference
+        // assemblies for incremental builds, same simple name, and loading one of THOSE throws "Reference
+        // assemblies cannot be loaded for execution" (no method bodies).
+        var fixtureBinDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "StreamsForge.AppCore.Tests.PluginFixture", "bin"));
+        return Directory.EnumerateFiles(fixtureBinDir, "StreamsForge.AppCore.Tests.PluginFixture.dll", SearchOption.AllDirectories)
+                   .OrderByDescending(File.GetLastWriteTimeUtc)
+                   .FirstOrDefault()
+               ?? throw new FileNotFoundException($"PluginFixture DLL not found under '{fixtureBinDir}' — build the solution first.");
+    }
+
+    // ------------------------------------------------------------------
     // Fakes.
     // ------------------------------------------------------------------
 

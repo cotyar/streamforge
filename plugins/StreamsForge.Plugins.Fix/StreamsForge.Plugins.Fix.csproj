@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <!-- StreamsForge.* stays referenced by name — never merged, see ILRepack.Plugins.targets. AppCore's
+         own transitive packages (NATS.*, Grpc.*, Google.Protobuf, YamlDotNet, Cronos, Orleans
+         serialization abstractions, Microsoft.Extensions.*) are excluded the same way: the host already
+         ships AppCore and everything it brings, regardless of this plugin. -->
+    <ProjectReference Include="..\..\shared\StreamsForge.AppCore\StreamsForge.AppCore.csproj" />
+    <!-- The FIX session transport this plugin exists to carry. Merged into the plugin DLL (below)
+         because, unlike AppCore, the host no longer ships StreamsForge.Connectors.Fix or QuickFIXn.Core
+         on its own once this plugin replaces the host's direct reference. -->
+    <ProjectReference Include="..\..\shared\StreamsForge.Connectors.Fix\StreamsForge.Connectors.Fix.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Everything this plugin brings that the host does NOT already ship, by assembly file base name
+         (no extension) — see ILRepack.Plugins.targets for what this drives. QuickFIXn.Core's own
+         assembly is named "QuickFix", not "QuickFIXn". -->
+    <PluginMergeAssembly Include="StreamsForge.Connectors.Fix" />
+    <PluginMergeAssembly Include="QuickFix" />
+  </ItemGroup>
+</Project>

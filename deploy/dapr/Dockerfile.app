@@ -30,9 +30,16 @@ WORKDIR /src
 # copied tree must keep the same shape for those relative paths to resolve inside the build context.
 COPY shared/ shared/
 COPY dapr/src/ dapr/src/
+# plugins/ holds the built-in server plugins (Quant, Fix) the host csproj builds and publishes into
+# /app/publish/plugins — see StreamsForge.Dapr.Host.csproj's PublishBuiltInPlugins target.
+COPY plugins/ plugins/
 WORKDIR /src/dapr/src/StreamsForge.Dapr.Host
-RUN dotnet restore StreamsForge.Dapr.Host.csproj
-RUN dotnet publish StreamsForge.Dapr.Host.csproj -c Release -o /app/publish --no-restore
+# -r linux-x64 on both: Publish.props (imported by this csproj when it exists) turns on
+# PublishSingleFile+SelfContained for any `dotnet publish`, defaulting the RID to linux-x64 when
+# unset — but a RID-specific publish needs a RID-specific restore graph, so pin it at restore time
+# too rather than lean on the publish-time fallback picking a mismatched (or absent) one.
+RUN dotnet restore StreamsForge.Dapr.Host.csproj -r linux-x64
+RUN dotnet publish StreamsForge.Dapr.Host.csproj -c Release -r linux-x64 -o /app/publish --no-restore
 
 # ---- Stage 3: runtime ----------------------------------------------------------------------------
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final

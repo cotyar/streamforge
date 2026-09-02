@@ -1,0 +1,26 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+
+    <!-- ILRepack.Lib.MSBuild.Task's own auto-target only fires on a Release build and merges every DLL
+         in the output directory; neither is what an install-time plugin needs (dev-run wants the merge
+         under Debug too, and we merge an explicit, per-project list — see ILRepack.Plugins.targets).
+         Pointing ILRepackTargetsFile at our own shared file makes that package's default Target's
+         "!Exists($(ILRepackTargetsFile))" condition false, so its default merge-everything target never
+         runs and ours (imported from this file) runs instead, unconditionally on every Build. -->
+    <ILRepackTargetsFile>$(MSBuildThisFileDirectory)ILRepack.Plugins.targets</ILRepackTargetsFile>
+
+    <!-- A plugin project is a class library, not an app — by default MSBuild copies a PackageReference's
+         assembly (QLNet, QuickFix) to the output directory only of the final EXECUTABLE that consumes it,
+         not of every class library in between. ILRepack needs the actual file on disk to merge, so force
+         the copy here. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.46" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

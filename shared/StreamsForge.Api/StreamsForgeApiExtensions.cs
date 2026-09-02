@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -406,6 +407,18 @@ public static class StreamsForgeApiExtensions
                     : Results.NotFound();
             });
         }
+        else if (EmbeddedPublishContent.TryGetProvider("docs") is { } embeddedDocs)
+        {
+            // Single-file publish fallback: a published host copied somewhere with no repo checkout
+            // around it has no on-disk docs/index.html, but Publish.props embedded it under the "docs"
+            // root when it published (see that file). Only index.html travels that way — sibling pages
+            // (comparison.html) stay disk-only, so /docs/{page}.html isn't mapped here.
+            app.MapGet("/docs", () =>
+            {
+                var file = embeddedDocs.GetFileInfo("index.html");
+                return file.Exists ? Results.File(file.CreateReadStream(), "text/html") : Results.NotFound();
+            });
+        }
 
         // Serve the built SPA (repo-root web/dist) if present, without swallowing /api or /hubs routes.
         if (options.SpaDistPath is not null && Directory.Exists(options.SpaDistPath))
@@ -415,5 +428,70 @@ public static class StreamsForgeApiExtensions
             app.UseStaticFiles(new StaticFileOptions { FileProvider = spaFiles });
             app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = spaFiles });
         }
+        else if (EmbeddedPublishContent.TryGetProvider("spa") is { } embeddedSpa)
+        {
+            // Same single-file publish fallback, same shape — an embedded IFileProvider (web/dist/**
+            // under the "spa" root, see Publish.props) instead of a PhysicalFileProvider. The
+            // static-files/default-files/fallback middleware are file-provider-agnostic, so this is a
+            // straight swap.
+            app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedSpa });
+            app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedSpa });
+            app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = embeddedSpa });
+        }
+    }
+}
+
+/// <summary>
+/// Fallback content for a single-file-published host whose on-disk SPA/docs/protos paths are gone —
+/// the common case being the published output copied somewhere with no repo checkout around it (see
+/// tools/publish.sh). Publish.props (both hosts) embeds web/dist/**, docs/index.html and Protos/*.proto
+/// as manifest resources ONLY while publishing (a plain `dotnet build`/`dotnet run` embeds nothing), so
+/// every lookup here is keyed off <see cref="Assembly.GetEntryAssembly"/> — the running host's own
+/// assembly, whichever flavor it is — rather than a reference to either host project.
+///
+/// <para>Returns null/false whenever nothing was embedded: no manifest at all (dev build), or a
+/// manifest with no entries under the requested root (e.g. a publish that ran before `web/dist`
+/// existed). Every call site keeps its on-disk behavior byte-identical in that case — this is
+/// deliberately just a second place to look, never a replacement for the disk check.</para>
+/// </summary>
+internal static class EmbeddedPublishContent
+{
+    private const string ManifestResourceName = "Microsoft.Extensions.FileProviders.Embedded.Manifest.xml";
+
+    /// <summary>An <see cref="IFileProvider"/> rooted at <paramref name="root"/> ("spa", "docs" or
+    /// "protos" — the <c>&lt;Link&gt;</c> prefixes Publish.props embeds under), or null if this build
+    /// embedded nothing under that root.</summary>
+    public static IFileProvider? TryGetProvider(string root)
+    {
+        var assembly = Assembly.GetEntryAssembly();
+        if (assembly is null || Array.IndexOf(assembly.GetManifestResourceNames(), ManifestResourceName) < 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return new ManifestEmbeddedFileProvider(assembly, root);
+        }
+        catch (InvalidOperationException)
+        {
+            // The manifest exists but has no entries under this root (nothing was embedded there at
+            // publish time) — same "nothing embedded" outcome as no manifest at all.
+            return null;
+        }
+    }
+
+    /// <summary>Reads one embedded text file back whole, or null if it isn't there.</summary>
+    public static string? TryReadText(string root, string fileName)
+    {
+        var file = TryGetProvider(root)?.GetFileInfo(fileName);
+        if (file is not { Exists: true })
+        {
+            return null;
+        }
+
+        using var stream = file.CreateReadStream();
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
     }
 }

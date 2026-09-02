@@ -1,0 +1,57 @@
+<Project>
+  <!--
+    Single-file publish knobs for the Dapr host — sibling of orleans/src/StreamsForge.Host/Publish.props,
+    same reasoning throughout (see that file's comments for the detail; kept here only where this host
+    differs). StreamsForge.Dapr.Host.csproj imports this conditionally on Exists(), so publish settings
+    never mix with the .csproj's references. Everything below is gated on `_IsPublishing`, an MSBuild
+    global property `dotnet publish` sets before evaluation starts — a plain `dotnet build`/`dotnet run`
+    is unaffected.
+
+    RID: left for the command line; tools/publish.sh defaults to linux-x64. The fallback below only
+    fires for a bare `dotnet publish` with no -r.
+  -->
+  <PropertyGroup Condition="'$(_IsPublishing)' == 'true'">
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">linux-x64</RuntimeIdentifier>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- Same rationale as the Orleans host's Publish.props: a native lib a dependency carries on some
+         RID (e.g. Microsoft.Data.SqlClient's SNI) must bundle into the single file, not land loose. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+
+    <!-- Explicitly NOT trimmed, and NOT NativeAOT. This host shares the same reflection-heavy surfaces
+         as the Orleans host — StreamsForgePlugins' Activator/AssemblyLoadContext plugin loading, SignalR,
+         and (once served) gRPC reflection — plus Dapr's own actor method-invocation dispatch, which is
+         itself reflection-driven. A trimmer/AOT analyzer cannot see any of that from the static call
+         graph, so trimming breaks it SILENTLY; staying off is cheaper than a trim-warning allowlist that
+         can never prove completeness. -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishAot>false</PublishAot>
+
+    <!-- Same embedded-fallback shape as the Orleans host (see EmbeddedPublishContent in
+         shared/StreamsForge.Api/StreamsForgeApiExtensions.cs) — web/dist/** and docs/index.html only.
+         This host has no Protos/ directory of its own (decision D-F: no static gRPC serving here, see
+         Program.cs's apiOptions comment), so there is nothing to embed under a "protos" root. -->
+    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_IsPublishing)' == 'true'">
+    <!-- Required for GenerateEmbeddedFilesManifest to actually do anything — see the Orleans host's
+         Publish.props for the confirmed-empirically explanation (the FrameworkReference to
+         Microsoft.AspNetCore.App gives the runtime TYPES for reading the manifest, not the build-time
+         generation step, which is this package's own .targets file). -->
+    <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.11" />
+
+    <!-- web/dist/** — manifest root "spa". Same three-levels-up path as the Orleans host reaches the
+         repo-root web/ from its own project directory. -->
+    <EmbeddedResource Include="../../../web/dist/**" Condition="Exists('../../../web/dist')">
+      <Link>spa/%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </EmbeddedResource>
+
+    <!-- orleans/docs/index.html — this flavor serves the SAME docs file the Orleans host does (plan 006
+         docs sync), so it embeds from the same source. Manifest root "docs". -->
+    <EmbeddedResource Include="../../../orleans/docs/index.html" Condition="Exists('../../../orleans/docs/index.html')">
+      <Link>docs/index.html</Link>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,42 @@
+<Project>
+  <!--
+    Shared merge step for every project under plugins/. A plugin project declares which of its OWN
+    package assemblies (by file base name, no extension — e.g. "QLNet", "QuickFix") need to travel with
+    it via a <PluginMergeAssembly Include="..." /> item; everything else the plugin references
+    (StreamsForge.Engine/Contracts/AppCore/Abstractions/Api, Orleans*, Microsoft.*, System.*,
+    Google.Protobuf, Grpc.*, and every package pulled in transitively through those — NATS, YamlDotNet,
+    Cronos, ...) is something the host already ships in its own output directory and must NOT be merged:
+    the plugin loads into the host's own AssemblyLoadContext.Default, so a merged-in duplicate of a type
+    the host already has would produce two incompatible copies of e.g. IInboundTransport.
+
+    ILRepack.Lib.MSBuild.Task's own auto-target (imported ahead of this file by
+    ILRepack.Lib.MSBuild.Task.targets) is disabled by Directory.Build.props pointing
+    ILRepackTargetsFile here — this file's target is what actually runs, unconditionally, after every
+    Build (Debug included, so `dotnet run`/F5 also gets a merged plugin — see the host csproj's own
+    plugin-copy target for why that matters for the dev inner loop).
+  -->
+  <Target Name="MergePluginAssembly" AfterTargets="Build" Condition="'$(IsCrossTargetingBuild)' != 'true'"
+          Inputs="$(OutDir)$(TargetName)$(TargetExt);@(PluginMergeAssembly->'$(OutDir)%(Identity).dll')"
+          Outputs="$(OutDir)merged\$(TargetName)$(TargetExt)">
+    <!-- QLNet alone takes ILRepack ~2 minutes to merge (it is a large, near-verbatim port of QuantLib) —
+         the Inputs/Outputs above give this target MSBuild's normal up-to-date skip so that cost is paid
+         once per actual change, not on every rebuild of the solution. -->
+    <ItemGroup>
+      <_PluginMergeInputs Include="$(OutDir)$(TargetName)$(TargetExt)" />
+      <_PluginMergeInputs Include="@(PluginMergeAssembly->'$(OutDir)%(Identity).dll')" />
+    </ItemGroup>
+
+    <MakeDir Directories="$(OutDir)merged" />
+
+    <ILRepack
+        Parallel="true"
+        DebugInfo="false"
+        Internalize="false"
+        AllowDuplicateResources="false"
+        InputAssemblies="@(_PluginMergeInputs)"
+        TargetKind="Dll"
+        LibraryPath="$(OutDir)"
+        OutputFile="$(OutDir)merged\$(TargetName)$(TargetExt)"
+    />
+  </Target>
+</Project>

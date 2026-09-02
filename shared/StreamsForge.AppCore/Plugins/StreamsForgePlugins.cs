@@ -27,6 +27,12 @@ public interface IStreamsForgePlugin
 /// what a runtime needs to add the plugin's own types (Orleans grains, serializers) to its manifest.</summary>
 public sealed record LoadedPlugin(IStreamsForgePlugin Plugin, Assembly Assembly);
 
+/// <summary>One console UI module a plugin assembly carries as an embedded resource — the DLL-plus-loose-
+/// <c>.js</c> install becomes one file. <see cref="ResourceName"/> is the manifest resource name
+/// (<c>ui-plugins/&lt;FileName&gt;</c>); <see cref="Assembly"/> is where to read it back from with
+/// <see cref="Assembly.GetManifestResourceStream(string)"/>.</summary>
+public sealed record UiModule(string FileName, Assembly Assembly, string ResourceName);
+
 /// <summary>
 /// Loads <see cref="IStreamsForgePlugin"/> implementations out of a directory of assemblies, so a
 /// connector that cannot live in this repo installs by being copied next to the host rather than by being
@@ -92,33 +98,56 @@ public static class StreamsForgePlugins
     private static List<string> LoadAssembly(string file)
     {
         var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(file);
+        var report = new List<string>();
+        string? lastRegisteredName = null;
 
         // Not finding a plugin type is silence on purpose: the directory holds a plugin's DEPENDENCIES
         // too, and reporting each of them as "no plugin here" would bury the lines that matter.
-        return
-        [
-            .. assembly.GetExportedTypes()
-                .Where(t => typeof(IStreamsForgePlugin).IsAssignableFrom(t) && t is { IsAbstract: false, IsInterface: false })
-                .OrderBy(t => t.FullName, StringComparer.Ordinal)
-                .Select(Activate),
-        ];
+        foreach (var type in assembly.GetExportedTypes()
+                     .Where(t => typeof(IStreamsForgePlugin).IsAssignableFrom(t) && t is { IsAbstract: false, IsInterface: false })
+                     .OrderBy(t => t.FullName, StringComparer.Ordinal))
+        {
+            var (line, registeredName) = Activate(type);
+            report.Add(line);
+            if (registeredName is not null)
+            {
+                lastRegisteredName = registeredName;
+            }
+        }
+
+        // Embedded ui-plugins/*.js|*.mjs resources count only from an assembly that registered at least
+        // one plugin here — the directory also holds a plugin's plain dependency DLLs, and scanning every
+        // one of THOSE for a same-shaped resource would attribute a UI module to an assembly that never
+        // opted into being a StreamsForge plugin at all.
+        if (lastRegisteredName is not null)
+        {
+            report.AddRange(ScanUiModules(assembly, lastRegisteredName));
+        }
+
+        return report;
     }
 
     private static readonly List<LoadedPlugin> _loaded = [];
+    private static readonly List<UiModule> _uiModules = [];
 
     /// <summary>Every plugin <see cref="LoadFrom"/> activated so far, in load order. Hosts read this after
     /// loading to run the plugin's optional hooks (<c>IStreamsForgeWebPlugin</c> in StreamsForge.Api) and
     /// to register plugin assemblies with the runtime.</summary>
     public static IReadOnlyList<LoadedPlugin> Loaded => _loaded;
 
-    private static string Activate(Type type)
+    /// <summary>Every console UI module found embedded in a plugin assembly so far — see
+    /// <see cref="UiModule"/>. <c>UiPluginsEndpoints</c> unions these with the on-disk <c>ui-plugins/</c>
+    /// directory, disk winning on a same-named file.</summary>
+    public static IReadOnlyList<UiModule> UiModules => _uiModules;
+
+    private static (string Line, string? RegisteredName) Activate(Type type)
     {
         try
         {
             var plugin = (IStreamsForgePlugin)Activator.CreateInstance(type)!;
             plugin.Register();
             _loaded.Add(new LoadedPlugin(plugin, type.Assembly));
-            return $"plugin '{plugin.Name}' ({type.FullName}) registered";
+            return ($"plugin '{plugin.Name}' ({type.FullName}) registered", plugin.Name);
         }
         catch (Exception ex)
         {
@@ -126,7 +155,34 @@ public static class StreamsForgePlugins
             // the one an operator can act on ("an inbound transport for kind 'orion' is already
             // registered"), so unwrap it rather than reporting the wrapper.
             var cause = ex is TargetInvocationException { InnerException: { } inner } ? inner : ex;
-            return $"plugin '{type.FullName}' failed to register: {cause.Message}";
+            return ($"plugin '{type.FullName}' failed to register: {cause.Message}", null);
         }
+    }
+
+    /// <summary>Convention: <c>&lt;EmbeddedResource Include="ui-plugins/*.js" LogicalName="ui-plugins/%(Filename)%(Extension)" /&gt;</c>
+    /// (also allow <c>.mjs</c>) in the plugin's csproj — no member on <see cref="IStreamsForgePlugin"/>
+    /// needed, since the resource is discoverable from the assembly alone.</summary>
+    private static List<string> ScanUiModules(Assembly assembly, string pluginName)
+    {
+        var report = new List<string>();
+        foreach (var resourceName in assembly.GetManifestResourceNames().Order(StringComparer.Ordinal))
+        {
+            if (!resourceName.StartsWith("ui-plugins/", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var ext = Path.GetExtension(resourceName);
+            if (ext is not (".js" or ".mjs"))
+            {
+                continue;
+            }
+
+            var fileName = resourceName["ui-plugins/".Length..];
+            _uiModules.Add(new UiModule(fileName, assembly, resourceName));
+            report.Add($"plugin '{pluginName}' provides ui module '{fileName}'");
+        }
+
+        return report;
     }
 }

@@ -46,8 +46,15 @@ WORKDIR /src
 COPY shared/ shared/
 COPY orleans/ orleans/
 COPY external/ycs/ external/ycs/
+# plugins/ holds the built-in server plugins (Quant, Fix) the host csproj builds and publishes into
+# /app/publish/plugins — see StreamsForge.Host.csproj's PublishBuiltInPlugins target.
+COPY plugins/ plugins/
 
-RUN dotnet publish orleans/src/StreamsForge.Host -c Release -o /app/publish
+# -r linux-x64: orleans/src/StreamsForge.Host/Publish.props (imported by the csproj when it exists)
+# turns on PublishSingleFile+SelfContained for any `dotnet publish`, defaulting the RID to linux-x64
+# when unset — but that default only fires once MSBuild has already picked a RID-less restore graph,
+# so pass it explicitly here too rather than lean on the fallback.
+RUN dotnet publish orleans/src/StreamsForge.Host -c Release -r linux-x64 -o /app/publish
 
 # ---------------------------------------------------------------------------
 # Stage 3 — runtime image
@@ -104,5 +111,9 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 EXPOSE 8080
 
 # Cloud Run injects PORT (default 8080 locally/compose too); shell form so ${PORT} expands, and
-# `exec` so dotnet becomes PID 1 (proper SIGTERM handling on `docker stop` / Cloud Run scale-down).
-ENTRYPOINT ["/bin/sh", "-c", "exec dotnet StreamsForge.Host.dll --urls http://0.0.0.0:${PORT:-8080}"]
+# `exec` so the app becomes PID 1 (proper SIGTERM handling on `docker stop` / Cloud Run scale-down).
+#
+# Publish.props (see orleans/src/StreamsForge.Host/Publish.props) makes the publish above a
+# self-contained single-file native executable, not a framework-dependent .dll — there is no
+# StreamsForge.Host.dll in /app/publish to hand to `dotnet`. Run the executable directly instead.
+ENTRYPOINT ["/bin/sh", "-c", "exec ./StreamsForge.Host --urls http://0.0.0.0:${PORT:-8080}"]

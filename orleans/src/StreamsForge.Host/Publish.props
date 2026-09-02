@@ -1,0 +1,77 @@
+<Project>
+  <!--
+    Single-file publish knobs for the Orleans host (see /TRANSPORTS.md and CLAUDE.md's "Hard rules" —
+    this file, not the .csproj, is where publish settings live; StreamsForge.Host.csproj only imports it
+    conditionally on Exists()). Everything below is gated on `_IsPublishing` — an MSBuild GLOBAL property
+    `dotnet publish` sets before project evaluation even starts (verified empirically: an ItemGroup
+    conditioned on it is empty during `dotnet build` and populated during `dotnet publish`), so a plain
+    `dotnet build`/`dotnet run` sees none of this — the dev inner loop's bin/ output is byte-identical
+    whether or not this file exists.
+
+    RID: left for the command line (`dotnet publish -r <rid>`) — tools/publish.sh defaults to linux-x64
+    (the container image target) and passes osx-arm64/etc. through unchanged. The fallback below only
+    fires if someone runs a bare `dotnet publish` with no -r at all.
+  -->
+  <PropertyGroup Condition="'$(_IsPublishing)' == 'true'">
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">linux-x64</RuntimeIdentifier>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- A dependency such as Microsoft.Data.SqlClient carries a native lib (SNI) on some RIDs; without
+         this it lands next to the exe as a loose file instead of inside the bundle, defeating "single
+         file" on exactly the RID that needs it. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+
+    <!-- Explicitly NOT trimmed, and NOT NativeAOT (no PublishAot). Both run whole-program reachability
+         analysis that this host cannot survive: dynamic protobuf descriptor generation
+         (Host/Grpc/Dynamic/*), gRPC server reflection, SignalR's runtime type discovery, and
+         StreamsForgePlugins' Activator/AssemblyLoadContext-based plugin loading all reach types purely
+         through reflection that a trimmer/AOT analyzer cannot see from the static call graph — trimming
+         breaks these SILENTLY (a missing member at runtime, not a build error) rather than loudly, so
+         it stays off instead of chasing a trim-warning suppression list that can never prove it's
+         complete. -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishAot>false</PublishAot>
+
+    <!-- Deliverable 2: fold web/dist/**, docs/index.html and Protos/*.proto into the published exe as
+         embedded resources, so a copy of just the publish output (no repo checkout alongside it) can
+         still serve the console SPA, /docs and the static .proto downloads. GenerateEmbeddedFilesManifest
+         turns the EmbeddedResource items below into a directory-shaped manifest queryable via
+         ManifestEmbeddedFileProvider — see EmbeddedPublishContent in
+         shared/StreamsForge.Api/StreamsForgeApiExtensions.cs, which reads it back by
+         Assembly.GetEntryAssembly() and is what actually falls back to it. The on-disk path stays
+         authoritative in every case; this is only consulted when it's missing. -->
+    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_IsPublishing)' == 'true'">
+    <!-- GenerateEmbeddedFilesManifest above is a build-time feature of THIS package (not something the
+         Microsoft.AspNetCore.App shared framework FrameworkReference in StreamsForge.Host.csproj brings
+         along on its own) — its .targets file is what actually wires the manifest-generation step into
+         the build. Confirmed empirically: without this reference the EmbeddedResource items below embed
+         fine, but no "Microsoft.Extensions.FileProviders.Embedded.Manifest.xml" resource is produced, so
+         ManifestEmbeddedFileProvider (the reader, in shared/StreamsForge.Api) has nothing to read. Only
+         needed at publish time, hence conditioned like everything else here. -->
+    <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.11" />
+
+    <!-- web/dist/** (built by `bun run` with cwd=web build; tools/publish.sh builds it first if missing or
+         stale) — manifest root "spa". Condition guards a publish attempted before the SPA was ever
+         built: the exe still publishes, it just has nothing to fall back to for the SPA. -->
+    <EmbeddedResource Include="../../../web/dist/**" Condition="Exists('../../../web/dist')">
+      <Link>spa/%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </EmbeddedResource>
+
+    <!-- docs/index.html only — manifest root "docs". Sibling pages (comparison.html) deliberately do
+         NOT travel here; see StreamsForgeApiExtensions.cs's docs fallback comment for why. -->
+    <EmbeddedResource Include="../../docs/index.html" Condition="Exists('../../docs/index.html')">
+      <Link>docs/index.html</Link>
+    </EmbeddedResource>
+
+    <!-- The two static .proto files GET /api/meta/protos/static serves raw — manifest root "protos".
+         Separate item TYPE from the <Protobuf Include="Protos\*.proto" .../> items above (which drive
+         Grpc.Tools codegen); embedding the same files as plain resources too is orthogonal. -->
+    <EmbeddedResource Include="Protos/*.proto">
+      <Link>protos/%(Filename)%(Extension)</Link>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>

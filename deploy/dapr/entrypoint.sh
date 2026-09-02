@@ -57,7 +57,11 @@ term_handler() {
 trap term_handler TERM INT
 
 launch_app() {
-  dotnet StreamsForge.Dapr.Host.dll --urls "http://0.0.0.0:${port}" &
+  # Dockerfile.app publishes with Publish.props' single-file/self-contained settings (RID pinned to
+  # linux-x64 at both restore and publish time) — /app has StreamsForge.Dapr.Host, a native
+  # executable, not a StreamsForge.Dapr.Host.dll for `dotnet` to load. WORKDIR is /app and this
+  # script never cd's, so the relative path resolves at both call sites below.
+  ./StreamsForge.Dapr.Host --urls "http://0.0.0.0:${port}" &
   app_pid=$!
 }
 
@@ -91,7 +95,7 @@ if [[ "$daprd_ready" == true ]]; then
   kill -TERM "$app_pid" 2>/dev/null
   wait "$app_pid" 2>/dev/null
   trap - TERM INT
-  exec dotnet StreamsForge.Dapr.Host.dll --urls "http://0.0.0.0:${port}"
+  exec ./StreamsForge.Dapr.Host --urls "http://0.0.0.0:${port}"
 fi
 
 wait "$app_pid"

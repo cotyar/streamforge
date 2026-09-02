@@ -20,13 +20,31 @@
     <ProjectReference Include="..\..\..\shared\StreamsForge.AppCore\StreamsForge.AppCore.csproj" />
     <ProjectReference Include="..\..\..\shared\StreamsForge.Api\StreamsForge.Api.csproj" />
     <ProjectReference Include="..\..\..\shared\StreamsForge.Connectors.Database\StreamsForge.Connectors.Database.csproj" />
-    <ProjectReference Include="..\..\..\shared\StreamsForge.Connectors.Fix\StreamsForge.Connectors.Fix.csproj" />
     <!-- Plan 020 wave B-2: CrdtDocGrain calls CrdtProjector.Flatten/Diff directly, the same
-         "out-of-core connector project" shape StreamsForge.Connectors.Database/Fix already have here. -->
+         "out-of-core connector project" shape StreamsForge.Connectors.Database already has here. -->
     <ProjectReference Include="..\..\..\shared\StreamsForge.Connectors.Crdt\StreamsForge.Connectors.Crdt.csproj" />
-    <ProjectReference Include="..\..\..\shared\StreamsForge.Quant\StreamsForge.Quant.csproj" />
     <ProjectReference Include="..\StreamsForge.Abstractions\StreamsForge.Abstractions.csproj" />
+    <!-- Quant and Fix are now install-time server plugins (plugins/), not host references — see
+         StreamsForgePlugins.LoadFrom in Program.cs. ReferenceOutputAssembly=false: build order only,
+         nothing from these projects is linked into the host. The targets below copy each plugin's
+         single merged DLL into $(OutDir)plugins\ so `dotnet run`/F5 still has the quant functions and
+         the `fix` kinds without an operator installing anything by hand. -->
+    <ProjectReference Include="..\..\..\plugins\StreamsForge.Plugins.Quant\StreamsForge.Plugins.Quant.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\..\plugins\StreamsForge.Plugins.Fix\StreamsForge.Plugins.Fix.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <Target Name="CopyBuiltInPlugins" AfterTargets="Build">
+    <ItemGroup>
+      <_BuiltInPluginDlls Include="..\..\..\plugins\StreamsForge.Plugins.Quant\bin\$(Configuration)\net10.0\merged\StreamsForge.Plugins.Quant.dll" />
+      <_BuiltInPluginDlls Include="..\..\..\plugins\StreamsForge.Plugins.Fix\bin\$(Configuration)\net10.0\merged\StreamsForge.Plugins.Fix.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_BuiltInPluginDlls)" DestinationFolder="$(OutDir)plugins" SkipUnchangedFiles="true" />
+  </Target>
+  <!-- Same DLLs into the publish output, so `dotnet publish` (tools/publish.sh, the Dockerfiles) ships
+       the built-in plugins next to the single-file exe without any script copying them by hand. -->
+  <Target Name="PublishBuiltInPlugins" AfterTargets="Publish" DependsOnTargets="CopyBuiltInPlugins">
+    <Copy SourceFiles="@(_BuiltInPluginDlls)" DestinationFolder="$(PublishDir)plugins" SkipUnchangedFiles="true" />
+  </Target>
   <ItemGroup>
     <Protobuf Include="Protos\streamsforge.proto" GrpcServices="Server" />
     <Protobuf Include="Protos\streamsforge_dynamic.proto" GrpcServices="Server" />

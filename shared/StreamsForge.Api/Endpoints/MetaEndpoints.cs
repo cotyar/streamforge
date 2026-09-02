@@ -218,6 +218,12 @@ public static class MetaEndpoints
                 {
                     result.Add(new StaticProtoDto(name, File.ReadAllText(path)));
                 }
+                else if (EmbeddedPublishContent.TryReadText("protos", name) is { } embeddedText)
+                {
+                    // Single-file publish fallback — Publish.props embeds Protos/*.proto under the
+                    // "protos" root only while publishing; see EmbeddedPublishContent's doc comment.
+                    result.Add(new StaticProtoDto(name, embeddedText));
+                }
             }
 
             return Results.Ok(result);

@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Build-only fixture for StreamsForgePlugins/UiPluginsEndpoints tests (shared/StreamsForge.AppCore.Tests):
+    a real, standalone plugin DLL an operator's "one file" install can be simulated against, since the
+    loader reads assemblies off disk rather than in-memory. Not part of either .sln — StreamsForge.AppCore
+    .Tests references it with ReferenceOutputAssembly="false" purely to order the build; the test copies
+    the BUILT file into a temp "plugins/" directory and loads it through StreamsForgePlugins.LoadFrom,
+    never through a normal assembly reference (loading the same assembly identity twice into one
+    AssemblyLoadContext is exactly the failure this avoids).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\StreamsForge.AppCore\StreamsForge.AppCore.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The convention a real out-of-tree plugin csproj follows to carry its own console UI module. -->
+    <EmbeddedResource Include="ui-plugins/*.js" LogicalName="ui-plugins/%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

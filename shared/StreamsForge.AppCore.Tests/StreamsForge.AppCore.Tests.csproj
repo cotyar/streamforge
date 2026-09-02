@@ -16,5 +16,9 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\StreamsForge.AppCore\StreamsForge.AppCore.csproj" />
+    <ProjectReference Include="..\StreamsForge.Api\StreamsForge.Api.csproj" />
+    <!-- Build-order only: a real plugin DLL for StreamsForgePlugins.LoadFrom to load from a temp
+         directory, never referenced directly by this project's own code (see that project's csproj). -->
+    <ProjectReference Include="..\StreamsForge.AppCore.Tests.PluginFixture\StreamsForge.AppCore.Tests.PluginFixture.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 </Project>
