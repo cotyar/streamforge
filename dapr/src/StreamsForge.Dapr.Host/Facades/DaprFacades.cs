@@ -1,6 +1,7 @@
 using Dapr.Actors;
 using Dapr.Actors.Client;
 using StreamsForge.Abstractions;
+using StreamsForge.Api.Facades;
 using StreamsForge.AppCore.Environments;
 using StreamsForge.Dapr.Host.Access;
 using StreamsForge.Dapr.Host.Actors;
@@ -68,6 +69,9 @@ public static class DaprFacadesExtensions
         services.AddSingleton<IAuditFacade, DaprAuditFacade>();
         // Plan 020 D9: the CRDT document runtime is Orleans-only, permanently — see
         // DisabledCrdtFacade's own doc comment (same shape as DisabledTableShardFacade above).
+        // CRDT-as-a-plugin: DisabledCrdtFacade moved to shared/StreamsForge.Api/Facades so both flavors'
+        // hosts reference the SAME default rather than each keeping its own copy (Orleans now needs it
+        // too — see OrleansFacadesExtensions.AddOrleansFacades).
         services.AddSingleton<ICrdtFacade, DisabledCrdtFacade>();
         return services;
     }

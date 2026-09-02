@@ -297,6 +297,7 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#aichat">AI control chat</a>
   <a href="#admincli">Admin CLI &amp; MCP</a>
   <a href="#deploy">Deployment &amp; admin</a>
+  <a href="#deploy-singlefile" class="sub">Single-file deployment</a>
   <a href="#embedding">Embedding in your process</a>
   <a href="#embedding-wiring" class="sub">The wiring</a>
   <a href="#embedding-engine" class="sub">Or just the engine</a>
@@ -1156,6 +1157,7 @@ t.rowsFlow                             // StateFlow&lt;List&lt;Row&gt;&gt;</code
 
 <h3 id="connectors-plugins">Server plugins &amp; out-of-tree kinds</h3>
 <p>A source or sink kind does not have to be built into StreamsForge. A library nobody here references can add one by <b>installing two files</b>: a .NET assembly in the host's <code>plugins/</code> directory (next to the binaries, or wherever <code>Plugins:Path</code> points), and — only if the generic config form isn't enough — an ES module in <code>ui-plugins/</code> (see below). No rebuild, no configuration beyond the files.</p>
+<div class="callout"><b>This platform eats its own dog food.</b> The Quant pricing scalars (<code>BS_PRICE</code>, <code>BOND_PRICE</code>, <code>IRS_NPV</code>, …), the <code>fix</code>/<code>fix-duplex</code> transports and the Orleans-side of CRDT document sync all ship as plugins under this repo's own <code>plugins/</code> directory, not as host references — each one merged into a single DLL (<code>StreamsForge.Plugins.Quant.dll</code>, <code>StreamsForge.Plugins.Fix.dll</code>, <code>StreamsForge.Plugins.Crdt.dll</code>) and copied next to the host binaries automatically by the build. Delete one and the host still starts: Quant scalars stop resolving (<code>Unknown function 'BS_PRICE'</code> on the next compile, though an already-running pipeline keeps running until edited or restarted), <code>fix</code>/<code>fix-duplex</code> vanish from <code>GET /api/meta/instance</code>'s <code>plugins</code> list and refuse new sources with a 400, and creating or starting a <code>crdt</code> source is refused with a 400 that names the missing plugin (<code>no 'crdt' plugin is loaded on this host — install plugins/StreamsForge.Plugins.Crdt.dll…</code>; the same text as an <code>action: "error"</code> entry on config import) while the CRDT routes answer 501 from the disabled fallback facade. Nothing in the seed data or the built-in test suite depends on any of the three — losing one degrades that one feature, nothing else. See <a href="https://github.com/cotyar/streamsforge/blob/master/PLUGINS.md">PLUGINS.md</a> for how they're built and how to add a fourth.</div>
 <p>At startup the host loads every assembly in that directory, instantiates each <code>IStreamsForgePlugin</code> it finds and lets it register its kinds. Each outcome is one line on stdout:</p>
 <pre><code>[plugins] plugin 'Orion connector 1.2.0' (YourCompany.Orion.OrionPlugin) registered
 [plugins] plugin assembly 'broken.dll' could not be loaded: Could not load file or assembly …</code></pre>
@@ -1175,6 +1177,7 @@ t.rowsFlow                             // StateFlow&lt;List&lt;Row&gt;&gt;</code
 <tr><td>3. Reload the console</td><td>Plugins are imported once, before the first render. A hard reload (cache-busting) is what applies a changed file.</td></tr>
 </tbody></table></div>
 <p><b>Checking what is installed:</b> <code>curl -s http://localhost:5199/api/ui-plugins</code> lists the module URLs the console will import — anonymous, like the console's own bundle. If a kind still shows the generic form, look in the browser console: a plugin that fails to import is logged and skipped, never fatal.</p>
+<div class="callout"><b>A module can also travel inside a server plugin DLL</b> instead of as a loose file — a connector that ships both a transport (see above) and a specialized editor embeds its <code>.js</code>/<code>.mjs</code> as a resource in the same assembly (<code>&lt;EmbeddedResource Include="ui-plugins/*.js" LogicalName="ui-plugins/%(Filename)%(Extension)" /&gt;</code> in the plugin's csproj), so installing one DLL installs both halves. <code>GET /api/ui-plugins</code> lists the <b>union</b> of the on-disk <code>ui-plugins/</code> directory and every loaded plugin's embedded modules. On a name collision <b>disk wins</b> — an operator can override a bundled module (say, to patch a bug) by dropping a same-named file in <code>ui-plugins/</code> without rebuilding or reinstalling the plugin. The disk directory is rescanned on every request; the embedded set is fixed for the process's lifetime, populated once when the plugin loads at startup.</div>
 <p><b>Writing one</b> — one ES module, no bundler, no React copy of its own:</p>
 <pre><code>// ui-plugins/rv.js
 const { react, registerTransportEditor } = window.streamsforge
@@ -1676,6 +1679,24 @@ bun admin/sf.ts api GET /api/meta/instance   # escape hatch: any route, authenti
 <li><b>Cloud Run</b>: <code>deploy/&lt;flavor&gt;/deploy.sh</code> builds, pushes, and applies the service manifest (parameterized by <code>PROJECT_ID</code>/<code>REGION</code>; <code>--dry-run</code> prints without executing). Data is ephemeral — a cold start reseeds the demo catalog.</li>
 <li><b>Cluster admin app</b> (<code>admin/</code>, <code>bun main.ts</code>, <code>:5599</code>): start either stack on command, watch <code>/healthz</code> turn green, tail logs, and shut it down — against local compose or Cloud Run (<code>MODE=cloudrun</code>, start/stop = scale 1↔0). It never touches the dev servers on 5199/5399.</li>
 </ul>
+
+<h3 id="deploy-singlefile">Single-file deployment</h3>
+<p>Both flavors also publish as one self-contained native executable — no repo checkout, no <code>dotnet</code> runtime install, no separate SPA build step on the target machine:</p>
+<pre><code>tools/publish.sh orleans                       # → out/orleans-linux-x64/
+tools/publish.sh dapr osx-arm64 /tmp/dapr-out  # explicit RID + output dir
+tools/publish.sh orleans linux-x64 out/x --dry-run   # print the commands, touch nothing</code></pre>
+<p>Default RID is <code>linux-x64</code> (the container image target); any RID <code>dotnet publish -r</code> accepts works. The script builds <code>web/dist</code> first if it's missing or stale, runs <code>dotnet publish</code>, then strips the publish output down to exactly:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>What ships</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>The executable (Orleans ~67&nbsp;MB, Dapr ~61&nbsp;MB) + <code>appsettings.json</code></td><td>Self-contained, single-file, compressed. Run it directly (<code>./StreamsForge.Host</code>) — there is no <code>StreamsForge.Host.dll</code> for <code>dotnet</code> to load.</td></tr>
+<tr><td><code>plugins/</code></td><td>The built-in plugins (Quant, Fix, and — Orleans only — Crdt), already merged and copied in by the build. Drop a fourth-party plugin DLL in alongside them; see <a href="https://github.com/cotyar/streamsforge/blob/master/PLUGINS.md">PLUGINS.md</a>.</td></tr>
+<tr><td><code>ui-plugins/</code></td><td>Empty, with a <code>README.txt</code> — an obvious place to drop console UI modules. <code>Ui:PluginsPath</code> still overrides it.</td></tr>
+</tbody></table></div>
+<p>No <code>data/</code> ships — a published host creates its own on first boot from <code>--DataDir</code> (default <code>./data</code>), reseeding the demo catalog exactly like a fresh dev checkout. No <code>.pdb</code> files either; a deployable is the four things above, not a debug build's symbols.</p>
+<div class="callout"><b>Not trimmed, not Native AOT — deliberately.</b> Both run whole-program reachability analysis that this host cannot survive: dynamic protobuf descriptor generation, gRPC server reflection, SignalR's runtime type discovery, and the plugin loader's <code>Activator</code>/<code>AssemblyLoadContext</code>-based loading all reach types purely through reflection a trimmer or AOT analyzer cannot see from the static call graph. Trimming would break these silently — a missing member at runtime, not a build error — so it stays off rather than chasing a trim-warning suppression list that can never prove completeness.</div>
+<p>The SPA (<code>web/dist</code>), <code>docs/index.html</code> and the two static <code>.proto</code> files are <b>embedded</b> into the executable as a fallback: the running host checks its on-disk paths first (unchanged behavior for a normal checkout or container), and only reads the embedded copy when the disk path is missing — the case where the publish output was copied somewhere with no repo checkout alongside it. Verified live from exactly that layout: <code>/healthz</code>, <code>/</code> (the SPA), <code>/docs</code>, login, <code>/api/tables</code>, a proto download, a plugin dropped into <code>plugins/</code> and a UI module dropped into <code>ui-plugins/</code> all worked with nothing else present on disk.</p>
+<p><code>deploy/orleans/Dockerfile</code> and <code>deploy/dapr/Dockerfile.app</code> both build this way now (<code>dotnet publish -r linux-x64</code>, <code>COPY plugins/</code>) and run the native executable directly rather than <code>dotnet StreamsForge.Host.dll</code> — the runtime image is still <code>aspnet:10.0</code> (a smaller <code>runtime-deps</code> base is possible but not done). <code>Plugins:Path</code> and <code>Ui:PluginsPath</code> resolve exactly as before: relative to <code>AppContext.BaseDirectory</code>, which under single-file publish is still the executable's own directory.</p>
 </section>
 
 <section id="embedding">

@@ -19,5 +19,15 @@
     <ProjectReference Include="..\..\..\shared\StreamsForge.Engine\StreamsForge.Engine.csproj" />
     <ProjectReference Include="..\..\src\StreamsForge.Abstractions\StreamsForge.Abstractions.csproj" />
     <ProjectReference Include="..\..\src\StreamsForge.Host\StreamsForge.Host.csproj" />
+    <!-- CRDT-as-a-plugin regression fix: RegistryGrain.UpsertSourceAsync/DeleteSourceAsync/
+         EnsureInitializedAsync call GrainFactory.GetGrain<ICrdtDocGrain>(...) UNCONDITIONALLY for every
+         source kind (StopAsync on the non-crdt paths too, so the grain reference is resolved even for a
+         plain generator/connector/ingest source) — this project's ClusterSmokeTest/
+         TableGrainClusterSmokeTest exercise that path and, with CrdtDocGrain no longer compiled directly
+         into StreamsForge.Host, need a real implementation of ICrdtDocGrain in their TestCluster's
+         assembly graph or every one of them fails with "Could not find an implementation for interface
+         StreamsForge.Abstractions.ICrdtDocGrain" — regardless of the source kind under test. Same fix,
+         same reasoning as StreamsForge.Host.Tests' own csproj comment. -->
+    <ProjectReference Include="..\..\..\plugins\StreamsForge.Plugins.Crdt\StreamsForge.Plugins.Crdt.csproj" />
   </ItemGroup>
 </Project>

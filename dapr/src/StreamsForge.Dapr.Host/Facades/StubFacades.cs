@@ -72,38 +72,3 @@ public sealed class EmptyArrangementMetaFacade : IArrangementMetaFacade
     public Task<IReadOnlyList<ArrangementMetaInfo>> GetArrangementsAsync() =>
         Task.FromResult<IReadOnlyList<ArrangementMetaInfo>>([]);
 }
-
-/// <summary>Plan 020 D9: the CRDT document runtime is Orleans-only, permanently — not a W-something stub
-/// awaiting a later wave, the same "permanently disabled, not merely unimplemented" shape
-/// <see cref="DisabledTableShardFacade"/> gives key sharding. <see cref="ICrdtFacade.Enabled"/> being
-/// false is the whole point: <c>CrdtEndpoints</c> reads it and answers 501 before ever calling
-/// <see cref="MergeAsync"/>/<see cref="GetStatusAsync"/>, so both members below are defensive-only and
-/// should never actually run.</summary>
-public sealed class DisabledCrdtFacade : ICrdtFacade
-{
-    public bool Enabled => false;
-
-    public Task<CrdtMergeResult?> MergeAsync(string sourceName, IReadOnlyList<byte[]> updates) =>
-        Task.FromResult<CrdtMergeResult?>(null);
-
-    // Plan 020 wave D, finding 3 — same "no runtime here" null as every other member; Enabled already
-    // false is what makes CrdtEndpoints answer 501 before this is ever reached.
-    public Task<CrdtMergeResult?> MergeAttributedAsync(string sourceName, IReadOnlyList<byte[]> updates, string actor) =>
-        Task.FromResult<CrdtMergeResult?>(null);
-
-    public Task<CrdtDocStatus?> GetStatusAsync(string sourceName) =>
-        Task.FromResult<CrdtDocStatus?>(null);
-
-    public Task<CrdtMergeResult?> ReplayAsync(string sourceName) =>
-        Task.FromResult<CrdtMergeResult?>(null);
-
-    // Undecidable, not "no touches": an empty Touches list reads as "nothing to authorize" and would
-    // AUTHORIZE the update. Unreachable today (CrdtEndpoints answers 501 on Enabled == false before
-    // asking), so this is purely about which way a future wiring mistake falls.
-    public CrdtUpdateInspection Inspect(SourceDefinition source, byte[] update) =>
-        new() { Undecidable = true, UndecidableReason = "this build has no CRDT document runtime" };
-
-    // Plan 020 wave F — same "no runtime here" null as every other member above.
-    public Task<EscrowRebalanceResult?> RebalanceAsync(string sourceName, string from, string to, long amount) =>
-        Task.FromResult<EscrowRebalanceResult?>(null);
-}

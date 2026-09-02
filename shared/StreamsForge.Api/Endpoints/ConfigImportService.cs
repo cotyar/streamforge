@@ -905,7 +905,19 @@ public static class ConfigImportService
             var docSource = docByName[action.Name];
             var stored = storedByName.GetValueOrDefault(action.Name);
             var effective = SecretsMasker.MergeSecrets(docSource, stored);
-            await registry.UpsertSourceAsync(effective);
+            try
+            {
+                await registry.UpsertSourceAsync(effective);
+            }
+            catch (InvalidOperationException ex)
+            {
+                // A registry-side refusal with an operator-readable reason (e.g. a `crdt` source on a host
+                // without the crdt plugin): one error entry for this source, the rest of the import proceeds.
+                var entry = ToEntry("source", action);
+                entry.Action = "error";
+                entry.Diagnostics = [ex.Message];
+                return entry;
+            }
         }
 
         return ToEntry("source", action);

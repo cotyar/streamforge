@@ -49,6 +49,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamsForge.Plugins.Quant"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamsForge.Plugins.Fix", "..\plugins\StreamsForge.Plugins.Fix\StreamsForge.Plugins.Fix.csproj", "{6F8E620A-F12F-4196-98A9-4EC1F3F1582B}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamsForge.Plugins.Crdt", "..\plugins\StreamsForge.Plugins.Crdt\StreamsForge.Plugins.Crdt.csproj", "{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -299,6 +301,18 @@ Global
 		{6F8E620A-F12F-4196-98A9-4EC1F3F1582B}.Release|x64.Build.0 = Release|Any CPU
 		{6F8E620A-F12F-4196-98A9-4EC1F3F1582B}.Release|x86.ActiveCfg = Release|Any CPU
 		{6F8E620A-F12F-4196-98A9-4EC1F3F1582B}.Release|x86.Build.0 = Release|Any CPU
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Debug|x64.Build.0 = Debug|Any CPU
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Debug|x86.Build.0 = Debug|Any CPU
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Release|x64.ActiveCfg = Release|Any CPU
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Release|x64.Build.0 = Release|Any CPU
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Release|x86.ActiveCfg = Release|Any CPU
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -315,5 +329,6 @@ Global
 		{A83FE455-164F-4ED1-93EF-2F3F79FBF761} = {4F52FD11-658E-A102-6CD3-7D7C16FFA15B}
 		{F4D29431-638F-44F9-B573-49E5807419A3} = {08F382F2-8534-4951-913E-69688BB3D7D8}
 		{6F8E620A-F12F-4196-98A9-4EC1F3F1582B} = {08F382F2-8534-4951-913E-69688BB3D7D8}
+		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6} = {08F382F2-8534-4951-913E-69688BB3D7D8}
 	EndGlobalSection
 EndGlobal

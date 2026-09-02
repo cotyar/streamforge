@@ -341,7 +341,20 @@ public sealed class RegistryGrain(
         // actually running) rather than tracking the previous Kind separately just to target one Stop call.
         var generator = GrainFactory.GetGrain<IGeneratorGrain>(EnvKeys.Qualify(_env, def.Name));
         var connector = GrainFactory.GetGrain<IConnectorGrain>(EnvKeys.Qualify(_env, def.Name));
-        var crdt = GrainFactory.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(_env, def.Name));
+        // CRDT-as-a-plugin — VERIFIED LIVE, THE HARD WAY: GrainFactory.GetGrain<ICrdtDocGrain>(...) throws
+        // System.ArgumentException("Could not find an implementation for interface ...") IMMEDIATELY, at
+        // reference-construction time, not lazily on the first RPC — when no 'crdt' plugin is loaded.
+        // Constructing this reference unconditionally, the way generator/connector are just above, would
+        // therefore break EVERY source upsert on a plugin-absent host, not just crdt-kind ones, because
+        // every OTHER branch below still calls crdt.StopAsync() for the "kind switched away from crdt"
+        // cleanup. Booting a real host with `--Plugins:Path <empty dir>` and creating a plain non-crdt
+        // source reproduced exactly that 500 before this guard moved up here. So: check plugin presence
+        // ONCE, before constructing the reference at all — `crdt` stays null when the plugin is absent,
+        // every non-crdt branch below skips its StopAsync (nothing crdt-related could be running without
+        // the plugin in the first place, so there is nothing to stop), and only the Crdt case — the one
+        // branch that actually needs the grain — surfaces the readable refusal.
+        var crdtPluginLoaded = StreamsForge.AppCore.Plugins.StreamsForgePlugins.Loaded.Any(p => p.Plugin.Name == "crdt");
+        var crdt = crdtPluginLoaded ? GrainFactory.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(_env, def.Name)) : null;
         if (def.Enabled)
         {
             switch (SourceKindDispatch.Classify(def.Kind))
@@ -349,14 +362,32 @@ public sealed class RegistryGrain(
                 case SourceKindDispatch.ActorKind.Generator:
                     await generator.StartAsync(def);
                     await connector.StopAsync();
-                    await crdt.StopAsync();
+                    if (crdt is not null)
+                    {
+                        await crdt.StopAsync();
+                    }
                     break;
                 case SourceKindDispatch.ActorKind.Ingest:
                     await generator.StopAsync();
                     await connector.StopAsync();
-                    await crdt.StopAsync();
+                    if (crdt is not null)
+                    {
+                        await crdt.StopAsync();
+                    }
                     break;
                 case SourceKindDispatch.ActorKind.Crdt:
+                    // An operator hitting this from POST /api/sources needs to know WHY, not just that it
+                    // 500'd — this call site, unlike the boot-resume/ping loops elsewhere in this class,
+                    // has no surrounding try/catch. Checked here, once, rather than inside CrdtDocGrain
+                    // itself, because a grain that failed to activate has no path back to the caller at
+                    // all.
+                    if (crdt is null)
+                    {
+                        throw new InvalidOperationException(
+                            $"source '{def.Name}' is kind 'crdt', but no 'crdt' plugin is loaded on this " +
+                            "host — install plugins/StreamsForge.Plugins.Crdt.dll (or check the " +
+                            "Plugins:Path this instance was started with) before starting a CRDT source.");
+                    }
                     await crdt.StartAsync(def);
                     await generator.StopAsync();
                     await connector.StopAsync();
@@ -364,7 +395,10 @@ public sealed class RegistryGrain(
                 default: // Connector
                     await connector.StartAsync(def);
                     await generator.StopAsync();
-                    await crdt.StopAsync();
+                    if (crdt is not null)
+                    {
+                        await crdt.StopAsync();
+                    }
                     break;
             }
         }
@@ -372,7 +406,10 @@ public sealed class RegistryGrain(
         {
             await generator.StopAsync();
             await connector.StopAsync();
-            await crdt.StopAsync();
+            if (crdt is not null)
+            {
+                await crdt.StopAsync();
+            }
         }
     }
 

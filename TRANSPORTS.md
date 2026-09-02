@@ -346,6 +346,12 @@ class doc for the canonical wording — this section restates it rather than div
 
 ## FIX
 
+> **Installation note (plan 022):** the `fix`/`fix-duplex` session **source and sink kinds** below now
+> ship as the `StreamsForge.Plugins.Fix` server plugin under `plugins/`, not a host `ProjectReference` —
+> see `PLUGINS.md`. The `fix` wire **format** (`FixParser`, used by any `url`/`file`/`folder`/`nats`
+> source) stays in `StreamsForge.AppCore` and needs no plugin; only the live session kinds do. Everything
+> below about the format, the session, and `fix-duplex` is otherwise unchanged by that move.
+
 Plan 018 adds two things that are useful separately and better together: a wire **format** (`fix`) that
 any `url`/`file`/`folder`/`nats` source can name, and a receive-only session **source kind** (also spelled
 `fix` — a coincidence of both being named after the protocol, not a conflict; a `SourceDefinition.Kind`
@@ -775,6 +781,16 @@ library nobody here references — **one DLL in `plugins/`, and (optionally) one
 `ui-plugins/`** — and the platform picks up both at startup with no rebuild and no config beyond the
 files themselves.
 
+> **This is also how three IN-TREE kinds ship today** (plan 022): the Quant pricing scalars, the
+> `fix`/`fix-duplex` transports, and (Orleans only) the `crdt` source's grain-backed facade are each
+> built as a plugin under this repo's own `plugins/` directory rather than referenced from a host
+> project — merged into one DLL apiece and copied next to the host binaries automatically by the
+> build, so a normal checkout behaves exactly as if they were still linked in. `PLUGINS.md` at the repo
+> root is the full guide: the two host hooks (`Register()` / `IStreamsForgeWebPlugin`), a decision table
+> for which one to use, worked examples for all three in-tree plugins plus an out-of-tree template, the
+> ILRepack merge rule and why, and the runtime failure modes when a plugin is missing. This section
+> keeps the transport-authoring recipe; read `PLUGINS.md` for the installation mechanics around it.
+
 ```csharp
 // YourCompany.Orion.dll, dropped in <host binaries>/plugins/ (or wherever `Plugins:Path` points)
 public sealed class OrionPlugin : IStreamsForgePlugin      // StreamsForge.AppCore.Plugins
@@ -984,10 +1000,14 @@ rest); bending a CRDT merge into that shape would mean a transport that secretly
 exact second extraction path with its own subtly different semantics this seam exists to prevent (plan
 020 D3). So `crdt` dispatches to its own grain (`CrdtDocGrain`, the same shape as `IGeneratorGrain`), not
 through `InboundTransports`/`ConnectorGrain` at all, and Orleans-only for now (plan 020 D9 — the Dapr
-flavor stores the kind and refuses to start it). Full documentation, including the config shape, the
-three-stamp deletion convention, the replay route, and the reconciliation pattern for what a CRDT cannot
-enforce, is in [orleans/docs/index.html#crdt](orleans/docs/index.html#crdt) — this document stays the
-transport recipe, and a CRDT document isn't a transport.
+flavor stores the kind and refuses to start it). **Installation note (plan 022):** `CrdtDocGrain` and the
+Orleans facade that talks to it now ship as the `StreamsForge.Plugins.Crdt` server plugin under
+`plugins/`, replacing the core's disabled default facade via `IStreamsForgeWebPlugin.ConfigureServices`
+— see `PLUGINS.md`. The grain interface, the facade contract, the HTTP routes and everything else this
+paragraph already describes stay in the core untouched by that move. Full documentation, including the
+config shape, the three-stamp deletion convention, the replay route, and the reconciliation pattern for
+what a CRDT cannot enforce, is in [orleans/docs/index.html#crdt](orleans/docs/index.html#crdt) — this
+document stays the transport recipe, and a CRDT document isn't a transport.
 
 **The registries are static lists, not DI discovery.** Assembly scanning would buy nothing — transports are
 compile-time known — and both connector drivers are constructed by runtime machinery (an Orleans grain, a

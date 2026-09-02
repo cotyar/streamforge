@@ -19,7 +19,8 @@ descriptor, since `SecretWalk` cannot see into a dictionary; a kind whose plugin
 WHOLE bag, failing closed). So an out-of-tree kind adds a config dimension without touching
 `StreamsForge.Contracts`; the one thing the bag cannot express is a nested optional group. Operator-facing
 install instructions: `orleans/docs/index.html` §§ Server plugins & out-of-tree kinds / Console UI
-plugins. Architecture:
+plugins; contributor-facing guide (both hooks, worked in-tree examples, the ILRepack build rule):
+[`PLUGINS.md`](PLUGINS.md). Architecture:
 [`orleans/ARCHITECTURE.md`](orleans/ARCHITECTURE.md) · [`dapr/ARCHITECTURE.md`](dapr/ARCHITECTURE.md)
 · Dapr's descoped/owed/unverified list: [`dapr/PARITY.md`](dapr/PARITY.md)
 · rationale: [`orleans/DESIGN.md`](orleans/DESIGN.md) · runtime comparison + measured latency:
@@ -44,7 +45,11 @@ SQL Server's 3-day CDC retention default, `REPLICA IDENTITY FULL`) are written d
 dictionary (a static table of the common 4.2/4.4/5.0 tags, unknown tags fall back to `tag<N>` strings),
 repeating groups parsed into nested JSON arrays — usable by any `url`/`file`/`folder`/`nats` source; and
 `fix` is also a live, receive-only session source kind, `shared/StreamsForge.Connectors.Fix` on
-`QuickFIXn.Core`, an `IInboundTransport` out of the core like the database connectors. No FIX dictionary
+`QuickFIXn.Core`, an `IInboundTransport` out of the core like the database connectors. **As of plan 022
+the `fix`/`fix-duplex` session kinds ship as the `StreamsForge.Plugins.Fix` server plugin under
+`plugins/`** (merged with `QuickFix`), not a host reference — the wire `format: "fix"` itself stays in
+`StreamsForge.AppCore` and needs no plugin, only the live session kinds do; see the "Plugins &
+single-file" paragraph below. No FIX dictionary
 ships with the platform (`UseDataDictionary=N`); order entry is deliberately a separate plan
 ([`019`](plans/019-fix-order-entry.md)). The session's operational hazards (the drop-oldest bridge
 queue, `storePath`'s in-memory-vs-file-backed choice, at-most-once delivery) are written down in
@@ -65,6 +70,37 @@ on `ClOrdID` — plan 019 D7's cheapest large win. Full wiring, the row→FIX ma
 found live (every row a duplex sink actually forwards carries platform-reserved columns — `_ts`/
 `_source`/`_weight` — that the outbound mapper must skip rather than refuse) are in
 [`TRANSPORTS.md`](TRANSPORTS.md)'s `fix-duplex` sections.
+
+**Plugins & single-file** (plan 022): three previously-linked features — the Quant pricing scalars,
+the `fix`/`fix-duplex` transports, and (Orleans only) `crdt`'s grain-backed facade — now ship as
+install-time server plugins under `plugins/` (`StreamsForge.Plugins.{Quant,Fix,Crdt}`), each merged by
+ILRepack into one self-contained DLL an operator installs by copying it into `plugins/`. **Ownership
+rule: neither host csproj links a plugin project as a normal reference** — every plugin
+`ProjectReference` carries `ReferenceOutputAssembly="false"` (build order only), and two host-owned
+MSBuild targets (`CopyBuiltInPlugins`/`PublishBuiltInPlugins`) copy each plugin's merged DLL into
+`$(OutDir)plugins`/`$(PublishDir)plugins` so `dotnet run` and `dotnet publish` both have them with no
+manual step. `IStreamsForgePlugin.Register()` covers a plugin that only adds transports or SQL
+functions (Quant, Fix); `IStreamsForgeWebPlugin` (`StreamsForge.Api`, not `AppCore` — hard rule 2) adds
+`ConfigureServices`/`MapEndpoints` for a plugin that needs the host itself, which is what Crdt uses to
+replace the core's disabled `ICrdtFacade` stub with the real Orleans one. **Publish knobs live only in
+each host's `Publish.props`** (imported by the csproj when present, everything gated on MSBuild's own
+`_IsPublishing` so `dotnet build`/`dotnet run` stay byte-identical): `PublishSingleFile` +
+`SelfContained`, explicitly **no trimming and no Native AOT** (dynamic protobuf, gRPC reflection,
+SignalR and the plugin loader's `Activator`/`AssemblyLoadContext` use are all reflection paths a
+trimmer breaks silently), plus the SPA/docs/protos embedded-with-disk-first-fallback wiring
+(`EmbeddedPublishContent` in `shared/StreamsForge.Api/StreamsForgeApiExtensions.cs`). `tools/publish.sh
+<orleans|dapr> [rid] [out-dir]` drives it end to end; both Dockerfiles under `deploy/` now run the
+published native executable directly rather than `dotnet <name>.dll`. Full guide (the hook decision
+table, all three in-tree plugins as worked examples, the ILRepack merge rule, and the runtime failure
+modes when a plugin is absent): [`PLUGINS.md`](PLUGINS.md). **Six pre-existing test failures, not
+caused by this plan**: restart/reactivation tests in `CrdtDocGrainClusterTests` (3),
+`ShardedTableClusterTests` (2) and `ConnectorGrainPolledClusterTests` (1,
+`ADeactivatedConnectorResumesFromThePersistedCursor`) fail deterministically with
+`CodecNotFoundException(Newtonsoft.Json.JsonSerializationException)`, verified failing before this
+work at `bfc421f`; see `plans/022-plugins-and-single-file.md`'s found-and-not-fixed list for status.
+Test counts move slightly from this plan's own AppCore.Tests additions (the plugin-loader and
+`UiPluginsEndpointsTests` coverage) — treat the exact whole-suite numbers elsewhere in this file as
+approximate until the next verification pass confirms them.
 
 **Entitlements, approvals, audit** (plan 015): authorization is per-resource grants, not the three
 role strings. A grant is `action` (`pipeline.update`, `*`) × `scope` (`*` | exact entity **NAME** |
@@ -167,9 +203,9 @@ pinned to the fork's `parity-yjs-13.6.32` branch, NOT `main`; see that project's
 
 ```bash
 ~/.dotnet/dotnet build orleans/StreamsForge.sln
-~/.dotnet/dotnet test  orleans/StreamsForge.sln     # 2424 tests — the whole suite must be green
+~/.dotnet/dotnet test  orleans/StreamsForge.sln     # 3659 tests — green except the 6 known pre-existing failures (see plans/022)
 ~/.dotnet/dotnet build dapr/StreamsForge.Dapr.sln
-~/.dotnet/dotnet test  dapr/StreamsForge.Dapr.sln   # 695 tests — the whole suite must be green
+~/.dotnet/dotnet test  dapr/StreamsForge.Dapr.sln   # 1540 tests — the whole suite must be green
 cd clients/typescript && bun test  # 14 contract + conformance/live-table; boots its own engine on 8199/8299
 bun install                       # once, at the REPO ROOT — one workspace, one lockfile
 cd web && bun run build           # prebuild compiles @streamsforge/client + @streamsforge/tanstack-db

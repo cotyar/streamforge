@@ -20,5 +20,13 @@
     <ProjectReference Include="..\..\src\StreamsForge.Abstractions\StreamsForge.Abstractions.csproj" />
     <ProjectReference Include="..\..\..\shared\StreamsForge.Engine\StreamsForge.Engine.csproj" />
     <ProjectReference Include="..\..\src\StreamsForge.Host\StreamsForge.Host.csproj" />
+    <!-- CRDT-as-a-plugin: CrdtDocGrain/OrleansCrdtFacade moved out of StreamsForge.Host into this
+         project — a normal (non-merged, non-ReferenceOutputAssembly=false) reference, so
+         CrdtDocGrainClusterTests/CrdtDurabilityTests keep discovering the grain type exactly as before
+         (Orleans TestingHost picks up grain classes from referenced assemblies, the same way it always
+         found CrdtDocGrain when it lived directly in StreamsForge.Host). This bypasses LoadFrom/ILRepack
+         entirely, by design — see this wave's report for why the LIVE host (not this test path) is the
+         one that actually proves the plugin/merge/manifest wiring. -->
+    <ProjectReference Include="..\..\..\plugins\StreamsForge.Plugins.Crdt\StreamsForge.Plugins.Crdt.csproj" />
   </ItemGroup>
 </Project>

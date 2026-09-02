@@ -1,7 +1,6 @@
 using Orleans;
 using Orleans.Streams;
 using StreamsForge.Abstractions;
-using StreamsForge.Connectors.Crdt;
 using StreamsForge.AppCore.Environments;
 using StreamsForge.AppCore.Ingest;
 using StreamsForge.Engine;
@@ -75,11 +74,15 @@ public static class OrleansFacadesExtensions
         services.AddSingleton<ITableShardFacade, OrleansTableShardFacade>();
         services.AddSingleton<IArrangementMetaFacade, OrleansArrangementMetaFacade>();
         services.AddSingleton<IConnectorStatusFacade, OrleansConnectorStatusFacade>();
-        // Plan 020 wave B-2: same zero-per-call-state shape as OrleansConnectorStatusFacade above — it
-        // reads EnvironmentAmbient.Current freshly INSIDE each method (never captured at construction), so
-        // a plain singleton is safe. Always Enabled: Orleans is the CRDT-capable flavour (D9); the Dapr
-        // side registers DisabledCrdtFacade instead.
-        services.AddSingleton<ICrdtFacade, OrleansCrdtFacade>();
+        // Plan 020 wave B-2 / CRDT-as-a-plugin: the real Orleans CRDT facade now lives in the
+        // StreamsForge.Plugins.Crdt plugin (OrleansCrdtFacade, always Enabled — Orleans is the
+        // CRDT-capable flavour, D9), not here. This registers the same DISABLED default the Dapr flavor
+        // uses (shared StreamsForge.Api.Facades.DisabledCrdtFacade) so a host with the plugin absent still
+        // boots and answers /api/crdt/... with 501, exactly like Dapr. When the crdt plugin loads,
+        // CrdtPlugin.ConfigureServices registers OrleansCrdtFacade AFTER this call, in Program.cs's plugin
+        // hook — "last registration wins" for singleton resolution, so the real facade wins whenever the
+        // plugin is present.
+        services.AddSingleton<ICrdtFacade, StreamsForge.Api.Facades.DisabledCrdtFacade>();
         // Plan 008 W4: client-push ingress. SourceIngressRegistry is the host-process singleton buffer
         // registry (one SourceIngressBuffer per ingest-kind source); OrleansIngressFacade is the thin
         // Orleans-side adapter IIngressFacade callers (SourcesEndpoints, IngestGrpcService) depend on.
@@ -196,90 +199,6 @@ internal sealed class OrleansConnectorStatusFacade(IClusterClient client) : ICon
             return null;
         }
         return await client.GetGrain<IConnectorGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).GetStatusAsync();
-    }
-}
-
-/// <summary>Plan 020 wave B-2: Orleans-side <see cref="ICrdtFacade"/> — the CRDT counterpart of
-/// <see cref="OrleansConnectorStatusFacade"/> above, same "resolve, check kind, forward to the grain"
-/// shape. <see cref="ICrdtFacade.MergeAsync"/>/<see cref="ICrdtFacade.GetStatusAsync"/>'s own doc comments
-/// say null means "no source of that name exists or it is not crdt-kind" — checked HERE, once, so
-/// <see cref="CrdtDocGrain"/> itself never has to (D5: it trusts the def stamped on it at
-/// <c>StartAsync</c>, not a fresh registry read).</summary>
-internal sealed class OrleansCrdtFacade(IClusterClient client) : ICrdtFacade
-{
-    public bool Enabled => true;
-
-    public async Task<CrdtMergeResult?> MergeAsync(string sourceName, IReadOnlyList<byte[]> updates)
-    {
-        var def = await ResolveCrdtSourceAsync(sourceName);
-        if (def is null)
-        {
-            return null;
-        }
-
-        return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).MergeAsync(updates);
-    }
-
-    /// <summary>Plan 020 wave D, finding 3 — same "resolve, check kind, forward" shape as
-    /// <see cref="MergeAsync"/>, forwarding to <see cref="ICrdtDocGrain.MergeAttributedAsync"/> instead.</summary>
-    public async Task<CrdtMergeResult?> MergeAttributedAsync(string sourceName, IReadOnlyList<byte[]> updates, string actor)
-    {
-        var def = await ResolveCrdtSourceAsync(sourceName);
-        if (def is null)
-        {
-            return null;
-        }
-
-        return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).MergeAttributedAsync(updates, actor);
-    }
-
-    public async Task<CrdtDocStatus?> GetStatusAsync(string sourceName)
-    {
-        var def = await ResolveCrdtSourceAsync(sourceName);
-        if (def is null)
-        {
-            return null;
-        }
-
-        return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).GetStatusAsync();
-    }
-
-    public async Task<CrdtMergeResult?> ReplayAsync(string sourceName)
-    {
-        var def = await ResolveCrdtSourceAsync(sourceName);
-        if (def is null)
-        {
-            return null;
-        }
-
-        return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).ReplayAsync();
-    }
-
-    // Plan 020 wave D: pure delegation. This host already references StreamsForge.Connectors.Crdt (the
-    // grain projects documents with it), so the decode costs nothing new HERE — the point of routing it
-    // through the facade is that StreamsForge.Api does not have to.
-    public CrdtUpdateInspection Inspect(SourceDefinition source, byte[] update) =>
-        CrdtUpdateInspector.Inspect(update, source.Connector?.Crdt ?? new CrdtSourceConfig());
-
-    /// <summary>Plan 020 wave F — same "resolve, check kind, forward" shape as <see cref="MergeAsync"/>,
-    /// forwarding to <see cref="ICrdtDocGrain.RebalanceAsync"/> instead.</summary>
-    public async Task<EscrowRebalanceResult?> RebalanceAsync(string sourceName, string from, string to, long amount)
-    {
-        var def = await ResolveCrdtSourceAsync(sourceName);
-        if (def is null)
-        {
-            return null;
-        }
-
-        return await client.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(EnvironmentAmbient.Current, sourceName)).RebalanceAsync(from, to, amount);
-    }
-
-    private async Task<SourceDefinition?> ResolveCrdtSourceAsync(string sourceName)
-    {
-        // Plan 021 D4 — a facade answering one request reads the ambient.
-        var registry = client.RegistryFor(EnvironmentAmbient.Current);
-        var def = await registry.GetSourceAsync(sourceName);
-        return def is null || def.Kind != SourceKinds.Crdt ? null : def;
     }
 }
 

@@ -124,7 +124,16 @@ public static class SourcesEndpoints
             // null here) — MergeSecrets is still run for compositional symmetry with PUT below
             // (it's a no-op when `stored` is null).
             var effective = SecretsMasker.MergeSecrets(def, existing);
-            await registry.UpsertSourceAsync(effective);
+            try
+            {
+                await registry.UpsertSourceAsync(effective);
+            }
+            catch (InvalidOperationException ex)
+            {
+                // A registry-side refusal with an operator-readable reason (e.g. a `crdt` source on a host
+                // without the crdt plugin) — surface the message, not an empty 500.
+                return Results.BadRequest(new ErrorResponse(ex.Message));
+            }
 
             // Plan 016 wave 2-B: re-read rather than return `effective` — Revision/SchemaRevision are
             // assigned INSIDE the registry (RegistryGrain.UpsertSourceAsync / CatalogStore.UpsertSourceAsync),
@@ -192,7 +201,16 @@ public static class SourcesEndpoints
             // object cycle round-tripping a masked value verbatim) is replaced with the STORED real
             // secret before it ever reaches UpsertSourceAsync — never persist the literal mask.
             var effective = SecretsMasker.MergeSecrets(def, existing);
-            await registry.UpsertSourceAsync(effective);
+            try
+            {
+                await registry.UpsertSourceAsync(effective);
+            }
+            catch (InvalidOperationException ex)
+            {
+                // A registry-side refusal with an operator-readable reason (e.g. a `crdt` source on a host
+                // without the crdt plugin) — surface the message, not an empty 500.
+                return Results.BadRequest(new ErrorResponse(ex.Message));
+            }
 
             // Plan 016 wave 2-B: re-read rather than return `effective` — see the identical note on the
             // POST handler above for why (the counters are assigned past Orleans' by-value boundary, and

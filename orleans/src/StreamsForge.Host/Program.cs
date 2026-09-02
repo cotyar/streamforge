@@ -2,6 +2,7 @@ using System.Net;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Orleans;
 using Orleans.Hosting;
+using Orleans.Serialization;
 using StreamsForge.Abstractions;
 using StreamsForge.Api;
 using StreamsForge.Api.Plugins;
@@ -163,6 +164,70 @@ builder.Host.UseOrleans(siloBuilder =>
     }
     siloBuilder.AddMemoryGrainStorage(StreamConstants.PubSubStoreName);
     siloBuilder.AddJsonFileGrainStorage(StreamConstants.StorageName);
+
+    // CRDT-as-a-plugin: a grain class living in a dynamically loaded plugin DLL (StreamsForge.Plugins.Crdt
+    // merges CrdtDocGrain into one file under plugins/) is not automatically part of this silo's grain
+    // manifest the way a project-referenced grain assembly is.
+    //
+    // TWO SEPARATE REGISTRATIONS ARE NEEDED — VERIFIED LIVE, THE HARD WAY. The obvious-looking one-liner,
+    // `siloBuilder.Services.AddSerializer(b => b.AddAssembly(assembly))`, registers the assembly's
+    // generated `TypeManifestProviderAttribute` class with the SERIALIZER's type manifest (codecs,
+    // copiers, interface-to-proxy invoker mappings) — necessary, but NOT sufficient. Booting a real host
+    // with only that call, creating a crdt-kind source still threw
+    // `System.ArgumentException: Could not find an implementation for interface
+    // StreamsForge.Abstractions.ICrdtDocGrain` out of
+    // `Orleans.GrainInterfaceTypeToGrainTypeResolver.GetGrainType` — the interface-to-CONCRETE-GRAIN-CLASS
+    // mapping is a silo-local concern read from `IOptions<Orleans.Configuration.GrainTypeOptions>`
+    // (`Classes`/`Interfaces`, both `HashSet<Type>`), which a project-referenced grain assembly gets
+    // populated into automatically (the referencing project's own Orleans-generated startup code calls
+    // `services.Configure<GrainTypeOptions>(...)` for every grain type IT was compiled against) but a
+    // `LoadFromAssemblyPath`'d plugin assembly — never compiled against by the Host — does not. The fix:
+    // reflect over each loaded plugin assembly for concrete, non-abstract classes assignable to
+    // `Orleans.IGrain` (the common marker every `IGrainWithXKey` grain interface extends) and add both the
+    // class and its own grain interface(s) to `GrainTypeOptions` directly. Loop over
+    // `StreamsForgePlugins.Loaded` rather than hard-coding this one plugin because this must work for ANY
+    // future grain-carrying plugin, not just this one.
+    //
+    // ORDERING, VERIFIED: this lambda is the CONFIGURE action UseOrleans defers — it does not run when
+    // UseOrleans(...) is called (that line sits ABOVE the LoadFrom loop, further down this file, in source
+    // order) but when builder.Build() actually assembles the silo's service provider. LoadFrom runs before
+    // Build() unconditionally, so StreamsForgePlugins.Loaded is already populated by the time this foreach
+    // executes — confirmed live: a source built with the crdt plugin ABSENT still boots and both loops
+    // below are simply empty; a source built WITH the plugin loaded activates CrdtDocGrain from the merged
+    // plugins/StreamsForge.Plugins.Crdt.dll, not from a project-referenced copy (there isn't one any more
+    // — the host no longer references StreamsForge.Connectors.Crdt directly).
+    siloBuilder.Services.AddSerializer(b =>
+    {
+        foreach (var p in StreamsForge.AppCore.Plugins.StreamsForgePlugins.Loaded)
+        {
+            b.AddAssembly(p.Assembly);
+        }
+    });
+    siloBuilder.Services.Configure<Orleans.Configuration.GrainTypeOptions>(o =>
+    {
+        foreach (var p in StreamsForge.AppCore.Plugins.StreamsForgePlugins.Loaded)
+        {
+            foreach (var type in p.Assembly.GetTypes())
+            {
+                if (!type.IsClass || type.IsAbstract || !typeof(Orleans.IGrain).IsAssignableFrom(type))
+                {
+                    continue;
+                }
+
+                o.Classes.Add(type);
+                foreach (var iface in type.GetInterfaces())
+                {
+                    // Orleans' OWN grain-marker interfaces (IGrain, IGrainWithStringKey, IAddressable, …)
+                    // live in the Orleans namespace and are already known to the silo — only the plugin's
+                    // OWN grain interface (ICrdtDocGrain) needs adding here.
+                    if (typeof(Orleans.IGrain).IsAssignableFrom(iface) && iface.Namespace?.StartsWith("Orleans", StringComparison.Ordinal) != true)
+                    {
+                        o.Interfaces.Add(iface);
+                    }
+                }
+            }
+        }
+    });
 
     // Plan 011 wave D1 — HOW LONG AN IDLE SHARD STAYS RESIDENT.
     //

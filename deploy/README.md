@@ -5,6 +5,19 @@ decision D-A). Both are **self-contained**: SPA + docs + published host baked in
 external volumes. Both are **prepared, not deployed** — `deploy.sh` in each folder only builds and
 prints/applies gcloud commands when you run it yourself; nothing here runs automatically.
 
+**Both images now run the single-file publish** (plan [`022-plugins-and-single-file.md`](../plans/022-plugins-and-single-file.md)):
+the `dotnet publish` stage produces one self-contained native executable (`PublishSingleFile` +
+`SelfContained`, no trimming — see `PLUGINS.md` for why), and each Dockerfile's entrypoint runs it
+directly (`./StreamsForge.Host` / `./StreamsForge.Dapr.Host`), not `dotnet <name>.dll` — there is no
+framework-dependent DLL in the publish output to hand to `dotnet` anymore. Both Dockerfiles also
+`COPY plugins/` into the build stage so the built-in server plugins (Quant, Fix, and — Orleans only —
+Crdt) publish alongside the host into `/app/publish/plugins`, exactly as a non-container publish does.
+For a non-container deploy (a VM, a bare-metal box, anywhere without Docker), skip the Dockerfile
+entirely and run `tools/publish.sh <orleans|dapr> [rid] [out-dir]` — it produces the identical
+executable-plus-`plugins/`-plus-`ui-plugins/` layout these images bake in; see `PLUGINS.md` and
+`orleans/docs/index.html` § "Single-file deployment" for the full contract (what ships, what doesn't,
+`Plugins:Path`/`Ui:PluginsPath`).
+
 ## Orleans flavor — `deploy/orleans/`
 
 Single container: bun builds the SPA, the dotnet SDK publishes `StreamsForge.Host`, a slim

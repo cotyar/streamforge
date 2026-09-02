@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <!-- The grain (CrdtDocGrain.cs) needs the silo-side Orleans APIs (Grain, [PersistentState],
+         IPersistentState, stream provider/StreamId) that Microsoft.Orleans.Sdk (brought in transitively
+         by the StreamsForge.Abstractions reference below) does not carry on its own — referenced by name,
+         never merged: the host already ships both packages. -->
+    <PackageReference Include="Microsoft.Orleans.Server" Version="10.3.0" />
+    <PackageReference Include="Microsoft.Orleans.Streaming" Version="10.3.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Grain interfaces (ICrdtDocGrain et al.) — also brings Microsoft.Orleans.Sdk transitively, which
+         is what gives this project's own CrdtDocGrain its Orleans codegen. StreamsForge.* stays
+         referenced by name, never merged, see ILRepack.Plugins.targets. -->
+    <ProjectReference Include="..\..\orleans\src\StreamsForge.Abstractions\StreamsForge.Abstractions.csproj" />
+    <!-- IStreamsForgeWebPlugin (the plugin's second-tier hook: replacing the host's default
+         DisabledCrdtFacade with the real OrleansCrdtFacade). -->
+    <ProjectReference Include="..\..\shared\StreamsForge.Api\StreamsForge.Api.csproj" />
+    <!-- The CRDT projection/escrow logic this plugin exists to carry (CrdtDocGrain calls
+         CrdtProjector.Flatten/Diff/EscrowCounter directly, the same "out-of-core connector project" shape
+         StreamsForge.Connectors.Database has in the host). Merged into the plugin DLL below because,
+         unlike StreamsForge.Abstractions/Api, the host no longer ships this assembly (or its own
+         Ycs/Newtonsoft.Json dependency) once this plugin replaces the host's direct reference. -->
+    <ProjectReference Include="..\..\shared\StreamsForge.Connectors.Crdt\StreamsForge.Connectors.Crdt.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Everything this plugin brings that the host does NOT already ship, by assembly file base name
+         (no extension) — see ILRepack.Plugins.targets for what this drives.
+         StreamsForge.Connectors.Crdt and Ycs: the host no longer ships either once this merge replaces
+         its direct StreamsForge.Connectors.Crdt reference. Newtonsoft.Json is DELIBERATELY NOT merged,
+         unlike Ycs's own transitive dependency on it (external/ycs/src/Ycs/Ycs.csproj, 13.0.3) would
+         suggest — verified against a real build: Microsoft.Orleans.Core/Runtime/Server/Streaming
+         (10.3.0) already depend on Newtonsoft.Json 13.0.4 themselves, so the host ships it regardless of
+         this plugin (NuGet floats Ycs's 13.0.3 requirement up to the host's 13.0.4, which stays binary
+         compatible) — merging it in too would just duplicate a type the host already has, exactly the
+         hazard this file's own class doc warns against. Referenced by name via the ProjectReference
+         above, same as every StreamsForge.*/Orleans* dependency. -->
+    <PluginMergeAssembly Include="StreamsForge.Connectors.Crdt" />
+    <PluginMergeAssembly Include="Ycs" />
+  </ItemGroup>
+</Project>
