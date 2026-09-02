@@ -23,6 +23,10 @@ public interface IStreamsForgePlugin
     void Register();
 }
 
+/// <summary>One plugin instance the loader activated, with the assembly it came from — the assembly is
+/// what a runtime needs to add the plugin's own types (Orleans grains, serializers) to its manifest.</summary>
+public sealed record LoadedPlugin(IStreamsForgePlugin Plugin, Assembly Assembly);
+
 /// <summary>
 /// Loads <see cref="IStreamsForgePlugin"/> implementations out of a directory of assemblies, so a
 /// connector that cannot live in this repo installs by being copied next to the host rather than by being
@@ -100,12 +104,20 @@ public static class StreamsForgePlugins
         ];
     }
 
+    private static readonly List<LoadedPlugin> _loaded = [];
+
+    /// <summary>Every plugin <see cref="LoadFrom"/> activated so far, in load order. Hosts read this after
+    /// loading to run the plugin's optional hooks (<c>IStreamsForgeWebPlugin</c> in StreamsForge.Api) and
+    /// to register plugin assemblies with the runtime.</summary>
+    public static IReadOnlyList<LoadedPlugin> Loaded => _loaded;
+
     private static string Activate(Type type)
     {
         try
         {
             var plugin = (IStreamsForgePlugin)Activator.CreateInstance(type)!;
             plugin.Register();
+            _loaded.Add(new LoadedPlugin(plugin, type.Assembly));
             return $"plugin '{plugin.Name}' ({type.FullName}) registered";
         }
         catch (Exception ex)

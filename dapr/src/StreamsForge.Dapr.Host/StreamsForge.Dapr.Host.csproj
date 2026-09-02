@@ -23,4 +23,6 @@
     <ProjectReference Include="..\..\..\shared\StreamsForge.Connectors.Fix\StreamsForge.Connectors.Fix.csproj" />
     <ProjectReference Include="..\..\..\shared\StreamsForge.Quant\StreamsForge.Quant.csproj" />
   </ItemGroup>
+  <!-- Single-file publish settings live next door, so publish knobs never mix with references. -->
+  <Import Project="Publish.props" Condition="Exists('Publish.props')" />
 </Project>

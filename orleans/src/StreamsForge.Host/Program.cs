@@ -4,6 +4,7 @@ using Orleans;
 using Orleans.Hosting;
 using StreamsForge.Abstractions;
 using StreamsForge.Api;
+using StreamsForge.Api.Plugins;
 using StreamsForge.AppCore.Discovery;
 using StreamsForge.AppCore.Environments;
 using StreamsForge.Connectors.Database;
@@ -231,6 +232,10 @@ foreach (var line in StreamsForge.AppCore.Plugins.StreamsForgePlugins.LoadFrom(b
 {
     Console.WriteLine($"[plugins] {line}");
 }
+// A plugin that implements IStreamsForgeWebPlugin (StreamsForge.Api) gets its two host hooks here:
+// services now, endpoints after Build(). Loaded plugins are also what a runtime adds to its own type
+// manifest (Orleans: grains/serializers) — see the UseOrleans block.
+StreamsForge.Api.Plugins.StreamsForgePluginHosting.ConfigureServices(builder.Services, builder.Configuration);
 
 // Plan 016 wave 5: this instance's directory of known peers, read from config and installed into the
 // process-wide PeerDirectory before the host starts serving. "Discovery:Peers" (a section, not a flat
@@ -282,6 +287,7 @@ var apiOptions = new StreamsForgeApiOptions(
     Version: app.Configuration["Version"] ?? "");
 
 app.MapStreamsForgeApi(apiOptions);
+app.MapPluginEndpoints();
 
 // gRPC control plane + streaming (see Protos/streamsforge.proto) — served on the HTTP/2-only
 // endpoint configured above (Grpc:Port, default 5299); doesn't share the REST/SignalR/SPA port.

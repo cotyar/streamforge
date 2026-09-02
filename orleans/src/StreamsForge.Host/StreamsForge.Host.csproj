@@ -31,4 +31,6 @@
     <Protobuf Include="Protos\streamsforge.proto" GrpcServices="Server" />
     <Protobuf Include="Protos\streamsforge_dynamic.proto" GrpcServices="Server" />
   </ItemGroup>
+  <!-- Single-file publish settings live next door, so publish knobs never mix with references. -->
+  <Import Project="Publish.props" Condition="Exists('Publish.props')" />
 </Project>

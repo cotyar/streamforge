@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using StreamsForge.Abstractions;
 using StreamsForge.Api;
+using StreamsForge.Api.Plugins;
 using StreamsForge.AppCore.Discovery;
 using StreamsForge.Connectors.Database;
 using StreamsForge.Connectors.Fix;
@@ -97,6 +98,10 @@ foreach (var line in StreamsForge.AppCore.Plugins.StreamsForgePlugins.LoadFrom(b
 {
     Console.WriteLine($"[plugins] {line}");
 }
+// A plugin that implements IStreamsForgeWebPlugin (StreamsForge.Api) gets its two host hooks here:
+// services now, endpoints after Build(). Loaded plugins are also what a runtime adds to its own type
+// manifest (Orleans: grains/serializers) — see the UseOrleans block.
+StreamsForge.Api.Plugins.StreamsForgePluginHosting.ConfigureServices(builder.Services, builder.Configuration);
 
 // Plan 016 wave 5: same shape, same config keys as the Orleans host's Program.cs — see that file's
 // comment for why "Discovery:Peers" is a section (binds as an array from appsettings.json, CLI
@@ -150,6 +155,7 @@ var apiOptions = new StreamsForgeApiOptions(
     Version: app.Configuration["Version"] ?? "");
 
 app.MapStreamsForgeApi(apiOptions);
+app.MapPluginEndpoints();
 
 // Dapr actor HTTP endpoints the sidecar calls for activation/deactivation/method-invocation.
 app.MapActorsHandlers();
