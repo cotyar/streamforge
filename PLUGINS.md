@@ -147,6 +147,28 @@ copy would be exactly the duplicate-type hazard the merge rule exists to avoid. 
 discoverable by the silo through the host's two-step manifest registration (hook order step 3 above),
 with zero CRDT-specific code in the host.
 
+**What a grain must satisfy to be picked up by that registration** (the host reflects over the plugin
+assembly; nothing is declared explicitly): (1) it is an ordinary concrete Orleans grain — a
+non-abstract class deriving from `Grain` and implementing its own interface, which extends an
+`IGrainWith*Key`; the host's filter is literally `type.IsClass && !type.IsAbstract &&
+typeof(IGrain).IsAssignableFrom(type)`. (2) Its grain interface lives outside the `Orleans` namespace
+(in `StreamsForge.Abstractions`, like `ICrdtDocGrain`, or in the plugin itself when only the plugin's
+own code calls it) — every non-`Orleans*` grain interface on the class is added to
+`GrainTypeOptions.Interfaces`. (3) It is declared in the plugin's **primary** assembly, never in a
+merged dependency: Orleans codegen emits the assembly's `TypeManifestProvider` and the grain's invokers
+into the assembly that declares the grain, and ILRepack keeps assembly-level attributes only from the
+primary, so a grain inside a merged DLL loses its manifest and `AddAssembly` registers nothing for it
+(Crdt: the grain is in the plugin project; `StreamsForge.Connectors.Crdt`, which is merged, carries no
+grains). (4) The project has Orleans codegen — `Microsoft.Orleans.Sdk`, transitively via the
+`StreamsForge.Abstractions` reference — and its state types carry `[GenerateSerializer]`/`[Id(n)]`.
+What a grain cannot do: configure the silo. There is no plugin hook inside `UseOrleans`, so a plugin
+grain uses only the providers the host already registers — `[PersistentState("…",
+StreamConstants.StorageName)]` (the `JsonFileGrainStorage` under `DataDir`) and
+`GetStreamProvider(StreamConstants.ProviderName)` — and cannot declare a storage or stream provider of
+its own. And nothing calls a plugin grain unless the plugin does: Crdt is reached from `RegistryGrain`
+because the `crdt` kind is dispatched by the core; an out-of-tree grain is reached from the plugin's own
+`MapEndpoints` routes (resolve `IGrainFactory` from the request's services) or from its transport.
+
 `ICrdtDocGrain` (the grain interface, in `StreamsForge.Abstractions`), `ICrdtFacade` (in
 `StreamsForge.Contracts`), `CrdtEndpoints` (the `/api/crdt/...` routes) and
 `SourceSchemaService.ValidateCrdt` all stay in the core — only the Orleans-specific implementation
