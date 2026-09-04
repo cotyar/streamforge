@@ -275,7 +275,10 @@ past that and stays time-bounded by design. The other two only wait: the late pi
 of a 700-row file re-parse and the restart test waits for the first post-restart poll, which under load can
 lose its HTTP fetch to the CPU-starved in-test listener and take a 30 s backoff before retrying; both
 deadlines were widened to 90 s, and if they still lose a whole-solution race the cause is load, not logic).
-Also, ten `TestClusterPortAllocator.MutexManager` timeouts (tests failing in ~1 ms while BUILDING their
+The same family also lost once each in a later whole-solution run and passed 15/15 alone:
+`StreamBridgeSourceLifecycleTests.A_tight_burst_of_six_events_is_relayed_six_for_six` (waits ~10 s for six
+relayed hub calls) and the pre-existing `StreamBridgeServiceStartupRaceTests` fact (waits for a seeded
+table's first delta). Also, ten `TestClusterPortAllocator.MutexManager` timeouts (tests failing in ~1 ms while BUILDING their
 cluster) appeared in the same loaded run and vanished in isolation — that signature is the Orleans test
 port allocator's system-wide mutex under contention, never a test's own logic.
 Re-run a failure in isolation before calling it a regression — and report BOTH results, never just the
