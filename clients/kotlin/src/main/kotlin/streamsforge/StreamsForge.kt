@@ -35,6 +35,13 @@ object StreamsForge {
      *   don't follow that relationship.
      * @param ingestKey `X-SF-Ingest-Key`, preferred over the admin JWT for [StreamsForgeClient.push]
      *   whenever set, so a caller that only feeds a source never needs to hold an admin token.
+     * @param caFile Path to a PEM certificate to trust for TLS (REST, SignalR AND gRPC), used as
+     *   its own trust anchor -- matches `tools/tls/dev-cert.sh`'s self-signed dev certificate.
+     *   Only meaningful when [url] and/or the resolved [grpcTarget] are `https://`; ignored for
+     *   a plaintext connection. `null` (the default) trusts the JVM's platform trust store.
+     * @param insecure Development-only escape hatch: trusts every certificate and skips hostname
+     *   verification on all three transports, no [caFile] required. Never turn this on outside a
+     *   throwaway/dev environment -- it accepts literally any TLS server.
      */
     suspend fun connect(
         url: String,
@@ -44,14 +51,17 @@ object StreamsForge {
         token: String? = null,
         ingestKey: String? = null,
         transport: Transport = Transport.AUTO,
+        caFile: String? = null,
+        insecure: Boolean = false,
     ): StreamsForgeClient {
-        val http = AuthClient(url, user, password, token)
+        val tls = buildTlsConfig(caFile, insecure)
+        val http = AuthClient(url, user, password, token, tls)
 
         var grpc: GrpcTransport? = null
         if (transport == Transport.GRPC || transport == Transport.AUTO) {
             val target = grpcTarget ?: defaultGrpcTarget(url)
             try {
-                val candidate = GrpcTransport(target) { http.token() }
+                val candidate = GrpcTransport(target, caFile, insecure) { http.token() }
                 candidate.probe()
                 grpc = candidate
             } catch (e: Exception) {
@@ -59,7 +69,8 @@ object StreamsForge {
                     throw StreamsForgeError(
                         "gRPC channel to $target refused. If the host was started with --urls, " +
                             "Program.cs's guard binds no gRPC port at all -- start it with " +
-                            "--Http:Port/--Grpc:Port instead (design doc §3.2).",
+                            "--Http:Port/--Grpc:Port instead (design doc §3.2). Over https, check " +
+                            "caFile/insecure too.",
                         e,
                     )
                 }
@@ -75,7 +86,7 @@ object StreamsForge {
             liveTransport = grpc
             chosen = "grpc"
         } else {
-            liveTransport = SignalRTransport(url, http)
+            liveTransport = SignalRTransport(url, http, tls)
             chosen = "signalr"
         }
         logger.info("streamsforge: connected via $chosen transport ($url)")
@@ -84,11 +95,15 @@ object StreamsForge {
         return StreamsForgeClient(http, grpc, liveTransport, ingestKey, chosen, scope)
     }
 
-    private fun defaultGrpcTarget(baseUrl: String): String {
+    /** Guesses the gRPC port as `PORT+100` off [baseUrl] (`Program.cs`'s own convention),
+     * preserving an `https://` scheme so a caller who only passed `url = "https://host:port"`
+     * still gets a TLS gRPC target rather than a silently-plaintext one. */
+    internal fun defaultGrpcTarget(baseUrl: String): String {
         val uri = URI.create(baseUrl)
         val host = uri.host ?: "localhost"
         val httpPort = if (uri.port != -1) uri.port else if (uri.scheme == "https") 443 else 80
-        return "$host:${httpPort + 100}"
+        val prefix = if (uri.scheme == "https") "https://" else ""
+        return "$prefix$host:${httpPort + 100}"
     }
 }
 

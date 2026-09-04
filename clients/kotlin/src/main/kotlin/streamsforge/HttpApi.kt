@@ -12,6 +12,7 @@ import java.net.http.HttpResponse
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.locks.ReentrantLock
+import javax.net.ssl.SSLParameters
 import kotlin.concurrent.withLock
 
 private val TOKEN_LIFETIME: Duration = Duration.ofHours(11) // server mints 12h tokens; refresh a bit early
@@ -32,11 +33,24 @@ class AuthClient(
     private val user: String?,
     private val password: String?,
     token: String? = null,
+    tls: TlsConfig? = null,
 ) : Closeable {
     val baseUrl: String = baseUrl.trimEnd('/')
     internal val gson = Gson()
 
-    private val client: HttpClient = HttpClient.newHttpClient()
+    // A caFile/insecure TLS config swaps in an SSLContext trusting the given CA (or, for
+    // `insecure`, everything); `insecure` additionally switches off hostname verification --
+    // java.net.http.HttpClient has no direct hostnameVerifier hook, but an empty
+    // endpointIdentificationAlgorithm disables the check the same way. Left at the JDK default
+    // (real hostname verification against the platform trust store) when [tls] is null.
+    private val client: HttpClient = HttpClient.newBuilder().apply {
+        if (tls != null) {
+            sslContext(tls.sslContext)
+            if (tls.insecure) {
+                sslParameters(SSLParameters().apply { endpointIdentificationAlgorithm = "" })
+            }
+        }
+    }.build()
     private val lock = ReentrantLock()
     private var cachedToken: String? = token
     private var tokenMintedAt: Instant? = if (token != null) Instant.now() else null

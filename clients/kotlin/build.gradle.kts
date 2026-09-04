@@ -37,6 +37,11 @@ dependencies {
     compileOnly("org.apache.tomcat:annotations-api:6.0.53")
 
     implementation("com.microsoft.signalr:signalr:8.0.17") // brings okhttp3 + rxjava3 + gson
+    // signalr already pulls this transitively (runtime-only from our POV) -- declared explicitly
+    // so SignalRTransport can reference OkHttpClient.Builder directly for TLS configuration
+    // (setHttpClientBuilderCallback) without it being merely an implementation detail of a
+    // dependency. Version pinned to match what signalr:8.0.17 itself resolves.
+    implementation("com.squareup.okhttp3:okhttp:4.10.0")
     implementation("com.google.code.gson:gson:2.11.0") // REST (de)serialization -- same library the signalr client already uses
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 

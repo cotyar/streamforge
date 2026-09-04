@@ -36,7 +36,7 @@ private data class WireDelta(val row: Row, val weight: Long)
  * connection but are independent frames, and nothing orders one before the other) is buffered
  * rather than dropped.
  */
-class SignalRTransport(baseUrl: String, private val http: AuthClient) : TableTransport {
+class SignalRTransport(baseUrl: String, private val http: AuthClient, private val tls: TlsConfig? = null) : TableTransport {
     override val name = "signalr"
 
     private val hubUrl = "${baseUrl.trimEnd('/')}/hubs/stream"
@@ -53,9 +53,23 @@ class SignalRTransport(baseUrl: String, private val http: AuthClient) : TableTra
     override suspend fun subscribeTable(tableName: String): Flow<DeltaBatch> {
         val deltaListType: Type = TypeToken.getParameterized(List::class.java, WireDelta::class.java).type
         val token = http.token()
-        val connection: HubConnection = HubConnectionBuilder.create(hubUrl)
+        val builder = HubConnectionBuilder.create(hubUrl)
             .withAccessTokenProvider(Single.just(token))
-            .build()
+        // The Java SignalR client hands out its underlying OkHttpClient.Builder for exactly this
+        // kind of customization (`setHttpClientBuilderCallback`) -- there is no higher-level
+        // "trust this CA" knob, so reaching for OkHttp's own `sslSocketFactory`/`hostnameVerifier`
+        // is the intended door in, not a workaround. Uses the SAME SSLContext/TrustManager the
+        // REST side ([AuthClient]) was built with, so both halves of one `connect()` call trust
+        // exactly the same thing.
+        if (tls != null) {
+            builder.setHttpClientBuilderCallback { okBuilder ->
+                okBuilder.sslSocketFactory(tls.sslContext.socketFactory, tls.trustManager)
+                if (tls.insecure) {
+                    okBuilder.hostnameVerifier { _, _ -> true }
+                }
+            }
+        }
+        val connection: HubConnection = builder.build()
 
         // The slow part (negotiate -> websocket upgrade -> hub protocol handshake) happens HERE,
         // as part of this suspend call, NOT lazily inside a Flow -- see

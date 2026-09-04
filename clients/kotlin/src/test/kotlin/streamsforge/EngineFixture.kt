@@ -34,6 +34,11 @@ import java.util.concurrent.TimeUnit
  *    BLOCKS FOREVER, hanging with no error anywhere. [_Drain] below is a daemon thread doing
  *    nothing but reading that pipe into a bounded ring buffer, so the tail is available for a
  *    failure report without ever letting the pipe fill.
+ *
+ * [start]/[preconditionsOrSkipReason] with no arguments boot the plain HTTP instance on
+ * [HTTP_PORT]/[GRPC_PORT], as before. The [EngineOptions] overloads let another test class boot a
+ * SECOND, differently-configured instance in the same run (right now: [TlsTest]'s TLS-enabled
+ * host on 7799/7899, silo 17799/37799 -- reserved ports, never overlapping this fixture's own).
  */
 object EngineFixture {
     val HTTP_PORT = System.getenv("SF_TEST_HTTP_PORT")?.toIntOrNull() ?: 9199
@@ -81,7 +86,31 @@ object EngineFixture {
         fun tail(chars: Int = 6000): String = synchronized(lines) { lines.joinToString("\n") }.takeLast(chars)
     }
 
-    data class Handle(val process: Process, val dataDir: File, val drain: Drain)
+    data class Handle(
+        val process: Process,
+        val dataDir: File,
+        val drain: Drain,
+        val baseUrl: String,
+        val grpcTarget: String,
+    )
+
+    /** Ports (and optional silo ports / extra CLI args / `https` scheme) for a second instance in
+     * the same test run -- [start]/[preconditionsOrSkipReason] with no arguments are just this
+     * with [httpPort]/[grpcPort] defaulted to [HTTP_PORT]/[GRPC_PORT] and nothing else set. */
+    data class EngineOptions(
+        val httpPort: Int = HTTP_PORT,
+        val grpcPort: Int = GRPC_PORT,
+        val siloPort: Int? = null,
+        val gatewayPort: Int? = null,
+        val scheme: String = "http",
+        val extraArgs: List<String> = emptyList(),
+        /** REST client used for the health-poll and fixture-config import -- plain
+         * `HttpClient.newHttpClient()` for `http`; a caller booting an `https` instance passes one
+         * built with the matching trust config (e.g. via [buildTlsConfig]), since the default
+         * client trusts nothing but the platform store and a self-signed dev cert would fail
+         * every request otherwise. */
+        val httpClient: HttpClient = HttpClient.newHttpClient(),
+    )
 
     private fun portFree(port: Int): Boolean = try {
         Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 200) }
@@ -92,12 +121,14 @@ object EngineFixture {
 
     /** Non-null means "skip, for this reason" -- mirrors conftest.py's `pytest.skip(...)` calls:
      * asserts the ports are free first and refuses to collide with a running instance. */
-    fun preconditionsOrSkipReason(): String? {
-        if (HTTP_PORT in FORBIDDEN_PORTS || GRPC_PORT in FORBIDDEN_PORTS) {
+    fun preconditionsOrSkipReason(): String? = preconditionsOrSkipReason(EngineOptions())
+
+    fun preconditionsOrSkipReason(options: EngineOptions): String? {
+        if (options.httpPort in FORBIDDEN_PORTS || options.grpcPort in FORBIDDEN_PORTS) {
             return "refusing to configure the contract-test fixture onto a forbidden port"
         }
-        if (!portFree(HTTP_PORT) || !portFree(GRPC_PORT)) {
-            return "port $HTTP_PORT or $GRPC_PORT is already in use -- refusing to collide with a running instance"
+        if (!portFree(options.httpPort) || !portFree(options.grpcPort)) {
+            return "port ${options.httpPort} or ${options.grpcPort} is already in use -- refusing to collide with a running instance"
         }
         if (!dotnet.exists()) return "dotnet not found at $dotnet -- cannot boot the contract-test engine"
         if (!knownPrebuiltDir.exists() && !projectDir.isDirectory) {
@@ -106,7 +137,9 @@ object EngineFixture {
         return null
     }
 
-    fun start(): Handle {
+    fun start(): Handle = start(EngineOptions())
+
+    fun start(options: EngineOptions): Handle {
         val publishDirEnv = System.getenv("SF_TEST_PUBLISH_DIR")
         val publishDir = when {
             publishDirEnv != null -> File(publishDirEnv)
@@ -117,27 +150,35 @@ object EngineFixture {
         check(dll.exists()) { "StreamsForge.Host.dll not found under ${publishDir.absolutePath}" }
         val dataDir = Files.createTempDirectory("sf-kotlin-client-test-").toFile()
 
-        val process = ProcessBuilder(
+        val args = mutableListOf(
             dotnet.absolutePath, dll.absolutePath,
-            "--Http:Port", HTTP_PORT.toString(),
-            "--Grpc:Port", GRPC_PORT.toString(),
+            "--Http:Port", options.httpPort.toString(),
+            "--Grpc:Port", options.grpcPort.toString(),
             "--Streams:Transport", "push",
             "--DataDir", dataDir.absolutePath,
         )
+        if (options.siloPort != null) args += listOf("--Silo:Port", options.siloPort.toString())
+        if (options.gatewayPort != null) args += listOf("--Silo:GatewayPort", options.gatewayPort.toString())
+        args += options.extraArgs
+
+        val process = ProcessBuilder(args)
             .directory(publishDir)
             .redirectErrorStream(true)
             .start()
         val drain = Drain(process)
 
+        val baseUrl = "${options.scheme}://localhost:${options.httpPort}"
+        val grpcTarget = if (options.scheme == "https") "https://localhost:${options.grpcPort}" else "localhost:${options.grpcPort}"
+
         try {
-            waitHealthy(process, drain)
-            importFixtureConfig()
+            waitHealthy(baseUrl, options.httpClient, process, drain)
+            importFixtureConfig(baseUrl, options.httpClient)
         } catch (e: Exception) {
             process.destroyForcibly()
             dataDir.deleteRecursively()
             throw e
         }
-        return Handle(process, dataDir, drain)
+        return Handle(process, dataDir, drain, baseUrl, grpcTarget)
     }
 
     fun stop(handle: Handle) {
@@ -159,8 +200,7 @@ object EngineFixture {
         return publishDir
     }
 
-    private fun waitHealthy(process: Process, drain: Drain, timeoutSeconds: Long = 90) {
-        val client = HttpClient.newHttpClient()
+    private fun waitHealthy(baseUrl: String, client: HttpClient, process: Process, drain: Drain, timeoutSeconds: Long = 90) {
         val deadline = System.nanoTime() + timeoutSeconds * 1_000_000_000L
         var lastError: Exception? = null
         while (System.nanoTime() < deadline) {
@@ -181,8 +221,7 @@ object EngineFixture {
         throw RuntimeException("engine did not become healthy within ${timeoutSeconds}s (last error: $lastError)\n${drain.tail()}")
     }
 
-    private fun importFixtureConfig() {
-        val client = HttpClient.newHttpClient()
+    private fun importFixtureConfig(baseUrl: String, client: HttpClient) {
         val gson = Gson()
 
         val loginResp = client.send(

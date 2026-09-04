@@ -57,6 +57,18 @@ would then wait forever. Making `subscribeTable` a suspend function that complet
 connection setup before returning closes that window; `LiveTable`'s existing buffer/replay logic
 still handles the case where a delta *does* arrive during the snapshot read.
 
+## TLS
+
+`grpcTarget` accepts `host:port` (plaintext), `http://host:port`, or `https://host:port` (TLS, ALPN
+h2) -- an omitted target guesses `PORT+100` off `url`, preserving an `https://` scheme. Two new
+`connect` parameters, honored by REST, SignalR and gRPC alike: `caFile` (a PEM trusted as its own
+CA -- matches `tools/tls/dev-cert.sh`'s self-signed dev certificate) and `insecure` (trust-all, no
+hostname check -- dev only). Neither set trusts the JVM's default store, for a CA-issued cert.
+
+```kotlin
+StreamsForge.connect(url = "https://localhost:5199", user = "admin", password = "admin123!", caFile = "cert.pem")
+```
+
 ## Change-notification latency and backpressure
 
 `LiveTable` publishes through `rowsFlow`, a `StateFlow<List<Row>>`, under a LEADING edge +
