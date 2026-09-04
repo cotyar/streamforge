@@ -146,12 +146,15 @@ object EngineFixture {
             knownPrebuiltDir.exists() -> knownPrebuiltDir
             else -> publish()
         }
+        // A plain build output / framework-dependent publish has a .dll to run under `dotnet`; a
+        // single-file publish (Publish.props, plan 022) has only the native executable.
         val dll = File(publishDir, "StreamsForge.Host.dll")
-        check(dll.exists()) { "StreamsForge.Host.dll not found under ${publishDir.absolutePath}" }
+        val exe = File(publishDir, if (System.getProperty("os.name").startsWith("Windows")) "StreamsForge.Host.exe" else "StreamsForge.Host")
+        check(dll.exists() || exe.exists()) { "neither StreamsForge.Host.dll nor native StreamsForge.Host found under ${publishDir.absolutePath}" }
         val dataDir = Files.createTempDirectory("sf-kotlin-client-test-").toFile()
 
-        val args = mutableListOf(
-            dotnet.absolutePath, dll.absolutePath,
+        val args = (if (dll.exists()) mutableListOf(dotnet.absolutePath, dll.absolutePath) else mutableListOf(exe.absolutePath))
+        args += listOf(
             "--Http:Port", options.httpPort.toString(),
             "--Grpc:Port", options.grpcPort.toString(),
             "--Streams:Transport", "push",
@@ -187,10 +190,24 @@ object EngineFixture {
         handle.dataDir.deleteRecursively()
     }
 
+    private fun localRid(): String {
+        val os = System.getProperty("os.name").lowercase()
+        val arch = System.getProperty("os.arch").lowercase()
+        val osPart = when {
+            os.startsWith("mac") -> "osx"
+            os.startsWith("windows") -> "win"
+            else -> "linux"
+        }
+        val archPart = if (arch == "aarch64" || arch == "arm64") "arm64" else "x64"
+        return "$osPart-$archPart"
+    }
+
     private fun publish(): File {
         val publishDir = Files.createTempDirectory("sf-kotlin-client-publish-").toFile()
         val process = ProcessBuilder(
-            dotnet.absolutePath, "publish", projectDir.absolutePath, "-c", "Debug", "-o", publishDir.absolutePath,
+            // -r <this machine's RID>: since plan 022 a publish is a self-contained single-file NATIVE
+            // executable, so the RID must be the one this fixture will then execute.
+            dotnet.absolutePath, "publish", projectDir.absolutePath, "-c", "Debug", "-r", localRid(), "-o", publishDir.absolutePath,
         ).redirectErrorStream(true).start()
         // A single blocking publish with nothing else happening concurrently -- reading to EOF
         // here doubles as continuous draining, no separate Drain needed.

@@ -120,9 +120,9 @@ public sealed class TlsEngineFixture : IAsyncLifetime
                 return;
             }
         }
-        else if (!File.Exists(Path.Combine(_publishDir, "StreamsForge.Host.dll")))
+        else if (EngineProcess.HostEntryPoint(_publishDir) is null)
         {
-            SkipReason = $"SF_TEST_PUBLISH_DIR={_publishDir} has no StreamsForge.Host.dll";
+            SkipReason = $"SF_TEST_PUBLISH_DIR={_publishDir} has no StreamsForge.Host.dll or native StreamsForge.Host";
             return;
         }
 

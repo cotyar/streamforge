@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Diagnostics;
 using System.Net.Sockets;
 
@@ -26,6 +27,16 @@ internal static class EngineProcess
     // actual source with no effect on tests that never touch a fixture.
     private static readonly SemaphoreSlim PublishGate = new(1, 1);
 
+    /// <summary>The runnable artifact in a publish directory: the .dll when there is one, else the
+    /// native single-file executable; null when neither exists.</summary>
+    public static string? HostEntryPoint(string publishDir)
+    {
+        var dll = Path.Combine(publishDir, "StreamsForge.Host.dll");
+        if (File.Exists(dll)) return dll;
+        var exe = Path.Combine(publishDir, OperatingSystem.IsWindows() ? "StreamsForge.Host.exe" : "StreamsForge.Host");
+        return File.Exists(exe) ? exe : null;
+    }
+
     public static bool PortFree(int port)
     {
         try
@@ -45,7 +56,9 @@ internal static class EngineProcess
         await PublishGate.WaitAsync();
         try
         {
-            var psi = new ProcessStartInfo(Dotnet, $"publish \"{projectDir}\" -c Debug -o \"{publishDir}\"")
+            // -r <this machine's RID>: since plan 022 a publish is a self-contained single-file NATIVE
+            // executable (Publish.props), so the RID has to be the one the fixture will then execute.
+            var psi = new ProcessStartInfo(Dotnet, $"publish \"{projectDir}\" -c Debug -r {RuntimeInformation.RuntimeIdentifier} -o \"{publishDir}\"")
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -76,11 +89,11 @@ internal static class EngineProcess
             // WaitHealthyAsync reports it as "engine process exited early" with the OS's generic
             // "could not execute" text, nothing pointing at the actual publish. Fail here instead,
             // at the one place that actually knows a publish just happened.
-            var expectedDll = Path.Combine(publishDir, "StreamsForge.Host.dll");
-            if (!File.Exists(expectedDll))
+            var expectedDll = HostEntryPoint(publishDir);
+            if (expectedDll is null)
             {
                 throw new InvalidOperationException(
-                    $"dotnet publish exited 0 but {expectedDll} does not exist -- likely build-cache " +
+                    $"dotnet publish exited 0 but neither StreamsForge.Host.dll nor the native StreamsForge.Host executable exists under {publishDir} -- likely build-cache " +
                     $"corruption from concurrent publishes of the same source tree under heavy load:\n{Tail(stdout + stderr, 6000)}");
             }
         }
@@ -97,15 +110,20 @@ internal static class EngineProcess
     /// <paramref name="log"/> (an unread pipe fills and can kill the engine mid-suite).</summary>
     public static Process StartHost(string publishDir, IEnumerable<string> args, ProcessLogTail log)
     {
-        var dll = Path.Combine(publishDir, "StreamsForge.Host.dll");
-        var psi = new ProcessStartInfo(Dotnet)
+        var entry = HostEntryPoint(publishDir)
+            ?? throw new InvalidOperationException($"no StreamsForge.Host.dll or native StreamsForge.Host under {publishDir}");
+        // A framework-dependent publish (or SF_TEST_PUBLISH_DIR pointing at a plain build output) has a
+        // .dll to run under `dotnet`; a single-file publish (Publish.props, plan 022) has only the native
+        // executable, which runs on its own.
+        var isDll = entry.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);
+        var psi = new ProcessStartInfo(isDll ? Dotnet : entry)
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             WorkingDirectory = publishDir,
         };
-        psi.ArgumentList.Add(dll);
+        if (isDll) psi.ArgumentList.Add(entry);
         foreach (var a in args) psi.ArgumentList.Add(a);
 
         var process = Process.Start(psi) ?? throw new InvalidOperationException("failed to start StreamsForge.Host");
