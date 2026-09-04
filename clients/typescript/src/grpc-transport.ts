@@ -1,8 +1,10 @@
 /**
  * Tier 1 gRPC transport (design doc §3): StreamService.SubscribeTable for deltas,
  * TableService.Rows/Search/Validate/List for the catalog and snapshot, and the bidi
- * IngestService.Ingest for pushes. One insecure h2c channel, prior knowledge -- no TLS
- * negotiation, matching how the engine is actually run from source (§3.2's --urls trap).
+ * IngestService.Ingest for pushes. Plaintext h2c by default, prior knowledge -- no TLS
+ * negotiation, matching how the engine is actually run from source (§3.2's --urls trap). A
+ * `https://` target switches to ALPN-negotiated h2 over TLS (the server side of this is
+ * `--Tls:Enabled true` on the host, see `tools/tls/dev-cert.sh`) -- see `parseGrpcTarget` below.
  *
  * Node-only, and deliberately never imported eagerly: index.ts reaches this module only via a
  * dynamic `import()` gated on a Node-runtime check, so a browser bundle that imports
@@ -149,6 +151,38 @@ function promisify<Req, Res>(
   });
 }
 
+// ---- target parsing (scheme decides plaintext vs TLS) -----------------------------------
+
+export interface ParsedGrpcTarget {
+  /** Bare `host:port`, scheme stripped -- what `@grpc/grpc-js`'s client constructors expect. */
+  target: string;
+  /** Whether to dial with `createSsl` (true) or `createInsecure` (false). */
+  tls: boolean;
+}
+
+/**
+ * `grpc=` (ConnectOptions.grpc / STREAMSFORGE_GRPC) may be a bare `host:port` (plaintext,
+ * unchanged since before TLS support), an explicit `http://host:port` (also plaintext), or
+ * `https://host:port` (TLS). Anything else with no recognized scheme is treated as bare
+ * `host:port` -- the historical default, so an existing caller's target string keeps working
+ * unmodified.
+ */
+export function parseGrpcTarget(raw: string): ParsedGrpcTarget {
+  if (raw.startsWith("https://")) return { target: raw.slice("https://".length), tls: true };
+  if (raw.startsWith("http://")) return { target: raw.slice("http://".length), tls: false };
+  return { target: raw, tls: false };
+}
+
+export interface GrpcTransportOptions {
+  /** PEM text (not a path -- callers resolve a file path before reaching here, see index.ts's
+   * `resolveCa`). Passed to `createSsl`'s `rootCerts`; omitted means "trust the system roots",
+   * which is what a certificate from a real CA needs and a self-signed dev cert does not have. */
+  ca?: string;
+  /** false = accept any certificate (self-signed/invalid), the gRPC equivalent of http.ts's
+   * `verify: false` -- dev-only, see this option's doc comment on ConnectOptions in index.ts. */
+  verify?: boolean;
+}
+
 // ---- Transport ---------------------------------------------------------------------------
 
 export class GrpcTransport implements Transport {
@@ -160,12 +194,25 @@ export class GrpcTransport implements Transport {
   constructor(
     target: string,
     private readonly getToken: () => Promise<string>,
+    opts: GrpcTransportOptions = {},
   ) {
     const v1 = loadV1();
-    const creds = grpc.credentials.createInsecure();
-    this.tables = new v1.TableService(target, creds) as unknown as grpc.Client & Record<string, unknown>;
-    this.stream = new v1.StreamService(target, creds) as unknown as grpc.Client & Record<string, unknown>;
-    this.ingestClient = new v1.IngestService(target, creds) as unknown as grpc.Client & Record<string, unknown>;
+    const { target: bareTarget, tls } = parseGrpcTarget(target);
+    let creds: grpc.ChannelCredentials;
+    if (tls) {
+      const rootCerts = opts.ca ? Buffer.from(opts.ca, "utf-8") : null;
+      // grpc-js's VerifyOptions (confirmed against the installed @grpc/grpc-js@1.14.4) supports
+      // both rejectUnauthorized and checkServerIdentity -- setting both is belt-and-braces (some
+      // older grpc-js releases only honored the latter for the "wrong hostname" half of
+      // verification, not "untrusted issuer").
+      const verifyOptions = opts.verify === false ? { rejectUnauthorized: false, checkServerIdentity: () => undefined } : undefined;
+      creds = grpc.credentials.createSsl(rootCerts, null, null, verifyOptions);
+    } else {
+      creds = grpc.credentials.createInsecure();
+    }
+    this.tables = new v1.TableService(bareTarget, creds) as unknown as grpc.Client & Record<string, unknown>;
+    this.stream = new v1.StreamService(bareTarget, creds) as unknown as grpc.Client & Record<string, unknown>;
+    this.ingestClient = new v1.IngestService(bareTarget, creds) as unknown as grpc.Client & Record<string, unknown>;
   }
 
   private async metadata(): Promise<grpc.Metadata> {

@@ -64,8 +64,18 @@ export interface ConnectOptions {
    * one that fails loudly. */
   transport?: TransportName;
   /** false = accept self-signed/invalid TLS certs (local dev with a portless cert). Spelled out
-   * rather than defaulted -- see http.ts. */
+   * rather than defaulted -- see http.ts. Applies to every transport this client can pick: REST
+   * (http.ts), gRPC (grpc-transport.ts). SignalR has no equivalent hook in this client -- see the
+   * "TLS" section of the README for the NODE_TLS_REJECT_UNAUTHORIZED fallback. */
   verify?: boolean;
+  /** A custom CA to trust -- PEM text (contains `-----BEGIN`) or a file path, e.g. the `cert.pem`
+   * `tools/tls/dev-cert.sh` writes (that script's certificate is its own trust anchor: pointing
+   * `ca` at it is what makes `https://` work against a host started with
+   * `--Tls:Enabled true --Kestrel:Certificates:Default:Path cert.pem …` without also setting
+   * `verify: false`). Also STREAMSFORGE_CA. Applies to REST and gRPC, same reach as `verify`; for
+   * SignalR under Node, set `NODE_EXTRA_CA_CERTS` to the same path instead (see the README). A
+   * file path is Node-only -- a browser caller must pass the PEM text itself. */
+  ca?: string;
 }
 
 export interface TableOptions {
@@ -94,13 +104,36 @@ function isNodeRuntime(): boolean {
   return typeof process !== "undefined" && Boolean(process.versions?.node);
 }
 
-function defaultGrpcTarget(baseUrl: string): string {
-  // Guesses the gRPC port from the REST base_url following Program.cs's own PORT/PORT+100
-  // convention. Only a fallback -- pass grpc= (or STREAMSFORGE_GRPC) whenever the two ports don't
-  // follow that relationship, e.g. an explicit --Http:Port/--Grpc:Port pair that isn't +100 apart.
+/** Guesses the gRPC port from the REST base_url following Program.cs's own PORT/PORT+100
+ * convention. Only a fallback -- pass grpc= (or STREAMSFORGE_GRPC) whenever the two ports don't
+ * follow that relationship, e.g. an explicit --Http:Port/--Grpc:Port pair that isn't +100 apart.
+ * Preserves the base URL's scheme when it is `https:` (the host's gRPC port serves TLS too
+ * whenever `--Tls:Enabled true` is on, per Program.cs's two-listener branch) -- `url:
+ * "https://h:7199"` alone, with no explicit `grpc=`, yields `"https://h:7299"`, not a bare
+ * `"h:7299"` that GrpcTransport would then dial in plaintext against a TLS-only port. Exported so
+ * this scheme-preservation rule is unit-testable without booting an engine. */
+export function defaultGrpcTarget(baseUrl: string): string {
   const u = new URL(baseUrl);
   const httpPort = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
-  return `${u.hostname}:${httpPort + 100}`;
+  const target = `${u.hostname}:${httpPort + 100}`;
+  return u.protocol === "https:" ? `https://${target}` : target;
+}
+
+/** Turns `ConnectOptions.ca` / `STREAMSFORGE_CA` (PEM text or a file path) into PEM text.
+ * Resolving a path needs `node:fs`, which lives in ca-resolve.ts (a Node-only module, like
+ * grpc-transport.ts) reached only through a dynamic import guarded by `isNodeRuntime()` --
+ * inline PEM text (the only form a browser caller can use, having no filesystem) never triggers
+ * that import at all. */
+async function resolveCa(ca: string | undefined): Promise<string | undefined> {
+  if (!ca) return undefined;
+  if (ca.includes("-----BEGIN")) return ca;
+  if (!isNodeRuntime()) {
+    throw new StreamsForgeError(
+      "ca as a file path requires Node -- a browser has no filesystem to resolve it against; pass the PEM text itself (starting '-----BEGIN') instead",
+    );
+  }
+  const { resolveCaPem } = await import("./ca-resolve.js");
+  return resolveCaPem(ca);
 }
 
 export class Client {
@@ -206,7 +239,8 @@ export async function connect(opts: ConnectOptions = {}): Promise<Client> {
     throw new StreamsForgeError("no base URL: pass url=, or set STREAMSFORGE_BASE_URL");
   }
 
-  const http = new RestClient({ baseUrl: cfg.baseUrl, user: cfg.user, password: cfg.password, token: opts.token, verify: opts.verify });
+  const caPem = await resolveCa(cfg.ca);
+  const http = new RestClient({ baseUrl: cfg.baseUrl, user: cfg.user, password: cfg.password, token: opts.token, verify: opts.verify, ca: caPem });
 
   let grpcTransport: (GrpcIngestCapable & Transport) | null = null;
   if (transportOpt === "grpc" || transportOpt === "auto") {
@@ -223,7 +257,7 @@ export async function connect(opts: ConnectOptions = {}): Promise<Client> {
       const target = cfg.grpc ?? defaultGrpcTarget(cfg.baseUrl);
       try {
         const { GrpcTransport } = await import("./grpc-transport.js");
-        const candidate = new GrpcTransport(target, () => http.token());
+        const candidate = new GrpcTransport(target, () => http.token(), { ca: caPem, verify: opts.verify });
         await candidate.listTables(); // proves the channel AND the JWT actually work
         grpcTransport = candidate;
       } catch (err) {

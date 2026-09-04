@@ -164,6 +164,26 @@ URL matches the one being addressed — a token from another host is not silentl
 with `SF_USER`/`SF_PASSWORD`. Only the JWT is ever written to disk, and only by an explicit
 `sf login`; no credential is. There are no default credentials in the code.
 
+### TLS
+
+Pointing `--url`/`SF_URL` at `https://…` (a host started with `--Tls:Enabled true`, see
+`tools/tls/dev-cert.sh` and `SECURITY.md`) works with no extra flag as long as the certificate
+chains to a CA this machine already trusts. Two env vars cover the case where it doesn't — both
+read fresh on every request (`sfclient.ts`'s `tlsRequestInit`), so they apply to `sf login` and
+every command after it identically, and both work automatically for `mcp.ts` too (it shares this
+same client):
+
+- **`SF_CA_FILE`** — a PEM file *path* (unlike `@streamsforge/client`'s `ca=`, which also accepts
+  inline PEM text: there's no good way to carry a multi-line block in a shell env var, and a path
+  is what you'd type on a command line anyway). Point it at the `cert.pem` `dev-cert.sh` wrote —
+  that file is its own trust anchor, self-signed with `CA:TRUE` — to trust a dev instance's
+  certificate: `SF_CA_FILE=/path/to/cert.pem bun admin/sf.ts health`.
+- **`SF_INSECURE=1`** — accept any certificate, no CA needed. The CLI equivalent of that client's
+  `verify: false`. Dev-only; never point this at anything you don't already trust by other means.
+
+Neither var is required for a certificate from a real CA (or one your OS/Node already trusts) —
+they exist for the self-signed dev-cert case this whole repo's TLS docs revolve around.
+
 ### Environments (plan 021)
 
 Every command takes `--env <name>`, falling back to `SF_ENV`, falling back to the default

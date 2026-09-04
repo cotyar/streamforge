@@ -20,6 +20,11 @@ export interface RestClientOptions {
   token?: string;
   /** false = accept self-signed/invalid TLS certs (local dev with a portless cert). */
   verify?: boolean;
+  /** PEM text (not a path -- index.ts's `resolveCa` reads a file path before this point) of a
+   * custom CA to trust in addition to (Bun's fetch REPLACES, per its own `tls.ca` doc comment,
+   * not adds to) the system roots. Typically a self-signed dev cert from `tools/tls/dev-cert.sh`,
+   * which is its own root -- see ConnectOptions.ca's doc comment in index.ts. */
+  ca?: string;
 }
 
 export class RestClient {
@@ -27,6 +32,7 @@ export class RestClient {
   private readonly user: string | undefined;
   private readonly password: string | undefined;
   private readonly verify: boolean;
+  private readonly ca: string | undefined;
   private token_: string | null;
   private tokenMintedAtMs: number | null;
   private loginInFlight: Promise<void> | null = null;
@@ -36,6 +42,7 @@ export class RestClient {
     this.user = opts.user;
     this.password = opts.password;
     this.verify = opts.verify ?? true;
+    this.ca = opts.ca;
     this.token_ = opts.token ?? null;
     this.tokenMintedAtMs = opts.token ? Date.now() : null;
   }
@@ -45,7 +52,10 @@ export class RestClient {
     // portable standard fetch option for this. verify=false is spelled out by the caller
     // (connect()'s own doc comment) rather than silently defaulted, matching the design doc's
     // "a client that quietly stops verifying TLS is not a habit worth teaching" (§4).
-    return this.verify ? {} : ({ tls: { rejectUnauthorized: false } } as RequestInit);
+    const tls: { rejectUnauthorized?: boolean; ca?: string } = {};
+    if (!this.verify) tls.rejectUnauthorized = false;
+    if (this.ca) tls.ca = this.ca;
+    return Object.keys(tls).length > 0 ? ({ tls } as RequestInit) : {};
   }
 
   async token(): Promise<string> {

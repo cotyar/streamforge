@@ -68,10 +68,32 @@ When gRPC is refused, the error names the likely cause: the engine was started w
 which trips `Program.cs`'s guard so **no gRPC port is bound at all** -- start it with
 `--Http:Port <n> --Grpc:Port <n+100>` instead (see the design doc's §3.2).
 
+## TLS
+
+Point `url` at `https://…` (a host started with `--Tls:Enabled true`, see `tools/tls/dev-cert.sh`
+and `SECURITY.md`) and REST works like any HTTPS client. For gRPC, `grpc=` carries the scheme too
+-- `"host:port"` and `"http://host:port"` stay plaintext (unchanged), `"https://host:port"` dials
+TLS; omitted, `defaultGrpcTarget` guesses `grpc=` from `url` and **keeps its scheme**, so
+`url: "https://h:7199"` alone yields a TLS gRPC guess at `"https://h:7299"`, not a plaintext one
+against what is a TLS-only port once `Tls:Enabled` is on.
+
+- **`ca`** (also `STREAMSFORGE_CA`) -- a custom CA to trust: PEM text (containing `-----BEGIN`) or
+  a file path (Node only; a browser has no filesystem, so it must pass PEM text). Point it at the
+  `cert.pem` `dev-cert.sh` wrote -- that file is its own trust anchor (self-signed, `CA:TRUE`) --
+  to talk to a dev instance without disabling verification. Applies to REST and gRPC.
+- **`verify: false`** -- accept any certificate (self-signed/invalid), on REST **and** gRPC. Dev
+  only; spelled out rather than defaulted on purpose (see `ConnectOptions.verify`'s doc comment).
+- **SignalR has no `ca`/`verify` hook in this client** -- `@microsoft/signalr`'s Node HTTP client
+  builds its own request/socket options and never sees this client's `RestClient`, so there is no
+  clean way to thread a per-connection CA or "skip verification" into it. Set
+  `NODE_EXTRA_CA_CERTS=/path/to/cert.pem` (process-wide, before your process starts) to trust a
+  custom CA for SignalR under Node; there is no equivalent fallback for `verify: false` short of
+  the blunt, process-wide `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+
 ## Public surface
 
 ```ts
-connect({ url, grpc, user, password, token, ingestKey, transport, verify }) -> Promise<Client>
+connect({ url, grpc, user, password, token, ingestKey, transport, verify, ca }) -> Promise<Client>
 client.table(name, { key, timeoutMs, flushMs }) -> Promise<LiveTable>
 client.snapshot(name, limit) -> Promise<Row[]>           // one-shot REST/gRPC read, no subscription
 client.tables() -> Promise<TableDefinitionDto[]>

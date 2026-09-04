@@ -10,6 +10,29 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export const DEFAULT_URL = "http://localhost:5199";
+
+/** TLS trust for every request this file makes (login included) -- SF_CA_FILE (a PEM file PATH,
+ * unlike @streamsforge/client's `ca=`, which also accepts inline PEM text: a shell env var has no
+ * good way to carry a multi-line block, and a path is what someone types on a command line anyway)
+ * and SF_INSECURE=1 (accept any certificate -- the CLI equivalent of that client's `verify: false`,
+ * dev-only). Read fresh on every call rather than cached at module load, so a test can flip either
+ * env var between two SfClient instances in the same process without restarting it. */
+export function tlsRequestInit(): RequestInit {
+  const caFile = process.env.SF_CA_FILE;
+  const insecure = process.env.SF_INSECURE === "1";
+  if (!caFile && !insecure) return {};
+  const tls: { ca?: string; rejectUnauthorized?: boolean } = {};
+  if (caFile) tls.ca = readFileSync(caFile, "utf8");
+  if (insecure) tls.rejectUnauthorized = false;
+  return { tls } as RequestInit;
+}
+
+/** The one place this file calls `fetch` -- login() and request() both route through here so
+ * SF_CA_FILE/SF_INSECURE apply to every outbound request (an admin login over `--Tls:Enabled`
+ * needs the same trust as every request after it) without each call site repeating the plumbing. */
+function sfFetch(url: string, init: RequestInit): Promise<Response> {
+  return fetch(url, { ...tlsRequestInit(), ...init });
+}
 /** Plan 021 — the header `EnvironmentSelectionMiddleware` reads
  * (`shared/StreamsForge.Api/Environments/EnvironmentSelectionMiddleware.cs`), duplicated here as a
  * string literal for the same "no cross-language sharing in this folder" reason `normalizeEnv` is. */
@@ -233,7 +256,7 @@ export class SfClient {
     // env-configured command makes. Found while verifying the plan-015 commands against a wedged host.
     let res: Response;
     try {
-      res = await fetch(`${this.url}/api/auth/login`, {
+      res = await sfFetch(`${this.url}/api/auth/login`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ username, password: secret }),
@@ -281,7 +304,7 @@ export class SfClient {
 
     let res: Response;
     try {
-      res = await fetch(`${this.url}${path}`, { method, headers, body });
+      res = await sfFetch(`${this.url}${path}`, { method, headers, body });
     } catch (err) {
       throw new SfError(`cannot reach ${this.url}: ${err instanceof Error ? err.message : String(err)}`);
     }
