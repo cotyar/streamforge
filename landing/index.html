@@ -22,9 +22,12 @@
       </a>
       <button class="menu-button" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
       <nav id="site-nav" aria-label="Main navigation">
-        <a href="#why">Why StreamsForge</a>
-        <a href="#architecture">Architecture</a>
+        <a href="#product">Console</a>
+        <a href="#connect">Connect</a>
+        <a href="#edge">Edge</a>
+        <a href="#build">Build</a>
         <a class="nav-docs" href="/docs/">Docs <span aria-hidden="true">↗</span></a>
+        <a class="nav-github" href="https://github.com/cotyar/streamsforge" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
         <a href="#launch">Get started</a>
       </nav>
     </header>
@@ -122,6 +125,114 @@
         <div class="proof-grid"><h2>Latency is an<br /><em>architectural fact.</em></h2><div><p>StreamsForge’s in-process push transport brings a live table delta to subscribers at a measured 1 ms p50—while retaining the standard pull transport when byte-for-byte Orleans behavior matters.</p><div class="metric"><b>1 <small>ms</small></b><span>p50 table delta<br />push transport</span></div></div></div>
       </section>
 
+      <section class="product" id="product">
+        <div class="section-head product-heading"><div><p class="section-number">04 / THE CONSOLE</p><h2>See the stream<br />as it <em>behaves.</em></h2></div><p>The console is an operating surface, not a screenshot of a dashboard: inspect SQL, watch live rows arrive, follow lineage, and govern catalog changes.</p></div>
+        <div class="product-stage" data-gallery>
+          <div class="product-stage-copy">
+            <p class="eyebrow"><span></span> PRODUCT PROOF</p>
+            <h3 data-gallery-title>Live operations,<br /><em>without the blind spot.</em></h3>
+            <p data-gallery-copy>See running sources, materialized tables, pipelines, and the pressure points that need attention—on a single operational canvas.</p>
+            <div class="gallery-controls" role="group" aria-label="Choose a console view">
+              <button type="button" class="gallery-control is-active" data-gallery-select="dashboard" aria-pressed="true">Overview</button>
+              <button type="button" class="gallery-control" data-gallery-select="pipeline" aria-pressed="false">SQL + pipeline</button>
+              <button type="button" class="gallery-control" data-gallery-select="table" aria-pressed="false">Live table</button>
+              <button type="button" class="gallery-control" data-gallery-select="chat" aria-pressed="false">AI control</button>
+            </div>
+            <a href="/docs/" class="text-link">Explore the operator docs <span aria-hidden="true">↗</span></a>
+          </div>
+          <figure class="product-frame">
+            <div class="frame-chrome" aria-hidden="true"><span></span><span></span><span></span><b data-gallery-label>overview / live catalog</b><i>LIVE</i></div>
+            <img data-gallery-image src="/media/product/dashboard.png" alt="StreamsForge console overview showing platform activity." width="2880" height="1800" loading="lazy" />
+            <figcaption data-gallery-caption>Console overview: the live catalog at a glance.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="product-reels" aria-labelledby="reels-heading">
+        <div class="reels-intro"><p class="section-number">04.1 / RECORDED FROM A LIVE CONSOLE</p><h2 id="reels-heading">Watch the catalog<br /><em>move.</em></h2><p>These short tours use browser captures from the seeded Orleans container—not rendered mockups. The stills preserve the destination views in full detail.</p></div>
+        <div class="reel-grid">
+          <figure><img src="/media/recordings/console-tour.gif" alt="Animated StreamsForge console view of the live pipeline catalog." width="960" height="640" loading="lazy" /><figcaption><span>01</span> Live pipeline catalog</figcaption></figure>
+          <figure><img src="/media/recordings/lineage-tour.gif" alt="Animated StreamsForge console view of the lineage graph linking sources, pipelines, and tables." width="960" height="640" loading="lazy" /><figcaption><span>02</span> Source-to-table lineage</figcaption></figure>
+        </div>
+        <div class="reel-stills">
+          <figure><img src="/media/recordings/console-pipelines.png" alt="StreamsForge Pipelines console showing seven pipeline definitions and their current throughput." width="1440" height="960" loading="lazy" /><figcaption><span>CAPTURE</span> Live pipeline catalog</figcaption></figure>
+          <figure><img src="/media/recordings/console-lineage.png" alt="StreamsForge Lineage console showing the relationship between sources, pipelines, and tables." width="1440" height="960" loading="lazy" /><figcaption><span>CAPTURE</span> Source-to-table graph</figcaption></figure>
+        </div>
+      </section>
+
+      <section class="measure" aria-labelledby="measure-heading">
+        <div><p class="section-number">05 / MEASURED, NOT ASSERTED</p><h2 id="measure-heading">The full latency<br /><em>shape matters.</em></h2><p>Choose the transport shape that matches the system you are building. The fast path is measured, and the baseline remains visible.</p></div>
+        <div class="latency-table-wrap">
+          <table class="latency-table">
+            <caption>Measured table-delta latency</caption>
+            <thead><tr><th scope="col">Runtime / transport</th><th scope="col">p50</th><th scope="col">p90</th><th scope="col">p99</th></tr></thead>
+            <tbody>
+              <tr class="fast-path"><th scope="row">Orleans / in-process push</th><td>1 ms</td><td>2 ms</td><td>6 ms</td></tr>
+              <tr><th scope="row">Dapr / Redis pub-sub</th><td>7 ms</td><td>9 ms</td><td>14 ms</td></tr>
+              <tr><th scope="row">Orleans / memory-stream pull</th><td>115 ms</td><td>164 ms</td><td>190 ms</td></tr>
+            </tbody>
+          </table>
+          <p class="method-note">Table-delta measurements from the runtime comparison. Push is Orleans-only; Dapr’s Redis pub-sub path is shown separately.</p>
+        </div>
+      </section>
+
+      <section class="connect" id="connect">
+        <div class="section-head"><div><p class="section-number">06 / CONNECT WHERE DATA LIVES</p><h2>Bring the stream<br />you <em>already have.</em></h2></div><p>Ingress and egress share one pluggable transport seam. Start with database changes, broker messages, sessions, files, APIs, or another named instance.</p></div>
+        <ul class="transport-list" role="list">
+          <li><b>Postgres</b><span>polling + native logical-replication CDC</span></li>
+          <li><b>SQL Server</b><span>polling + native capture-table CDC</span></li>
+          <li><b>NATS</b><span>reference ingress and egress</span></li>
+          <li><b>FIX</b><span>receive-only and duplex session modes</span></li>
+          <li><b>Files + URLs</b><span>CSV, TSV, NDJSON and delimiter sniffing</span></li>
+          <li><b>gRPC peers</b><span>federate by instance and entity name</span></li>
+          <li><b>CRDT</b><span>Orleans-native edge source</span></li>
+        </ul>
+      </section>
+
+      <section class="cdc">
+        <div class="cdc-lead"><p class="section-number">07 / NATIVE CDC</p><h2>Database changes,<br /><em>not another estate.</em></h2><p>Point StreamsForge at Postgres or SQL Server, run streaming SQL over the change feed, and sink the result back to a database. Native CDC is built into the host: no Kafka cluster or Connect layer required for these two dialects.</p><a class="text-link" href="/docs/#sources">Read the connector docs <span aria-hidden="true">↗</span></a></div>
+        <div class="cdc-sheet">
+          <div class="sheet-line"><span>POSTGRES</span><b>logical replication / pgoutput</b></div>
+          <div class="sheet-line"><span>SQL SERVER</span><b>CDC capture tables / LSN cursor</b></div>
+          <div class="sheet-line"><span>STREAMING SQL</span><b>same engine, between source and sink</b></div>
+          <div class="sheet-line"><span>SHIP IT</span><b>self-contained executable or container</b></div>
+          <aside><strong>Operator truth.</strong> A replication slot can pin WAL; SQL Server CDC retention can discard history; delivery is at-least-once. StreamsForge preflights those hazards—it does not pretend they disappear.</aside>
+        </div>
+      </section>
+
+      <section class="edge" id="edge">
+        <div class="edge-media"><figure><img src="/media/demos/crdt-offline-edge.png" alt="Offline edge demonstration showing local actions queued during disconnection and reconciled after reconnect." width="1280" height="900" loading="lazy" /><figcaption>Mechanism shown in the Bind business demo; the relay is simulated there. StreamsForge’s CRDT source itself is Orleans-native.</figcaption></figure></div>
+        <div class="edge-copy"><p class="section-number">08 / CRDT + OFFLINE EDGE</p><h2>Keep working<br />when the link <em>doesn’t.</em></h2><p>Offline sessions reconcile to one net result on reconnect. Replay is idempotent; bounded counters can keep a hard inventory limit even when replicas spend concurrently.</p><ul role="list"><li><b>Yjs-compatible documents</b> merge concurrent edits character by character.</li><li><b>Escrow counters</b> preserve a distributed, offline bound.</li><li><b>SQL compensation</b> turns an invalid merged state into a normal streaming workflow.</li><li><b>Presence</b> is live per host process with automatic TTL eviction.</li></ul><p class="scope-note">Available on the Orleans runtime. Dapr stores the kind but deliberately refuses to start it.</p></div>
+      </section>
+
+      <section class="build" id="build">
+        <div class="section-head"><div><p class="section-number">09 / COMPUTE IN THE FLOW</p><h2>Risk, scenarios,<br />and <em>the next tick.</em></h2></div><p>Run Monte-Carlo shaped workloads, materialize the distribution, and compute statistics in the engine—not in a browser after the fact.</p></div>
+        <div class="build-grid">
+          <article class="quant-card"><p class="card-kicker">MONTE-CARLO / STREAMING SQL</p><div class="distribution" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><h3>Paths become<br /><em>a live distribution.</em></h3><p>Materialize paths, calculate median, percentiles, VaR and expected shortfall, then join fresh limits without restarting the simulation.</p></article>
+          <article class="quant-card quant-card-dark"><p class="card-kicker">QUANT FUNCTIONS</p><pre><span>SELECT</span> BS_PRICE(...),
+<span>       </span> IRS_DV01(...),
+<span>       </span> BOND_DURATION(...)
+<span>FROM</span> live_positions</pre><p>Black–Scholes, bond, swap and FX-forward functions return NULL for an invalid input rather than crashing the entire pipeline.</p><div class="scenario-mark">WHAT IF <b>+25bp</b></div></article>
+          <article class="quant-card client-card"><p class="card-kicker">FIVE CLIENTS / ONE CONFORMANCE SUITE</p><div class="client-badges"><span>TS</span><span>PY</span><span>KT</span><span>.NET</span><span>REACT</span></div><h3>Build where<br />your users <em>are.</em></h3><p>TypeScript, Python, Kotlin, .NET, React and TanStack DB share the same Z-set conformance cases. REST, SignalR, gRPC, CLI and MCP meet operators where they work.</p></article>
+        </div>
+      </section>
+
+      <section class="operate">
+        <div class="operate-terminal"><div class="terminal-head"><span></span><span></span><span></span><b>operator shell</b></div><pre><span>$</span> bun admin/sf.ts login
+<span>✓</span> authenticated as admin
+
+<span>$</span> bun admin/sf.ts ls pipelines
+<span>→</span> 7 running / 0 stale
+
+<span>$</span> bun admin/mcp.ts
+<span>✓</span> tools ready over stdio</pre></div>
+        <div class="operate-copy"><p class="section-number">10 / OPERATE BY HAND OR AGENT</p><h2>A live catalog,<br /><em>within reach.</em></h2><p>The zero-dependency CLI can inspect, create, start and stop catalog entities. Its companion MCP server exposes the same operations to an agent over stdio.</p><p>Federate a peer by its instance name and entity name; keep isolated environments within one server without teaching every tool a new address.</p><a href="/docs/" class="text-link">Read API, CLI and federation docs <span aria-hidden="true">↗</span></a></div>
+      </section>
+
+      <section class="recording" aria-labelledby="recording-heading">
+        <p class="section-number">11 / RECORD THE REAL THING</p><div><h2 id="recording-heading">Product demos are<br /><em>reproducible.</em></h2><p>Webreel scenarios in the repository sign into a local console, walk the live catalog, and export GIF, MP4 or WebM. Run them against a seeded instance to capture the product as it works today.</p></div><a class="button button-quiet" href="https://github.com/cotyar/streamsforge/tree/master/.examples/webreel">Open recording recipes <span aria-hidden="true">↗</span></a>
+      </section>
+
       <section class="launch" id="launch">
         <p class="section-number">04 / START HERE</p>
         <div class="launch-copy"><h2>Let the data<br />keep <em>moving.</em></h2><p>Start a local StreamsForge console, bring in an event stream, and write the first query that keeps answering itself.</p></div>
@@ -130,7 +241,7 @@
       </section>
     </main>
 
-    <footer><a class="wordmark" href="#top"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M5 11.5h12.5L24 18l11-6.5M5 20h12.5L24 26l11-6M5 28.5h12.5L24 34l11-5.5" /></svg><span>Streams<span>Forge</span></span></a><p>Streaming SQL for a changing world.</p><a href="#top">Back to top ↑</a></footer>
+    <footer><a class="wordmark" href="#top"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M5 11.5h12.5L24 18l11-6.5M5 20h12.5L24 26l11-6M5 28.5h12.5L24 34l11-5.5" /></svg><span>Streams<span>Forge</span></span></a><p>Streaming SQL for a changing world.</p><a href="https://github.com/cotyar/streamsforge" target="_blank" rel="noreferrer">GitHub ↗</a><a href="#top">Back to top ↑</a></footer>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

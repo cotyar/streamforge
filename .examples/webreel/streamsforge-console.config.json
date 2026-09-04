@@ -1,0 +1,50 @@
+{
+  "$schema": "https://webreel.dev/schema/v1.json",
+  "outDir": "videos",
+  "baseUrl": "http://127.0.0.1:6199",
+  "viewport": { "width": 1440, "height": 960 },
+  "defaultDelay": 650,
+  "theme": {
+    "cursor": { "color": "#b9f978" },
+    "keystroke": { "background": "#061815", "color": "#f7f2e9" }
+  },
+  "videos": {
+    "console-tour": {
+      "url": "/login",
+      "output": "console-tour.gif",
+      "waitFor": "#username",
+      "steps": [
+        { "action": "type", "selector": "#username", "text": "admin" },
+        { "action": "type", "selector": "#password", "text": "admin123!" },
+        { "action": "click", "selector": "button[type=submit]" },
+        { "action": "pause", "ms": 1200 },
+        { "action": "wait", "selector": "a[href='/pipelines']" },
+        { "action": "navigate", "url": "/pipelines" },
+        { "action": "pause", "ms": 1800 },
+        { "action": "wait", "text": "Pipelines" },
+        { "action": "screenshot", "output": "console-pipelines.png" },
+        { "action": "navigate", "url": "/tables" },
+        { "action": "pause", "ms": 1800 },
+        { "action": "wait", "text": "Tables" },
+        { "action": "screenshot", "output": "console-tables.png" }
+      ]
+    },
+    "lineage-tour": {
+      "url": "/login",
+      "output": "lineage-tour.gif",
+      "waitFor": "#username",
+      "steps": [
+        { "action": "type", "selector": "#username", "text": "admin" },
+        { "action": "type", "selector": "#password", "text": "admin123!" },
+        { "action": "click", "selector": "button[type=submit]" },
+        { "action": "pause", "ms": 1200 },
+        { "action": "wait", "selector": "a[href='/lineage']" },
+        { "action": "navigate", "url": "/lineage" },
+        { "action": "pause", "ms": 2200 },
+        { "action": "wait", "text": "Lineage" },
+        { "action": "screenshot", "output": "console-lineage.png" },
+        { "action": "pause", "ms": 800 }
+      ]
+    }
+  }
+}
