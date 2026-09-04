@@ -4,6 +4,7 @@ using StreamsForge.Abstractions;
 using StreamsForge.AppCore.Environments;
 using StreamsForge.Engine;
 using StreamsForge.Engine.Dataflow;
+using StreamsForge.Host.Facades;
 
 namespace StreamsForge.Host.Grains;
 
@@ -90,16 +91,73 @@ public sealed class TableIngestGrain : Grain, ITableIngestGrain
         {
             var stream = streamProvider.GetStream<List<TableDeltaDto>>(StreamId.Create(StreamConstants.TableDeltaNamespace, qualifiedInputName));
             _tableSub = await stream.SubscribeAsync((batch, _) => OnTableDeltaBatchAsync(batch));
+            _status = PipelineStatus.Running;
         }
         else
         {
-            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, qualifiedInputName));
-            _streamSub = await stream.SubscribeAsync((evt, _) => OnStreamEventAsync(evt));
+            // Subscribe-then-attach against a connector-kind source — the coordinator-mode (Parallelism >= 2)
+            // copy of TableGrain.AttachToStreamInputAsync, which carries the full rationale. The one
+            // difference that matters here: _status is set to Running BEFORE the replay is fed, because
+            // OnStreamEventAsync no-ops while the grain is Stopped and the replayed rows would otherwise be
+            // dropped on the floor — the very loss this exists to close.
+            await AttachToStreamSourceAsync(streamProvider, def, inputName, qualifiedInputName);
         }
 
         _flushTimer = this.RegisterGrainTimer(OnFlushTickAsync, FlushInterval, FlushInterval);
-        _status = PipelineStatus.Running;
         this.DelayDeactivation(TimeSpan.FromDays(365));
+    }
+
+    /// <summary>See the call site's comment and <c>TableGrain.AttachToStreamInputAsync</c>'s doc for the
+    /// protocol and why it is exactly-once. Sets <see cref="_status"/> to Running itself (the caller no
+    /// longer does, on either branch) so the replayed rows reach <see cref="OnStreamEventAsync"/>'s
+    /// buffering rather than its Stopped guard; a flush of that buffer can only happen on the timer the
+    /// caller arms afterwards or at the 1000-event threshold, both of which are safe here.</summary>
+    private async Task AttachToStreamSourceAsync(
+        IStreamProvider streamProvider, TableDefinition def, string inputName, string qualifiedInputName)
+    {
+        IConnectorGrain? connector = null;
+        SourceReplaySnapshot? snapshot = null;
+
+        // GetSourceAsync is on RegistryGrain's [MayInterleave] allowlist (verified), so calling it from here
+        // is safe even when the registry is itself awaiting the TableGrain.StartAsync that led to this call.
+        try
+        {
+            var sourceDef = await GrainFactory.RegistryFor(def.Environment).GetSourceAsync(inputName);
+            if (sourceDef is not null && SourceKindDispatch.Classify(sourceDef.Kind) == SourceKindDispatch.ActorKind.Connector)
+            {
+                connector = GrainFactory.GetGrain<IConnectorGrain>(qualifiedInputName);
+                snapshot = await connector.BeginAttachAsync();
+            }
+        }
+        catch
+        {
+            // Best-effort, exactly like the other two consumers: losing the backfill is bad, refusing to
+            // start the table is worse.
+            connector = null;
+            snapshot = null;
+        }
+
+        try
+        {
+            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, qualifiedInputName));
+            _streamSub = await stream.SubscribeAsync((evt, _) => OnStreamEventAsync(evt));
+            _status = PipelineStatus.Running;
+
+            if (snapshot is not null)
+            {
+                foreach (var row in snapshot.Rows)
+                {
+                    await OnStreamEventAsync(new EventRecord(row));
+                }
+            }
+        }
+        finally
+        {
+            if (connector is not null)
+            {
+                try { await connector.EndAttachAsync(); } catch { /* the source's own safety timer covers it */ }
+            }
+        }
     }
 
     public async Task StopAsync()

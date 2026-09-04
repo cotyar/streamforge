@@ -5,6 +5,7 @@ using Orleans.Runtime;
 using Orleans.Serialization.Invocation;
 using Orleans.Streams;
 using StreamsForge.Abstractions;
+using StreamsForge.AppCore.Connectors;
 using StreamsForge.AppCore.Environments;
 using StreamsForge.Engine;
 using StreamsForge.Engine.Dataflow;
@@ -492,9 +493,7 @@ public sealed class TableGrain(
         var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
         foreach (var name in compileResult.StreamInputs.Distinct())
         {
-            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, EnvKeys.Qualify(def.Environment, name)));
-            var handle = await stream.SubscribeAsync((evt, _) => OnStreamEventAsync(name, evt));
-            _streamSubs.Add(handle);
+            await AttachToStreamInputAsync(streamProvider, def, name, sources);
         }
         // Wishlist #14 option (a) — see AttachToTableInputAsync's own doc comment for the full
         // subscribe-then-attach protocol this replaces WarnIfTableInputsAlreadyHoldRowsAsync with.
@@ -511,6 +510,90 @@ public sealed class TableGrain(
 
         // Keep this activation alive for as long as the table is running — mirrors PipelineGrain.
         this.DelayDeactivation(TimeSpan.FromDays(365));
+    }
+
+    /// <summary>The STREAM-input twin of <see cref="AttachToTableInputAsync"/> below: subscribe-then-attach
+    /// against a connector-kind source, so a table written AFTER its source was already enabled and polling
+    /// still gets the rows that source has already emitted.
+    ///
+    /// <para>THE WINDOW THIS CLOSES: Orleans memory streams have no replay, so before this a table only
+    /// ever saw rows published after its own subscription existed. The natural console flow — create the
+    /// source (enabled), then write the table SQL — puts the source's first poll (interval floor: 1 s) well
+    /// before that subscription, and with a dedup key configured those rows never come round again. They
+    /// were simply lost, silently.</para>
+    ///
+    /// <para>ORDER, AND WHY IT IS EXACTLY-ONCE: <c>BeginAttachAsync</c> first — it takes a hold that stops
+    /// the source publishing and returns its recent rows in one turn — THEN subscribe, THEN feed the
+    /// returned rows through <see cref="OnStreamEventAsync"/> (the same handler live traffic uses, so
+    /// GROUP BY/JOIN/LATEST BY state is built from them rather than bypassed), THEN release the hold in a
+    /// <c>finally</c>. Nothing can be published into the gap between the snapshot and the subscription, so
+    /// no row is both replayed and delivered live, and none is missed. See
+    /// <see cref="IConnectorGrain.BeginAttachAsync"/> for the driver half.</para>
+    ///
+    /// <para>Only <see cref="SourceKindDispatch.ActorKind.Connector"/> sources have that driver. Generators
+    /// are continuous (there is no first batch to miss), ingest sources are drained by the facade rather
+    /// than by this grain, and a CRDT document brings its own replay — all three are subscribed to exactly
+    /// as before. A source the catalog does not know at all (a table compiled against a since-deleted
+    /// source name) is treated the same way: subscribe, no attach.</para>
+    ///
+    /// <para>The gate is best-effort in ONE direction only: if <c>BeginAttachAsync</c> itself throws, this
+    /// falls back to a plain subscription rather than refusing to start the table. Losing the backfill is
+    /// bad; refusing to start is worse.</para></summary>
+    private async Task AttachToStreamInputAsync(
+        IStreamProvider streamProvider, TableDefinition def, string name, IEnumerable<SourceDefinition> sources)
+    {
+        var qualified = EnvKeys.Qualify(def.Environment, name);
+
+        var sourceDef = sources.FirstOrDefault(s => s.Name == name);
+        IConnectorGrain? connector = null;
+        SourceReplaySnapshot? snapshot = null;
+        if (sourceDef is not null && SourceKindDispatch.Classify(sourceDef.Kind) == SourceKindDispatch.ActorKind.Connector)
+        {
+            connector = GrainFactory.GetGrain<IConnectorGrain>(qualified);
+            try
+            {
+                snapshot = await connector.BeginAttachAsync();
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Table '{Table}': could not attach to stream input '{Source}' for replay — subscribing without it.", def.Name, name);
+                connector = null;
+                snapshot = null;
+            }
+        }
+
+        try
+        {
+            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, qualified));
+            var handle = await stream.SubscribeAsync((evt, _) => OnStreamEventAsync(name, evt));
+            _streamSubs.Add(handle);
+
+            if (snapshot is not null && snapshot.Rows.Count > 0)
+            {
+                if (snapshot.TotalSeen > snapshot.Rows.Count)
+                {
+                    // NOTE (same rule as AttachToTableInputAsync's warning below): each placeholder name
+                    // appears exactly once — the structured-logging formatter binds positionally.
+                    logger.LogWarning(
+                        "Table '{Table}': late attach to source '{Source}' replayed {Replayed} of {TotalSeen} row(s); " +
+                        "earlier rows are not recoverable (the source's replay ring holds the most recent {Capacity}).",
+                        def.Name, name, snapshot.Rows.Count, snapshot.TotalSeen, SourceReplayBuffer.Capacity);
+                }
+
+                foreach (var row in snapshot.Rows)
+                {
+                    await OnStreamEventAsync(name, new EventRecord(row));
+                }
+            }
+        }
+        finally
+        {
+            if (connector is not null)
+            {
+                try { await connector.EndAttachAsync(); }
+                catch (Exception ex) { logger.LogDebug(ex, "Table '{Table}': releasing the attach hold on source '{Source}' failed; the source's own safety timer covers it.", def.Name, name); }
+            }
+        }
     }
 
     /// <summary>

@@ -1,7 +1,9 @@
+using Microsoft.Extensions.Logging;
 using Orleans;
 using Orleans.Runtime;
 using Orleans.Streams;
 using StreamsForge.Abstractions;
+using StreamsForge.AppCore.Connectors;
 using StreamsForge.AppCore.Environments;
 using StreamsForge.Engine;
 using StreamsForge.Host.Facades;
@@ -11,7 +13,7 @@ namespace StreamsForge.Host.Grains;
 /// <summary>Key = pipeline id. One activation per running pipeline. Subscribes to its SQL's source
 /// streams, feeds events through a <see cref="PipelineExecutor"/>, and publishes emitted rows +
 /// periodic metrics back onto Orleans streams for <see cref="Services.StreamBridgeService"/> to relay.</summary>
-public sealed class PipelineGrain : Grain, IPipelineGrain
+public sealed class PipelineGrain(ILogger<PipelineGrain> logger) : Grain, IPipelineGrain
 {
     private const int RecentResultsCapacity = 100;
     private const int MetricsEveryNTicks = 4; // 4 * 500ms ≈ 2s
@@ -63,9 +65,7 @@ public sealed class PipelineGrain : Grain, IPipelineGrain
         var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
         foreach (var sourceName in compileResult.SourceNames.Distinct())
         {
-            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, EnvKeys.Qualify(def.Environment, sourceName)));
-            var handle = await stream.SubscribeAsync((evt, _) => OnSourceEventAsync(sourceName, evt));
-            _subscriptions.Add(handle);
+            await AttachToSourceAsync(streamProvider, def, sourceName, sources);
         }
 
         var now = DateTimeOffset.UtcNow;
@@ -102,6 +102,72 @@ public sealed class PipelineGrain : Grain, IPipelineGrain
 
         // Cancel the earlier keep-alive; TimeSpan.Zero restores normal idle-activation GC.
         this.DelayDeactivation(TimeSpan.Zero);
+    }
+
+    /// <summary>Subscribe-then-attach against a connector-kind source — the pipeline's copy of
+    /// <c>TableGrain.AttachToStreamInputAsync</c>, which carries the full rationale. Short version: memory
+    /// streams have no replay, so a pipeline written after its source was already enabled and polling used
+    /// to see nothing of what that source had already emitted. <c>BeginAttachAsync</c> holds the source's
+    /// publishing and hands back its recent rows; those are fed through the SAME
+    /// <see cref="OnSourceEventAsync"/> handler live traffic uses (so windows/joins are built from them
+    /// rather than bypassed) after the subscription exists; the hold is released in a <c>finally</c>, at
+    /// which point anything the source produced meanwhile is delivered — to this subscription too. Nothing
+    /// is replayed and delivered twice; nothing falls in the gap. Only
+    /// <see cref="SourceKindDispatch.ActorKind.Connector"/> sources have that driver — generators, ingest
+    /// sources and CRDT documents are subscribed to exactly as before.</summary>
+    private async Task AttachToSourceAsync(
+        IStreamProvider streamProvider, PipelineDefinition def, string sourceName, IEnumerable<SourceDefinition> sources)
+    {
+        var qualified = EnvKeys.Qualify(def.Environment, sourceName);
+
+        var sourceDef = sources.FirstOrDefault(s => s.Name == sourceName);
+        IConnectorGrain? connector = null;
+        SourceReplaySnapshot? snapshot = null;
+        if (sourceDef is not null && SourceKindDispatch.Classify(sourceDef.Kind) == SourceKindDispatch.ActorKind.Connector)
+        {
+            connector = GrainFactory.GetGrain<IConnectorGrain>(qualified);
+            try
+            {
+                snapshot = await connector.BeginAttachAsync();
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Pipeline '{Pipeline}': could not attach to source '{Source}' for replay — subscribing without it.", def.Name, sourceName);
+                connector = null;
+                snapshot = null;
+            }
+        }
+
+        try
+        {
+            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, qualified));
+            var handle = await stream.SubscribeAsync((evt, _) => OnSourceEventAsync(sourceName, evt));
+            _subscriptions.Add(handle);
+
+            if (snapshot is not null && snapshot.Rows.Count > 0)
+            {
+                if (snapshot.TotalSeen > snapshot.Rows.Count)
+                {
+                    logger.LogWarning(
+                        "Pipeline '{Pipeline}': late attach to source '{Source}' replayed {Replayed} of {TotalSeen} row(s); " +
+                        "earlier rows are not recoverable (the source's replay ring holds the most recent {Capacity}).",
+                        def.Name, sourceName, snapshot.Rows.Count, snapshot.TotalSeen, SourceReplayBuffer.Capacity);
+                }
+
+                foreach (var row in snapshot.Rows)
+                {
+                    await OnSourceEventAsync(sourceName, new EventRecord(row));
+                }
+            }
+        }
+        finally
+        {
+            if (connector is not null)
+            {
+                try { await connector.EndAttachAsync(); }
+                catch (Exception ex) { logger.LogDebug(ex, "Pipeline '{Pipeline}': releasing the attach hold on source '{Source}' failed; the source's own safety timer covers it.", def.Name, sourceName); }
+            }
+        }
     }
 
     public Task<List<ResultEnvelope>> GetRecentResultsAsync(int limit)

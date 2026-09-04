@@ -18,8 +18,15 @@ namespace StreamsForge.AppCore.Connectors;
 /// every pre-014 caller/record — additive, default parameter) counts messages
 /// <see cref="Mapping.CdcEnvelope"/> could not turn into a row (a delete with no `before`, a tombstone) —
 /// same shape as <see cref="CoercionFailures"/>: counted and visible, NOT folded into <see cref="Error"/>,
-/// because one unrepresentable CDC event must not drop every other row this cycle DID produce.</summary>
-public sealed record PollCycleResult(List<Dictionary<string, object?>> Rows, string? Error, int CoercionFailures = 0, int EnvelopeSkipped = 0);
+/// because one unrepresentable CDC event must not drop every other row this cycle DID produce.
+/// <see cref="Note"/> (additive, default parameter — every pre-existing caller/record reads null) is the
+/// "clean cycle, something to say" channel: a cycle that SUCCEEDED and whose rows must be emitted, but
+/// which nevertheless has something an operator needs to read. It is deliberately NOT an
+/// <see cref="Error"/> — the driver's emit policy drops every row of a failed cycle, so folding a
+/// partial-success note into Error is exactly how good rows get lost (see
+/// <see cref="ConnectorPollCycle.ExecuteFolder"/>, the reason this field exists). Drivers surface it on
+/// the same status line coercion failures and envelope skips already use.</summary>
+public sealed record PollCycleResult(List<Dictionary<string, object?>> Rows, string? Error, int CoercionFailures = 0, int EnvelopeSkipped = 0, string? Note = null);
 
 /// <summary>One poll execution for url/file/folder connector kinds, composing the W2 cores
 /// (FormatParsers → RecordExtractor → DedupTracker/FileLedger) identically on both runtimes, plus
@@ -94,7 +101,17 @@ public static class ConnectorPollCycle
     }
 
     /// <summary>Folder kind: each NEW/changed file (name+mtime ledger, optional glob on names,
-    /// no recursion) is parsed once and remembered.</summary>
+    /// no recursion) is parsed once and remembered.
+    ///
+    /// <para>PER-FILE ISOLATION: one unparseable file no longer costs this cycle the rows every OTHER file
+    /// produced. A failed file is skipped BEFORE <c>ledger.Record</c> (so it is re-read, and re-attempted,
+    /// on the next cycle — a half-written file that gets its second chunk simply lands then), and the good
+    /// files' rows come back with <see cref="PollCycleResult.Error"/> NULL plus a
+    /// <see cref="PollCycleResult.Note"/> naming what failed. This is not cosmetic: the driver's emit
+    /// policy is "a failed cycle emits nothing", so returning an aggregate Error here — which is what this
+    /// method used to do — meant the good files were ledgered as read AND their rows dropped, i.e.
+    /// permanently lost. "folder not found" stays an Error: nothing was read, nothing is being hidden, and
+    /// the failure streak/backoff it drives is the right response to a path that is not there.</para></summary>
     public static PollCycleResult ExecuteFolder(SourceDefinition def, FileLedger ledger, DedupTracker dedup, long nowMs)
     {
         var cfg = def.Connector?.Folder ?? throw new InvalidOperationException($"source '{def.Name}' has kind 'folder' but no folder config");
@@ -110,7 +127,12 @@ public static class ConnectorPollCycle
             rows.AddRange(one.Rows);
             ledger.Record(file, mtimeMs);
         }
-        return new PollCycleResult(rows, errors.Count == 0 ? null : string.Join("; ", errors));
+        return new PollCycleResult(
+            rows,
+            null,
+            Note: errors.Count == 0
+                ? null
+                : $"{errors.Count} file(s) failed to parse and will be retried next cycle: {string.Join("; ", errors)}");
     }
 
     /// <summary>NATS kind (plan 009 B1): one message payload → parse (<see cref="NatsSubConfig.Format"/>)

@@ -755,6 +755,14 @@ public static class ConnectorBookkeeping
         {
             notes.Add($"{result.EnvelopeSkipped} message(s) skipped: the envelope carried no representable row");
         }
+        // The cycle core's own "clean cycle, something to say" channel (PollCycleResult.Note) — today the
+        // folder kind's per-file parse failures, which are shared/ and therefore already this flavour's
+        // behaviour too. This one line is the whole Dapr mirror of that change: TickAsync here already
+        // publishes rows regardless of Error, so the loss the Orleans driver had never existed on this side.
+        if (result.Note is not null)
+        {
+            notes.Add(result.Note);
+        }
         return notes.Count == 0 ? null : string.Join("; ", notes);
     }
 

@@ -77,7 +77,11 @@ public interface IConnectorStatusSink : IGrainWithStringKey
 ///
 /// Emission goes through the same door GeneratorGrain uses: one EventRecord per row onto
 /// (StreamConstants.SourcesNamespace, sourceName) — pipelines/tables/SignalR/SPA all work unchanged
-/// for a connector-kind source's events.
+/// for a connector-kind source's events. Inside this grain that door is exactly one method, PublishAsync:
+/// both publish sites (the poll cycle's emission loop and EmitRowsAsync's subscriber path) go through it,
+/// which is what lets the late-consumer attach gate (BeginAttachAsync/EndAttachAsync — see
+/// IConnectorGrain's own doc for the protocol) be total rather than best-effort, and what feeds the
+/// bounded SourceReplayBuffer a late-subscribing table/pipeline replays from.
 ///
 /// State ([PersistentState("connector", ...)]) is written after every completed cycle (poll rates are
 /// low — D-E's 1s floor) so status/dedup/ledger survive a silo recycle; OnActivateAsync self-resumes
@@ -115,6 +119,31 @@ public sealed class ConnectorGrain(
     private DedupTracker? _dedup;
     private FileLedger? _ledger;
 
+    // ------------------------------------------------------------------
+    // Late-consumer replay (plan: creation-time window). See IConnectorGrain.BeginAttachAsync's own doc
+    // for the protocol these three fields implement; PublishAsync below is the single door every row
+    // leaves this grain through, which is what makes the gate total rather than best-effort.
+    // ------------------------------------------------------------------
+
+    /// <summary>Bounded memory of what this activation has already published, handed to a consumer that
+    /// subscribes late. In-memory, per activation — empty after a silo recycle, deliberately.</summary>
+    private readonly SourceReplayBuffer _replay = new();
+
+    /// <summary>Outstanding <see cref="BeginAttachAsync"/> holds. While &gt; 0, rows go to
+    /// <see cref="_pending"/> instead of the stream. A grain turn is the unit of atomicity here — nothing
+    /// interleaves inside a single method body between the check and the append — so no lock is needed and
+    /// none would help.</summary>
+    private int _attachHolds;
+
+    private readonly List<EventRecord> _pending = [];
+
+    /// <summary>Force-release for a consumer that took a hold and never came back (it crashed, its silo
+    /// went away, its StartAsync threw between the two calls). Without it one dead attacher would gate the
+    /// source's publishing for the life of the activation — a far worse failure than the duplicate-free
+    /// replay the hold buys.</summary>
+    private static readonly TimeSpan AttachSafetyRelease = TimeSpan.FromSeconds(10);
+    private IGrainTimer? _attachReleaseTimer;
+
     // Emission-counter persist throttle for the gRPC/NATS path (EmitRowsAsync can fire once per remote
     // frame/message — far more often than a poll cycle's natural "persist once per cycle" cadence):
     // persist at most every 50 batches or 5 seconds, whichever comes first (design pin).
@@ -133,6 +162,11 @@ public sealed class ConnectorGrain(
 
     public async Task StartAsync(SourceDefinition def)
     {
+        // Rows already produced are rows already owed: flush anything an attach hold is sitting on BEFORE
+        // the generation bump below makes this activation disown the cycle that produced them. Dropping
+        // them here would reintroduce, on the restart path, exactly the loss the gate exists to prevent.
+        await ReleaseAttachHoldsAndFlushAsync();
+
         state.State.Def = def;
         state.State.Running = true;
         // A (re)start is the operator saying "try this definition now". Carrying the old failure streak
@@ -161,6 +195,10 @@ public sealed class ConnectorGrain(
 
     public async Task StopAsync()
     {
+        // Same reasoning as StartAsync's identical call: a stop must not eat rows this source had already
+        // produced and merely deferred on a consumer's behalf.
+        await ReleaseAttachHoldsAndFlushAsync();
+
         state.State.Running = false;
         _generation++;
         _timer?.Dispose();
@@ -241,13 +279,11 @@ public sealed class ConnectorGrain(
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         if (rows.Count > 0)
         {
-            var stream = this.GetStreamProvider(StreamConstants.ProviderName)
-                .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, this.GetPrimaryKeyString()));
             foreach (var row in rows)
             {
                 row.TryAdd("_source", def.Name);
                 row.TryAdd("_ts", nowMs);
-                await stream.OnNextAsync(new EventRecord(row));
+                await PublishAsync(new EventRecord(row));
             }
 
             state.State.EventsEmittedTotal += rows.Count;
@@ -326,6 +362,13 @@ public sealed class ConnectorGrain(
         {
             notes.Add($"{result.EnvelopeSkipped} message(s) skipped: the envelope carried no representable row");
         }
+        // The cycle core's own "clean cycle, something to say" channel (PollCycleResult.Note) — today the
+        // folder kind's per-file parse failures. Same reason as the two above: it is not an Error precisely
+        // so the rows beside it survive, which leaves this status line the only place it shows up.
+        if (result.Note is not null)
+        {
+            notes.Add(result.Note);
+        }
         return notes.Count == 0 ? null : string.Join("; ", notes);
     }
 
@@ -338,6 +381,101 @@ public sealed class ConnectorGrain(
 
         state.State.CoercionFailuresTotal += count;
         await state.WriteStateAsync();
+    }
+
+    // ------------------------------------------------------------------
+    // Publishing + the late-consumer attach gate
+    // ------------------------------------------------------------------
+
+    private IAsyncStream<EventRecord> SourceStream() =>
+        this.GetStreamProvider(StreamConstants.ProviderName)
+            .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, this.GetPrimaryKeyString()));
+
+    /// <summary>THE single door every row leaves this grain through — both publish sites (the poll cycle's
+    /// emission loop and <see cref="EmitRowsAsync"/>'s subscriber path) call it, and a third one must too.
+    /// While an attach hold is outstanding the row is deferred rather than published; otherwise it goes to
+    /// the stream and is then remembered in <see cref="_replay"/> for whoever subscribes next. The ring is
+    /// appended AFTER the publish deliberately: a row that failed to publish is not a row a late consumer
+    /// should be told it missed — the cycle's own error path owns that failure (see
+    /// <see cref="RunCycleAsync"/>), and the next cycle re-reads and re-emits it.</summary>
+    private async Task PublishAsync(EventRecord evt)
+    {
+        if (_attachHolds > 0)
+        {
+            _pending.Add(evt);
+            return;
+        }
+
+        await SourceStream().OnNextAsync(evt);
+        _replay.Append(new Dictionary<string, object?>(evt));
+    }
+
+    /// <summary>See <see cref="IConnectorGrain.BeginAttachAsync"/> for the protocol and why it is correct.
+    /// Synchronous by construction (no await before the hold is taken and the snapshot read) — a grain turn
+    /// is indivisible, so no cycle or subscriber callback can slip a publish between the two.</summary>
+    public Task<SourceReplaySnapshot> BeginAttachAsync()
+    {
+        _attachHolds++;
+
+        // One shared safety timer, re-armed on every Begin: the deadline that matters is "10s since the
+        // most recent attach started", so several overlapping consumers each get their own full window and
+        // a single abandoned hold still cannot outlive it.
+        _attachReleaseTimer?.Dispose();
+        _attachReleaseTimer = this.RegisterGrainTimer(ForceReleaseAttachAsync, AttachSafetyRelease, Timeout.InfiniteTimeSpan);
+
+        var (rows, totalSeen) = _replay.Snapshot();
+        return Task.FromResult(new SourceReplaySnapshot { Rows = rows, TotalSeen = totalSeen });
+    }
+
+    public async Task EndAttachAsync()
+    {
+        if (_attachHolds > 0)
+        {
+            _attachHolds--;
+        }
+
+        if (_attachHolds == 0)
+        {
+            _attachReleaseTimer?.Dispose();
+            _attachReleaseTimer = null;
+            await FlushPendingAsync();
+        }
+    }
+
+    /// <summary>The safety timer's target — see <see cref="AttachSafetyRelease"/>. Releases EVERY hold, not
+    /// one: the only situation this fires in is "somebody is not coming back", and there is no way to tell
+    /// which holder that was.</summary>
+    private Task ForceReleaseAttachAsync() => ReleaseAttachHoldsAndFlushAsync();
+
+    private async Task ReleaseAttachHoldsAndFlushAsync()
+    {
+        _attachHolds = 0;
+        _attachReleaseTimer?.Dispose();
+        _attachReleaseTimer = null;
+        await FlushPendingAsync();
+    }
+
+    /// <summary>Publishes everything deferred while the gate was closed, oldest first, through the stream
+    /// directly rather than back through <see cref="PublishAsync"/> — a hold taken WHILE this flush is
+    /// awaiting must not re-queue rows that are already on their way out and re-order them behind newer
+    /// ones. A throw here abandons the rest of the batch; the deferral list is cleared up front so a
+    /// failed flush cannot be replayed twice by a later one.</summary>
+    private async Task FlushPendingAsync()
+    {
+        if (_pending.Count == 0)
+        {
+            return;
+        }
+
+        var pending = _pending.ToList();
+        _pending.Clear();
+
+        var stream = SourceStream();
+        foreach (var evt in pending)
+        {
+            await stream.OnNextAsync(evt);
+            _replay.Append(new Dictionary<string, object?>(evt));
+        }
     }
 
     // ------------------------------------------------------------------
@@ -644,75 +782,121 @@ public sealed class ConnectorGrain(
         {
             return;
         }
-        state.State.Cursor = nextCursor;
 
-        // Driver-level emit policy (design pin, W3A): a cycle either succeeds (emit everything it
-        // produced, reset the failure streak) or fails (emit NOTHING this cycle, even if the cycle core
-        // partially succeeded — e.g. ExecuteFolder having parsed some files before hitting one it
-        // couldn't). The already-updated ledger/dedup state (below) still means a partially-successful
-        // folder cycle won't re-parse the files it DID get through next time — only this cycle's rows
-        // are dropped, not re-queued.
-        if (result.Error is null)
+        // RE-ARM IS A `finally`, NOT A TAIL STATEMENT. The grain timer is ONE-SHOT (cron correctness — see
+        // the class doc), so the ONLY thing that keeps a scheduled source alive is the next ArmTimer call.
+        // Everything below can throw — the emission loop (a stream provider failure), WriteStateAsync (a
+        // storage failure) — and a throw that skipped the re-arm stopped the source dead until the
+        // activation was recycled, with nothing but a swallowed exception to say so. Set inside the try,
+        // read in the finally, with a 30 s fallback when the cycle never got as far as computing one.
+        //
+        // The `generation == _generation` half of the finally's guard is load-bearing, not defensive: a
+        // StartAsync that interleaved at one of those awaits has ALREADY armed the timer it wants, and
+        // re-arming here on top of it would replace that timer with this stale cycle's (possibly
+        // backed-off) delay — the exact staleness the generation check at the top of this method exists to
+        // prevent, reintroduced one line from the end.
+        TimeSpan? rearmDelay = null;
+        try
         {
-            if (result.Rows.Count > 0)
+            // Driver-level emit policy: a cycle either succeeds (emit everything it produced, reset the
+            // failure streak) or fails (emit nothing). What CHANGED is where the boundary of "failed" sits:
+            // a cycle core that partially succeeded — ExecuteFolder parsing four files and choking on a
+            // fifth — no longer reports that as an Error at all. It returns the good rows plus a
+            // PollCycleResult.Note, and leaves the bad file OUT of the ledger so the next cycle retries it.
+            // The old shape ledgered the good files AND dropped their rows, which is not "emit nothing this
+            // cycle": those rows were never coming back. Persistence of the cursor/dedup/ledger is gated on
+            // emission below for the same reason from the other direction — if the emit itself failed, the
+            // trackers must NOT record progress the stream never saw.
+            var emitFailed = false;
+            var produced = result.Rows.Count;
+            if (result.Error is null && produced > 0)
             {
-                var stream = this.GetStreamProvider(StreamConstants.ProviderName)
-                    .GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, this.GetPrimaryKeyString()));
-                foreach (var row in result.Rows)
+                var emitted = 0;
+                try
                 {
-                    await stream.OnNextAsync(new EventRecord(row));
+                    foreach (var row in result.Rows)
+                    {
+                        await PublishAsync(new EventRecord(row));
+                        emitted++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Folded into the ordinary error path rather than escaping: the status line, the
+                    // failure streak and the backoff are all things an operator already knows how to read,
+                    // and an escaping exception here would additionally have skipped the re-arm.
+                    result = new PollCycleResult([], $"emit failed after {emitted}/{produced} row(s): {ex.GetType().Name}: {ex.Message}");
+                    emitFailed = true;
                 }
             }
-            state.State.ConsecutiveFailures = 0;
-            state.State.LastStatus = "ok";
-            // Plan 009 C2: a coercion failure under Null/DropRow never produces a non-null Error above
-            // (only RejectBatch does, via ConnectorPollCycle.Emit). It is counted in
-            // CoercionFailuresTotal — the queryable channel — and ALSO restated in LastError so an
-            // operator reading the status line sees it without knowing to look at a counter.
-            state.State.CoercionFailuresTotal += result.CoercionFailures;
-            // Plan 014: an envelope skip reaches an operator the same way and for the same reason — it is
-            // never an Error (that would drop the good rows beside it), so without this line a CDC source
-            // quietly discarding every delete looks identical to one with no deletes.
-            state.State.EnvelopeSkippedTotal += result.EnvelopeSkipped;
-            state.State.LastError = CycleNote(result, def.OnCoercionFailure);
-        }
-        else
-        {
-            state.State.ConsecutiveFailures++;
-            state.State.LastStatus = "error";
-            state.State.LastError = result.Error;
-        }
 
-        state.State.LastRunMs = nowMs;
-        state.State.LastBatchCount = result.Error is null ? result.Rows.Count : 0;
-        state.State.EventsEmittedTotal += state.State.LastBatchCount;
-        state.State.DedupKeys = _dedup!.ToPersistable();
-        state.State.Ledger = _ledger!.ToPersistable();
+            if (result.Error is null)
+            {
+                state.State.ConsecutiveFailures = 0;
+                state.State.LastStatus = "ok";
+                // Plan 009 C2: a coercion failure under Null/DropRow never produces a non-null Error above
+                // (only RejectBatch does, via ConnectorPollCycle.Emit). It is counted in
+                // CoercionFailuresTotal — the queryable channel — and ALSO restated in LastError so an
+                // operator reading the status line sees it without knowing to look at a counter.
+                state.State.CoercionFailuresTotal += result.CoercionFailures;
+                // Plan 014: an envelope skip reaches an operator the same way and for the same reason — it is
+                // never an Error (that would drop the good rows beside it), so without this line a CDC source
+                // quietly discarding every delete looks identical to one with no deletes.
+                state.State.EnvelopeSkippedTotal += result.EnvelopeSkipped;
+                state.State.LastError = CycleNote(result, def.OnCoercionFailure);
+            }
+            else
+            {
+                state.State.ConsecutiveFailures++;
+                state.State.LastStatus = "error";
+                state.State.LastError = result.Error;
+            }
 
-        var schedule = def.Connector?.Schedule ?? DefaultSchedule;
-        var nowUtc = DateTimeOffset.UtcNow;
-        var nextRun = BackoffPolicy.NextRun(schedule, nowUtc, state.State.ConsecutiveFailures);
+            state.State.LastRunMs = nowMs;
+            state.State.LastBatchCount = result.Error is null ? result.Rows.Count : 0;
+            state.State.EventsEmittedTotal += state.State.LastBatchCount;
 
-        // Plan 014: HasMore means "there is more waiting right now", and the whole reason a snapshot pages
-        // across DRIVER cycles instead of inside one PollAsync is that every page's cursor gets persisted
-        // before the next page is read — so a restart resumes mid-snapshot. Waiting out the schedule
-        // between pages would make a million-row snapshot take (pages x interval) to land for no benefit,
-        // so the next run is now. Same one-shot timer, just due immediately; PolledSourceCore never
-        // returns HasMore on a failed cycle, so this cannot spin against a failure. Overwriting NextRunMs
-        // (rather than arming behind its back) keeps the status honest about when the next cycle runs.
-        if (hasMore)
-        {
-            nextRun = nowUtc;
-        }
+            if (!emitFailed)
+            {
+                state.State.Cursor = nextCursor;
+                state.State.DedupKeys = _dedup!.ToPersistable();
+                state.State.Ledger = _ledger!.ToPersistable();
+            }
+            // else: leave all three at their persisted values. The in-memory trackers this cycle mutated are
+            // rebuilt from that persisted state by the next cycle's EnsureTrackers(), so the file/page is
+            // re-read and re-emitted — at-least-once, with the dedup key (when one is configured)
+            // suppressing whatever DID get out before the failure.
 
-        state.State.NextRunMs = nextRun?.ToUnixTimeMilliseconds();
+            var schedule = def.Connector?.Schedule ?? DefaultSchedule;
+            var nowUtc = DateTimeOffset.UtcNow;
+            var nextRun = BackoffPolicy.NextRun(schedule, nowUtc, state.State.ConsecutiveFailures);
 
-        await state.WriteStateAsync();
+            // Plan 014: HasMore means "there is more waiting right now", and the whole reason a snapshot pages
+            // across DRIVER cycles instead of inside one PollAsync is that every page's cursor gets persisted
+            // before the next page is read — so a restart resumes mid-snapshot. Waiting out the schedule
+            // between pages would make a million-row snapshot take (pages x interval) to land for no benefit,
+            // so the next run is now. Same one-shot timer, just due immediately; PolledSourceCore never
+            // returns HasMore on a failed cycle (and `!emitFailed` covers the one failure it cannot know
+            // about), so this cannot spin against a failure. Overwriting NextRunMs (rather than arming behind
+            // its back) keeps the status honest about when the next cycle runs.
+            if (hasMore && !emitFailed)
+            {
+                nextRun = nowUtc;
+            }
 
-        if (state.State.Running)
-        {
+            state.State.NextRunMs = nextRun?.ToUnixTimeMilliseconds();
+
+            await state.WriteStateAsync();
+
             var delay = nextRun.HasValue ? nextRun.Value - nowUtc : TimeSpan.FromSeconds(30);
-            ArmTimer(delay > TimeSpan.Zero ? delay : TimeSpan.Zero);
+            rearmDelay = delay > TimeSpan.Zero ? delay : TimeSpan.Zero;
+        }
+        finally
+        {
+            if (state.State.Running && generation == _generation)
+            {
+                ArmTimer(rearmDelay ?? TimeSpan.FromSeconds(30));
+            }
         }
     }
 

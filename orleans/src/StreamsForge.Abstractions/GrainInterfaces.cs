@@ -299,6 +299,22 @@ public interface IUserStoreGrain : IUserStoreFacade, IGrainWithStringKey
 // and RegistryGrain's Kind dispatch (UpsertSourceAsync/DeleteSourceAsync/EnsureInitializedAsync).
 // ============================================================================
 
+/// <summary>The (rows, totalSeen) pair <see cref="IConnectorGrain.BeginAttachAsync"/> returns — the
+/// source-side twin of <see cref="TableAttachSnapshot"/>, and defined here for the same reason that one is
+/// (an Orleans grain-call return shape, never serialized onto any shared pub/sub stream).
+/// <see cref="Rows"/> are the recent rows this source has already published, oldest first, in the exact
+/// shape they went onto the stream (already `_ts`/`_source`-stamped — no `_seq` or other attach-only
+/// column is added). <see cref="TotalSeen"/> is everything the source published since its activation came
+/// up, including rows the ring has already evicted: <c>TotalSeen &gt; Rows.Count</c> is the honest
+/// statement "you are getting the last N of M and the rest are not recoverable", which the caller logs
+/// rather than swallowing.</summary>
+[GenerateSerializer]
+public sealed record SourceReplaySnapshot
+{
+    [Id(0)] public List<Dictionary<string, object?>> Rows { get; set; } = [];
+    [Id(1)] public long TotalSeen { get; set; }
+}
+
 /// <summary>Key = source name. Drives one connector-kind source ("url" | "file" | "folder" | "grpc" —
 /// see SourceKinds; "generator"-kind sources use IGeneratorGrain instead, never this interface).
 /// url/file/folder poll on a schedule (Cronos cron or fixed interval, D-E backoff on failure); grpc is
@@ -315,4 +331,41 @@ public interface IConnectorGrain : IGrainWithStringKey
     /// <summary>gRPC-subscriber callback entry: rows decoded off this grain's turn are handed back here
     /// via a captured self-reference so publishing/counter updates happen inside a normal grain call.</summary>
     Task EmitRowsAsync(List<Dictionary<string, object?>> rows, long remoteSeq);
+
+    /// <summary>Subscribe-then-attach for STREAM inputs — the source-side twin of
+    /// <see cref="ITableGrain.AttachSnapshotAsync"/>, and the fix for the creation-time replay window (a
+    /// table/pipeline written after its source was already enabled and polling used to get nothing, because
+    /// memory streams have no replay and the source had no memory of what it emitted).
+    ///
+    /// <para>Protocol, from the CONSUMER's side, in this order: (1) <c>BeginAttachAsync</c> — takes a hold
+    /// on this source's publishing and returns its recent rows; (2) subscribe to the source's stream;
+    /// (3) feed the returned rows through the SAME handler the subscription uses; (4)
+    /// <see cref="EndAttachAsync"/>, in a <c>finally</c>. While a hold is outstanding the source publishes
+    /// nothing — new rows queue inside the driver and are released (to every subscriber, including the new
+    /// one) when the last hold is dropped. That is what makes the replay exactly-once: nothing can be
+    /// published into the gap between the snapshot being taken and the subscription existing, so no row is
+    /// both replayed and delivered live, and none is missed.</para>
+    ///
+    /// <para>THE ONE GAP, MEASURED: the hold stops the source PUBLISHING, and has no reach into the stream
+    /// provider's own pipeline. A row already handed to <c>OnNextAsync</c> may still be in the memory
+    /// stream's queue, not yet pulled into the cache the pulling agent serves new subscribers from (default
+    /// pull period 100 ms) — a consumer subscribing inside that window receives it live AND replays it from
+    /// the ring. Subscribing the instant a source's counter reached 500 rows produced 501 deliveries idle
+    /// and 554 under load; waiting ~2 s for the stream to quiesce produced exactly 500. So: exactly-once
+    /// outside a window roughly one pull period wide, at-least-once inside it. That window is not the case
+    /// this exists for (a table written minutes after its source started), and closing it would mean the
+    /// gate reaching into the stream provider's delivery pipeline — which is not a seam Orleans offers. A
+    /// consumer that cannot tolerate a duplicate at all should key its admission (a table's
+    /// <c>LATEST BY</c> already does, which is why every table test here is exact regardless).</para>
+    ///
+    /// <para>Reentrant-safe and cheap; holds are counted, so several consumers may attach at once. A
+    /// consumer that dies between the two calls does NOT gate the source forever — the driver arms its own
+    /// short safety release. Only sources classified <c>SourceKindDispatch.ActorKind.Connector</c> have
+    /// this driver at all; generators (continuous), ingest sources and CRDT documents are attached to
+    /// without it.</para></summary>
+    Task<SourceReplaySnapshot> BeginAttachAsync();
+
+    /// <summary>Drops one hold taken by <see cref="BeginAttachAsync"/>; at zero, everything the source
+    /// produced while held is published. Always call it in a <c>finally</c> — see the protocol above.</summary>
+    Task EndAttachAsync();
 }
