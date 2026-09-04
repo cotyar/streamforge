@@ -19,7 +19,8 @@
     <ProjectReference Include="..\StreamsForge.AppCore\StreamsForge.AppCore.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <!-- The convention a real out-of-tree plugin csproj follows to carry its own console UI module. -->
-    <EmbeddedResource Include="ui-plugins/*.js" LogicalName="ui-plugins/%(Filename)%(Extension)" />
+    <!-- The convention a real out-of-tree plugin csproj follows to carry its own console UI module(s) —
+         the wildcard covers .js/.mjs/.ts/.tsx alike. -->
+    <EmbeddedResource Include="ui-plugins/*" LogicalName="ui-plugins/%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

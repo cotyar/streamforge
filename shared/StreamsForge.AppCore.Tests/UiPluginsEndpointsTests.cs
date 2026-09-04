@@ -58,10 +58,56 @@ public sealed class UiPluginsEndpointsTests : IAsyncDisposable
         using var client = await StartAsync(dir);
 
         var list = await client.GetFromJsonAsync<string[]>("/api/ui-plugins") ?? [];
-        Assert.Contains("/api/ui-plugins/disk-only.js", list);
+        var url = Assert.Single(list, u => u.StartsWith("/api/ui-plugins/disk-only.js?v=", StringComparison.Ordinal));
 
-        var body = await client.GetStringAsync("/api/ui-plugins/disk-only.js");
+        var body = await client.GetStringAsync(url);
         Assert.Equal("export default { apiVersion: 2 };", body);
+    }
+
+    [Fact]
+    public async Task Listing_is_no_store_and_a_url_changes_when_the_file_changes()
+    {
+        var dir = NewTempDir();
+        var path = Path.Combine(dir, "versioned.js");
+        File.WriteAllText(path, "export default { apiVersion: 2 };");
+        var oldWrite = File.GetLastWriteTimeUtc(path);
+
+        using var client = await StartAsync(dir);
+
+        var response = await client.GetAsync("/api/ui-plugins");
+        Assert.True(response.Headers.CacheControl!.NoStore);
+        var before = await response.Content.ReadFromJsonAsync<string[]>() ?? [];
+        var beforeUrl = Assert.Single(before, u => u.StartsWith("/api/ui-plugins/versioned.js?v=", StringComparison.Ordinal));
+
+        // Rewrite the file AND bump its last-write-time explicitly — filesystem timestamp resolution can
+        // be coarser than the test, so relying on the write alone to change the ticks would be flaky.
+        File.WriteAllText(path, "export default { apiVersion: 3 };");
+        File.SetLastWriteTimeUtc(path, oldWrite.AddSeconds(1));
+
+        var after = await client.GetFromJsonAsync<string[]>("/api/ui-plugins") ?? [];
+        var afterUrl = Assert.Single(after, u => u.StartsWith("/api/ui-plugins/versioned.js?v=", StringComparison.Ordinal));
+
+        Assert.NotEqual(beforeUrl, afterUrl);
+
+        var body = await client.GetStringAsync(afterUrl);
+        Assert.Equal("export default { apiVersion: 3 };", body);
+    }
+
+    [Fact]
+    public async Task A_tsx_file_is_listed_and_served_as_plain_text()
+    {
+        var dir = NewTempDir();
+        File.WriteAllText(Path.Combine(dir, "editor.tsx"), "export default function Editor() { return null; }");
+
+        using var client = await StartAsync(dir);
+
+        var list = await client.GetFromJsonAsync<string[]>("/api/ui-plugins") ?? [];
+        var url = Assert.Single(list, u => u.StartsWith("/api/ui-plugins/editor.tsx?v=", StringComparison.Ordinal));
+
+        var response = await client.GetAsync(url);
+        Assert.Equal("text/plain", response.Content.Headers.ContentType!.MediaType);
+        Assert.Equal("utf-8", response.Content.Headers.ContentType!.CharSet);
+        Assert.Equal("export default function Editor() { return null; }", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -82,10 +128,24 @@ public sealed class UiPluginsEndpointsTests : IAsyncDisposable
         using var client = await StartAsync(NewTempDir()); // empty disk directory — nothing to collide with.
 
         var list = await client.GetFromJsonAsync<string[]>("/api/ui-plugins") ?? [];
-        Assert.Contains("/api/ui-plugins/test-kind.js", list);
+        var url = Assert.Single(list, u => u.StartsWith("/api/ui-plugins/test-kind.js?v=", StringComparison.Ordinal));
 
-        var body = await client.GetStringAsync("/api/ui-plugins/test-kind.js");
+        var body = await client.GetStringAsync(url);
         Assert.Contains("registerTransportEditor('ui-fixture-kind'", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task An_embedded_tsx_module_is_listed()
+    {
+        LoadFixturePlugin();
+
+        using var client = await StartAsync(NewTempDir());
+
+        var list = await client.GetFromJsonAsync<string[]>("/api/ui-plugins") ?? [];
+        var url = Assert.Single(list, u => u.StartsWith("/api/ui-plugins/test-kind-ts.tsx?v=", StringComparison.Ordinal));
+
+        var body = await client.GetStringAsync(url);
+        Assert.Contains("registerTransportEditor('ui-fixture-kind-ts'", body, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -100,9 +160,9 @@ public sealed class UiPluginsEndpointsTests : IAsyncDisposable
 
         // Listed exactly once — the union de-duplicates by name, it does not offer two entries.
         var list = await client.GetFromJsonAsync<string[]>("/api/ui-plugins") ?? [];
-        Assert.Single(list, u => u == "/api/ui-plugins/test-kind.js");
+        var url = Assert.Single(list, u => u.StartsWith("/api/ui-plugins/test-kind.js?v=", StringComparison.Ordinal));
 
-        var body = await client.GetStringAsync("/api/ui-plugins/test-kind.js");
+        var body = await client.GetStringAsync(url);
         Assert.Equal("/* operator override */", body); // disk content, not the embedded module's.
     }
 

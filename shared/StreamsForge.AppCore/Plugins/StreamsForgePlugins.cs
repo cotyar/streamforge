@@ -28,17 +28,19 @@ public interface IStreamsForgePlugin
 public sealed record LoadedPlugin(IStreamsForgePlugin Plugin, Assembly Assembly);
 
 /// <summary>One console UI module a plugin assembly carries as an embedded resource — the DLL-plus-loose-
-/// <c>.js</c> install becomes one file. <see cref="ResourceName"/> is the manifest resource name
+/// file install becomes one file. <see cref="ResourceName"/> is the manifest resource name
 /// (<c>ui-plugins/&lt;FileName&gt;</c>); <see cref="Assembly"/> is where to read it back from with
-/// <see cref="Assembly.GetManifestResourceStream(string)"/>.</summary>
+/// <see cref="Assembly.GetManifestResourceStream(string)"/>. <see cref="FileName"/>'s extension is one of
+/// <see cref="StreamsForgePlugins.UiModuleExtensions"/>.</summary>
 public sealed record UiModule(string FileName, Assembly Assembly, string ResourceName);
 
 /// <summary>
 /// Loads <see cref="IStreamsForgePlugin"/> implementations out of a directory of assemblies, so a
 /// connector that cannot live in this repo installs by being copied next to the host rather than by being
-/// referenced from it. The console-side counterpart is the <c>ui-plugins/</c> directory (one ES module per
-/// specialized editor) — a full out-of-tree kind is normally one DLL here and one module there, and the
-/// two are independent: a server plugin with no UI module gets the generic descriptor-driven form.
+/// referenced from it. The console-side counterpart is the <c>ui-plugins/</c> directory (one ES module or
+/// TypeScript file per specialized editor) — a full out-of-tree kind is normally one DLL here and one
+/// module there, and the two are independent: a server plugin with no UI module gets the generic
+/// descriptor-driven form.
 ///
 /// <para><b>Why a directory scan when the registries deliberately are not DI discovery.</b> Their doc
 /// comments reject assembly SCANNING FOR TRANSPORT TYPES — inferring registration from the type graph, so
@@ -50,7 +52,15 @@ public sealed record UiModule(string FileName, Assembly Assembly, string Resourc
 /// share its <c>StreamsForge.AppCore</c>/<c>StreamsForge.Contracts</c> types — a transport in an isolated
 /// context would implement a DIFFERENT <c>IInboundTransport</c> and could not register at all. The cost is
 /// the usual plugin ceiling: a plugin's dependency versions are not isolated from the host's, and on a
-/// conflict the host's copy wins.</para>
+/// conflict the host's copy wins — <see cref="DescribeVersionConflicts"/> is the diagnostic for the one
+/// direction that actually bites (a plugin built against a NEWER version than the host is running).</para>
+///
+/// <para><b>Two passes, deliberately.</b> Pass 1 loads every <c>*.dll</c> in the directory with
+/// <see cref="AssemblyLoadContext.LoadFromAssemblyPath"/> — a plugin's own dependency DLLs sit in the same
+/// directory and must all be resident before pass 2 reflects over any of them, or a plugin whose assembly
+/// happens to sort before its dependency (ordinal order) would fail to resolve a type it needs. Pass 2 then
+/// scans only the assemblies that actually loaded, so one native or corrupt DLL is reported once (as
+/// "skipped, not a loadable managed assembly") and does not also show up as a scan failure.</para>
 /// </summary>
 public static class StreamsForgePlugins
 {
@@ -58,6 +68,14 @@ public static class StreamsForgePlugins
     /// convention as the console's <c>ui-plugins/</c> — a NuGet package that copies content to the output
     /// directory installs itself.</summary>
     public static string DefaultDirectory => Path.Combine(AppContext.BaseDirectory, "plugins");
+
+    /// <summary>Console UI module file extensions the loader/endpoint recognize: ES modules (<c>.js</c>/
+    /// <c>.mjs</c>) served to the browser verbatim, or TypeScript (<c>.ts</c>/<c>.tsx</c>) served as plain
+    /// text and transpiled client-side. Convention: <c>&lt;EmbeddedResource Include="ui-plugins/*"
+    /// LogicalName="ui-plugins/%(Filename)%(Extension)" /&gt;</c> in the plugin's csproj — the wildcard
+    /// covers any of these extensions (and anything else dropped in the directory is simply ignored)
+    /// without the csproj needing to list them one by one.</summary>
+    public static readonly string[] UiModuleExtensions = [".js", ".mjs", ".ts", ".tsx"];
 
     /// <summary>Loads and registers every plugin in <paramref name="directory"/>, returning one line per
     /// outcome for the caller to log — this assembly takes no logging dependency, and a host that
@@ -77,27 +95,58 @@ public static class StreamsForgePlugins
         }
 
         var report = new List<string>();
+
+        // Pass 1: get every assembly file resident in the default load context first, independent of
+        // whether it turns out to carry a plugin type — see the class doc for why this has to be a
+        // separate pass from the scan below.
+        var assemblies = new List<Assembly>();
         foreach (var file in Directory.EnumerateFiles(dir, "*.dll").Order(StringComparer.Ordinal))
         {
             try
             {
-                report.AddRange(LoadAssembly(file));
+                assemblies.Add(AssemblyLoadContext.Default.LoadFromAssemblyPath(file));
             }
             catch (Exception ex)
             {
-                // BadImageFormat (a native DLL a plugin shipped alongside itself), a missing dependency, a
-                // type that cannot be reflected over — none of them are this host's problem to fix, and
-                // none of them are worth refusing to start over.
-                report.Add($"plugin assembly '{Path.GetFileName(file)}' could not be loaded: {ex.Message}");
+                // BadImageFormat (a native DLL a plugin shipped alongside itself), a missing dependency —
+                // neither is this host's problem to fix, and neither is worth refusing to start over.
+                report.Add($"plugin assembly '{Path.GetFileName(file)}' skipped (not a loadable managed assembly): {ex.Message}");
+            }
+        }
+
+        // Pass 2: reflect over the assemblies that actually loaded, looking for plugin types.
+        foreach (var assembly in assemblies)
+        {
+            try
+            {
+                report.AddRange(ScanAssembly(assembly));
+            }
+            catch (Exception ex)
+            {
+                report.Add($"plugin assembly '{AssemblyDisplayName(assembly)}' could not be scanned for plugins: {Describe(ex)}");
             }
         }
 
         return report;
     }
 
-    private static List<string> LoadAssembly(string file)
+    private static string AssemblyDisplayName(Assembly assembly) =>
+        string.IsNullOrEmpty(assembly.Location) ? assembly.GetName().Name ?? "?" : Path.GetFileName(assembly.Location);
+
+    /// <summary>A <see cref="ReflectionTypeLoadException"/> carries one loader exception per type that
+    /// failed to reflect over — often dozens for one bad assembly, nearly all duplicates of the same root
+    /// cause. Up to 3 distinct messages is enough for an operator to act on without flooding the log.</summary>
+    private static string Describe(Exception ex) =>
+        ex is ReflectionTypeLoadException { LoaderExceptions.Length: > 0 } rtle
+            ? string.Join("; ", rtle.LoaderExceptions
+                .Where(e => e is not null)
+                .Select(e => e!.Message)
+                .Distinct(StringComparer.Ordinal)
+                .Take(3))
+            : ex.Message;
+
+    private static List<string> ScanAssembly(Assembly assembly)
     {
-        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(file);
         var report = new List<string>();
         string? lastRegisteredName = null;
 
@@ -112,13 +161,17 @@ public static class StreamsForgePlugins
             if (registeredName is not null)
             {
                 lastRegisteredName = registeredName;
+                report.AddRange(DescribeVersionConflicts(
+                    registeredName,
+                    assembly.GetReferencedAssemblies(),
+                    AssemblyLoadContext.Default.Assemblies.Select(a => a.GetName())));
             }
         }
 
-        // Embedded ui-plugins/*.js|*.mjs resources count only from an assembly that registered at least
-        // one plugin here — the directory also holds a plugin's plain dependency DLLs, and scanning every
-        // one of THOSE for a same-shaped resource would attribute a UI module to an assembly that never
-        // opted into being a StreamsForge plugin at all.
+        // Embedded ui-plugins/* resources count only from an assembly that registered at least one plugin
+        // here — the directory also holds a plugin's plain dependency DLLs, and scanning every one of
+        // THOSE for a same-shaped resource would attribute a UI module to an assembly that never opted
+        // into being a StreamsForge plugin at all.
         if (lastRegisteredName is not null)
         {
             report.AddRange(ScanUiModules(assembly, lastRegisteredName));
@@ -159,9 +212,47 @@ public static class StreamsForgePlugins
         }
     }
 
-    /// <summary>Convention: <c>&lt;EmbeddedResource Include="ui-plugins/*.js" LogicalName="ui-plugins/%(Filename)%(Extension)" /&gt;</c>
-    /// (also allow <c>.mjs</c>) in the plugin's csproj — no member on <see cref="IStreamsForgePlugin"/>
-    /// needed, since the resource is discoverable from the assembly alone.</summary>
+    /// <summary>The default load context is the one place both the host and every plugin's own
+    /// dependencies live, so a plugin whose csproj references a NEWER version of something the host
+    /// already ships (e.g. Newtonsoft.Json) silently gets the host's OLDER copy at runtime — assembly
+    /// resolution in one context always keeps whatever loaded first. That mismatch is invisible until the
+    /// plugin calls a member the older copy doesn't have, which surfaces as a
+    /// <see cref="TypeInitializationException"/> or <see cref="MissingMethodException"/> far from its real
+    /// cause. This is pure and side-effect free so it can be unit-tested without loading an assembly at
+    /// all.
+    ///
+    /// <para>Only the "plugin expects newer than the host has" direction is worth a line: the opposite (a
+    /// plugin built against an older version than the host) resolves to something with at least as much as
+    /// the plugin asked for, which is the ordinary, harmless case.</para></summary>
+    public static IEnumerable<string> DescribeVersionConflicts(
+        string pluginName,
+        IEnumerable<AssemblyName> referenced,
+        IEnumerable<AssemblyName> loaded)
+    {
+        var loadedVersions = new Dictionary<string, Version?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in loaded)
+        {
+            if (name.Name is not null)
+            {
+                loadedVersions.TryAdd(name.Name, name.Version); // first wins
+            }
+        }
+
+        return referenced
+            .Where(r => r.Name is not null
+                        && r.Version is not null
+                        && loadedVersions.TryGetValue(r.Name, out var lv)
+                        && lv is not null
+                        && lv < r.Version)
+            .OrderBy(r => r.Name, StringComparer.Ordinal)
+            .Select(r => $"plugin '{pluginName}' references {r.Name} {r.Version} but the host has {loadedVersions[r.Name!]} loaded — the host copy wins; a TypeInitializationException at first use means this");
+    }
+
+    /// <summary>Convention: <c>&lt;EmbeddedResource Include="ui-plugins/*" LogicalName="ui-plugins/%(Filename)%(Extension)" /&gt;</c>
+    /// in the plugin's csproj — no member on <see cref="IStreamsForgePlugin"/> needed, since the resource is
+    /// discoverable from the assembly alone. Only files whose extension is in
+    /// <see cref="UiModuleExtensions"/> count; anything else under <c>ui-plugins/</c> in the assembly is
+    /// ignored.</summary>
     private static List<string> ScanUiModules(Assembly assembly, string pluginName)
     {
         var report = new List<string>();
@@ -173,7 +264,7 @@ public static class StreamsForgePlugins
             }
 
             var ext = Path.GetExtension(resourceName);
-            if (ext is not (".js" or ".mjs"))
+            if (!UiModuleExtensions.Contains(ext, StringComparer.OrdinalIgnoreCase))
             {
                 continue;
             }

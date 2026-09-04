@@ -175,6 +175,7 @@ public class OutOfTreeKindTests
             // file in the directory cannot keep a host from starting.
             Assert.Single(report);
             Assert.Contains("not-really.dll", report[0]);
+            Assert.Contains("skipped", report[0]);
         }
         finally
         {
@@ -213,6 +214,7 @@ public class OutOfTreeKindTests
 
             Assert.Contains(report, l => l.StartsWith("plugin 'test-kind-plugin' (", StringComparison.Ordinal) && l.EndsWith("registered", StringComparison.Ordinal));
             Assert.Contains("plugin 'test-kind-plugin' provides ui module 'test-kind.js'", report);
+            Assert.Contains("plugin 'test-kind-plugin' provides ui module 'test-kind-ts.tsx'", report);
 
             var module = StreamsForgePlugins.UiModules.Last(m => m.FileName == "test-kind.js");
             Assert.Equal("ui-plugins/test-kind.js", module.ResourceName);
