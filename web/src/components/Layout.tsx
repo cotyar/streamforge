@@ -13,9 +13,9 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 
 const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
+  { to: '/sources', label: 'Sources', icon: Database, end: false },
   { to: '/pipelines', label: 'Pipelines', icon: Workflow, end: false },
   { to: '/tables', label: 'Tables', icon: Table2, end: false },
-  { to: '/sources', label: 'Sources', icon: Database, end: false },
   { to: '/lineage', label: 'Lineage', icon: Waypoints, end: false },
   { to: '/explorer', label: 'API Explorer', icon: Braces, end: false },
   { to: '/config', label: 'Configuration', icon: ArrowLeftRight, end: false },
