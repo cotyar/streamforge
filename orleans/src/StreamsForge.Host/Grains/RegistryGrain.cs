@@ -54,6 +54,24 @@ public sealed class RegistryGrain(
     /// byte-identical requirement in one field.</summary>
     private string _env = EnvKeys.Default;
 
+    /// <summary>Plan "source data-loss fixes" section E2 — the RESUME half of
+    /// <see cref="EnsureInitializedAsync"/> runs exactly ONCE per activation. Boot has two independent
+    /// callers of that method (<c>Program.cs</c>'s per-environment loop and
+    /// <c>StreamBridgeService.DiscoverEnvironmentsAsync</c>) and, before this latch, no idempotency guard —
+    /// so the pipelines/tables resume loops ran TWICE, and the second pass's
+    /// <c>ITableGrain.StartAsync</c> re-ran the resume path and RESET each table to empty
+    /// (<c>TableGrain.ClearResumeMarkersAndDetect</c>), wiping whatever rows the first pass had let in.
+    /// Non-reentrancy serializes the two boot callers, so the second one simply returns here.
+    ///
+    /// <para>Set only as the LAST statement of the method, never at the top: a storage throw part-way
+    /// through the resume block must leave the latch open so the OTHER boot caller still gets a full
+    /// attempt. Deliberately NOT persisted — it is per-activation, and a reactivated grain must resume its
+    /// grains again. The SEED/backfill section above it stays unlatched and data-driven (it fires on an
+    /// empty catalog / an empty <c>SourceNames</c>), which is what keeps
+    /// <c>PipelineLineageBackfillTests</c> and <c>EnvIsolationRegistryTests</c> true across repeat
+    /// calls.</para></summary>
+    private bool _resumed;
+
     public override Task OnActivateAsync(CancellationToken cancellationToken)
     {
         _env = EnvKeys.EnvOf(this.GetPrimaryKeyString());
@@ -133,34 +151,16 @@ public sealed class RegistryGrain(
             await state.WriteStateAsync();
         }
 
-        foreach (var src in state.State.Sources.Where(s => s.Enabled))
+        // ------------------------------------------------------------------------------------------
+        // RESUME BLOCK — once per activation (see _resumed), CONSUMERS BEFORE PRODUCERS.
+        //
+        // Everything above this line is seeding/backfill: data-driven, idempotent, and deliberately
+        // unlatched, so a repeat call still repairs a catalog that was hand-edited (or restored) between
+        // calls. Everything below starts grains, and starting them twice is not free — see _resumed.
+        // ------------------------------------------------------------------------------------------
+        if (_resumed)
         {
-            try
-            {
-                // Plan 006 D-C / plan 008 W4 / plan 009 wave D / plan 020 wave B-2: four-way Kind dispatch
-                // via the shared SourceKindDispatch.Classify (StreamsForge.Abstractions — both flavors use
-                // it, see its own class doc). Generator (or unset — pre-006 seeds/sources) keeps the
-                // pre-existing IGeneratorGrain path unchanged; Ingest starts NO grain at all (rows arrive
-                // through IIngressFacade); Crdt goes to ICrdtDocGrain (D3 — never IConnectorGrain);
-                // Connector (everything else) goes to IConnectorGrain.
-                var kind = SourceKindDispatch.Classify(src.Kind);
-                if (kind == SourceKindDispatch.ActorKind.Generator)
-                {
-                    await GrainFactory.GetGrain<IGeneratorGrain>(EnvKeys.Qualify(_env, src.Name)).StartAsync(src);
-                }
-                else if (kind == SourceKindDispatch.ActorKind.Crdt)
-                {
-                    await GrainFactory.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(_env, src.Name)).StartAsync(src);
-                }
-                else if (kind != SourceKindDispatch.ActorKind.Ingest)
-                {
-                    await GrainFactory.GetGrain<IConnectorGrain>(EnvKeys.Qualify(_env, src.Name)).StartAsync(src);
-                }
-            }
-            catch
-            {
-                // best-effort on boot; supervisor will retry via PingAsync
-            }
+            return;
         }
 
         var statusChanged = false;
@@ -195,24 +195,68 @@ public sealed class RegistryGrain(
             }
         }
 
-        // Plan 020 wave C: CRDT documents re-assert their projection AFTER the tables above are Running
-        // and subscribed — never earlier. The ordering in this method is load-bearing, not incidental:
-        // sources resume first (the loop far above), so a document that replayed on its own activation
-        // would publish into a stream nobody has subscribed to yet and the rows would be dropped. This is
-        // the recovery for TableGrain's RESTART-RESUME LIMITATION, which resets a resuming table to empty
-        // and rebuilds it "purely from live traffic" — a document has no further live traffic to rebuild
-        // from, because D7 makes replaying its update history emit nothing. Best-effort like every other
-        // resume in this method; a document that fails to replay is still a correct document, just an
-        // empty table until its next edit or an explicit POST .../crdt/replay.
+        // PRODUCERS LAST — the whole point of this ordering. Memory streams have NO replay: a table or
+        // pipeline receives only rows published after it subscribed. Resuming sources first (which is what
+        // this method did before) opened a window in which a url/file/folder source's first poll landed
+        // before any consumer had subscribed, and with a dedup key configured those rows never come back —
+        // the source has already ledgered them. The two loops above subscribe by stream NAME and compile
+        // against registry STATE (GetSourcesAsync, on the [MayInterleave] allowlist), so neither needs a
+        // started source grain to reach Running; nothing here depends on the old order.
         //
-        // EVERY time this method runs, not once per boot — and that is not laziness, it was measured. This
-        // method has two callers on boot (Program.cs's per-environment loop and StreamBridgeService) and
-        // no idempotency guard, so the tables loop just above runs TWICE, and each pass calls
-        // ITableGrain.StartAsync again, which re-runs the resume path and RESETS the table to empty
-        // (TableGrain's ClearResumeMarkersAndDetect). A replay that fires only on the first pass is
-        // therefore wiped by the second pass's reset — verified live: latching this to once-per-activation
-        // put the table straight back to rowCount 0 / rebuilding true. Re-asserting is idempotent for a
-        // LATEST BY consumer, so paying it once per pass is the cheap half of this trade.
+        // Residual, and deliberately not closed by ordering alone: a connector grain activated by an
+        // unrelated API call during the boot window (GET /api/sources/{name}/status, say) self-resumes an
+        // overdue poll on OnActivateAsync and can still publish early. The source-side replay ring covers
+        // that case; see also GeneratorSupervisorService.PingEnvironmentAsync, whose 15s sweep would
+        // otherwise be exactly such an activator and now awaits this method first.
+        foreach (var src in state.State.Sources.Where(s => s.Enabled))
+        {
+            try
+            {
+                // Plan 006 D-C / plan 008 W4 / plan 009 wave D / plan 020 wave B-2: four-way Kind dispatch
+                // via the shared SourceKindDispatch.Classify (StreamsForge.Abstractions — both flavors use
+                // it, see its own class doc). Generator (or unset — pre-006 seeds/sources) keeps the
+                // pre-existing IGeneratorGrain path unchanged; Ingest starts NO grain at all (rows arrive
+                // through IIngressFacade); Crdt goes to ICrdtDocGrain (D3 — never IConnectorGrain);
+                // Connector (everything else) goes to IConnectorGrain.
+                var kind = SourceKindDispatch.Classify(src.Kind);
+                if (kind == SourceKindDispatch.ActorKind.Generator)
+                {
+                    await GrainFactory.GetGrain<IGeneratorGrain>(EnvKeys.Qualify(_env, src.Name)).StartAsync(src);
+                }
+                else if (kind == SourceKindDispatch.ActorKind.Crdt)
+                {
+                    await GrainFactory.GetGrain<ICrdtDocGrain>(EnvKeys.Qualify(_env, src.Name)).StartAsync(src);
+                }
+                else if (kind != SourceKindDispatch.ActorKind.Ingest)
+                {
+                    await GrainFactory.GetGrain<IConnectorGrain>(EnvKeys.Qualify(_env, src.Name)).StartAsync(src);
+                }
+            }
+            catch
+            {
+                // best-effort on boot; supervisor will retry via PingAsync
+            }
+        }
+
+        // Plan 020 wave C: CRDT documents re-assert their projection AFTER the pipelines/tables above are
+        // Running and subscribed — never earlier. The ordering in this method is load-bearing, not
+        // incidental: a document that replayed on its own activation would publish into a stream nobody
+        // has subscribed to yet and the rows would be dropped. This is the recovery for TableGrain's
+        // RESTART-RESUME LIMITATION, which resets a resuming table to empty and rebuilds it "purely from
+        // live traffic" — a document has no further live traffic to rebuild from, because D7 makes
+        // replaying its update history emit nothing. Best-effort like every other resume in this method; a
+        // document that fails to replay is still a correct document, just an empty table until its next
+        // edit or an explicit POST .../crdt/replay.
+        //
+        // ONCE PER ACTIVATION, and that is now the whole story. This comment used to justify re-running
+        // the replay on EVERY call, because the method had two boot callers and no idempotency guard: the
+        // tables loop ran twice, the second ITableGrain.StartAsync re-ran the resume path and RESET the
+        // table to empty (TableGrain's ClearResumeMarkersAndDetect), so a replay that fired only on the
+        // first pass was wiped by the second — verified live at the time, latching the replay alone put
+        // the table straight back to rowCount 0 / rebuilding true. The _resumed latch above removes the
+        // second pass itself, so the replay's single pass is no longer wiped by anything and the
+        // observation that produced that live evidence can no longer occur. Re-asserting stays idempotent
+        // for a LATEST BY consumer, so an operator-issued replay is still safe at any time.
         foreach (var src in state.State.Sources.Where(s =>
                      s.Enabled && SourceKindDispatch.Classify(s.Kind) == SourceKindDispatch.ActorKind.Crdt))
         {
@@ -263,6 +307,10 @@ public sealed class RegistryGrain(
                 // best-effort — a stale/misconfigured shard router shouldn't block boot.
             }
         }
+
+        // LAST statement, on purpose — see _resumed. Anything that throws above leaves the latch open so
+        // the other boot caller still gets a full attempt at the resume block.
+        _resumed = true;
     }
 
     public Task<List<SourceDefinition>> GetSourcesAsync() => Task.FromResult(state.State.Sources.ToList());
@@ -411,6 +459,22 @@ public sealed class RegistryGrain(
                 await crdt.StopAsync();
             }
         }
+
+        // Sources finally get lifecycle events, like pipelines and tables already had. Before this, the
+        // console's live source tape depended entirely on StreamBridgeService's 30s add-only source poll:
+        // a source created in the UI produced nothing on the wire for up to 30 seconds, and a deleted one
+        // kept a relay forever. PipelineId carries the source NAME — the same convention the "table-"
+        // kinds use for a table's name, sources having no id at all.
+        //
+        // Deliberately published AFTER the start/stop dispatch above and NOT inside a try: if starting the
+        // grain threw, this upsert did not take effect the way the caller asked, and announcing
+        // "source-started" for it would tell the bridge to relay a stream nothing is producing on. The
+        // publish itself is a plain stream OnNextAsync exactly like the table path's, so it needs no
+        // InterleavableMethods entry — the bridge subscribes, it never calls back into this grain.
+        await PublishLifecycleAsync(
+            def.Name,
+            def.Enabled ? "source-started" : "source-stopped",
+            def.Enabled ? PipelineStatus.Running : PipelineStatus.Stopped);
     }
 
     public async Task<bool> DeleteSourceAsync(string name)
@@ -426,6 +490,10 @@ public sealed class RegistryGrain(
         // Stop both kinds unconditionally — see UpsertSourceAsync's dispatch comment (cheap/idempotent).
         await GrainFactory.GetGrain<IGeneratorGrain>(EnvKeys.Qualify(_env, name)).StopAsync();
         await GrainFactory.GetGrain<IConnectorGrain>(EnvKeys.Qualify(_env, name)).StopAsync();
+        // See UpsertSourceAsync's publish for the convention (PipelineId = the source NAME). This is the
+        // event that lets StreamBridgeService drop the relay — its 30s source poll is add-only and never
+        // unsubscribed, so before this a deleted source's subscription outlived the source itself.
+        await PublishLifecycleAsync(name, "source-deleted", PipelineStatus.Stopped);
         return true;
     }
 

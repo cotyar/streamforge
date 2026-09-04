@@ -560,7 +560,23 @@ public sealed class PipelineMetrics
 public sealed class LifecycleEvent
 {
     [Id(0)] public string PipelineId { get; set; } = "";
-    /// <summary>"created" | "updated" | "deleted" | "started" | "stopped" | "failed".</summary>
+    /// <summary>Which entity the event is about is encoded in the PREFIX, because all three share one
+    /// stream and one <see cref="PipelineId"/> field:
+    /// <list type="bullet">
+    /// <item>pipelines (no prefix): "created" | "updated" | "deleted" | "started" | "stopped" | "failed" —
+    /// <see cref="PipelineId"/> is the pipeline's id.</item>
+    /// <item>tables ("table-"): "table-created" | "table-updated" | "table-deleted" | "table-started" |
+    /// "table-stopped" | "table-failed" — <see cref="PipelineId"/> carries the table's NAME (its grain
+    /// key), not an id.</item>
+    /// <item>sources ("source-"): "source-started" | "source-stopped" | "source-deleted" —
+    /// <see cref="PipelineId"/> carries the source's NAME, sources having no id at all. Started/stopped
+    /// follow <c>SourceDefinition.Enabled</c> on every upsert (create AND update), so a subscriber sees
+    /// one event per accepted write rather than only on a transition; <see cref="Status"/> is
+    /// Running/Stopped to match. There is no "source-failed" — a source that fails to poll reports it
+    /// through its own connector status, not on this stream.</item>
+    /// </list>
+    /// A subscriber that does not recognise a prefix must ignore the event, never fall through to the
+    /// pipeline branch: this list grows additively.</summary>
     [Id(1)] public string Kind { get; set; } = "";
     [Id(2)] public PipelineStatus Status { get; set; }
     [Id(3)] public long TimestampMs { get; set; }

@@ -42,6 +42,24 @@ public sealed class GeneratorSupervisorService(IClusterClient client, IHostAppli
     private async Task PingEnvironmentAsync(string env)
     {
         var registry = client.RegistryFor(env);
+
+        // Awaited BEFORE the source enumeration below, and that ordering is the whole point of this call.
+        // Pinging a source ACTIVATES its connector grain, and ConnectorGrain.OnActivateAsync self-resumes:
+        // an overdue timer fires an immediate poll. This sweep's first tick lands 15s after startup, which
+        // on a slow boot is comfortably inside the window in which the registry has not yet resumed this
+        // environment's pipelines and tables — so without this, the supervisor could be the thing that
+        // makes a persisted-Running connector publish its first rows into streams NOBODY HAS SUBSCRIBED TO
+        // YET. Memory streams have no replay, and a source with a dedup key never re-emits those rows, so
+        // they are gone. RegistryGrain.EnsureInitializedAsync resumes consumers before producers and is
+        // latched to once per activation, so after the first boot pass this is one cheap grain call per
+        // environment per 15s.
+        //
+        // What this does NOT close (documented rather than pretended away): any OTHER caller can still
+        // activate a connector during the boot window — GET /api/sources/{name}/status is enough — and
+        // that activation self-resumes the same way. Ordering cannot fix that; the source-side replay ring
+        // is what hands those rows to a table when it eventually attaches.
+        await registry.EnsureInitializedAsync();
+
         var sources = await registry.GetSourcesAsync();
         foreach (var src in sources.Where(s => s.Enabled))
         {

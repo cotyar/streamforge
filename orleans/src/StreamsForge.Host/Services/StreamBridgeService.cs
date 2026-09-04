@@ -11,8 +11,9 @@ using StreamsForge.Host.Facades;
 namespace StreamsForge.Host.Services;
 
 /// <summary>
-/// Bridges Orleans streams to SignalR groups: pipeline lifecycle/results/metrics and raw
-/// source event relays (sampled to ~20 msg/s per source).
+/// Bridges Orleans streams to SignalR groups: pipeline/table/source lifecycle, pipeline results,
+/// metrics, table deltas, and raw source event relays (PACED to ~20 msg/s per source — see
+/// <see cref="SubscribeToSourceAsync"/> for why pacing, not sampling).
 /// </summary>
 public sealed class StreamBridgeService(
     IClusterClient client,
@@ -20,6 +21,16 @@ public sealed class StreamBridgeService(
     IHostApplicationLifetime lifetime) : BackgroundService
 {
     private const double SourceRelayMinIntervalMs = 50; // ~20 msg/s cap
+
+    /// <summary>How many CONSECUTIVE paced (i.e. delayed) source callbacks are tolerated before this
+    /// bridge stops trailing the producer and goes back to dropping. At the 50 ms floor above, 40 is about
+    /// two seconds of accumulated lag — the point past which a "live tape" is no longer live and the
+    /// honest thing is to skip ahead. A burst (a poll cycle emitting a few dozen rows at once) relays in
+    /// FULL because it ends long before the streak does; only a sustained &gt;20 rows/s firehose reaches
+    /// the cap, and that is exactly the case where the old drop-everything-inside-50 ms behaviour was
+    /// right. Not a knob: a source relay is a UI convenience, and the pipeline/table data path does not
+    /// go through this service at all.</summary>
+    private const int SourceRelayMaxPacedStreak = 40;
 
     /// <summary>How long a table's deltas accumulate before one `tableDelta` message carries them all.
     /// The engine publishes one list per upstream batch, which for a bulk load (a Monte-Carlo run
@@ -39,6 +50,12 @@ public sealed class StreamBridgeService(
     private readonly Dictionary<string, StreamSubscriptionHandle<List<ResultEnvelope>>> _pipelineSubs = new();
     private readonly Dictionary<string, StreamSubscriptionHandle<EventRecord>> _sourceSubs = new();
     private readonly Dictionary<string, DateTime> _lastSourceSend = new();
+
+    /// <summary>Consecutive paced callbacks per qualified source name — see
+    /// <see cref="SourceRelayMaxPacedStreak"/>. Written only from that source's own subscription callback,
+    /// which Orleans delivers sequentially for one subscription, so it needs no lock (the same reason the
+    /// pacing itself is correct); <see cref="_lastSourceSend"/> has always relied on that property.</summary>
+    private readonly Dictionary<string, int> _sourcePacedStreak = new();
     private readonly Dictionary<string, StreamSubscriptionHandle<List<TableDeltaDto>>> _tableSubs = new();
     private readonly Dictionary<string, long> _tableSeq = new();
 
@@ -177,6 +194,16 @@ public sealed class StreamBridgeService(
 
     private async Task OnLifecycleEventAsync(string env, LifecycleEvent evt, StreamSequenceToken? token)
     {
+        // Source lifecycle events reuse this same stream/type — LifecycleEvent.PipelineId holds the
+        // source's Name (its grain key), like the "table-" kinds below. Checked FIRST and returned from
+        // unconditionally: without this branch a "source-…" kind falls through to the pipelineStatus send
+        // below and announces a source's name to the console as if it were a pipeline id.
+        if (evt.Kind.StartsWith("source-", StringComparison.Ordinal))
+        {
+            await OnSourceLifecycleEventAsync(env, evt);
+            return;
+        }
+
         // Table lifecycle events reuse this same stream/type — LifecycleEvent.PipelineId holds the
         // table's Name (its grain key) in that case, not an Id. Kind is prefixed "table-" to disambiguate.
         if (evt.Kind.StartsWith("table-", StringComparison.Ordinal))
@@ -198,6 +225,35 @@ public sealed class StreamBridgeService(
             case "stopped":
             case "deleted":
                 await UnsubscribeFromPipelineOutputAsync(env, evt.PipelineId);
+                break;
+        }
+    }
+
+    /// <summary>Turns a source's own lifecycle event into a relay subscription (or the removal of one),
+    /// so a source created in the console starts producing <c>sourceEvent</c> messages IMMEDIATELY rather
+    /// than at the next tick of the 30 s <see cref="RefreshSourceSubscriptionsAsync"/> poll — which stays
+    /// exactly as it was, as the backstop that heals a missed event.
+    ///
+    /// <para>Started and stopped BOTH subscribe, which is not an oversight: that 30 s poll has always
+    /// subscribed every catalogued source regardless of <c>Enabled</c> (a disabled source simply never
+    /// publishes, so the subscription costs nothing and is ready the moment it is re-enabled), and having
+    /// the event path agree with the poll path is what makes <see cref="SubscribeToSourceAsync"/>'s
+    /// idempotence enough. Only deletion actually removes anything.</para>
+    ///
+    /// <para>No hub message is sent for these — <c>StreamHub</c>'s clients listen for
+    /// <c>pipelineStatus</c>/<c>tableStatus</c> and there is no <c>sourceStatus</c> counterpart to
+    /// invent here; the console learns a source's state from the REST catalog it already re-reads.</para></summary>
+    private async Task OnSourceLifecycleEventAsync(string env, LifecycleEvent evt)
+    {
+        var sourceName = evt.PipelineId;
+        switch (evt.Kind)
+        {
+            case "source-started":
+            case "source-stopped":
+                await SubscribeToSourceAsync(env, sourceName);
+                break;
+            case "source-deleted":
+                await UnsubscribeFromSourceAsync(env, sourceName);
                 break;
         }
     }
@@ -262,6 +318,27 @@ public sealed class StreamBridgeService(
         }
     }
 
+    /// <summary>Idempotent by design — both the 30 s poll and a "source-…" lifecycle event call it, and
+    /// whichever arrives first wins.
+    ///
+    /// <para><b>PACED, NOT SAMPLED.</b> This used to DROP any event arriving less than
+    /// <see cref="SourceRelayMinIntervalMs"/> after the last send, which meant a burst — the normal shape
+    /// of a polled source, one cycle emitting every row of a file in a tight loop — reached the console as
+    /// one or two rows and the rest simply never appeared. To an operator watching a source's live tape
+    /// that is indistinguishable from data loss, and it is the integrator report's item #4. Now a
+    /// too-early event WAITS OUT the remainder of its slot and is then sent, so a burst relays in full,
+    /// in order, merely spread over time.</para>
+    ///
+    /// <para>Awaiting inside the callback is what makes that safe: Orleans delivers one subscription's
+    /// callbacks SEQUENTIALLY, awaiting each before the next, so the delay applies back-pressure to this
+    /// relay alone and the ordering of what reaches the hub is the ordering the source published in. It
+    /// costs a stream-delivery turn per row, which is why it cannot be unbounded — see the streak guard
+    /// below.</para>
+    ///
+    /// <para>The elapsed time is measured against OUR OWN last send (<see cref="_lastSourceSend"/>), never
+    /// against <c>evt</c>'s timestamp: an ingest/CDC/file source carries HISTORICAL <c>_ts</c> values, so
+    /// pacing on the payload's clock would either fire everything at once or stall forever depending on
+    /// the data.</para></summary>
     private async Task SubscribeToSourceAsync(string env, string name)
     {
         var qualifiedName = EnvKeys.Qualify(env, name);
@@ -277,19 +354,61 @@ public sealed class StreamBridgeService(
 
         var handle = await stream.SubscribeAsync(async (evt, _) =>
         {
-            var now = DateTime.UtcNow;
-            if (_lastSourceSend.TryGetValue(qualifiedName, out var last) &&
-                (now - last).TotalMilliseconds < SourceRelayMinIntervalMs)
+            var remaining = _lastSourceSend.TryGetValue(qualifiedName, out var last)
+                ? SourceRelayMinIntervalMs - (DateTime.UtcNow - last).TotalMilliseconds
+                : 0;
+
+            if (remaining > 0)
             {
-                return;
+                // A producer that stays ahead of the cap indefinitely would otherwise make this relay
+                // trail further and further behind reality, one 50 ms slot at a time, with no bound. Past
+                // the streak cap we skip instead — degrading to exactly the OLD sampling behaviour — until
+                // an event finally arrives owing no delay, which resets the streak below.
+                if (_sourcePacedStreak.GetValueOrDefault(qualifiedName) >= SourceRelayMaxPacedStreak)
+                {
+                    return;
+                }
+
+                _sourcePacedStreak[qualifiedName] = _sourcePacedStreak.GetValueOrDefault(qualifiedName) + 1;
+                await Task.Delay(TimeSpan.FromMilliseconds(remaining));
+            }
+            else
+            {
+                _sourcePacedStreak.Remove(qualifiedName);
             }
 
-            _lastSourceSend[qualifiedName] = now;
+            _lastSourceSend[qualifiedName] = DateTime.UtcNow;
             // The SignalR group is qualified; "sourceEvent"'s own name argument stays bare.
             await hub.Clients.Group($"source:{qualifiedName}").SendAsync("sourceEvent", name, evt);
         });
 
         _sourceSubs[qualifiedName] = handle;
+    }
+
+    /// <summary>Drops a deleted source's relay. Nothing did this before: the 30 s refresh is add-only, so
+    /// a subscription (and its <see cref="_lastSourceSend"/>/<see cref="_sourcePacedStreak"/> entries)
+    /// outlived the source that justified it for the rest of the process's life. Clearing the pacing state
+    /// too matters for the re-create case — a source deleted and re-created under the same name must not
+    /// inherit the old one's "last sent at" and silently delay its first event.</summary>
+    private async Task UnsubscribeFromSourceAsync(string env, string name)
+    {
+        var qualifiedName = EnvKeys.Qualify(env, name);
+        _lastSourceSend.Remove(qualifiedName);
+        _sourcePacedStreak.Remove(qualifiedName);
+
+        if (!_sourceSubs.Remove(qualifiedName, out var handle))
+        {
+            return;
+        }
+
+        try
+        {
+            await handle.UnsubscribeAsync();
+        }
+        catch
+        {
+            // best-effort — same tolerance as the pipeline/table unsubscribes.
+        }
     }
 
     private async Task SubscribeToTableOutputAsync(string env, string tableName)
