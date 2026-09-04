@@ -28,10 +28,13 @@ class AuthClient:
         user: str | None,
         password: str | None,
         *,
-        verify: bool = True,
+        verify: bool | str = True,
         token: str | None = None,
         timeout: float = 30.0,
     ) -> None:
+        """`verify` is httpx's own knob: `True`/`False`, or a path to a PEM CA bundle -- the
+        caller (`connect()`) passes a CA path here when `ca=` is set, so TLS verification checks
+        against that certificate instead of the system trust store."""
         self.base_url = base_url.rstrip("/")
         self._user = user
         self._password = password

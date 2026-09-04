@@ -133,11 +133,19 @@ def _drive(frames: Iterator[str], pipe, table_name: str) -> Iterator[tuple[list[
 
 
 class _WsPipe:
-    def __init__(self, ws_base_url: str, token: str, verify: bool) -> None:
+    def __init__(self, ws_base_url: str, token: str, verify: bool, ca: str | None = None) -> None:
         import websocket  # websocket-client
 
         url = f"{ws_base_url}/hubs/stream?access_token={token}"
-        sslopt = {"cert_reqs": ssl.CERT_NONE} if not verify else None
+        if not verify:
+            sslopt = {"cert_reqs": ssl.CERT_NONE}
+        elif ca:
+            # `ca` is a path to a PEM file (the server's own self-signed cert, or a CA that signed
+            # it) -- websocket-client's ca_certs takes a filesystem path, matching httpx's verify=
+            # and grpc's root_certificates-from-file usage elsewhere in this client.
+            sslopt = {"ca_certs": ca}
+        else:
+            sslopt = None
         self._ws = websocket.create_connection(url, sslopt=sslopt, timeout=30)
 
     def send(self, text: str) -> None:
@@ -263,12 +271,13 @@ _MODES = ("ws", "sse", "lp")
 
 
 class HubTransport:
-    def __init__(self, http, mode: str = "ws", verify: bool = True) -> None:
+    def __init__(self, http, mode: str = "ws", verify: bool = True, ca: str | None = None) -> None:
         if mode not in _MODES:
             raise StreamsForgeError(f"unknown signalr mode '{mode}' -- expected one of {_MODES}")
         self._http = http
         self._mode = mode
         self._verify = verify
+        self._ca = ca
         self.name = f"signalr:{mode}"
 
     def close(self) -> None:
@@ -310,7 +319,7 @@ class HubTransport:
     def _open_pipe(self):
         if self._mode == "ws":
             ws_base = self._http.base_url.replace("https://", "wss://").replace("http://", "ws://")
-            return _WsPipe(ws_base, self._http.token(), self._verify)
+            return _WsPipe(ws_base, self._http.token(), self._verify, self._ca)
         connection_token = _negotiate(self._http)
         if self._mode == "sse":
             return _SsePipe(self._http, connection_token)

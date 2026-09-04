@@ -1,7 +1,16 @@
 """Tier 1 gRPC transport (design doc §3): StreamService.SubscribeTable for deltas,
 TableService.Rows/Search/Validate/List for the catalog and snapshot, and the bidi
-IngestService.Ingest for pushes. One insecure h2c channel, prior knowledge -- no TLS
-negotiation, matching how the engine is actually run from source (§3.2's --urls trap).
+IngestService.Ingest for pushes.
+
+`target` is `host:port` (plaintext h2c, prior knowledge -- no TLS negotiation, matching how the
+engine is run from source when `--Tls:Enabled` is unset, §3.2's --urls trap), or scheme-prefixed:
+`http://host:port` is the same plaintext channel, `https://host:port` opens a TLS channel with
+ALPN h2 (the engine's TLS gRPC listener, plan/Server-side-TLS's two-listener branch). `ca`, when
+given, is the PEM bytes of the server's certificate (or the CA that signed it) -- StreamsForge's
+own `tools/tls/dev-cert.sh` mints a self-signed pair that IS its own trust anchor, so a client
+dialing it passes that same cert.pem as `ca`. `ca=None` over https falls back to grpc's system
+root store, which will reject a self-signed dev certificate -- that failure is deliberate, not a
+bug (design doc: "over https WITHOUT ca the connect raises").
 
 Row payloads travel as google.protobuf.Struct; MessageToDict is the whole "typing" story (design
 doc §2: "Rows stay dicts... pandas re-types the column anyway"). Struct numbers are IEEE-754
@@ -31,13 +40,33 @@ def _to_struct(row: Row) -> Struct:
     return s
 
 
+def parse_grpc_target(target: str) -> tuple[str, bool]:
+    """Split a `grpc=`/`STREAMSFORGE_GRPC` target into `(host:port, use_tls)`.
+
+    Accepts bare `host:port` (plaintext, unchanged from before TLS support), `http://host:port`
+    (plaintext, explicit) and `https://host:port` (TLS, ALPN h2) -- the scheme is stripped either
+    way since grpc.{insecure,secure}_channel both take a bare authority."""
+    if target.startswith("https://"):
+        return target[len("https://") :], True
+    if target.startswith("http://"):
+        return target[len("http://") :], False
+    return target, False
+
+
 class GrpcTransport:
     name = "grpc"
 
-    def __init__(self, target: str, auth) -> None:
+    def __init__(self, target: str, auth, ca: bytes | None = None) -> None:
         """`auth` is anything with a `.token()` method -- normally an `_http.AuthClient`, shared
-        with the REST side so both transports mint/refresh the same JWT."""
-        self._channel = grpc.insecure_channel(target)
+        with the REST side so both transports mint/refresh the same JWT. `ca` is the PEM bytes of
+        a trusted certificate/CA, used only when `target` resolves to an https (TLS) authority --
+        see the module docstring."""
+        host_port, use_tls = parse_grpc_target(target)
+        if use_tls:
+            creds = grpc.ssl_channel_credentials(root_certificates=ca)
+            self._channel = grpc.secure_channel(host_port, creds)
+        else:
+            self._channel = grpc.insecure_channel(host_port)
         self._auth = auth
         self._tables = pb_grpc.TableServiceStub(self._channel)
         self._stream = pb_grpc.StreamServiceStub(self._channel)

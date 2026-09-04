@@ -129,21 +129,27 @@ class Client:
 def _default_grpc_target(base_url: str) -> str:
     """Guess the gRPC port from the REST base_url following Program.cs's own PORT/PORT+100
     convention. Only a fallback -- pass grpc= (or STREAMSFORGE_GRPC) whenever the two ports don't
-    follow that relationship, e.g. an explicit --Http:Port/--Grpc:Port pair that isn't +100 apart."""
+    follow that relationship, e.g. an explicit --Http:Port/--Grpc:Port pair that isn't +100 apart.
+
+    Scheme-preserving: an https base_url guesses an https:// gRPC target (TLS, ALPN h2) so a
+    caller who only set `url="https://..."` and `Tls:Enabled` on one host doesn't ALSO have to
+    spell out `grpc="https://..."` by hand -- the guess would otherwise silently hand
+    GrpcTransport a bare host:port, which opens a plaintext channel against a TLS-only listener."""
     parts = urlsplit(base_url)
     host = parts.hostname or "localhost"
     http_port = parts.port or (443 if parts.scheme == "https" else 80)
-    return f"{host}:{http_port + 100}"
+    guess = f"{host}:{http_port + 100}"
+    return f"https://{guess}" if parts.scheme == "https" else guess
 
 
-def _probe_signalr_mode(http: AuthClient, verify: bool) -> str:
+def _probe_signalr_mode(http: AuthClient, verify: bool, ca: str | None = None) -> str:
     """auto: try signalr:ws, then signalr:sse, then give up on signalr:lp (it needs no upgrade
     and no long-lived probe connection, so it is the mode that "always works" if REST does)."""
     from . import _hub
 
     ws_base = http.base_url.replace("https://", "wss://").replace("http://", "ws://")
     try:
-        pipe = _hub._WsPipe(ws_base, http.token(), verify)
+        pipe = _hub._WsPipe(ws_base, http.token(), verify, ca)
         pipe.close()
         return "ws"
     except Exception as exc:
@@ -170,15 +176,24 @@ def connect(
     token: str | None = None,
     transport: str = "auto",
     verify: bool = True,
+    ca: str | None = None,
 ) -> Client:
-    """One-line connect. Resolution order for url/grpc/user/password: explicit kwarg -> env
-    (STREAMSFORGE_BASE_URL / STREAMSFORGE_GRPC / STREAMSFORGE_ADMIN_USER / STREAMSFORGE_ADMIN_PASS) ->
-    ~/.config/streamsforge/config.toml.
+    """One-line connect. Resolution order for url/grpc/user/password/ca: explicit kwarg -> env
+    (STREAMSFORGE_BASE_URL / STREAMSFORGE_GRPC / STREAMSFORGE_ADMIN_USER / STREAMSFORGE_ADMIN_PASS /
+    STREAMSFORGE_CA) -> ~/.config/streamsforge/config.toml.
 
     `transport`: "grpc" | "signalr" | "signalr:ws" | "signalr:sse" | "signalr:lp" | "auto"
     (default). "signalr" is an alias for "signalr:ws". "auto" tries gRPC, then SignalR (ws, then
     sse, then lp), and always logs which one it got -- a client that silently degrades and lets
     someone believe they're watching a live stream is worse than one that fails loudly.
+
+    TLS: an `https://` `url` (or `grpc` target) talks TLS. `ca=` is the path to a PEM
+    certificate/CA to trust -- required against `tools/tls/dev-cert.sh`'s self-signed dev
+    certificate, since it is its own trust anchor and appears in no system store. `ca=` is applied
+    to REST/SignalR (httpx `verify=`) and to the gRPC channel (`root_certificates=`) alike.
+    `verify=False` (skip certificate checks) only ever applies to REST/SignalR -- grpc-python has
+    no equivalent knob, so an https gRPC target combined with `verify=False` and no `ca=` raises a
+    `ValueError` here rather than failing later with an opaque handshake error.
     """
     if transport not in _VALID_TRANSPORTS:
         raise StreamsForgeError(
@@ -186,20 +201,36 @@ def connect(
             "signalr:lp or auto"
         )
 
-    cfg = _config.resolve(url=url, grpc=grpc, user=user, password=password)
+    cfg = _config.resolve(url=url, grpc=grpc, user=user, password=password, ca=ca)
     if not cfg.base_url:
         raise StreamsForgeError(
             "no base URL: pass url=, set STREAMSFORGE_BASE_URL, or add base_url to "
             "~/.config/streamsforge/config.toml"
         )
 
-    http = AuthClient(cfg.base_url, cfg.user, cfg.password, verify=verify, token=token)
+    ca_path = cfg.ca
+    ca_bytes: bytes | None = None
+    if ca_path:
+        with open(ca_path, "rb") as f:
+            ca_bytes = f.read()
+
+    # httpx (and, via HubTransport, the SignalR wire modes) accept a CA bundle PATH for `verify`;
+    # an explicit verify=False always wins (it means "skip checks entirely"), matching the design
+    # note above -- REST/SignalR CAN skip verification, gRPC cannot.
+    http_verify: bool | str = ca_path if (verify and ca_path) else verify
+    http = AuthClient(cfg.base_url, cfg.user, cfg.password, verify=http_verify, token=token)
 
     grpc_transport: GrpcTransport | None = None
     if transport in ("grpc", "auto"):
         target = cfg.grpc or _default_grpc_target(cfg.base_url)
+        if not verify and target.startswith("https://") and not ca_path:
+            raise ValueError(
+                f"verify=False cannot be used with an https gRPC target ('{target}') and no ca= -- "
+                "grpc-python has no certificate-skipping option. Pass ca=<path to the server's "
+                "certificate> instead (see tools/tls/dev-cert.sh for a development pair)."
+            )
         try:
-            candidate = GrpcTransport(target, http)
+            candidate = GrpcTransport(target, http, ca=ca_bytes)
             candidate.list_tables(timeout=3.0)  # proves the channel AND the JWT actually work
             grpc_transport = candidate
         except Exception as exc:
@@ -207,7 +238,8 @@ def connect(
                 raise StreamsForgeError(
                     f"gRPC channel to {target} refused. If the host was started with --urls, "
                     "Program.cs's guard binds no gRPC port at all -- start it with "
-                    "--Http:Port/--Grpc:Port instead (design doc §3.2)."
+                    "--Http:Port/--Grpc:Port instead (design doc §3.2). Over https, an untrusted "
+                    "certificate (e.g. a self-signed dev cert with no ca= passed) fails the same way."
                 ) from exc
             logger.warning(
                 "streamsforge: gRPC unavailable (%s: %s), falling back to SignalR", type(exc).__name__, exc
@@ -218,8 +250,12 @@ def connect(
     if grpc_transport is not None:
         chosen = "grpc"
     else:
-        mode = _SIGNALR_MODES[transport] if transport in _SIGNALR_MODES else _probe_signalr_mode(http, verify)
-        hub_transport = HubTransport(http, mode=mode, verify=verify)
+        mode = (
+            _SIGNALR_MODES[transport]
+            if transport in _SIGNALR_MODES
+            else _probe_signalr_mode(http, verify, ca_path)
+        )
+        hub_transport = HubTransport(http, mode=mode, verify=verify, ca=ca_path)
         chosen = hub_transport.name
 
     logger.info("streamsforge: connected via %s transport (%s)", chosen, cfg.base_url)

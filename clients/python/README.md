@@ -72,6 +72,21 @@ password = "admin123!"
 Two out-of-scope wire modes from the design doc are **not implemented here**: snapshot-diff
 polling, and any transport beyond the two above. `transport=` only ever accepts the values listed.
 
+## TLS
+
+An `https://` `url` (or `grpc=` target) talks TLS on every transport. `ca=` (also `STREAMSFORGE_CA`
+env, `ca` in `config.toml`) is the path to a PEM certificate/CA to trust -- required against
+`tools/tls/dev-cert.sh`'s self-signed dev certificate, since it is its own trust anchor and appears
+in no system store:
+
+```python
+sf = streamsforge.connect(url="https://host:5199", ca="cert.pem", user="admin", password="...")
+```
+
+`verify=False` skips certificate checks for REST/SignalR only -- grpc-python has no equivalent, so
+an https gRPC target with `verify=False` and no `ca=` raises `ValueError` at `connect()` rather than
+failing later with an opaque handshake error. For gRPC over a self-signed cert, pass `ca=` instead.
+
 ## Ad-hoc SQL
 
 ```python

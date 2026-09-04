@@ -22,6 +22,7 @@ class ResolvedConfig:
     user: str | None
     password: str | None
     ingest_key: str | None
+    ca: str | None
 
 
 def _load_toml(path: Path = CONFIG_PATH) -> dict:
@@ -38,6 +39,7 @@ def resolve(
     user: str | None = None,
     password: str | None = None,
     ingest_key: str | None = None,
+    ca: str | None = None,
     config_path: Path = CONFIG_PATH,
 ) -> ResolvedConfig:
     toml = _load_toml(config_path)
@@ -57,4 +59,5 @@ def resolve(
         user=pick(user, "STREAMSFORGE_ADMIN_USER", "user"),
         password=pick(password, "STREAMSFORGE_ADMIN_PASS", "password"),
         ingest_key=pick(ingest_key, "SF_INGEST_KEY", "ingest_key"),
+        ca=pick(ca, "STREAMSFORGE_CA", "ca"),
     )
