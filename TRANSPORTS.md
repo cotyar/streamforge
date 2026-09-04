@@ -975,6 +975,33 @@ reason.
 a connection string put behind a name carries its credential exactly as configured. Say so in your new
 kind's own docs if its endpoint-shaped field is the sort that might hold one.
 
+An `@name` endpoint (and a `Discovery:Peers` entry) may resolve to an `https://` value just as readily as
+an `http://` one — nothing here is scheme-specific — and a private CA that value's certificate chains to
+comes from `Tls:TrustedCaPath`, not from anything configured on the endpoint or peer entry itself. See the
+next section.
+
+### Outbound TLS trust
+
+`Tls:TrustedCaPath` and `Tls:AcceptAnyCertificate` (`shared/StreamsForge.AppCore/Net/OutboundTls.cs`) are
+the one place this platform decides whether it trusts a remote server's certificate, and they apply to
+*every* outbound HTTPS/gRPC connection the host makes — a `url` source's fetch, an `http` sink's publish,
+a `grpc` source's federated subscribe, a peer probe, OpenAPI schema derivation — not per-transport
+settings each connector would otherwise have to grow on its own. `Tls:TrustedCaPath` is a PEM file (one or
+more certificates) that **extends** the system trust store rather than replacing it: a publicly-trusted
+`https://` endpoint needs no configuration here at all, and a certificate signed by the configured CA
+still fails on a plain hostname mismatch — "our CA signed it" and "it's the host we asked for" are kept as
+two different questions on purpose, so a custom root can never launder an impersonating peer. Configured
+once at host startup, before anything dials out, because the outbound `HttpClient`s that use it are
+process-wide singletons that capture their handler on first use — a `Tls:TrustedCaPath` set after that
+point would silently apply to only some of them.
+
+`Tls:AcceptAnyCertificate=true` disables outbound verification altogether. It exists for a self-signed
+peer in local development and logs a startup warning for exactly that reason — never set it against
+anything that matters. On Linux, `SSL_CERT_FILE`/`SSL_CERT_DIR` are the OpenSSL-level equivalent for
+whatever sits below this platform's own handler (e.g. a native library a plugin brings in). This is the
+*outbound* axis only; the host's own server-side certificate (what a browser or another instance sees
+when it dials *this* host) is a separate setting — see `orleans/docs/index.html` § TLS.
+
 ---
 
 ## Transports whose client library cannot ship in this repo

@@ -41,6 +41,10 @@ spec:
           env:
             # PORT is NOT listed: Cloud Run reserves it (deploy is rejected if set explicitly);
             # the platform injects PORT=8080 to match containerPort above.
+            # Cloud Run terminates TLS itself at its edge and forwards to this container as cleartext
+            # HTTP — the container never needs its own certificate here. Set
+            # ASPNETCORE_FORWARDEDHEADERS_ENABLED=true (see orleans/docs/index.html § TLS) so
+            # GET /api/meta/instance reports https:// endpoints instead of http://.
             - name: GEMINI_API_KEY
               value: ${GEMINI_API_KEY}
           resources:

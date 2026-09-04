@@ -96,18 +96,33 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 # two-Kestrel-endpoint block only ran when --urls was UNSET, so this image never opened a gRPC
 # listener at all).
 #
-# THAT ALONE DOES NOT MAKE gRPC REACHABLE HERE, though — measured against a real running instance
-# while building this: Kestrel does not multiplex HTTP/1.1 and HTTP/2 on a single CLEARTEXT
-# endpoint (no TLS) in any shipped ASP.NET Core version; it always falls back to HTTP/1.1 and a
-# genuine h2c "prior knowledge" gRPC call times out (open, unresolved upstream:
+# THAT ALONE DOES NOT MAKE gRPC REACHABLE HERE on a CLEARTEXT endpoint, though — measured against a
+# real running instance while building this: Kestrel does not multiplex HTTP/1.1 and HTTP/2 on a
+# single cleartext endpoint (no TLS) in any shipped ASP.NET Core version; it always falls back to
+# HTTP/1.1 and a genuine h2c "prior knowledge" gRPC call times out (open, unresolved upstream:
 # dotnet/aspnetcore#56984). REST/SignalR on $PORT are completely unaffected either way. Two paths
-# actually close the gap, neither exercised by this Dockerfile as it stands: (1) put a certificate
-# on this endpoint (Kestrel:Certificates:Default) so Http1AndHttp2 gets real TLS+ALPN negotiation;
-# (2) deploy the Cloud Run SERVICE with HTTP/2 end-to-end (`--use-http2` / a port named "h2c" —
-# an infra-level `gcloud run deploy` flag, not something this file controls), which makes Cloud
-# Run's own edge terminate the client's TLS and forward EVERY request to the container as HTTP/2
-# cleartext, so the container's single Http1AndHttp2 listener only ever has to speak one protocol
-# for real and REST traffic rides along on it transparently.
+# close the gap:
+#
+# (1) PUT A CERTIFICATE ON THIS ENDPOINT — this now works. Change the ENTRYPOINT's --urls scheme to
+#     https and give Kestrel a certificate via the same Kestrel:Certificates:Default section the
+#     two-listener dev path uses (a PEM pair, PFX, or OS-store lookup — see
+#     shared/StreamsForge.AppCore/Net/OutboundTls.cs's sibling, orleans/src/StreamsForge.Host/
+#     Program.cs, for the branch that reads it), e.g.:
+#         ENTRYPOINT ["/bin/sh", "-c", "exec ./StreamsForge.Host --urls https://0.0.0.0:${PORT:-8080}"]
+#     with Kestrel__Certificates__Default__Path and Kestrel__Certificates__Default__KeyPath set (see
+#     compose.yaml's commented-out TLS block for the exact env vars and a cert volume mount). With a
+#     real certificate, Http1AndHttp2 gets real TLS+ALPN negotiation and gRPC becomes reachable on
+#     this single port — note this is the --urls branch specifically: Tls:Enabled (the flag that turns
+#     TLS on for the OTHER, two-listener branch) has no effect here, since the https:// scheme in
+#     --urls is what switches this branch's Kestrel to TLS. Full recipe and the outbound-trust axis
+#     (Tls:TrustedCaPath, for connections this container makes outward) are documented in
+#     orleans/docs/index.html § TLS and TRANSPORTS.md's "Outbound TLS trust" section.
+# (2) Deploy the Cloud Run SERVICE with HTTP/2 end-to-end (`--use-http2` / a port named "h2c" — an
+#     infra-level `gcloud run deploy` flag, not something this file controls), which makes Cloud Run's
+#     own edge terminate the client's TLS and forward EVERY request to the container as HTTP/2
+#     cleartext, so the container's single Http1AndHttp2 listener only ever has to speak one protocol
+#     for real and REST traffic rides along on it transparently. See deploy/orleans/service.yaml for
+#     the related note on ASPNETCORE_FORWARDEDHEADERS_ENABLED when Cloud Run itself terminates TLS.
 EXPOSE 8080
 
 # Cloud Run injects PORT (default 8080 locally/compose too); shell form so ${PORT} expands, and

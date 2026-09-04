@@ -150,6 +150,34 @@ Full routes and verified live recipes: `orleans/docs/index.html` §§ REST API /
 federation / Configuration import-export; contributor-facing `@name` wiring: `TRANSPORTS.md`'s Named
 external endpoints section.
 
+**TLS** (plan 024, Orleans only — the Dapr host is untouched and still loopback-only): `Tls:Enabled=true`
+plus the standard `Kestrel:Certificates:Default` section (`Path`+`KeyPath` PEM, `Path`+`Password`
+PFX, or `Subject`+`Store`) puts HTTPS on the REST port and TLS (ALPN h2) on the gRPC port; startup
+fails fast when the flag is set with no certificate. It only applies to the two-listener branch of
+`Program.cs` — a `--urls` deploy (Docker, Cloud Run) turns TLS on through `--urls https://…` plus the
+same certificate section, and with real TLS that single port ALSO serves gRPC, which a cleartext
+single port never could. `Tls:Enabled` also enables HSTS (not emitted for loopback hosts — ASP.NET's
+`ExcludedHosts` default, deliberately kept). Behind a TLS-terminating proxy set the built-in
+`ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` (trusts any proxy — off by default, fail-closed) so
+`/api/meta/instance` reports `https://` endpoints to peers. Every outbound HTTPS/gRPC connection the
+host makes (`url` source, `http` sink, `grpc` source, peer probes, OpenAPI schema derivation) goes
+through `shared/StreamsForge.AppCore/Net/OutboundTls.cs`: `Tls:TrustedCaPath` (PEM bundle) EXTENDS
+system trust — a name mismatch still fails — and `Tls:AcceptAnyCertificate` (dev only, warned at
+startup) disables it; configure before the first outbound call, the class latches. `tools/tls/dev-cert.sh
+<out-dir>` mints a self-signed cert that is its own trust anchor. NATS kinds carry a `tls` config
+group (`caFile`/`certFile`/`keyFile`/`insecureSkipVerify`). All four client SDKs accept a
+scheme-carrying gRPC target (`https://host:port`; scheme-less stays plaintext), a CA-file option and a
+dev-only skip-verify (TypeScript `ca`/`verify:false`/`STREAMSFORGE_CA`; .NET `CaCertificatePath`/
+`AcceptAnyCertificate`; Python `ca=`/`verify=False` REST-only; Kotlin `caFile`/`insecure`); the admin
+CLI/MCP read `SF_CA_FILE`/`SF_INSECURE=1`. Proven end to end by `TlsHostTests`, `TlsChainTests` (two
+hosts, folder → gRPC over TLS → table, 200/200), `ForwardedHeadersTests` and one live TLS suite per
+SDK. Also found and fixed here: since plan 022 a bare `dotnet publish` (no `-r`) defaulted to
+**linux-x64** single-file, so every client fixture on a Mac published an unrunnable host —
+`Publish.props` now defaults to the SDK's own RID (`$(NETCoreSdkRuntimeIdentifier)`; `tools/publish.sh`
+and the Dockerfiles pass `-r` explicitly and are unchanged), and the fixtures run the native
+executable when there is no `.dll`. Operator recipes: `orleans/docs/index.html` § TLS; the survey that
+sized this: `plans/024-tls-support.md`.
+
 **Environment isolation** (plan 021): an environment is the **registry KEY**, not a column — Orleans
 activates a whole separate `RegistryGrain` per environment (Dapr: `RegistryActor`), so two same-named
 tables in two environments are two grains with two states, not one filtered read. `default` is the
@@ -198,7 +226,15 @@ the `/sf-env` skill; per-wave outcomes and the found-and-not-fixed list at the e
   11111/30000). Reserved by tests: 9199/9299 (`clients/dotnet`, python, kotlin), 8199/8299
   (`clients/typescript`), 7511/7512 (`tools/soak`), and `orleans/tests/StreamsForge.Chain.Tests`'
   spawned hosts 9399/9499 + 9599/9699 (two-host gRPC chain) and 9799/9899 (restart), silo
-  11399/30399, 11599/30599, 11799/30799.
+  11399/30399, 11599/30599, 11799/30799. TLS tests (plan 024): the Chain project's 6599/6699
+  (TLS host), 6999/7099 (TLS startup failure), 8799/8899 + 8999/9099 (TLS two-host chain),
+  6799/6899 + 7199/7299 (forwarded headers), silo 16599/36599, 16999/36999, 18799/38799,
+  18999/38999, 16799/36799, 17199/37199; and each client SDK's TLS fixture — TypeScript 7199/7299
+  (silo 17199/37199; it never runs concurrently with the Chain project, which is why the http pair
+  can be shared), .NET 7399/7499 (17399/37399), Python 7599/7699 (17599/37599), Kotlin 7799/7899
+  (17799/37799). The four client fixtures all honour `SF_TEST_PUBLISH_DIR` — publish the host ONCE
+  and point every suite at it; four concurrent `dotnet publish`es of the same tree on one machine
+  is how a 5-minute publish timeout turns into 21 spurious skips.
   Containerized stacks (plan 007): orleans compose `6199`, dapr compose `6399`, admin app `5599` —
   these are the *container* ports; never confuse them with (or bind over) the dev servers above.
 - Seeds apply only to an **empty data dir** (`orleans/src/StreamsForge.Host/data/`; delete to

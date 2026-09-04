@@ -34,6 +34,18 @@ services:
       # only if set on the host — unset means the chat endpoint 503s with a friendly message,
       # which is expected out of the box.
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # --- TLS (optional, off by default) ------------------------------------------------------
+      # This image runs the single-port `--urls` branch (see the Dockerfile's ENTRYPOINT), where the
+      # *scheme* in --urls is what switches Kestrel to TLS — Tls__Enabled below has no effect on this
+      # branch by itself; turning TLS on for real also means changing the Dockerfile's ENTRYPOINT (or
+      # this service's `command:`) to `--urls https://0.0.0.0:${PORT}`. Left set here anyway so the
+      # certificate section is in one place once that scheme change is made. See TRANSPORTS.md's
+      # "Outbound TLS trust" section and orleans/docs/index.html § TLS for the full picture.
+      # Tls__Enabled: "true"
+      # Kestrel__Certificates__Default__Path: /certs/cert.pem
+      # Kestrel__Certificates__Default__KeyPath: /certs/key.pem
+    # volumes:
+    #   - ./certs:/certs:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 5s

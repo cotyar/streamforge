@@ -287,6 +287,11 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
   <a href="#environments-list" class="sub">Creating &amp; listing</a>
   <a href="#environments-select" class="sub">Selecting one</a>
   <a href="#environments-delete" class="sub">Force-delete</a>
+  <a href="#tls">TLS</a>
+  <a href="#tls-server" class="sub">Server-side TLS</a>
+  <a href="#tls-proxy" class="sub">Behind a TLS-terminating proxy</a>
+  <a href="#tls-outbound" class="sub">Outbound trust</a>
+  <a href="#tls-clients" class="sub">Clients</a>
   <a href="#config">Configuration import/export</a>
   <a href="#config-format" class="sub">Document format</a>
   <a href="#config-compose" class="sub">Compose &amp; merge rules</a>
@@ -1556,6 +1561,49 @@ curl -X DELETE "localhost:5199/api/environments/default?force=true" -H "Authoriz
 # -> 409 {"error":"The default environment cannot be deleted."}</code></pre>
 <p>Force-delete is the one genuinely destructive operation this feature adds: it deletes the environment's <b>catalog and the runtime state of everything in it</b> — every source, pipeline and table is torn down through the same code path a manual one-at-a-time delete uses (so a Running table is stopped first, its history/shard tiers released), then the environment record itself is removed. The console's picker makes this a deliberate two-step confirmation — a plain delete first, which escalates to an explicit "force-delete erases catalog AND runtime state" dialog only after the server has confirmed the environment is non-empty.</p>
 <div class="callout"><b>What force-delete does not clean up.</b> The environment's own registry state (an Orleans grain-storage JSON file, a Dapr Redis entry) is left behind holding an <i>empty</i> catalog — nothing in either flavor's storage layer can delete a grain/actor's own persisted file outright, only empty the object living in it. Its field-number map for the deleted entities is left behind too (harmless: field numbers are meant to persist forever regardless — see the API's <a href="#grpc-reflection">field-number stability</a> rule). Re-creating an environment with the same name later inherits that dead weight rather than starting clean.</div>
+</section>
+
+<section id="tls">
+<h2>TLS</h2>
+<p><b>Orleans flavor only</b> — the Dapr host today is loopback-only and its sidecar's own mTLS is a separate concern from anything on this page.</p>
+
+<h3 id="tls-server">Server-side TLS</h3>
+<p>Two branches, matching the two ways <code>Program.cs</code> already binds Kestrel. With no <code>--urls</code> (the default two-port dev shape, REST + gRPC separate), set <code>Tls:Enabled=true</code> plus a certificate under <code>Kestrel:Certificates:Default</code> — a PEM pair (<code>Path</code> + <code>KeyPath</code>), a PFX (<code>Path</code> + <code>Password</code>), or an OS-store lookup (<code>Subject</code> + <code>Store</code>) — and <b>both</b> listeners become TLS; the gRPC listener's h2c becomes ALPN-negotiated h2, which every gRPC client already speaks. Startup <b>fails fast</b> with a clear message if <code>Tls:Enabled</code> is set with no certificate configured — env-var spelling is <code>Tls__Enabled</code> / <code>Kestrel__Certificates__Default__Path</code>. With <code>--urls https://0.0.0.0:PORT</code> (the Docker/Cloud Run single-port shape), the certificate section is all that's needed — the <code>https://</code> scheme itself turns TLS on — and with a real certificate that single port now also serves gRPC over the same ALPN negotiation, which was previously impossible on a cleartext single port. <code>Tls:Enabled</code> also turns on HSTS (not emitted for <code>localhost</code>/<code>127.0.0.1</code>, ASP.NET's own default <code>ExcludedHosts</code> — a loopback dev server never gets the header even with TLS on).</p>
+<p><code>tools/tls/dev-cert.sh &lt;out-dir&gt; [host-or-ip ...]</code> mints a self-signed development pair (<code>cert.pem</code>/<code>key.pem</code>, SAN <code>localhost</code> + <code>127.0.0.1</code> plus any extra names/IPs given) and prints the two arguments to pass. It is its own trust anchor: a client trusts that same file as a CA.</p>
+<pre><code># 1. Mint a dev certificate for 127.0.0.1
+tools/tls/dev-cert.sh /tmp/sf-tls 127.0.0.1
+
+# 2. Start the host with TLS on, on isolated test ports
+~/.dotnet/dotnet run --project orleans/src/StreamsForge.Host -- \
+  --Http:Port 6599 --Grpc:Port 6699 \
+  --Tls:Enabled true \
+  --Kestrel:Certificates:Default:Path /tmp/sf-tls/cert.pem \
+  --Kestrel:Certificates:Default:KeyPath /tmp/sf-tls/key.pem
+
+# 3. Confirm, trusting the dev cert as its own CA
+curl --cacert /tmp/sf-tls/cert.pem https://127.0.0.1:6599/api/healthz</code></pre>
+<pre><code>// 4. TypeScript client, same trust anchor
+import { connect } from "@streamsforge/client";
+const client = await connect("https://127.0.0.1:6599", { ca: "/tmp/sf-tls/cert.pem" });</code></pre>
+
+<h3 id="tls-proxy">Behind a TLS-terminating proxy</h3>
+<p>When something in front of the host (a load balancer, Cloud Run's own edge) terminates TLS and forwards cleartext, set <code>ASPNETCORE_FORWARDEDHEADERS_ENABLED=true</code> — an ASP.NET Core built-in, not code this platform added — so the host believes <code>X-Forwarded-Proto</code> and reports <code>https://</code> endpoints from <code>GET /api/meta/instance</code> (what a peer federates against) and marks the docs auth cookie <code>Secure</code>. Default is <b>off</b>, fail-closed: an unset flag means the header is ignored and the host keeps reporting <code>http://</code> no matter what a caller claims, so only set it when the host is reachable <b>exclusively</b> through that trusted proxy — the flag trusts any forwarder unconditionally, with no configurable allowlist.</p>
+
+<h3 id="tls-outbound">Outbound trust</h3>
+<p>Separate axis from serving TLS: what this host accepts when <b>it</b> dials out — a federated <a href="#discovery-federation"><code>grpc</code> peer</a>, a <code>url</code> source, an <code>http</code> sink, a peer probe, OpenAPI schema derivation. <code>Tls:TrustedCaPath</code> points at a PEM bundle of one or more certificates and <b>extends</b> (never replaces) the system trust store for every one of those connections; a name mismatch still fails even against a certificate the configured CA did sign. <code>Tls:AcceptAnyCertificate=true</code> disables verification entirely — development only, and logged as a startup warning so it can't sit on unnoticed. On Linux, <code>SSL_CERT_FILE</code>/<code>SSL_CERT_DIR</code> are the OpenSSL-level equivalent, for anything below this platform's own handler. Federating two TLS instances end to end: point the consumer's <code>Discovery:Peers:0:RestEndpoint</code>/<code>GrpcEndpoint</code> at <code>https://…</code> and give it <code>Tls:TrustedCaPath</code> pointing at the producer's certificate.</p>
+
+<h3 id="tls-clients">Clients</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Client</th><th>CA file</th><th>Skip verification</th></tr></thead>
+<tbody>
+<tr><td>TypeScript</td><td><code>ca</code> option / <code>STREAMSFORGE_CA</code></td><td><code>verify: false</code></td></tr>
+<tr><td>.NET</td><td><code>CaCertificatePath</code></td><td><code>AcceptAnyCertificate</code></td></tr>
+<tr><td>Python</td><td><code>ca=</code> (REST only)</td><td><code>verify=False</code> (REST only)</td></tr>
+<tr><td>Kotlin</td><td><code>caFile</code></td><td><code>insecure</code></td></tr>
+<tr><td>Admin CLI / MCP</td><td><code>SF_CA_FILE</code></td><td><code>SF_INSECURE=1</code></td></tr>
+</tbody>
+</table></div>
+<p>Two things worth knowing beyond the table: CORS's <code>Cors:AllowedOrigins</code> entries are scheme-exact, so an https console origin must be listed as <code>https://…</code>, not <code>http://…</code>; and SignalR's bearer token travels in the websocket upgrade's query string, so TLS is what protects it in transit — a plain-http deployment on a shared network leaks it. The <code>nats</code> transport's own TLS group (<code>caFile</code>/<code>certFile</code>/<code>keyFile</code>/<code>insecureSkipVerify</code>) is a separate, transport-local setting — see <a href="https://github.com/cotyar/streamsforge/blob/master/TRANSPORTS.md">TRANSPORTS.md</a>'s NATS TLS subsection.</p>
 </section>
 
 <section id="config">
