@@ -202,6 +202,11 @@ A plugin outside this repo entirely needs, at minimum:
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- A class library does not copy its PackageReference DLLs to its own output the way an
+         executable does — without this, the plugin's type still registers fine, but the first real
+         operation (probe, connect, subscribe) fails with a FileNotFoundException for the first
+         package DLL it needs. Copy the whole output directory into plugins/, not just the plugin DLL. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
   <ItemGroup>
     <!-- Reference the host's public surface by package or project — however your build reaches it.
@@ -209,8 +214,8 @@ A plugin outside this repo entirely needs, at minimum:
     <PackageReference Include="StreamsForge.AppCore" Version="…" />
   </ItemGroup>
   <ItemGroup>
-    <!-- Optional: a console UI module travels inside the same DLL. -->
-    <EmbeddedResource Include="ui-plugins/*.js" LogicalName="ui-plugins/%(Filename)%(Extension)" />
+    <!-- Optional: a console UI module (.js/.mjs/.ts/.tsx) travels inside the same DLL. -->
+    <EmbeddedResource Include="ui-plugins/*" LogicalName="ui-plugins/%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>
 ```
@@ -310,7 +315,13 @@ already have:
 host-hardcoded `RegisterAll()` calls), **then** `StreamsForgePlugins.LoadFrom(Plugins:Path)` — so a
 plugin can never shadow a built-in kind name, only lose to it. Within the plugin directory, files load
 in `StringComparer.Ordinal` file-name order; within one assembly, plugin types activate in
-`StringComparer.Ordinal` full-type-name order.
+`StringComparer.Ordinal` full-type-name order. `LoadFrom` itself is **two-pass**: every DLL in the
+directory is loaded first, then each loaded assembly is scanned for `IStreamsForgePlugin` types —
+order-independent, so a dependency that sorts after its plugin by filename no longer produces a
+spurious "could not be loaded" line. Once a plugin registers, its referenced assembly versions are
+compared against what the host actually has loaded, and a plugin built against a **newer** version than
+the host logs `plugin 'X' references A 8.0.0.0 but the host has 6.0.0.0 loaded — the host copy wins; a
+TypeInitializationException at first use means this` (silent when the host's copy is the same or newer).
 
 **Where it looks**: `Plugins:Path` configuration key, defaulting to `plugins/` next to
 `AppContext.BaseDirectory` (the exe's own directory — including under single-file publish, where

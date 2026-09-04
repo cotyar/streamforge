@@ -125,7 +125,7 @@ fi
 # --- 5. An empty ui-plugins/ so an operator has an obvious place to drop console UI modules. ---
 mkdir -p "$OUT_DIR/ui-plugins"
 cat > "$OUT_DIR/ui-plugins/README.txt" <<'EOF'
-Drop one .js ES module per out-of-tree console UI plugin here (GET /api/ui-plugins lists them); see TRANSPORTS.md.
+Drop one .js/.mjs ES module or one .ts/.tsx file per out-of-tree console UI plugin here (GET /api/ui-plugins lists them); see TRANSPORTS.md.
 EOF
 
 # --- 6. Report what got published. ---

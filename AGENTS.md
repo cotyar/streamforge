@@ -92,7 +92,14 @@ trimmer breaks silently), plus the SPA/docs/protos embedded-with-disk-first-fall
 <orleans|dapr> [rid] [out-dir]` drives it end to end; both Dockerfiles under `deploy/` now run the
 published native executable directly rather than `dotnet <name>.dll`. Full guide (the hook decision
 table, all three in-tree plugins as worked examples, the ILRepack merge rule, and the runtime failure
-modes when a plugin is absent): [`PLUGINS.md`](PLUGINS.md). **Six pre-existing test failures, not
+modes when a plugin is absent): [`PLUGINS.md`](PLUGINS.md). Console UI plugins are now `apiVersion: 3`
+(2→3 added `draft`/`onSuggest`, name/description suggestions applied only while the user's own field is
+still blank) and can be a single TypeScript file (`.ts`/`.tsx`, no `import`s) transpiled in the browser
+via a lazily-downloaded `sucrase`; `GET /api/ui-plugins` is `Cache-Control: no-store` with a `?v=` on
+every URL, so a plain reload (not a hard one) picks up an edited file. The server-side loader is now
+two-pass (load every DLL in `plugins/` before scanning any for `IStreamsForgePlugin` — order-independent)
+and logs a line when a plugin references a newer assembly version than the host has loaded. **Six
+pre-existing test failures, not
 caused by this plan**: restart/reactivation tests in `CrdtDocGrainClusterTests` (3),
 `ShardedTableClusterTests` (2) and `ConnectorGrainPolledClusterTests` (1,
 `ADeactivatedConnectorResumesFromThePersistedCursor`) fail deterministically with

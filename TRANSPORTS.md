@@ -872,10 +872,17 @@ For the kinds the generic form can't express — a topic browser, a connection t
 library outside this repo can ship its own React editor and have the console load it. Nothing under `web/`
 changes, and no StreamsForge assembly is rebuilt.
 
-A plugin is **one ES module** in the host's `ui-plugins/` directory (`<host output dir>/ui-plugins/`, or
-wherever `Ui:PluginsPath` points). Ship it from a connector package as content copied to the output
-directory and a `PackageReference` installs the UI along with the transport. The console fetches
-`GET /api/ui-plugins` before its first render, imports each module, and the module registers itself:
+A plugin is **one file** in the host's `ui-plugins/` directory (`<host output dir>/ui-plugins/`, or
+wherever `Ui:PluginsPath` points): either an ES module (`.js`/`.mjs`) or **one TypeScript file**
+(`.ts`/`.tsx`) — single file only, no `import` statements, relative or package (an automatic-JSX-runtime
+TSX file would emit one, which is why TSX plugins write classic JSX against
+`const React = window.streamsforge.react` instead). A `.ts`/`.tsx` file is served as plain text and
+transpiled **in the browser** at load time via a lazily-downloaded `sucrase` (only fetched when a
+listed plugin actually needs it); a `.js`/`.mjs` file imports directly, no transpile step. Ship it from
+a connector package as content copied to the output directory and a `PackageReference` installs the UI
+along with the transport. The console fetches `GET /api/ui-plugins` before its first render (the
+listing is `Cache-Control: no-store` and every URL carries a `?v=` version, so a plain reload always
+sees a changed file — no hard reload needed), imports each module, and the module registers itself:
 
 ```js
 // ui-plugins/rv.js — see web/plugins-example/example-nats.js for a complete one.
@@ -884,12 +891,19 @@ registerTransportEditor('rv', RvEditor, 'inbound')  // omit 'inbound' to serve t
 ```
 
 `RvEditor` gets exactly the props the built-in editor gets — `{ descriptor, value, onChange, isEdit,
-disabled, idPrefix, direction }` — and replaces `TransportConfigEditor`'s output for that kind, in the
-source modal and the sinks editor alike (they both render through that one component, which is why one
-registration covers both).
+disabled, idPrefix, direction, draft, onSuggest }` — and replaces `TransportConfigEditor`'s output for
+that kind, in the source modal and the sinks editor alike (they both render through that one component,
+which is why one registration covers both). `draft` (`{ name, description, fields, tags }`) is a
+read-only view of the entity being edited, and `onSuggest(patch)` proposes a change to those same four
+fields: `name`/`description` land only while the user's own field is still blank (a plugin may call it
+from an effect as often as it likes and can never clobber typed text), `fields` replaces the schema
+editor's rows exactly like "Discover schema" does, and `tags` are unioned. Both props are `undefined` in
+the sinks editor — a sink has no name/description. Author typings for either language live in
+`web/plugins-example/streamsforge-plugin.d.ts`; `web/plugins-example/example-nats.tsx` is a worked TSX
+example (the plain-JS `example-nats.js` stays too).
 
 `window.streamsforge` also hands over what the console already has, so a plugin never pays for a second
-copy of it (`apiVersion` is `2`; feature-detect with `(window.streamsforge?.apiVersion ?? 0) >= 2`):
+copy of it (`apiVersion` is `3`; feature-detect with `(window.streamsforge?.apiVersion ?? 0) >= 3`):
 
 | Member | What it is |
 | --- | --- |
@@ -905,7 +919,8 @@ Rules that bite:
 - **Secrets stay secrets-lite**: on `isEdit` a stored value reads back as `***`, and sending `***`
   unchanged keeps it. An editor that "helpfully" clears that field wipes the credential on save.
 - **`window.streamsforge.react` is the console's own React** — use it rather than bundling a second copy,
-  which would break hooks. `apiVersion` (1) is bumped only if those props change shape.
+  which would break hooks. `apiVersion` is bumped only if those props change shape (2 → 3 added
+  `draft`/`onSuggest`).
 - **Validation still lives in `Validate()` on the backend.** A plugin that also validates is a second
   validator that drifts, exactly as above.
 - A plugin that throws while rendering takes down its own panel, not the console (`PluginErrorBoundary`);
