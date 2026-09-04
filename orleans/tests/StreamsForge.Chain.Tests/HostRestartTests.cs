@@ -204,8 +204,11 @@ public sealed class HostRestartTests : IAsyncLifetime
             JsonDocument? rows = null;
             try
             {
+                // 90 s, not 30: under whole-solution load the first post-restart poll can lose its HTTP
+                // fetch to a CPU-starved in-test listener, which is an Error and a 30 s backoff before the
+                // next try. The deadline is pure waiting; the assertion below is what the test is about.
                 await PollAsync(
-                    TimeSpan.FromSeconds(30),
+                    TimeSpan.FromSeconds(90),
                     async () =>
                     {
                         rows?.Dispose();

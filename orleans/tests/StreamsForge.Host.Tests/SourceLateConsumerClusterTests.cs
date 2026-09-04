@@ -125,7 +125,7 @@ public sealed class SourceLateConsumerClusterTests : IAsyncLifetime
         var status = await PollUntilAsync(
             () => connector.GetStatusAsync(),
             s => s.EventsEmittedTotal >= rows,
-            deadlineSeconds: 45);
+            deadlineSeconds: 90);
         Assert.Equal(rows, status.EventsEmittedTotal);
 
         await Task.Delay(2000);
@@ -156,7 +156,7 @@ public sealed class SourceLateConsumerClusterTests : IAsyncLifetime
 
         try
         {
-            var count = await PollUntilAsync(() => table.GetRowCountAsync(), c => c >= 500, deadlineSeconds: 45);
+            var count = await PollUntilAsync(() => table.GetRowCountAsync(), c => c >= 500, deadlineSeconds: 90);
             Assert.Equal(500, count);
 
             // Give a (wrong) second delivery of the same 500 a chance to show up before believing the count.
@@ -167,7 +167,7 @@ public sealed class SourceLateConsumerClusterTests : IAsyncLifetime
             // of the overlapping 500.
             await AppendRowsAsync(path, 500, 200);
 
-            var grown = await PollUntilAsync(() => table.GetRowCountAsync(), c => c >= 700, deadlineSeconds: 45);
+            var grown = await PollUntilAsync(() => table.GetRowCountAsync(), c => c >= 700, deadlineSeconds: 90);
             Assert.Equal(700, grown);
             await Task.Delay(1500);
             Assert.Equal(700, await table.GetRowCountAsync());
@@ -191,7 +191,7 @@ public sealed class SourceLateConsumerClusterTests : IAsyncLifetime
 
         try
         {
-            var count = await PollUntilAsync(() => table.GetRowCountAsync(), c => c >= 500, deadlineSeconds: 45);
+            var count = await PollUntilAsync(() => table.GetRowCountAsync(), c => c >= 500, deadlineSeconds: 90);
             Assert.Equal(500, count);
 
             await Task.Delay(1500);
@@ -199,7 +199,7 @@ public sealed class SourceLateConsumerClusterTests : IAsyncLifetime
 
             await AppendRowsAsync(path, 500, 200);
 
-            var grown = await PollUntilAsync(() => table.GetRowCountAsync(), c => c >= 700, deadlineSeconds: 45);
+            var grown = await PollUntilAsync(() => table.GetRowCountAsync(), c => c >= 700, deadlineSeconds: 90);
             Assert.Equal(700, grown);
         }
         finally
@@ -226,7 +226,7 @@ public sealed class SourceLateConsumerClusterTests : IAsyncLifetime
 
         try
         {
-            var metrics = await PollUntilAsync(() => pipeline.GetMetricsAsync(), m => m.TotalRowsOut >= 500, deadlineSeconds: 45);
+            var metrics = await PollUntilAsync(() => pipeline.GetMetricsAsync(), m => m.TotalRowsOut >= 500, deadlineSeconds: 90);
             Assert.Equal(500, metrics.TotalRowsOut);
 
             await Task.Delay(1500);
@@ -234,7 +234,7 @@ public sealed class SourceLateConsumerClusterTests : IAsyncLifetime
 
             await AppendRowsAsync(path, 500, 200);
 
-            var grown = await PollUntilAsync(() => pipeline.GetMetricsAsync(), m => m.TotalRowsOut >= 700, deadlineSeconds: 45);
+            var grown = await PollUntilAsync(() => pipeline.GetMetricsAsync(), m => m.TotalRowsOut >= 700, deadlineSeconds: 90);
             Assert.Equal(700, grown.TotalRowsOut);
         }
         finally
@@ -267,7 +267,7 @@ public sealed class SourceLateConsumerClusterTests : IAsyncLifetime
 
             // Let at least one poll cycle run while held. The counters advance (the cycle succeeded); the
             // rows are parked.
-            await PollUntilAsync(() => connector.GetStatusAsync(), s => s.EventsEmittedTotal >= 3, deadlineSeconds: 45);
+            await PollUntilAsync(() => connector.GetStatusAsync(), s => s.EventsEmittedTotal >= 3, deadlineSeconds: 90);
 
             var stillHeld = await connector.BeginAttachAsync();
             Assert.Empty(stillHeld.Rows); // nothing has been PUBLISHED yet, so nothing is in the ring

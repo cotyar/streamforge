@@ -215,9 +215,9 @@ pinned to the fork's `parity-yjs-13.6.32` branch, NOT `main`; see that project's
 
 ```bash
 ~/.dotnet/dotnet build orleans/StreamsForge.sln
-~/.dotnet/dotnet test  orleans/StreamsForge.sln     # 3659 tests — green except the 6 known pre-existing failures (see plans/022)
+~/.dotnet/dotnet test  orleans/StreamsForge.sln     # 3746 tests — green except the 6 known pre-existing failures (see plans/022); includes StreamsForge.Chain.Tests, which spawns real hosts on 9399–9899 (skips with a named reason if a port is busy)
 ~/.dotnet/dotnet build dapr/StreamsForge.Dapr.sln
-~/.dotnet/dotnet test  dapr/StreamsForge.Dapr.sln   # 1540 tests — the whole suite must be green
+~/.dotnet/dotnet test  dapr/StreamsForge.Dapr.sln   # 1602 tests — the whole suite must be green
 cd clients/typescript && bun test  # 14 contract + conformance/live-table; boots its own engine on 8199/8299
 bun install                       # once, at the REPO ROOT — one workspace, one lockfile
 cd web && bun run build           # prebuild compiles @streamsforge/client + @streamsforge/tanstack-db
@@ -265,6 +265,19 @@ weaker still, since here there is no wait at all, only the poll on a different g
 "to let the write-behind flush persist the HadRows marker", which is the weakest form of deadline: a hard
 sleep rather than a poll, so under whole-solution parallel load the second version has not reached the
 shard tier yet and `view.History.Sum(...)` reads 1 instead of 2. Passes 10/10 under `--filter`).
+`StreamBridgeSourceLifecycleTests.A_newly_upserted_enabled_source_is_relayed_without_waiting_for_the_30s_poll`,
+`SourceLateConsumerClusterTests.Pipeline_created_after_a_file_source_already_polled_gets_every_row` and
+`StreamsForge.Chain.Tests.HostRestartTests.Url_source_rows_re_land_after_a_host_restart` (all three added
+2026-09-04 by plan 023, each observed failing once in a whole-solution run that had the chain project's
+spawned hosts and a `TestCluster` competing for the CPU, and passing 2/2 under `--filter` right after. The
+first one's 10 s deadline IS its assertion — "relayed well inside the 30 s poll" — so it cannot be widened
+past that and stays time-bounded by design. The other two only wait: the late pipeline counts every delivery
+of a 700-row file re-parse and the restart test waits for the first post-restart poll, which under load can
+lose its HTTP fetch to the CPU-starved in-test listener and take a 30 s backoff before retrying; both
+deadlines were widened to 90 s, and if they still lose a whole-solution race the cause is load, not logic).
+Also, ten `TestClusterPortAllocator.MutexManager` timeouts (tests failing in ~1 ms while BUILDING their
+cluster) appeared in the same loaded run and vanished in isolation — that signature is the Orleans test
+port allocator's system-wide mutex under contention, never a test's own logic.
 Re-run a failure in isolation before calling it a regression — and report BOTH results, never just the
 green one. Nothing else on this list is allowed to grow without a paragraph saying why the test is
 time-bounded; a genuinely broken test hiding among "known flakes" is the failure mode this list can cause.
