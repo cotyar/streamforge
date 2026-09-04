@@ -162,6 +162,26 @@ document runtime does land, the replay is **not optional extra credit** — it i
 a restart, because the Dapr flavor's table actor resets a resuming table exactly as `TableGrain` does and
 D7 means re-delivering an edge's updates emits nothing. See plan 020's wave C outcomes.
 
+### D6 · Source relay, boot order and late-consumer replay (2026-09-04 integrator report) — Orleans-first
+
+Three source-stability changes landed on Orleans first and are owed here:
+
+- **Source lifecycle events + paced relay.** `RegistryGrain` now publishes `source-started`/
+  `source-stopped`/`source-deleted` and `StreamBridgeService` subscribes a new source's tape at once
+  (the 30 s poll is a backstop) and *paces* the ~20 msg/s relay instead of dropping events inside the
+  50 ms slot. `DaprStreamBridge` relays fixed pub/sub topics, so the lifecycle half buys nothing here,
+  but its `SourceRateSampler` still drops — `StreamingDaprStreamBridgeTests` pins "exactly one relayed
+  event" for a same-source batch, so porting the pacing is a behaviour decision, not a refactor.
+- **Consumers before producers at boot, one resume pass.** `RegistryGrain.EnsureInitializedAsync`
+  resumes pipelines/tables before sources and is latched per activation; the supervisor awaits it
+  before pinging. This flavor's resume is four independent supervisor boot sweeps whose relative
+  order is not coordinated, so a `url` source with a dedup key can still poll before its table actor
+  has re-registered after a restart.
+- **Late-consumer replay.** `IConnectorGrain.BeginAttachAsync`/`EndAttachAsync` hand a table or
+  pipeline that starts after its source already emitted the source's recent rows (a bounded
+  in-memory ring, held-and-flushed so nothing is duplicated). `ConnectorActor`/`TableActor` have no
+  attach protocol; a table created after a `file`/`url` source's first poll starts empty on Dapr.
+
 ### Explicitly NOT debt — checked and present on Dapr
 
 Plan 014 database connectors, 015 entitlements/approvals/audit (`AccessPolicyActor`, `ApprovalActor`,

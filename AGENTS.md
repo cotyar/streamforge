@@ -193,7 +193,12 @@ the `/sf-env` skill; per-wave outcomes and the found-and-not-fixed list at the e
   (not yet served — phase 2), sidecar HTTP `3599` / gRPC `4599`; run via `dapr/tools/run.sh` (dapr
   runtime 1.18.x, containers `dapr_redis`/`dapr_placement`/`dapr_scheduler` from `dapr init`), reseed
   via `dapr/tools/reset.sh` + restart, stop via `dapr stop --app-id streamsforge-dapr`. Test instances:
-  pick 6xxx–9xxx via `--Http:Port … --Grpc:Port … --DataDir <temp>` and kill them when done.
+  pick 6xxx–9xxx via `--Http:Port … --Grpc:Port … --DataDir <temp>` and kill them when done. A
+  second host on the same machine also needs its own `--Silo:Port`/`--Silo:GatewayPort` (defaults
+  11111/30000). Reserved by tests: 9199/9299 (`clients/dotnet`, python, kotlin), 8199/8299
+  (`clients/typescript`), 7511/7512 (`tools/soak`), and `orleans/tests/StreamsForge.Chain.Tests`'
+  spawned hosts 9399/9499 + 9599/9699 (two-host gRPC chain) and 9799/9899 (restart), silo
+  11399/30399, 11599/30599, 11799/30799.
   Containerized stacks (plan 007): orleans compose `6199`, dapr compose `6399`, admin app `5599` —
   these are the *container* ports; never confuse them with (or bind over) the dev servers above.
 - Seeds apply only to an **empty data dir** (`orleans/src/StreamsForge.Host/data/`; delete to
