@@ -1,3 +1,4 @@
+using System.Net.Security;
 using System.Runtime.CompilerServices;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
@@ -9,9 +10,12 @@ namespace StreamsForge.Client;
 /// <summary>
 /// Tier 1 gRPC transport: <c>StreamService.SubscribeTable</c> for deltas, <c>TableService.Rows</c>
 /// for the snapshot, <c>TableService.List</c> for id resolution and as the Auto-connect probe, and
-/// the bidi <c>IngestService.Ingest</c> for pushes. One insecure h2c channel, prior knowledge -- no
-/// TLS negotiation, matching how the engine is actually run from source (the <c>--urls</c> trap:
-/// starting the host with <c>--urls</c> trips its guard so no gRPC port is bound at all).
+/// the bidi <c>IngestService.Ingest</c> for pushes. Plaintext h2c (prior knowledge, no TLS
+/// negotiation) by default, matching how the engine is actually run from source (the <c>--urls</c>
+/// trap: starting the host with <c>--urls</c> trips its guard so no gRPC port is bound at all) --
+/// OR ALPN h2 over TLS when <paramref name="target"/> (see <see cref="TlsSupport.ParseGrpcTarget"/>)
+/// is an <c>https://</c> URI, in which case <paramref name="certValidator"/> (built once by
+/// <see cref="StreamsForgeClient.ConnectAsync"/> from <see cref="ConnectOptions"/>) governs trust.
 ///
 /// Row payloads travel as <c>google.protobuf.Struct</c>; <see cref="RowCodec"/> is the whole
 /// "typing" story -- see its class doc for the Struct-number precision hazard.
@@ -26,15 +30,23 @@ internal sealed class GrpcTransport : ITransport, IAsyncDisposable
     private readonly IngestService.IngestServiceClient _ingest;
     private readonly Func<CancellationToken, ValueTask<string>> _tokenProvider;
 
-    public GrpcTransport(string target, Func<CancellationToken, ValueTask<string>> tokenProvider)
+    public GrpcTransport(string target, Func<CancellationToken, ValueTask<string>> tokenProvider, RemoteCertificateValidationCallback? certValidator = null)
     {
         // h2c: the engine serves gRPC in cleartext locally (--Grpc:Port), so the client must ask
         // for HTTP/2 over plain HTTP explicitly -- .NET's SocketsHttpHandler otherwise refuses to
-        // negotiate HTTP/2 without TLS ("prior knowledge" h2c).
+        // negotiate HTTP/2 without TLS ("prior knowledge" h2c). Harmless to set unconditionally --
+        // it only affects unencrypted HTTP/2, never the TLS path below.
         AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
-        _channel = GrpcChannel.ForAddress($"http://{target}", new GrpcChannelOptions
+
+        var uri = TlsSupport.ParseGrpcTarget(target);
+        var handler = new SocketsHttpHandler();
+        if (uri.Scheme == Uri.UriSchemeHttps && certValidator is not null)
         {
-            HttpHandler = new SocketsHttpHandler(),
+            handler.SslOptions.RemoteCertificateValidationCallback = certValidator;
+        }
+        _channel = GrpcChannel.ForAddress(uri, new GrpcChannelOptions
+        {
+            HttpHandler = handler,
         });
         _tables = new TableService.TableServiceClient(_channel);
         _stream = new StreamService.StreamServiceClient(_channel);

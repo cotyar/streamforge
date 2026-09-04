@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
-using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using Xunit;
 
@@ -17,6 +16,10 @@ namespace StreamsForge.Client.Tests.Fixtures;
 /// content root from the current directory, not the assembly's -- run from anywhere else and
 /// appsettings.json is never found, so Jwt:Key is null and every request 500s inside auth
 /// middleware, including /api/healthz).
+///
+/// Process lifecycle (publish, spawn, drain logs, wait healthy, tear down) is shared with
+/// <see cref="TlsEngineFixture"/> via <see cref="EngineProcess"/>; this class owns only what is
+/// specific to the plaintext contract shape -- ports, and the fixture config import.
 /// </summary>
 public sealed class EngineFixture : IAsyncLifetime
 {
@@ -42,21 +45,11 @@ public sealed class EngineFixture : IAsyncLifetime
     /// running on these ports.</summary>
     public string? SkipReason { get; private set; }
 
-    private static readonly string Dotnet =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dotnet", "dotnet");
-
     private Process? _process;
     private string? _dataDir;
     private string? _publishDir;
     private bool _ownsPublishDir;
-
-    // Drained continuously via OutputDataReceived/ErrorDataReceived rather than read lazily: a
-    // RedirectStandardOutput=true process whose pipe nobody reads fills the OS pipe buffer once it
-    // has logged enough, and the engine then blocks (or dies) trying to write to a full pipe --
-    // this was observed taking the engine down mid-suite before this fixture drained it.
-    private readonly object _logLock = new();
-    private readonly List<string> _logTail = [];
-    private const int LogTailMaxLines = 400;
+    private readonly ProcessLogTail _log = new();
 
     public async Task InitializeAsync()
     {
@@ -65,14 +58,14 @@ public sealed class EngineFixture : IAsyncLifetime
             SkipReason = "refusing to configure the contract-test fixture onto a forbidden port";
             return;
         }
-        if (!PortFree(HttpPort) || !PortFree(GrpcPort))
+        if (!EngineProcess.PortFree(HttpPort) || !EngineProcess.PortFree(GrpcPort))
         {
             SkipReason = $"port {HttpPort} or {GrpcPort} is already in use -- refusing to collide with a running instance";
             return;
         }
-        if (!File.Exists(Dotnet))
+        if (!File.Exists(EngineProcess.Dotnet))
         {
-            SkipReason = $"dotnet not found at {Dotnet} -- cannot boot the contract-test engine";
+            SkipReason = $"dotnet not found at {EngineProcess.Dotnet} -- cannot boot the contract-test engine";
             return;
         }
 
@@ -92,7 +85,7 @@ public sealed class EngineFixture : IAsyncLifetime
             _ownsPublishDir = true;
             try
             {
-                await PublishAsync(projectDir, _publishDir);
+                await EngineProcess.PublishAsync(projectDir, _publishDir);
             }
             catch (Exception ex)
             {
@@ -107,10 +100,16 @@ public sealed class EngineFixture : IAsyncLifetime
         }
 
         _dataDir = Directory.CreateTempSubdirectory("sf-dotnet-client-data-").FullName;
-        StartProcess(_publishDir, _dataDir);
+        _process = EngineProcess.StartHost(_publishDir, [
+            "--Http:Port", HttpPort.ToString(),
+            "--Grpc:Port", GrpcPort.ToString(),
+            "--Streams:Transport", "push",
+            "--DataDir", _dataDir,
+        ], _log);
         try
         {
-            await WaitHealthyAsync();
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            await EngineProcess.WaitHealthyAsync(http, BaseUrl, _process, _log, TimeSpan.FromSeconds(90));
             await ImportFixtureConfigAsync();
         }
         catch (Exception ex)
@@ -122,116 +121,6 @@ public sealed class EngineFixture : IAsyncLifetime
 
     private static string ProjectDir([CallerFilePath] string thisFile = "") =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "..", "..", "..", "orleans", "src", "StreamsForge.Host"));
-
-    private static bool PortFree(int port)
-    {
-        try
-        {
-            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            socket.Connect("127.0.0.1", port);
-            return false; // connected -> something is listening
-        }
-        catch (SocketException)
-        {
-            return true;
-        }
-    }
-
-    private static async Task PublishAsync(string projectDir, string publishDir)
-    {
-        var psi = new ProcessStartInfo(Dotnet, $"publish \"{projectDir}\" -c Debug -o \"{publishDir}\"")
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-        using var proc = Process.Start(psi) ?? throw new InvalidOperationException("failed to start dotnet publish");
-        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-        var stderrTask = proc.StandardError.ReadToEndAsync();
-        try
-        {
-            await proc.WaitForExitAsync().WaitAsync(TimeSpan.FromMinutes(5));
-        }
-        catch (TimeoutException)
-        {
-            try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
-            throw new InvalidOperationException("dotnet publish timed out after 5 minutes");
-        }
-        var stdout = await stdoutTask;
-        var stderr = await stderrTask;
-        if (proc.ExitCode != 0)
-            throw new InvalidOperationException($"dotnet publish failed (code {proc.ExitCode}):\n{Tail(stdout + stderr, 6000)}");
-    }
-
-    private void StartProcess(string publishDir, string dataDir)
-    {
-        var dll = Path.Combine(publishDir, "StreamsForge.Host.dll");
-        var psi = new ProcessStartInfo(Dotnet)
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            // WebApplication.CreateBuilder takes its content root from the CURRENT DIRECTORY --
-            // run the DLL from anywhere else and appsettings.json is never found (see class doc).
-            WorkingDirectory = publishDir,
-        };
-        psi.ArgumentList.Add(dll);
-        psi.ArgumentList.Add("--Http:Port");
-        psi.ArgumentList.Add(HttpPort.ToString());
-        psi.ArgumentList.Add("--Grpc:Port");
-        psi.ArgumentList.Add(GrpcPort.ToString());
-        psi.ArgumentList.Add("--Streams:Transport");
-        psi.ArgumentList.Add("push");
-        psi.ArgumentList.Add("--DataDir");
-        psi.ArgumentList.Add(dataDir);
-
-        _process = Process.Start(psi) ?? throw new InvalidOperationException("failed to start StreamsForge.Host");
-        _process.OutputDataReceived += (_, e) => AppendLog(e.Data);
-        _process.ErrorDataReceived += (_, e) => AppendLog(e.Data);
-        _process.BeginOutputReadLine();
-        _process.BeginErrorReadLine();
-    }
-
-    private void AppendLog(string? line)
-    {
-        if (line is null) return;
-        lock (_logLock)
-        {
-            _logTail.Add(line);
-            if (_logTail.Count > LogTailMaxLines) _logTail.RemoveAt(0);
-        }
-    }
-
-    private string LogTailText()
-    {
-        lock (_logLock) return string.Join('\n', _logTail);
-    }
-
-    private async Task WaitHealthyAsync()
-    {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(90);
-        Exception? lastError = null;
-        while (DateTime.UtcNow < deadline)
-        {
-            if (_process!.HasExited)
-            {
-                throw new InvalidOperationException(
-                    $"engine process exited early (code {_process.ExitCode}):\n{Tail(LogTailText(), 6000)}");
-            }
-            try
-            {
-                var resp = await http.GetAsync($"{BaseUrl}/api/healthz");
-                if (resp.IsSuccessStatusCode) return;
-            }
-            catch (Exception ex)
-            {
-                lastError = ex;
-            }
-            await Task.Delay(500);
-        }
-        throw new InvalidOperationException($"engine did not become healthy within 90s (last error: {lastError})");
-    }
 
     private async Task ImportFixtureConfigAsync()
     {
@@ -295,28 +184,12 @@ public sealed class EngineFixture : IAsyncLifetime
 
     private sealed record LoginResponseDto(string Token);
 
-    private static string Tail(string s, int max) => s.Length <= max ? s : s[^max..];
-
     public async Task DisposeAsync()
     {
-        if (_process is { HasExited: false })
-        {
-            try
-            {
-                _process.Kill(entireProcessTree: true);
-                await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
-            }
-            catch { /* best-effort teardown */ }
-        }
-        _process?.Dispose();
-
-        if (_dataDir is not null) TryDeleteDirectory(_dataDir);
-        if (_ownsPublishDir && _publishDir is not null) TryDeleteDirectory(_publishDir);
-    }
-
-    private static void TryDeleteDirectory(string path)
-    {
-        try { Directory.Delete(path, recursive: true); } catch { /* best-effort cleanup */ }
+        await EngineProcess.KillAsync(_process);
+        _process = null;
+        EngineProcess.TryDeleteDirectory(_dataDir);
+        if (_ownsPublishDir) EngineProcess.TryDeleteDirectory(_publishDir);
     }
 }
 

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Net.Security;
 using System.Text.Json;
 
 namespace StreamsForge.Client;
@@ -29,10 +30,15 @@ internal sealed class AuthHttpClient : IAsyncDisposable
 
     public string BaseUrl { get; }
 
-    public AuthHttpClient(string baseUrl, string? user, string? password, string? token = null)
+    public AuthHttpClient(string baseUrl, string? user, string? password, string? token = null, RemoteCertificateValidationCallback? certValidator = null)
     {
         BaseUrl = baseUrl.TrimEnd('/');
-        _http = new HttpClient { BaseAddress = new Uri(BaseUrl + "/") };
+        var handler = new SocketsHttpHandler();
+        if (certValidator is not null)
+        {
+            handler.SslOptions.RemoteCertificateValidationCallback = certValidator;
+        }
+        _http = new HttpClient(handler) { BaseAddress = new Uri(BaseUrl + "/") };
         _user = user;
         _password = password;
         _token = token;

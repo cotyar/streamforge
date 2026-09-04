@@ -57,4 +57,16 @@ public sealed record ConnectOptions
     /// <summary>Used for the "connected via X transport" log and any transport warnings. Defaults
     /// to no-op logging.</summary>
     public ILoggerFactory? LoggerFactory { get; init; }
+
+    /// <summary>Path to a PEM file holding one or more CA certificates to trust IN ADDITION to the
+    /// machine's own trust store, for every TLS connection this client opens (REST, gRPC, and
+    /// SignalR's negotiate/SSE/long-poll/WebSocket traffic). A self-signed dev certificate (e.g.
+    /// from <c>tools/tls/dev-cert.sh</c>) is its own trust anchor, so pointing this at that same
+    /// <c>cert.pem</c> is enough. A hostname/SAN mismatch still fails even when the chain validates
+    /// against this CA -- see <see cref="TlsSupport"/>.</summary>
+    public string? CaCertificatePath { get; init; }
+
+    /// <summary>Skips ALL certificate validation -- name, chain, everything. Dev/test convenience
+    /// only; never set this against a server whose identity actually matters.</summary>
+    public bool AcceptAnyCertificate { get; init; }
 }

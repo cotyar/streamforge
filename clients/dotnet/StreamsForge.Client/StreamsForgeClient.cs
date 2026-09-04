@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Net.Security;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http.Connections;
@@ -59,7 +60,10 @@ public sealed class StreamsForgeClient : IAsyncDisposable
         var ingestKey = options.IngestKey ?? Environment.GetEnvironmentVariable("SF_INGEST_KEY");
         var logger = (options.LoggerFactory ?? NullLoggerFactory.Instance).CreateLogger("StreamsForge");
 
-        var http = new AuthHttpClient(url, user, password, options.Token);
+        // Built once from options and shared by every TLS path this client opens (REST, gRPC,
+        // SignalR) -- see TlsSupport's class doc.
+        var certValidator = TlsSupport.BuildValidator(options);
+        var http = new AuthHttpClient(url, user, password, options.Token, certValidator);
 
         GrpcTransport? grpc = null;
         if (options.Transport is TransportKind.Grpc or TransportKind.Auto)
@@ -67,7 +71,7 @@ public sealed class StreamsForgeClient : IAsyncDisposable
             var target = options.GrpcTarget ?? Environment.GetEnvironmentVariable("STREAMSFORGE_GRPC") ?? DefaultGrpcTarget(url);
             try
             {
-                var candidate = new GrpcTransport(target, http.GetTokenAsync);
+                var candidate = new GrpcTransport(target, http.GetTokenAsync, certValidator);
                 using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 probeCts.CancelAfter(TimeSpan.FromSeconds(3));
                 await candidate.ListTablesAsync(probeCts.Token).ConfigureAwait(false); // proves the channel AND the JWT work
@@ -94,7 +98,7 @@ public sealed class StreamsForgeClient : IAsyncDisposable
         }
         else
         {
-            live = await ResolveSignalRAsync(url, http, options, logger, ct).ConfigureAwait(false);
+            live = await ResolveSignalRAsync(url, http, options, certValidator, logger, ct).ConfigureAwait(false);
             chosen = live.Name;
         }
 
@@ -105,11 +109,14 @@ public sealed class StreamsForgeClient : IAsyncDisposable
         return new StreamsForgeClient(http, grpc, live, ingestKey, chosen, logger);
     }
 
-    private static string DefaultGrpcTarget(string baseUrl)
+    internal static string DefaultGrpcTarget(string baseUrl)
     {
         var uri = new Uri(baseUrl);
         var httpPort = uri.Port > 0 ? uri.Port : (uri.Scheme == "https" ? 443 : 80);
-        return $"{uri.Host}:{httpPort + 100}";
+        var hostPort = $"{uri.Host}:{httpPort + 100}";
+        // Scheme-preserving: an https:// Url's guess must stay https:// too, or the guessed
+        // target would silently downgrade to plaintext h2c against a port that only speaks TLS.
+        return uri.Scheme == Uri.UriSchemeHttps ? $"https://{hostPort}" : hostPort;
     }
 
     private static readonly (HttpTransportType Flag, string Label)[] SignalRPriority =
@@ -129,15 +136,16 @@ public sealed class StreamsForgeClient : IAsyncDisposable
     /// above: never let a caller believe they are on the fast path while quietly riding a fallback.
     /// Long polling needs no upgrade and no probe connection, so it is tried last and unconditionally
     /// (if plain REST works, long polling does too).</summary>
-    private static async Task<ITransport> ResolveSignalRAsync(string url, AuthHttpClient http, ConnectOptions options, ILogger logger, CancellationToken ct)
+    private static async Task<ITransport> ResolveSignalRAsync(
+        string url, AuthHttpClient http, ConnectOptions options, RemoteCertificateValidationCallback? certValidator, ILogger logger, CancellationToken ct)
     {
         var requested = options.SignalRTransports;
-        if (IsSingleFlag(requested)) return new SignalRTransport(url, http.GetTokenAsync, requested, http);
+        if (IsSingleFlag(requested)) return new SignalRTransport(url, http.GetTokenAsync, requested, http, certValidator);
 
         foreach (var (flag, label) in SignalRPriority)
         {
             if (!requested.HasFlag(flag)) continue;
-            var candidate = new SignalRTransport(url, http.GetTokenAsync, flag, http);
+            var candidate = new SignalRTransport(url, http.GetTokenAsync, flag, http, certValidator);
             if (flag == HttpTransportType.LongPolling) return candidate;
             try
             {

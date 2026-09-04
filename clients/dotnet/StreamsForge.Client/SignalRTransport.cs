@@ -1,3 +1,4 @@
+using System.Net.Security;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -26,13 +27,17 @@ internal sealed class SignalRTransport : ITransport
     private readonly Func<CancellationToken, ValueTask<string>> _tokenProvider;
     private readonly HttpTransportType _transportType;
     private readonly AuthHttpClient _http;
+    private readonly RemoteCertificateValidationCallback? _certValidator;
 
-    public SignalRTransport(string baseUrl, Func<CancellationToken, ValueTask<string>> tokenProvider, HttpTransportType transportType, AuthHttpClient http)
+    public SignalRTransport(
+        string baseUrl, Func<CancellationToken, ValueTask<string>> tokenProvider, HttpTransportType transportType, AuthHttpClient http,
+        RemoteCertificateValidationCallback? certValidator = null)
     {
         _baseUrl = baseUrl.TrimEnd('/');
         _tokenProvider = tokenProvider;
         _transportType = transportType;
         _http = http;
+        _certValidator = certValidator;
         Name = transportType switch
         {
             HttpTransportType.WebSockets => "signalr:ws",
@@ -52,6 +57,21 @@ internal sealed class SignalRTransport : ITransport
                 // headers) and as an Authorization header for the negotiate/long-poll requests --
                 // handled entirely inside HttpConnectionOptions, nothing to special-case here.
                 options.AccessTokenProvider = async () => await _tokenProvider(CancellationToken.None).ConfigureAwait(false);
+
+                if (_certValidator is not null)
+                {
+                    // Covers negotiate + the ServerSentEvents/LongPolling wire modes, both of which
+                    // ride an ordinary HttpClient built from this handler.
+                    options.HttpMessageHandlerFactory = _ => new SocketsHttpHandler
+                    {
+                        SslOptions = { RemoteCertificateValidationCallback = _certValidator },
+                    };
+                    // The WebSockets wire mode's TLS handshake does NOT go through the handler
+                    // above -- ClientWebSocket validates independently, so it needs its own
+                    // callback or a self-signed dev CA would validate over REST/SSE/long-poll but
+                    // still get rejected the moment WebSockets was actually the transport picked.
+                    options.WebSocketConfiguration = wsOptions => wsOptions.RemoteCertificateValidationCallback = _certValidator;
+                }
             })
             .Build();
 

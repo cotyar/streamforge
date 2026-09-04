@@ -70,6 +70,15 @@ pins that exact mode with no fallback (the hub itself restricts none).
 If gRPC is refused, check how the host was started: with `--urls`, `Program.cs`'s guard binds **no
 gRPC port at all**. Start it with `--Http:Port <n> --Grpc:Port <n+100>` instead.
 
+## TLS
+
+`Url`/`GrpcTarget` of `https://host:port` connect over TLS (REST, gRPC ALPN h2, and SignalR); a bare
+`host:port` or `http://` target stays plaintext exactly as before. `CaCertificatePath` names a PEM
+file of one or more extra CAs to trust alongside the machine's own store — enough on its own for a
+self-signed dev cert (e.g. `tools/tls/dev-cert.sh`'s output, which is its own trust anchor).
+`AcceptAnyCertificate` skips validation entirely (dev only). A hostname/SAN mismatch always fails,
+even against a trusted CA. Neither option changes a plaintext connection's behavior.
+
 ## LiveTable
 
 `subscribe → buffer → snapshot → replay`, then live deltas. Subscription registration completes
@@ -213,6 +222,12 @@ shape.
   `--urls`, so it has no gRPC port at all, which makes it the natural real-world check of `Auto`'s
   fallback: the gRPC probe genuinely fails and the client must say it fell back to SignalR. It never
   pushes, restarts or reconfigures shared infrastructure.
+- **`TlsSupportTests`** — target parsing, the scheme-preserving gRPC guess, and the certificate
+  validator (accept/reject built directly, no real handshake). No engine, no network.
+- **`TlsTests`** — both live transports plus the no-CA negative case, against an isolated HTTPS/TLS
+  gRPC engine on **7399/7499** (`Fixtures/TlsEngineFixture.cs`, sharing `EngineFixture`'s process
+  lifecycle via `Fixtures/EngineProcess.cs`), certs generated fresh per run by `tools/tls/dev-cert.sh`.
+  Same `SkipReason` philosophy as `ContractTests`.
 
 ## Not here yet
 
