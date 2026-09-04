@@ -4,7 +4,13 @@ import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { findTransportEditor, PluginErrorBoundary, type TransportDirection } from '@/plugins/registry'
+import {
+  findTransportEditor,
+  PluginErrorBoundary,
+  type TransportDirection,
+  type EditorDraft,
+  type EditorSuggestion,
+} from '@/plugins/registry'
 
 /** The transport's own config object as it goes on the wire (a NatsSubConfig, a NatsPubConfig, …). This
  *  component never knows which — it reads and writes by descriptor key. */
@@ -35,6 +41,8 @@ export function TransportConfigEditor({
   disabled = false,
   idPrefix = 'tcfg',
   direction = 'inbound',
+  draft,
+  onSuggest,
 }: {
   descriptor: TransportDescriptor
   value: TransportConfigValue
@@ -44,6 +52,10 @@ export function TransportConfigEditor({
   idPrefix?: string
   /** Which half of the kind is being configured — a plugin may register a different editor per half. */
   direction?: TransportDirection
+  /** apiVersion 3, forwarded straight to a registered plugin editor — see TransportEditorProps in
+   *  `@/plugins/registry`. Undefined on the sinks editor, which has no source draft to offer. */
+  draft?: EditorDraft
+  onSuggest?: (patch: EditorSuggestion) => void
 }) {
   const Plugin = findTransportEditor(descriptor.kind, direction)
   if (Plugin) {
@@ -57,6 +69,8 @@ export function TransportConfigEditor({
           disabled={disabled}
           idPrefix={idPrefix}
           direction={direction}
+          draft={draft}
+          onSuggest={onSuggest}
         />
       </PluginErrorBoundary>
     )

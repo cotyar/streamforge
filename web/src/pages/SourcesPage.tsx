@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import { ChevronRight, Database, Pencil, Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -65,6 +65,8 @@ import {
   toMappingFormState,
   type MappingFormState,
 } from '../components/sources/MappingEditor'
+import { applySuggestion } from '../plugins/suggest'
+import type { EditorDraft, EditorSuggestion } from '../plugins/suggest'
 import { cn } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -337,6 +339,12 @@ function toFormState(s: SourceDefinition | undefined, descriptors: TransportDesc
   }
 }
 
+/** Fields and mapping.sourcePaths must stay index-aligned (D-B): a pure form-state update, so both the
+ * modal's own `updateFields` and a plugin's `onSuggest` (via `suggest`, below) apply the same rule. */
+function withFields(f: SourceFormState, fields: FieldDef[]): SourceFormState {
+  return { ...f, fields, mapping: { ...f.mapping, sourcePaths: resyncSourcePaths(fields, f.mapping.sourcePaths) } }
+}
+
 function SourceModal({
   initial,
   isEdit,
@@ -385,9 +393,27 @@ function SourceModal({
   const transportDescriptor = findDescriptor(descriptors, form.kind)
 
   /** Fields and mapping.sourcePaths must stay index-aligned (D-B) — every place fields can change
-   * (manual edit, add/remove row, OpenAPI derive, remote-schema fetch) routes through this. */
+   * (manual edit, add/remove row, OpenAPI derive, remote-schema fetch, a plugin's `onSuggest`) routes
+   * through this. */
   function updateFields(fields: FieldDef[]) {
-    setForm((f) => ({ ...f, fields, mapping: { ...f.mapping, sourcePaths: resyncSourcePaths(fields, f.mapping.sourcePaths) } }))
+    setForm((f) => withFields(f, fields))
+  }
+
+  // apiVersion 3: a registered transport plugin can read the rest of the form (`draft`) and propose a
+  // patch to it (`onSuggest`) — see `web/src/plugins/suggest.ts` for the merge rules. `draft` is memoized
+  // so a plugin that treats it as an effect dependency doesn't get a new object identity every render.
+  const draft: EditorDraft = useMemo(
+    () => ({ name: form.name, description: form.description, fields: form.fields, tags: form.tags }),
+    [form.name, form.description, form.fields, form.tags],
+  )
+
+  function suggest(patch: EditorSuggestion) {
+    setForm((f) => {
+      const next = applySuggestion(f, patch)
+      if (!Object.keys(next).length) return f
+      const merged = { ...f, ...next }
+      return next.fields ? withFields(merged, next.fields) : merged
+    })
   }
 
   // Plan 014: a registered transport answers "schedule?" / "mapping editor?" from its own descriptor
@@ -661,6 +687,8 @@ function SourceModal({
                 onChange={(next) => setForm((f) => ({ ...f, transport: next }))}
                 isEdit={isEdit}
                 disabled={saving}
+                draft={draft}
+                onSuggest={suggest}
               />
             )}
             {transportDescriptor?.canProbe && (

@@ -3,6 +3,9 @@ import { api, getStoredToken } from '@/api/client'
 import { subscribePipeline, subscribeSource, subscribeTable } from '@/realtime/hub'
 import type { TransportDescriptor } from '@/api/types'
 import type { TransportConfigValue } from '@/components/sources/TransportConfigEditor'
+import type { EditorDraft, EditorSuggestion } from './suggest'
+
+export type { EditorDraft, EditorSuggestion }
 
 /**
  * UI plugins: a third-party library that adds a source/sink KIND can also add a specialized editor for it,
@@ -29,6 +32,13 @@ export interface TransportEditorProps {
   disabled: boolean
   idPrefix: string
   direction: TransportDirection
+  /** apiVersion 3: the rest of the source form as it stands right now — read-only. Absent on the sinks
+   *  editor (a sink has no name/description/fields/tags of its own to suggest into). */
+  draft?: EditorDraft
+  /** apiVersion 3: propose a patch to the draft above (e.g. a name inferred from a probed subject).
+   *  `applySuggestion` (./suggest.ts) is the single place the merge rules live — a plugin just states
+   *  what it has an opinion about. Absent wherever `draft` is absent. */
+  onSuggest?: (patch: EditorSuggestion) => void
 }
 
 export type TransportDirection = 'inbound' | 'outbound'
@@ -68,8 +78,8 @@ export function clearTransportEditors(): void {
 export const pluginHost = {
   /** Bumped when this object or TransportEditorProps changes shape, so a plugin can feature-detect
    *  (`if ((window.streamsforge?.apiVersion ?? 0) >= 2)`) instead of assuming. 1 → 2 added `api`, `live`
-   *  and `loadLiveTables`. */
-  apiVersion: 2,
+   *  and `loadLiveTables`. 2 → 3 added `draft`/`onSuggest`. */
+  apiVersion: 3,
   react,
   registerTransportEditor,
 
