@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using StreamsForge.Abstractions;
 using StreamsForge.AppCore.Discovery;
+using StreamsForge.AppCore.Net;
 
 namespace StreamsForge.AppCore.Sinks;
 
@@ -61,7 +62,14 @@ public sealed class HttpSinkClient : ISinkClient
     /// degrades to the platform's usual publish bound rather than an unbounded wait.</summary>
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(3);
 
-    private static readonly HttpClient SharedHttp = new();
+    /// <summary>Built lazily through <see cref="OutboundTls.NewHandler"/> so this client honours the
+    /// host's outbound TLS trust configuration (<c>Tls:TrustedCaPath</c> /
+    /// <c>Tls:AcceptAnyCertificate</c>). Lazy, not eager: a static field initialiser would run at type
+    /// load, which for a type touched during startup can precede <c>OutboundTls.Configure</c> and would
+    /// then capture the default trust silently. First real dial is what forces it.</summary>
+    private static readonly Lazy<HttpClient> SharedHttpLazy = new(() => new HttpClient(OutboundTls.NewHandler()));
+
+    private static HttpClient SharedHttp => SharedHttpLazy.Value;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

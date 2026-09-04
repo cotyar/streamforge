@@ -4,11 +4,12 @@ using Orleans.Streams;
 using StreamsForge.Abstractions;
 using StreamsForge.AppCore.Connectors;
 using StreamsForge.AppCore.Connectors.Grpc;
-using StreamsForge.AppCore.Discovery;
-using StreamsForge.AppCore.Environments;
-using StreamsForge.AppCore.Transports;
 using StreamsForge.AppCore.Connectors.Polling;
 using StreamsForge.AppCore.Connectors.Scheduling;
+using StreamsForge.AppCore.Discovery;
+using StreamsForge.AppCore.Environments;
+using StreamsForge.AppCore.Net;
+using StreamsForge.AppCore.Transports;
 using StreamsForge.Engine;
 
 namespace StreamsForge.Host.Grains;
@@ -99,7 +100,15 @@ public sealed class ConnectorGrain(
     /// carry no Content-Length header at all.</summary>
     private const long MaxUrlResponseBytes = 10 * 1024 * 1024;
 
-    private static readonly HttpClient SharedHttpClient = new() { Timeout = TimeSpan.FromSeconds(30) };
+    /// <summary>Built lazily through <see cref="OutboundTls.NewHandler"/> so this client honours the
+    /// host's outbound TLS trust configuration (<c>Tls:TrustedCaPath</c> /
+    /// <c>Tls:AcceptAnyCertificate</c>). Lazy, not eager: a static field initialiser would run at type
+    /// load, which for a type touched during startup can precede <c>OutboundTls.Configure</c> and would
+    /// then capture the default trust silently. First real dial is what forces it.</summary>
+    private static readonly Lazy<HttpClient> SharedHttpClientLazy =
+        new(() => new HttpClient(OutboundTls.NewHandler()) { Timeout = TimeSpan.FromSeconds(30) });
+
+    private static HttpClient SharedHttpClient => SharedHttpClientLazy.Value;
 
     private IGrainTimer? _timer;
 

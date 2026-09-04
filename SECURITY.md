@@ -17,8 +17,21 @@ pointing it at anything real, know that:
   reachable by other people needs them removed or changed.
 - **JWT signing key**: HS256 with a development key unless you set your own via configuration.
   Set one before exposing the API.
-- **No transport security of its own** — run it behind a TLS-terminating proxy. The gRPC endpoint
-  is cleartext h2c by design (`:5299`).
+- **TLS is off by default and native when you turn it on.** `Tls:Enabled=true` puts TLS on *both*
+  listeners — REST/SignalR/SPA and gRPC (which then serves ALPN-negotiated h2 rather than cleartext
+  h2c) — using Kestrel's own `Kestrel:Certificates:Default` section (`Path`+`KeyPath` for a PEM pair,
+  `Path`+`Password` for a PFX, or `Subject`+`Store`); the host **refuses to start** if the flag is set
+  with no certificate configured, and `tools/tls/dev-cert.sh <dir>` mints a development pair. A
+  TLS-terminating proxy in front still works and is unchanged — set
+  `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` so the host believes the proxy's `X-Forwarded-Proto`
+  and reports its own endpoints as `https://` (without that flag the header is ignored, deliberately:
+  trusting it while directly exposed lets any caller dictate the scheme the instance reports).
+- **Outbound TLS trust is a separate axis.** What this instance accepts when *it* dials out — a
+  federated peer, an HTTP sink, a `url` source — is the system trust store by default.
+  `Tls:TrustedCaPath` adds a PEM bundle of private certificate authorities on top of it (a name
+  mismatch is still refused; a custom CA answers "who signed this", never "is this the host I asked
+  for"). `Tls:AcceptAnyCertificate=true` disables outbound validation entirely and logs a warning at
+  startup — development only.
 - **The AI control chat can mutate the catalog.** `POST /api/chat` gives the model function-calling
   access to create, edit, start and stop sources, pipelines and tables. Every tool re-checks the same
   entitlement its REST equivalent checks, at the same scope, attributed to the model with the human as

@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography.X509Certificates;
 
 namespace StreamsForge.Chain.Tests;
 
@@ -33,6 +34,13 @@ namespace StreamsForge.Chain.Tests;
 /// purpose (see CLAUDE.md) — a client that resolves <c>localhost</c> to <c>::1</c> first gets a
 /// connection refused that reads like a dead server.</item>
 /// </list>
+///
+/// <para><b>TLS.</b> Set <see cref="TlsCertPath"/> (and pass <c>--Tls:Enabled true</c> plus the two
+/// <c>Kestrel:Certificates:Default</c> arguments through <c>extraArgs</c> — see <see cref="DevCert"/>,
+/// which mints a pair with the repo's own <c>tools/tls/dev-cert.sh</c> and returns exactly those
+/// arguments). <see cref="BaseUrl"/> then speaks <c>https</c> and every client from
+/// <see cref="NewClient"/> pins that certificate's thumbprint. Extra environment variables for the
+/// spawned process go in <see cref="EnvVars"/>.</para>
 ///
 /// <para>The same instance can be stopped and started again against the SAME <see cref="DataDir"/> and
 /// the same ports — that is what <c>HostRestartTests</c> does. Data-directory ownership is therefore
@@ -66,6 +74,7 @@ public sealed class HostProcess : IAsyncDisposable
     private readonly List<string> _logTail = [];
 
     private Process? _process;
+    private string? _certThumbprint;
 
     public HostProcess(
         string label,
@@ -87,7 +96,37 @@ public sealed class HostProcess : IAsyncDisposable
     /// <summary>Temp state directory, kept across a stop/start pair and deleted only on dispose.</summary>
     public string DataDir { get; }
 
-    public string BaseUrl => $"http://127.0.0.1:{_httpPort}";
+    /// <summary>Set (via object initializer, before <see cref="Start"/>) to the PEM certificate this
+    /// host serves — <c>tools/tls/dev-cert.sh</c>'s <c>cert.pem</c>. Non-null flips
+    /// <see cref="BaseUrl"/>/<see cref="GrpcUrl"/> to <c>https</c> and makes every client this type
+    /// hands out trust EXACTLY that certificate, by thumbprint.
+    ///
+    /// <para>Thumbprint pinning rather than <c>=> true</c>: a callback that accepts anything would make
+    /// a TLS test pass against a host that served a different certificate, or none of the ones the test
+    /// generated — which is the one thing these tests exist to detect. It also does NOT relax the name
+    /// check by accident, because there is no name check left to relax: pinning replaces validation
+    /// wholesale, and the SAN behaviour is asserted separately by <c>OutboundTlsTests</c> against the
+    /// product's own validator.</para>
+    ///
+    /// <para>Setting this does NOT pass <c>--Tls:Enabled</c> to the host — the caller does that through
+    /// <c>extraArgs</c>, so a test can also point a trusting client at a host that was deliberately
+    /// misconfigured.</para></summary>
+    public string? TlsCertPath { get; init; }
+
+    /// <summary>Extra environment variables for the spawned process, filled before <see cref="Start"/>.
+    /// Some ASP.NET switches are only reachable this way in their documented form (e.g.
+    /// <c>ASPNETCORE_FORWARDEDHEADERS_ENABLED</c>), and an env var is also how a real deployment sets
+    /// them, so a test that proves one should use the same channel.</summary>
+    public IDictionary<string, string> EnvVars { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>True when this host is expected to serve TLS (see <see cref="TlsCertPath"/>).</summary>
+    public bool IsTls => TlsCertPath is not null;
+
+    public string BaseUrl => $"{(IsTls ? "https" : "http")}://127.0.0.1:{_httpPort}";
+
+    /// <summary>The gRPC endpoint another instance would be pointed at, in the scheme this host serves.
+    /// Under TLS this is ALPN-negotiated h2, not h2c.</summary>
+    public string GrpcUrl => $"{(IsTls ? "https" : "http")}://127.0.0.1:{_grpcPort}";
 
     public int HttpPort => _httpPort;
 
@@ -190,6 +229,10 @@ public sealed class HostProcess : IAsyncDisposable
         {
             psi.ArgumentList.Add(arg);
         }
+        foreach (var (name, value) in EnvVars)
+        {
+            psi.Environment[name] = value;
+        }
 
         _process = Process.Start(psi)
             ?? throw new InvalidOperationException($"failed to start StreamsForge host '{_label}'");
@@ -199,9 +242,65 @@ public sealed class HostProcess : IAsyncDisposable
         _process.BeginErrorReadLine();
     }
 
+    /// <summary>A fresh, unauthenticated <see cref="HttpClient"/> pointed at this host and trusting its
+    /// certificate when it serves TLS (see <see cref="TlsCertPath"/>). Caller disposes. Every client
+    /// this type hands out — including the one <see cref="LoginAsync"/> returns — comes from here, so
+    /// there is exactly one place that knows how to talk to a TLS host.</summary>
+    public HttpClient NewClient(TimeSpan? timeout = null)
+    {
+        HttpClient http;
+        if (TlsCertPath is null)
+        {
+            http = new HttpClient();
+        }
+        else
+        {
+            var expected = _certThumbprint ??= LoadThumbprint(TlsCertPath);
+            var handler = new HttpClientHandler
+            {
+                ServerCertificateCustomValidationCallback = (_, cert, _, _) =>
+                    cert is not null
+                    && string.Equals(cert.Thumbprint, expected, StringComparison.OrdinalIgnoreCase),
+            };
+            http = new HttpClient(handler, disposeHandler: true);
+        }
+        http.BaseAddress = new Uri(BaseUrl);
+        http.Timeout = timeout ?? TimeSpan.FromSeconds(30);
+        return http;
+    }
+
+    private static string LoadThumbprint(string pemPath)
+    {
+        using var cert = X509CertificateLoader.LoadCertificateFromFile(pemPath);
+        return cert.Thumbprint;
+    }
+
+    /// <summary>True once the spawned process has exited (false when it was never started).</summary>
+    public bool HasExited => _process is null || _process.HasExited;
+
+    /// <summary>Waits for the process to exit and returns its exit code, or <c>null</c> if it was still
+    /// running at <paramref name="timeout"/>. Used by the "misconfigured host must not boot" facts,
+    /// where NOT exiting is the failure.</summary>
+    public async Task<int?> WaitForExitAsync(TimeSpan timeout)
+    {
+        if (_process is null)
+        {
+            return null;
+        }
+        try
+        {
+            await _process.WaitForExitAsync().WaitAsync(timeout);
+            return _process.ExitCode;
+        }
+        catch (TimeoutException)
+        {
+            return null;
+        }
+    }
+
     public async Task WaitHealthyAsync(TimeSpan? timeout = null)
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+        using var http = NewClient(TimeSpan.FromSeconds(2));
         var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(90));
         Exception? lastError = null;
         while (DateTime.UtcNow < deadline)
@@ -235,7 +334,7 @@ public sealed class HostProcess : IAsyncDisposable
     /// is gone.</summary>
     public async Task<HttpClient> LoginAsync()
     {
-        var http = new HttpClient { BaseAddress = new Uri(BaseUrl), Timeout = TimeSpan.FromSeconds(30) };
+        var http = NewClient();
         try
         {
             var resp = await http.PostAsJsonAsync("api/auth/login", new { username = AdminUser, password = AdminPassword });

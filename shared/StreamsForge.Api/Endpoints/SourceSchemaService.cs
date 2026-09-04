@@ -7,6 +7,7 @@ using StreamsForge.AppCore.Connectors.Mapping;
 using StreamsForge.AppCore.Connectors.OpenApi;
 using StreamsForge.AppCore.Connectors.Scheduling;
 using StreamsForge.AppCore.Ingest;
+using StreamsForge.AppCore.Net;
 using StreamsForge.AppCore.Transports;
 
 namespace StreamsForge.Api;
@@ -465,7 +466,15 @@ public static class SourceSchemaService
     // POST /api/sources/schema/derive-openapi (I/O isolated to FetchOpenApiDocAsync below).
     // ------------------------------------------------------------------
 
-    private static readonly HttpClient DeriveHttpClient = new() { Timeout = TimeSpan.FromSeconds(15) };
+    /// <summary>Built lazily through <see cref="OutboundTls.NewHandler"/> so this client honours the
+    /// host's outbound TLS trust configuration (<c>Tls:TrustedCaPath</c> /
+    /// <c>Tls:AcceptAnyCertificate</c>). Lazy, not eager: a static field initialiser would run at type
+    /// load, which for a type touched during startup can precede <c>OutboundTls.Configure</c> and would
+    /// then capture the default trust silently. First real dial is what forces it.</summary>
+    private static readonly Lazy<HttpClient> DeriveHttpClientLazy =
+        new(() => new HttpClient(OutboundTls.NewHandler()) { Timeout = TimeSpan.FromSeconds(15) });
+
+    private static HttpClient DeriveHttpClient => DeriveHttpClientLazy.Value;
     private const long MaxOpenApiDocBytes = 5 * 1024 * 1024;
 
     /// <summary>DocUrl set -> fetched server-side (15 s timeout, 5 MB cap; non-2xx/oversize/network

@@ -6,6 +6,7 @@ using Grpc.Core;
 using Grpc.Net.Client;
 using Grpc.Reflection.V1Alpha;
 using StreamsForge.Abstractions;
+using StreamsForge.AppCore.Net;
 using StreamsForge.Host.Grpc.Dynamic;
 
 namespace StreamsForge.AppCore.Connectors.Grpc;
@@ -52,7 +53,14 @@ namespace StreamsForge.AppCore.Connectors.Grpc;
 /// </summary>
 public sealed class GrpcSubscriberCore
 {
-    private static readonly HttpClient SharedHttp = new();
+    /// <summary>Built lazily through <see cref="OutboundTls.NewHandler"/> so this client honours the
+    /// host's outbound TLS trust configuration (<c>Tls:TrustedCaPath</c> /
+    /// <c>Tls:AcceptAnyCertificate</c>). Lazy, not eager: a static field initialiser would run at type
+    /// load, which for a type touched during startup can precede <c>OutboundTls.Configure</c> and would
+    /// then capture the default trust silently. First real dial is what forces it.</summary>
+    private static readonly Lazy<HttpClient> SharedHttpLazy = new(() => new HttpClient(OutboundTls.NewHandler()));
+
+    private static HttpClient SharedHttp => SharedHttpLazy.Value;
 
     private readonly GrpcSubConfig _config;
     private readonly Func<IReadOnlyList<Dictionary<string, object?>>, long, Task> _onRows;
@@ -492,9 +500,22 @@ public sealed class GrpcSubscriberCore
 
     private static GrpcChannel CreateChannel(string address)
     {
-        // StreamsForge's gRPC surface is h2c (plaintext HTTP/2) - see plan/ARCHITECTURE port notes.
+        // StreamsForge's gRPC surface is h2c (plaintext HTTP/2) by default - see plan/ARCHITECTURE
+        // port notes. The switch stays regardless of the address: a peer directory can hold a mix of
+        // http:// and https:// endpoints, and removing it would break every cleartext target.
         AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
-        return GrpcChannel.ForAddress(address);
+
+        // An https:// target goes through the SAME outbound trust the REST calls above use, so a
+        // federated peer behind a private CA needs Tls:TrustedCaPath configured once and not once per
+        // transport. DisposeHttpClient is load-bearing: every call site here wraps the channel in
+        // `using`, a channel is created per (re)connect, and a supplied handler is NOT disposed with the
+        // channel unless this is set — which on a source that reconnects all day is a socket leak,
+        // exactly the pitfall the shared static clients above exist to avoid.
+        return GrpcChannel.ForAddress(address, new GrpcChannelOptions
+        {
+            HttpHandler = OutboundTls.NewHandler(),
+            DisposeHttpClient = true,
+        });
     }
 
     // ------------------------------------------------------------------

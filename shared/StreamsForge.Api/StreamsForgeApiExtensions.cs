@@ -309,6 +309,29 @@ public static class StreamsForgeApiExtensions
 
     public static void MapStreamsForgeApi(this WebApplication app, StreamsForgeApiOptions options)
     {
+        // HSTS only when this instance actually serves TLS itself (Tls:Enabled — see the host's
+        // Program.cs Kestrel setup). Strict-Transport-Security tells a browser to refuse the plaintext
+        // scheme for this origin for the next max-age, which is a promise an instance running cleartext
+        // cannot keep: sending it from an http:// deployment would lock a console user out of their own
+        // server until the header expired. Browsers ignore the header on a plaintext response, so this
+        // gate is belt and braces — but the gate is what makes the intent readable.
+        //
+        // Deliberately NOT UseHttpsRedirection: there is exactly one REST port here, and a redirect
+        // middleware with no second port to redirect TO either does nothing or guesses a port that is
+        // not listening. A deployment wanting an http→https bounce puts it in the proxy that owns both.
+        //
+        // KNOWN AND KEPT: ASP.NET's HstsOptions.ExcludedHosts defaults to localhost / 127.0.0.1 / [::1],
+        // so a loopback request gets NO header even with Tls:Enabled. That default is not overridden,
+        // and the reason is worth stating: HSTS is scoped to a HOST and ignores the port, so emitting it
+        // for `localhost` would make the browser refuse plaintext `http://localhost:<anything>` for the
+        // whole max-age — poisoning every other project the developer runs on that machine. The chain
+        // test proves the header by dialling with a non-loopback Host header, which is also the shape a
+        // real deployment has.
+        if (app.Configuration.GetValue("Tls:Enabled", false))
+        {
+            app.UseHsts();
+        }
+
         app.UseCors(SpaCorsPolicy);
         app.UseAuthentication();
         app.UseAuthorization();

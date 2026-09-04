@@ -8,6 +8,7 @@ using StreamsForge.Api;
 using StreamsForge.Api.Plugins;
 using StreamsForge.AppCore.Discovery;
 using StreamsForge.AppCore.Environments;
+using StreamsForge.AppCore.Net;
 using StreamsForge.Connectors.Database;
 using StreamsForge.Host.Facades;
 using StreamsForge.Host.Grpc;
@@ -23,6 +24,26 @@ var builder = WebApplication.CreateBuilder(args);
 // ASPNETCORE_URLS (if set) wins and takes the single-port path below instead of these two explicit
 // Kestrel endpoints.
 //
+// TLS, in each of the two branches:
+//
+// - Two-listener branch (no --urls): set `Tls:Enabled=true` and both listeners become https, using
+//   Kestrel's own default certificate section — `Kestrel:Certificates:Default:{Path,KeyPath}` for a
+//   PEM pair, `{Path,Password}` for a PFX, or `{Subject,Store}` for one out of the OS store. The gRPC
+//   listener stays HTTP/2-only; with TLS it is no longer h2c but ALPN-negotiated h2, which every gRPC
+//   client speaks without a special switch. `tools/tls/dev-cert.sh <dir>` mints a development pair and
+//   prints the two arguments. Startup FAILS FAST when Tls:Enabled is set with no certificate
+//   configured — a "TLS on" flag that silently served cleartext is the worst outcome available here.
+//
+// - Single-port branch (--urls): `--urls https://…` plus the same certificate section, and no
+//   Tls:Enabled needed — the scheme in the URL is what turns TLS on there, and Kestrel resolves the
+//   certificate from that section itself. This is also the branch where Http1AndHttp2 finally does
+//   what the wishlist wanted (see the long note in that branch): real ALPN multiplexing of REST and
+//   gRPC on one port requires TLS, and this is how it gets it.
+//
+// `Tls:Enabled` also turns on HSTS in the shared API pipeline (see StreamsForgeApiExtensions).
+// OUTBOUND trust — what this host accepts when IT dials a peer/sink/url source — is a separate axis
+// configured just below via OutboundTls.
+//
 // PORT (the PaaS convention: Cloud Run, Heroku, fly.io all set it) moves the HTTP port, and the gRPC
 // port follows at PORT+100 — the same +100 relationship the two defaults already have. Without this,
 // `PORT=6199 dotnet run` silently still bound 5199/5299, which on a developer machine means landing on
@@ -33,6 +54,20 @@ var httpPort = builder.Configuration.GetValue("Http:Port", envPort ?? 5199);
 // Resolved out here, not inside the `if`, because StreamsForgeApiOptions below reports this same number
 // to clients — computing it twice is how the reported port and the bound port drift apart.
 var grpcPort = builder.Configuration.GetValue("Grpc:Port", envPort is { } p ? p + 100 : 5299);
+
+// Outbound TLS trust, configured ONCE for every client this process dials with (federated gRPC
+// subscriber, HTTP sink, peer probe, url source, OpenAPI derive). Must run before anything can dial:
+// each of those call sites captures its handler in a static Lazy the first time it is used, and
+// OutboundTls.Configure deliberately throws rather than silently apply to only some of them.
+//
+// No logger here — the DI logging pipeline does not exist until builder.Build(). The one thing worth
+// warning about (AcceptAnyCertificate) is re-emitted through app.Logger after the build, so it lands
+// in the real log rather than only on stdout.
+OutboundTls.Configure(
+    builder.Configuration[OutboundTls.TrustedCaPathKey],
+    builder.Configuration.GetValue(OutboundTls.AcceptAnyCertificateKey, false));
+
+var tlsEnabled = builder.Configuration.GetValue("Tls:Enabled", false);
 
 if (string.IsNullOrEmpty(builder.Configuration["urls"]))
 {
@@ -66,10 +101,44 @@ if (string.IsNullOrEmpty(builder.Configuration["urls"]))
     // defect is in the runtime's dual-stack accept path, not here — if a fixed .NET revision lands,
     // this can go back to ListenAnyIP and the contract suite is the thing that will tell you whether it
     // is safe to (see AGENTS.md's verification gates, which now list it for exactly that reason).
+    //
+    // Tls:Enabled adds UseHttps() to BOTH listeners. The no-argument overload is deliberate: it takes
+    // whatever Kestrel's own configuration loader already parsed out of Kestrel:Certificates:Default,
+    // so PEM pairs, PFX+password and OS-store lookups are all supported here without this file knowing
+    // any of those shapes. The gRPC listener keeps Http2 — under TLS that is ALPN-negotiated h2 rather
+    // than prior-knowledge h2c, which is what a gRPC client dialling https:// expects anyway.
+    if (tlsEnabled
+        && string.IsNullOrWhiteSpace(builder.Configuration["Kestrel:Certificates:Default:Path"])
+        && string.IsNullOrWhiteSpace(builder.Configuration["Kestrel:Certificates:Default:Subject"]))
+    {
+        // Fail fast, loudly. The alternative — booting cleartext with Tls:Enabled=true in the config —
+        // is a security misconfiguration that looks exactly like a working server.
+        throw new InvalidOperationException(
+            "Tls:Enabled is true but no server certificate is configured. Set either "
+          + "Kestrel:Certificates:Default:Path (+ :KeyPath for a PEM pair, or + :Password for a PFX) "
+          + "or Kestrel:Certificates:Default:Subject (+ :Store) so Kestrel has a certificate to serve. "
+          + "For a development pair: tools/tls/dev-cert.sh <out-dir> [host-or-ip ...], which prints the "
+          + "exact arguments to pass.");
+    }
+
     builder.WebHost.ConfigureKestrel(kestrel =>
     {
-        kestrel.Listen(IPAddress.Any, httpPort, o => o.Protocols = HttpProtocols.Http1);
-        kestrel.Listen(IPAddress.Any, grpcPort, o => o.Protocols = HttpProtocols.Http2);
+        kestrel.Listen(IPAddress.Any, httpPort, o =>
+        {
+            o.Protocols = HttpProtocols.Http1;
+            if (tlsEnabled)
+            {
+                o.UseHttps();
+            }
+        });
+        kestrel.Listen(IPAddress.Any, grpcPort, o =>
+        {
+            o.Protocols = HttpProtocols.Http2;
+            if (tlsEnabled)
+            {
+                o.UseHttps();
+            }
+        });
     });
 }
 else
@@ -321,6 +390,17 @@ NamedEndpoints.Configure(
         .Select(c => new KeyValuePair<string, string>(c.Key, c.Value!)));
 
 var app = builder.Build();
+
+// Re-emitted through the real logging pipeline (OutboundTls.Configure ran before it existed). This is
+// a development-only escape hatch that disables outbound certificate validation entirely, so it must
+// be visible in whatever log an operator actually reads.
+if (builder.Configuration.GetValue(OutboundTls.AcceptAnyCertificateKey, false))
+{
+    app.Logger.LogWarning(
+        "{Key} is TRUE: every outbound HTTPS/gRPC connection from this instance accepts ANY server "
+      + "certificate. Development only.",
+        OutboundTls.AcceptAnyCertificateKey);
+}
 
 // Host-specific facts StreamsForgeApiOptions carries so the shared endpoints stay byte-identical
 // across runtimes (plan 005 W3, decision D-B). Values below reproduce exactly what the pre-W3
