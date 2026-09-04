@@ -68,10 +68,16 @@ function tableNodeId(id: string): string {
   return `table:${id}`
 }
 
-/** Pipelines only ever read sources (leaf-level `sourceNames`); tables read streams (sources) AND/OR
- * other tables (`streamInputs`/`tableInputs`) — there is no pipeline-into-table edge in this SQL
- * dialect. A dependency name that doesn't resolve to a known entity (e.g. mid-edit SQL referencing a
- * not-yet-created source) is silently dropped rather than drawn as a dangling edge. */
+/** Pipelines only ever read sources (leaf-level `sourceNames`) — that half is unchanged, and it is
+ * what keeps this graph acyclic: nothing a pipeline reads can itself depend on a pipeline. Tables read
+ * all three: streams (`streamInputs`), other tables (`tableInputs`) and now PIPELINES
+ * (`pipelineInputs`), which is where the pipeline → table edge comes from. The three input lists name
+ * their entity differently and are resolved differently here: `streamInputs`/`pipelineInputs` and
+ * `tableInputs` all hold NAMES, but a source's node id IS its name while pipeline and table nodes are
+ * keyed by id, so those two go through a name→id map first. The reverse edge still does not exist —
+ * a pipeline cannot read a table or another pipeline. A dependency name that doesn't resolve to a
+ * known entity (e.g. mid-edit SQL referencing a not-yet-created source, or a pipeline whose
+ * definition this poll hasn't seen yet) is silently dropped rather than drawn as a dangling edge. */
 function buildEntries(sources: SourceDefinition[], pipelines: PipelineDefinition[], tables: TableDefinition[]): Map<string, LineageEntry> {
   const entries = new Map<string, LineageEntry>()
   for (const s of sources) {
@@ -87,9 +93,15 @@ function buildEntries(sources: SourceDefinition[], pipelines: PipelineDefinition
     entries.set(pipelineNodeId(p.id), { id: pipelineNodeId(p.id), kind: 'pipeline', refId: p.id, name: p.name, deps, sinkTargets })
   }
   const tableIdByName = new Map(tables.map((t) => [t.name, t.id]))
+  const pipelineIdByName = new Map(pipelines.map((p) => [p.name, p.id]))
   for (const t of tables) {
     const deps = [
       ...t.streamInputs.map(sourceNodeId).filter((id) => entries.has(id)),
+      ...(t.pipelineInputs ?? [])
+        .map((n) => pipelineIdByName.get(n))
+        .filter((id): id is string => !!id)
+        .map(pipelineNodeId)
+        .filter((id) => entries.has(id)),
       ...t.tableInputs
         .map((n) => tableIdByName.get(n))
         .filter((id): id is string => !!id)

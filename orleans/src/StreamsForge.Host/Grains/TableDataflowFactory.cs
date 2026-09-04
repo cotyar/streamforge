@@ -26,9 +26,14 @@ internal static class TableDataflowFactory
         // comment); every caller here already has `def` in hand.
         var registry = grainFactory.RegistryFor(def.Environment);
         var sources = await registry.GetSourcesAsync();
-        var streamSchemas = sources.ToDictionary(
-            s => s.Name,
-            s => new SourceSchema(s.Name, s.Fields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type))));
+        // Table-over-pipeline: sources PLUS every pipeline with a compiled output schema — the SAME
+        // dictionary RegistryGrain.CompileTableSql builds, via the same method, which is what makes this
+        // grain's plan identical to the one the registry compiled at create/update time. GetPipelinesAsync
+        // is on RegistryGrain's [MayInterleave] allowlist (verified), like GetSourcesAsync/GetTablesAsync
+        // beside it, so this call cannot deadlock against a registry that is itself awaiting the table
+        // start that led here.
+        var pipelines = await registry.GetPipelinesAsync();
+        var streamSchemas = PipelineInputs.BuildStreamSchemas(sources, pipelines);
 
         var tables = await registry.GetTablesAsync();
         var tableSchemas = tables

@@ -42,6 +42,9 @@ public sealed class TableIngestGrain : Grain, ITableIngestGrain
     private PipelineStatus _status = PipelineStatus.Stopped;
     private StreamSubscriptionHandle<EventRecord>? _streamSub;
     private StreamSubscriptionHandle<List<TableDeltaDto>>? _tableSub;
+    /// <summary>Table-over-pipeline: the P&gt;=2 twin of <c>TableGrain._pipelineSubs</c>. One more handle
+    /// field rather than a reuse of <see cref="_streamSub"/>, because the payload type differs.</summary>
+    private StreamSubscriptionHandle<List<ResultEnvelope>>? _pipelineSub;
     private IGrainTimer? _flushTimer;
 
     private readonly List<TableDelta> _pending = [];
@@ -95,12 +98,27 @@ public sealed class TableIngestGrain : Grain, ITableIngestGrain
         }
         else
         {
-            // Subscribe-then-attach against a connector-kind source — the coordinator-mode (Parallelism >= 2)
-            // copy of TableGrain.AttachToStreamInputAsync, which carries the full rationale. The one
-            // difference that matters here: _status is set to Running BEFORE the replay is fed, because
-            // OnStreamEventAsync no-ops while the grain is Stopped and the replayed rows would otherwise be
-            // dropped on the floor — the very loss this exists to close.
-            await AttachToStreamSourceAsync(streamProvider, def, inputName, qualifiedInputName);
+            // Table-over-pipeline: a stream input whose name belongs to a PIPELINE reads a different
+            // namespace with a different payload, keyed by the pipeline's ID — split off before the source
+            // path, the same way TableGrain.StartClassicAsync splits it. No attach protocol: a pipeline has
+            // no replay ring (see PipelineInputs' class doc), so this is a plain subscribe.
+            var pipeline = await PipelineInputs.FindAsync(GrainFactory, def.Environment, inputName);
+            if (pipeline is not null)
+            {
+                var stream = streamProvider.GetStream<List<ResultEnvelope>>(
+                    StreamId.Create(StreamConstants.OutputNamespace, PipelineInputs.OutputStreamKey(def.Environment, pipeline)));
+                _pipelineSub = await stream.SubscribeAsync((batch, _) => OnPipelineBatchAsync(batch));
+                _status = PipelineStatus.Running;
+            }
+            else
+            {
+                // Subscribe-then-attach against a connector-kind source — the coordinator-mode (Parallelism >= 2)
+                // copy of TableGrain.AttachToStreamInputAsync, which carries the full rationale. The one
+                // difference that matters here: _status is set to Running BEFORE the replay is fed, because
+                // OnStreamEventAsync no-ops while the grain is Stopped and the replayed rows would otherwise be
+                // dropped on the floor — the very loss this exists to close.
+                await AttachToStreamSourceAsync(streamProvider, def, inputName, qualifiedInputName);
+            }
         }
 
         _flushTimer = this.RegisterGrainTimer(OnFlushTickAsync, FlushInterval, FlushInterval);
@@ -168,6 +186,8 @@ public sealed class TableIngestGrain : Grain, ITableIngestGrain
 
         if (_streamSub is not null) { try { await _streamSub.UnsubscribeAsync(); } catch { /* best-effort */ } _streamSub = null; }
         if (_tableSub is not null) { try { await _tableSub.UnsubscribeAsync(); } catch { /* best-effort */ } _tableSub = null; }
+        // Table-over-pipeline — symmetric with the two above.
+        if (_pipelineSub is not null) { try { await _pipelineSub.UnsubscribeAsync(); } catch { /* best-effort */ } _pipelineSub = null; }
 
         _pending.Clear();
         _dataflow = null;
@@ -178,6 +198,18 @@ public sealed class TableIngestGrain : Grain, ITableIngestGrain
     {
         _status = PipelineStatus.Stopped;
         return base.OnDeactivateAsync(reason, cancellationToken);
+    }
+
+    /// <summary>Table-over-pipeline: one published batch from a pipeline input, fed row by row through the
+    /// SAME <see cref="OnStreamEventAsync"/> buffering the source path uses — the deltas this grain
+    /// routes downstream are then indistinguishable from a source's, which is the point. Only the
+    /// subscription differs, never the ingest.</summary>
+    private async Task OnPipelineBatchAsync(List<ResultEnvelope> batch)
+    {
+        foreach (var envelope in batch)
+        {
+            await OnStreamEventAsync(PipelineInputs.ToEventRecord(envelope, _inputName));
+        }
     }
 
     private Task OnStreamEventAsync(EventRecord evt)

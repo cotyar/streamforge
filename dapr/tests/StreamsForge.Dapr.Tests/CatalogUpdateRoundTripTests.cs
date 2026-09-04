@@ -43,13 +43,21 @@ public class CatalogUpdateRoundTripTests
     /// (<c>CatalogStore.UpdatePipelineAsync</c>/<c>UpdateTableAsync</c>) — a client that could set it could
     /// move an entity between environments simply by round-tripping whatever the client happened to send
     /// back, exactly the D5 invariant this plan's whole environment-isolation guarantee depends on.</para>
+    /// <para>Table-over-pipeline added <c>PipelineDefinition.OutputFields</c> and
+    /// <c>TableDefinition.PipelineInputs</c>. Both are recomputed from the compile result, exactly like
+    /// the <c>SourceNames</c> and <c>StreamInputs</c>/<c>TableInputs</c> already listed beside them, so
+    /// this is a classification — the thing this guard exists to force someone to make deliberately — not
+    /// a weakening of it. A pipeline's OutputFields matters more than its position in the list suggests:
+    /// it IS the relation a dependent table compiled against, so a client that could set it could
+    /// redefine, from outside, what somebody else's table is reading.</para>
     private static readonly HashSet<string> PipelineServerOwned =
         ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "UpdatedBy", "SourceNames",
-         "Revision", "StaleReason", "Environment"];
+         "OutputFields", "Revision", "StaleReason", "Environment"];
 
     private static readonly HashSet<string> TableServerOwned =
         ["Id", "Status", "Error", "CreatedBy", "CreatedAtMs", "UpdatedAtMs", "UpdatedBy", "OutputFields",
-         "StreamInputs", "TableInputs", "KeyFields", "Revision", "SchemaRevision", "StaleReason", "Environment"];
+         "StreamInputs", "PipelineInputs", "TableInputs", "KeyFields", "Revision", "SchemaRevision",
+         "StaleReason", "Environment"];
 
     /// <summary>Values that would be rejected by validation if generated blindly (parallelism range,
     /// non-negative flush interval) or that must stay compilable/unique.</summary>

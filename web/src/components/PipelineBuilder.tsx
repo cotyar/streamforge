@@ -1,66 +1,67 @@
 import { useMemo } from 'react'
 import { Plus, Trash2 } from 'lucide-react'
-import type { SourceDefinition } from '../api/types'
-import type { BuilderState, JoinClause, SelectItem, WhereCondition } from '../builder/types'
-import { AGG_FNS, COMPARE_OPS, DURATION_UNITS, JOIN_TYPES, newJoin, newSelectItem, newWhereCondition } from '../builder/types'
+import type { BuilderRelation, BuilderState, JoinClause, SelectItem, WhereCondition } from '../builder/types'
+import {
+  AGG_FNS,
+  COMPARE_OPS,
+  DURATION_UNITS,
+  JOIN_TYPES,
+  columnOptionsFor,
+  groupRelationsByKind,
+  newJoin,
+  newSelectItem,
+  newWhereCondition,
+} from '../builder/types'
 import { cn } from '@/lib/utils'
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectGroup, SelectItem as SelectOption, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem as SelectOption,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 
 const labelCls = 'mb-1 block text-xs font-medium uppercase tracking-wide text-muted-foreground'
 
-function useColumnOptions(state: BuilderState, sources: SourceDefinition[]) {
-  return useMemo(() => {
-    const byName = new Map(sources.map((s) => [s.name, s]))
-    const qualify = state.joins.length > 0
-    const options: string[] = []
-
-    const fromSource = byName.get(state.from.source)
-    if (fromSource) {
-      const alias = state.from.alias.trim() || fromSource.name
-      for (const f of fromSource.fields) {
-        options.push(qualify ? `${alias}.${f.name}` : f.name)
-      }
-    }
-    for (const join of state.joins) {
-      const src = byName.get(join.source)
-      if (!src) continue
-      const alias = join.alias.trim() || src.name
-      for (const f of src.fields) {
-        options.push(`${alias}.${f.name}`)
-      }
-    }
-    return options
-  }, [state.from, state.joins, sources])
-}
-
-function SourceSelect({
+/** FROM/JOIN relation picker. Relations of different kinds can legitimately be offered together (a
+ * table may read a source, a pipeline or another table), and the NAME alone doesn't say which — so
+ * the options are grouped under Sources / Pipelines / Tables headings rather than badged per row,
+ * which is the one grouping affordance a select gives us for free. A single-kind list (the pipeline
+ * page passes sources only) still renders its one heading, which reads as a plain label. */
+function RelationSelect({
   value,
   onChange,
-  sources,
+  relations,
   placeholder = 'Select…',
 }: {
   value: string
   onChange: (value: string) => void
-  sources: SourceDefinition[]
+  relations: BuilderRelation[]
   placeholder?: string
 }) {
+  const groups = useMemo(() => groupRelationsByKind(relations), [relations])
   return (
     <Select value={value || undefined} onValueChange={onChange}>
       <SelectTrigger className="w-full">
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>
       <SelectContent>
-        <SelectGroup>
-          {sources.map((s) => (
-            <SelectOption key={s.name} value={s.name}>
-              {s.name}
-            </SelectOption>
-          ))}
-        </SelectGroup>
+        {groups.map((group) => (
+          <SelectGroup key={group.kind}>
+            <SelectLabel>{group.label}</SelectLabel>
+            {group.relations.map((r) => (
+              <SelectOption key={`${group.kind}:${r.name}`} value={r.name}>
+                {r.name}
+              </SelectOption>
+            ))}
+          </SelectGroup>
+        ))}
       </SelectContent>
     </Select>
   )
@@ -69,13 +70,13 @@ function SourceSelect({
 export function PipelineBuilder({
   state,
   onChange,
-  sources,
+  relations,
 }: {
   state: BuilderState
   onChange: (next: BuilderState) => void
-  sources: SourceDefinition[]
+  relations: BuilderRelation[]
 }) {
-  const columnOptions = useColumnOptions(state, sources)
+  const columnOptions = useMemo(() => columnOptionsFor(state, relations), [state, relations])
 
   function patch(partial: Partial<BuilderState>) {
     onChange({ ...state, ...partial })
@@ -105,12 +106,12 @@ export function PipelineBuilder({
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-3">
           <div>
-            <label className={labelCls}>Source</label>
-            <SourceSelect
+            <label className={labelCls}>Relation</label>
+            <RelationSelect
               value={state.from.source}
               onChange={(v) => patch({ from: { ...state.from, source: v } })}
-              sources={sources}
-              placeholder="Select source…"
+              relations={relations}
+              placeholder="Select relation…"
             />
           </div>
           <div>
@@ -131,7 +132,7 @@ export function PipelineBuilder({
           </CardAction>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
-          {state.joins.length === 0 && <p className="text-xs text-muted-foreground">No joins — single-source pipeline.</p>}
+          {state.joins.length === 0 && <p className="text-xs text-muted-foreground">No joins — single-relation query.</p>}
           {state.joins.map((join, i) => (
             <div key={i} className="rounded-lg border border-border p-3">
               <div className="mb-2 grid grid-cols-4 gap-2">
@@ -153,8 +154,8 @@ export function PipelineBuilder({
                   </Select>
                 </div>
                 <div>
-                  <label className={labelCls}>Source</label>
-                  <SourceSelect value={join.source} onChange={(v) => updateJoin(i, { source: v })} sources={sources} />
+                  <label className={labelCls}>Relation</label>
+                  <RelationSelect value={join.source} onChange={(v) => updateJoin(i, { source: v })} relations={relations} />
                 </div>
                 <div>
                   <label className={labelCls}>Alias</label>
@@ -280,7 +281,7 @@ export function PipelineBuilder({
           <CardTitle>Group by</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-2">
-          {columnOptions.length === 0 && <p className="text-xs text-muted-foreground">Select a source to see available columns.</p>}
+          {columnOptions.length === 0 && <p className="text-xs text-muted-foreground">Select a relation to see available columns.</p>}
           {columnOptions.map((col) => {
             const active = state.groupBy.includes(col)
             return (

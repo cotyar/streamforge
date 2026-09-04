@@ -77,7 +77,8 @@ public sealed class CatalogNamePolicyClusterTests : IAsyncLifetime
     }
 
     // =============================================================================================
-    // Pipelines: unique among pipelines, and only among pipelines.
+    // Pipelines: unique among pipelines — and, since table-over-pipeline made a pipeline name a
+    // relation name a table's SQL can write, unique against source and table names too.
     // =============================================================================================
 
     [Fact]
@@ -121,21 +122,43 @@ public sealed class CatalogNamePolicyClusterTests : IAsyncLifetime
         Assert.NotNull(await Registry.UpdatePipelineAsync(updated));
     }
 
-    /// <summary>Deliberately NOT enforced across kinds: pipelines are not in the SQL namespace, so a
-    /// pipeline named after the source it reads is legal — and is the shape the seed data ships.</summary>
+    /// <summary><b>INVERTED by table-over-pipeline, deliberately — this is a behaviour change, not a
+    /// weakened assertion.</b> This test used to assert the opposite, on the premise that "pipelines are
+    /// not in the SQL namespace". That premise is exactly what the feature removed: a table's SQL may now
+    /// write <c>FROM &lt;pipeline&gt;</c>, so a pipeline name and a source name are two spellings in ONE
+    /// namespace, and a catalog holding both would make <c>FROM foo</c> resolve by dictionary-insertion
+    /// order inside <c>PipelineInputs.BuildStreamSchemas</c>. The old test's parenthetical ("the shape the
+    /// seed data ships") does not hold either — verified: no seeded pipeline name collides with a seeded
+    /// source name, so nothing in the demo catalog depended on the permission being granted.
+    ///
+    /// <para>Enforced going forward only, like every other name rule in this file: nothing scans the
+    /// catalog at boot and an existing colliding pair keeps working until one of the two is next
+    /// written.</para></summary>
     [Fact]
-    public async Task A_pipeline_may_share_its_name_with_a_source_it_reads_from()
+    public async Task A_pipeline_may_no_longer_share_its_name_with_a_source_it_reads_from()
     {
         var sourceName = await SeedSourceAsync();
 
-        var created = await Registry.CreatePipelineAsync(new PipelineDefinition
-        {
-            Name = sourceName,
-            Sql = $"SELECT symbol, price FROM {sourceName}",
-        });
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Registry.CreatePipelineAsync(new PipelineDefinition
+            {
+                Name = sourceName,
+                Sql = $"SELECT symbol, price FROM {sourceName}",
+            }));
+        Assert.Contains("already used by a stream source", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(await Registry.GetPipelinesAsync(), p => p.Name == sourceName);
 
-        Assert.Equal(sourceName, created.Name);
-        Assert.Equal(new[] { sourceName }, created.SourceNames.ToArray());
+        // …and the reverse direction, which has no prior test at all: a SOURCE may not take a pipeline's
+        // name either. Sources cannot be renamed, so this is the only moment the rule can be applied.
+        var pipelineName = Unique("np_pipe_owns");
+        await Registry.CreatePipelineAsync(new PipelineDefinition { Name = pipelineName, Sql = "SELECT 1" });
+        var clash = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Registry.UpsertSourceAsync(new SourceDefinition
+            {
+                Name = pipelineName,
+                Fields = [new FieldDef("symbol", FieldType.String)],
+            }));
+        Assert.Contains("already used by a pipeline", clash.Message, StringComparison.Ordinal);
     }
 
     // =============================================================================================

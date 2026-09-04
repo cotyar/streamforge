@@ -353,7 +353,13 @@ invocations with their own ports for `ts-consumer` (`bun run main.ts`) and `java
    Reserved); both reflection and proto downloads must obtain numbers there, keyed canonically by
    entity **id** even when resolved by name.
 6. **SQL fine print**: aggregate JSON with `->` not `->>` (text sums to zero); pipeline-mode
-   subqueries must be windowed; `LATEST BY` is table-mode only. Full list: DESIGN.md §D11.
+   subqueries must be windowed; `LATEST BY` is table-mode only; `FROM <pipeline>` is table-mode only
+   too — a table may read a pipeline by name (the pipeline's `OutputFields` is the relation, so source,
+   pipeline and table names share ONE namespace and the create paths refuse a collision), while a
+   pipeline still reads sources only, which is what keeps the graph acyclic. A table attaching to a
+   pipeline gets **no replay** — pipelines have no ring and no snapshot — so start it before the data
+   flows; Dapr does not have this yet (PARITY D6), and `POST /api/tables/validate` is optimistic there.
+   Full list: DESIGN.md §D11.
 7. **Branding is neutral**: plain "StreamsForge" wordmark only — every trace of the original
    client's name was removed from the pages, the docs and the plans (2026-08-04/09, pre-open-source);
    do not reintroduce any client name, and never reproduce a client logo graphic. Theme via tokens (`sf.theme`, light default); no raw hex outside the

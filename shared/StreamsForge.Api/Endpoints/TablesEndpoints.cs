@@ -815,10 +815,33 @@ public static class TablesEndpoints
         return result.IsAllowed ? null : AccessGuard.Deny(result);
     }
 
+    /// <summary>The stream-relation dictionary a TABLE compiles against — both call sites (POST /validate
+    /// and GET /{id}/plan) are table compiles, never pipeline ones.
+    ///
+    /// <para>Table-over-pipeline: it is sources PLUS every pipeline that has a compiled
+    /// <c>OutputFields</c>, the same rule the Orleans registry applies
+    /// (<c>PipelineInputs.BuildStreamSchemas</c>) — otherwise the console would report "unknown relation"
+    /// for SQL the server would then happily accept, which is worse than either behaviour on its own.
+    /// A pipeline appears here under its NAME, so its name occupies the same namespace a source's and a
+    /// table's do; the write paths enforce that.</para>
+    ///
+    /// <para><b>Flavor note.</b> This file is shared, and the Dapr flavor's <c>CatalogStore</c> does NOT
+    /// yet compile tables against pipelines (PARITY D6), so on Dapr this endpoint is optimistic: it
+    /// validates SQL that the subsequent create would refuse with an unknown-relation diagnostic. The
+    /// alternative — keeping validate sources-only — makes the Orleans console reject a legal table,
+    /// which is a wrong answer on the flavor where the feature exists.</para></summary>
     private static async Task<Dictionary<string, SourceSchema>> BuildStreamSchemasAsync(ICatalogFacade registry)
     {
-        var sources = await registry.GetSourcesAsync();
         var schemas = new Dictionary<string, SourceSchema>();
+
+        var pipelines = await registry.GetPipelinesAsync();
+        foreach (var p in pipelines)
+        {
+            if (p.OutputFields.Count == 0) continue;
+            schemas[p.Name] = new SourceSchema(p.Name, p.OutputFields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type)));
+        }
+
+        var sources = await registry.GetSourcesAsync();
         foreach (var src in sources)
         {
             var fields = src.Fields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type));

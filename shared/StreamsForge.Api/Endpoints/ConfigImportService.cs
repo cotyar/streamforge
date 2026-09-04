@@ -711,14 +711,31 @@ public static class ConfigImportService
             }
         }
 
+        // Table-over-pipeline: the third schema world. A TABLE may name a pipeline as a relation, so a
+        // table's compile below sees worldSourceSchemas ∪ this; a PIPELINE's compile never does (a
+        // pipeline still reads sources only, which is what keeps the graph acyclic). Seeded from the
+        // current catalog's already-compiled pipeline OutputFields and mutated in place as planned
+        // pipelines are processed — exactly the shape, and exactly the order-sensitivity, worldTableSchemas
+        // already has: a table planned BEFORE the pipeline it reads sees that pipeline's stored schema,
+        // not the document's new one. That is the pre-existing bargain for tables and this makes no new
+        // promise about it.
+        var worldPipelineSchemas = new Dictionary<string, SourceSchema>(StringComparer.Ordinal);
+        foreach (var (name, p) in pipelineByName)
+        {
+            if (p.OutputFields.Count > 0)
+            {
+                worldPipelineSchemas[name] = new SourceSchema(name, p.OutputFields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type)));
+            }
+        }
+
         var entries = new List<ConfigImportReportEntry>(plan.Count);
         foreach (var action in plan)
         {
             var entry = action.Kind switch
             {
                 "source" => await ProcessSourceAsync(action, docSourceByName, sourceByName, registry, apply),
-                "table" => await ProcessTableAsync(action, docTableByName, tableByName, worldSourceSchemas, worldTableSchemas, registry, apply, createdBy),
-                "pipeline" => await ProcessPipelineAsync(action, docPipelineByName, pipelineByName, worldSourceSchemas, registry, apply, createdBy),
+                "table" => await ProcessTableAsync(action, docTableByName, tableByName, worldSourceSchemas, worldPipelineSchemas, worldTableSchemas, registry, apply, createdBy),
+                "pipeline" => await ProcessPipelineAsync(action, docPipelineByName, pipelineByName, worldSourceSchemas, worldPipelineSchemas, registry, apply, createdBy),
                 _ => throw new InvalidOperationException($"unknown planned-action kind: {action.Kind}"),
             };
             entries.Add(entry);
@@ -932,6 +949,7 @@ public static class ConfigImportService
         Dictionary<string, ConfigTable> docByName,
         Dictionary<string, TableDefinition> storedByName,
         Dictionary<string, SourceSchema> worldSourceSchemas,
+        Dictionary<string, SourceSchema> worldPipelineSchemas,
         Dictionary<string, SourceSchema> worldTableSchemas,
         ICatalogFacade registry,
         bool apply,
@@ -991,7 +1009,17 @@ public static class ConfigImportService
 
         // D-J: every imported SQL compiles through the real Engine compiler against the composed
         // (post-import-world) catalog; failure -> "error", entity skipped, keep going.
-        var compile = SqlCompiler.CompileTable(sugar.Sql, worldSourceSchemas, worldTableSchemas);
+        // Table-over-pipeline: sources ∪ pipelines-with-a-schema, the same stream-relation set the
+        // registry compiles a table against. Composed per table rather than kept as one dictionary
+        // because worldPipelineSchemas keeps changing as the plan runs, and a source must win a name
+        // collision here exactly as it does everywhere else.
+        var worldStreamSchemas = new Dictionary<string, SourceSchema>(worldPipelineSchemas, StringComparer.Ordinal);
+        foreach (var (name, schema) in worldSourceSchemas)
+        {
+            worldStreamSchemas[name] = schema;
+        }
+
+        var compile = SqlCompiler.CompileTable(sugar.Sql, worldStreamSchemas, worldTableSchemas);
         if (!compile.Ok)
         {
             return ErrorEntry("table", action.Name, FormatDiagnostics(compile.Diagnostics));
@@ -1103,6 +1131,7 @@ public static class ConfigImportService
         Dictionary<string, ConfigPipeline> docByName,
         Dictionary<string, PipelineDefinition> storedByName,
         Dictionary<string, SourceSchema> worldSourceSchemas,
+        Dictionary<string, SourceSchema> worldPipelineSchemas,
         ICatalogFacade registry,
         bool apply,
         string createdBy)
@@ -1126,6 +1155,9 @@ public static class ConfigImportService
                 }
             }
 
+            // Table-over-pipeline: a deleted pipeline stops being a relation for any table planned after
+            // it — the mirror of ProcessTableAsync's worldTableSchemas.Remove on its own delete branch.
+            worldPipelineSchemas.Remove(action.Name);
             return ToEntry("pipeline", action);
         }
 
@@ -1150,6 +1182,13 @@ public static class ConfigImportService
         if (!compile.Ok)
         {
             return ErrorEntry("pipeline", action.Name, FormatDiagnostics(compile.Diagnostics));
+        }
+
+        // Table-over-pipeline: this pipeline's freshly compiled output schema becomes visible to any
+        // LATER-in-plan table that names it — the pipeline-side twin of worldTableSchemas' update below.
+        if (compile.OutputSchema is not null)
+        {
+            worldPipelineSchemas[action.Name] = compile.OutputSchema;
         }
 
         if (!apply)

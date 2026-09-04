@@ -46,6 +46,11 @@ public static class CatalogRecordMerge
         incoming.CreatedBy = existing.CreatedBy;
         incoming.CreatedAtMs = existing.CreatedAtMs;
         incoming.SourceNames = existing.SourceNames;
+        // Table-over-pipeline: OutputFields is derived from the same compile as SourceNames and carried for
+        // the identical reason. It matters more here than the name suggests — this pipeline's output schema
+        // is the RELATION any dependent table compiled against, so letting a request body set it would let
+        // a caller redefine, from the outside, what somebody else's table is reading.
+        incoming.OutputFields = existing.OutputFields;
         incoming.UpdatedAtMs = nowMs;
     
         // Plan 016 wave 0. The counters and StaleReason are the REGISTRY's, carried forward here so an
@@ -81,6 +86,8 @@ public static class CatalogRecordMerge
         incoming.CreatedAtMs = existing.CreatedAtMs;
         incoming.OutputFields = existing.OutputFields;
         incoming.StreamInputs = existing.StreamInputs;
+        // Table-over-pipeline — the fifth member of the same set, recomputed on the identical compile.
+        incoming.PipelineInputs = existing.PipelineInputs;
         incoming.TableInputs = existing.TableInputs;
         incoming.KeyFields = existing.KeyFields;
         incoming.UpdatedAtMs = nowMs;

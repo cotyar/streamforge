@@ -361,6 +361,13 @@ export interface PipelineDefinition {
    * pipeline-side counterpart of TableDefinition's streamInputs/tableInputs. Optional/additive — absent
    * on responses from a pre-W5 backend; empty until the SQL compiles. */
   sourceNames?: string[]
+  /** The pipeline's compiled OUTPUT schema — the same shape TableDefinition.outputFields has, and the
+   * reason a table can now name a pipeline as one of its relations: without a declared output shape
+   * there is nothing for the table's SQL (or the visual builder's column pickers) to bind to.
+   * Optional/additive — absent on responses from a server that predates it, and empty until the SQL
+   * compiles, so a consumer must treat "absent or empty" as "this pipeline is not offerable yet"
+   * rather than as "a pipeline with no columns". */
+  outputFields?: FieldDef[]
   /** Plan 009 B2: where this pipeline's rows are republished. Absent/empty = nowhere. */
   sinks?: SinkSpec[]
 
@@ -681,6 +688,10 @@ export interface TableDefinition {
   outputFields: FieldDef[]
   streamInputs: string[]
   tableInputs: string[]
+  /** Pipeline NAMES this table reads — the third input list beside streamInputs (sources) and
+   * tableInputs (other tables), populated from the last successful compile. Optional/additive: absent
+   * on a server that predates pipeline-into-table, which must render exactly as it does today. */
+  pipelineInputs?: string[]
   searchEnabled: boolean
   searchMode: TableSearchMode
   historyEnabled: boolean

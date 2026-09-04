@@ -40,7 +40,7 @@ FROM source | (SELECT …) alias [, UNNEST(expr) AS l …]
 |---|---|---|
 | Windows / EMIT / WITHIN | yes | **no** — running aggregates, retract/assert deltas |
 | Joins | interval (WITHIN, all 5 kinds) | relational equi: INNER/LEFT/RIGHT/FULL OUTER/CROSS over current state (composite keys; CROSS needs Parallelism=1) |
-| Inputs | stream sources | streams AND other tables (chaining) |
+| Inputs | stream sources | streams, PIPELINES and other tables — `FROM <pipeline>` is legal in **table mode only** (the pipeline's compiled output schema is the relation; no replay on a late attach) |
 | LATEST BY | ✗ (diagnostic) | ✓ latest row per key by event ts |
 
 ## Gotchas that will bite you (all tested, all deliberate)

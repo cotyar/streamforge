@@ -6,10 +6,12 @@ import { tablesApi } from '../api/tables'
 import { downloadCsv } from '../api/csv'
 import type { UpdateTableRequest } from '../api/tables'
 import { sourcesApi } from '../api/sources'
+import { pipelinesApi } from '../api/pipelines'
 import { ApiError } from '../api/client'
 import type {
   FieldDef,
   Metadata,
+  PipelineDefinition,
   ResultRow,
   RowValue,
   SinkSpec,
@@ -33,6 +35,7 @@ import { StatusBadge } from '../components/StatusBadge'
 import { RevisionBadge } from '../components/RevisionBadge'
 import { StaleReasonBanner } from '../components/StaleReasonNote'
 import { SqlEditor } from '../components/SqlEditor'
+import { PipelineBuilder } from '../components/PipelineBuilder'
 import { RoleGate } from '../components/RoleGate'
 import { MetadataEditor } from '../components/MetadataEditor'
 import { RowHistorySheet } from '../components/RowHistorySheet'
@@ -48,6 +51,7 @@ import { Field, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/components/ui/input-group'
 import { Switch } from '@/components/ui/switch'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -66,6 +70,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import type { BuilderRelation, BuilderState } from '../builder/types'
+import { emptyBuilderState } from '../builder/types'
+import { builderStateToSql } from '../builder/sqlgen'
+
+/** SQL text vs the visual builder — the same two-mode editor the pipeline detail page has, wired the
+ * same way (see `builderTouched` below for the one subtlety). */
+type EditorMode = 'sql' | 'builder'
 
 function isJsonValue(v: RowValue): v is Record<string, RowValue> | RowValue[] {
   return typeof v === 'object' && v !== null
@@ -1189,6 +1200,14 @@ export function TableDetailPage() {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [sql, setSql] = useState('')
+  const [mode, setMode] = useState<EditorMode>('sql')
+  const [builderState, setBuilderState] = useState<BuilderState>(emptyBuilderState())
+  // True only once the user actually edits something in the Builder tab — distinct from
+  // `builderState` merely existing, since the builder is never seeded from loaded SQL (out of
+  // scope: no SQL→builder parser) and starts out an honest, empty "SELECT * FROM <source>" render.
+  // Switching SQL → Builder → SQL must never clobber real SQL with that empty render, so
+  // `switchToSql` (below) only writes builder→SQL back when this is true.
+  const [builderTouched, setBuilderTouched] = useState(false)
   const [searchEnabled, setSearchEnabled] = useState(false)
   const [searchMode, setSearchMode] = useState<TableSearchMode>('Exact')
   const [tags, setTags] = useState<Tags>([])
@@ -1206,11 +1225,13 @@ export function TableDetailPage() {
 
   const [sources, setSources] = useState<SourceDefinition[]>([])
   const [otherTables, setOtherTables] = useState<TableDefinition[]>([])
+  const [pipelines, setPipelines] = useState<PipelineDefinition[]>([])
 
-  // Real sources plus every other table exposed as a pseudo-source (its output schema mapped to
-  // SourceDefinition-shaped fields) so the SQL editor's FROM/JOIN autocomplete suggests tables the
-  // same way it suggests streams. The table currently being edited is excluded to avoid offering a
-  // self-reference. Fetched once here so both the editor and any future consumer share one request.
+  // Real sources plus every other table AND every pipeline exposed as a pseudo-source (its output
+  // schema mapped to SourceDefinition-shaped fields) so the SQL editor's FROM/JOIN autocomplete
+  // suggests all three the same way it suggests streams — a table may read any of them. The table
+  // currently being edited is excluded to avoid offering a self-reference. Fetched once here so the
+  // editor, the visual builder and any future consumer share one request per kind.
   useEffect(() => {
     let cancelled = false
     sourcesApi
@@ -1229,26 +1250,56 @@ export function TableDetailPage() {
       .catch(() => {
         if (!cancelled) setOtherTables([])
       })
+    pipelinesApi
+      .list()
+      .then((list) => {
+        if (!cancelled) setPipelines(list)
+      })
+      .catch(() => {
+        if (!cancelled) setPipelines([])
+      })
     return () => {
       cancelled = true
     }
   }, [])
 
+  /** A pipeline/table is offerable as an input only once it has a compiled output schema: an entity
+   * whose SQL has never compiled has no columns to bind to, and offering its bare name would produce
+   * SQL the server refuses. `outputFields` is optional on PipelineDefinition (absent on a server that
+   * predates pipeline-into-table), and absent reads the same as empty here — not offerable. */
+  const inputPipelines = useMemo(() => pipelines.filter((p) => (p.outputFields?.length ?? 0) > 0), [pipelines])
+  const inputTables = useMemo(() => otherTables.filter((t) => t.id !== id && t.outputFields.length > 0), [otherTables, id])
+
   const editorSources = useMemo<SourceDefinition[]>(() => {
-    const pseudo: SourceDefinition[] = otherTables
-      .filter((t) => t.id !== id)
-      .map((t) => ({
-        name: t.name,
-        description: t.description,
-        fields: t.outputFields,
-        generatorProfile: 'generic',
-        eventsPerSecond: 0,
-        enabled: true,
-        tags: [],
-        metadata: {},
-      }))
-    return [...sources, ...pseudo]
-  }, [sources, otherTables, id])
+    const asPseudoSource = (name: string, description: string, fields: FieldDef[]): SourceDefinition => ({
+      name,
+      description,
+      fields,
+      generatorProfile: 'generic',
+      eventsPerSecond: 0,
+      enabled: true,
+      tags: [],
+      metadata: {},
+    })
+    return [
+      ...sources,
+      ...inputPipelines.map((p) => asPseudoSource(p.name, p.description, p.outputFields ?? [])),
+      ...inputTables.map((t) => asPseudoSource(t.name, t.description, t.outputFields)),
+    ]
+  }, [sources, inputPipelines, inputTables])
+
+  /** What the visual builder's FROM/JOIN pickers offer, grouped by kind in the UI. Unlike
+   * `editorSources` above (which flattens everything into SourceDefinition shape purely to feed the
+   * text editor's autocomplete), this keeps the kind, because seeing that `orders` is a pipeline and
+   * not a source is most of the value of the picker. */
+  const builderRelations = useMemo<BuilderRelation[]>(
+    () => [
+      ...sources.map((s) => ({ name: s.name, kind: 'source' as const, fields: s.fields })),
+      ...inputPipelines.map((p) => ({ name: p.name, kind: 'pipeline' as const, fields: p.outputFields ?? [] })),
+      ...inputTables.map((t) => ({ name: t.name, kind: 'table' as const, fields: t.outputFields })),
+    ],
+    [sources, inputPipelines, inputTables],
+  )
 
   useEffect(() => {
     if (isNew) {
@@ -1256,6 +1307,8 @@ export function TableDetailPage() {
       setName('')
       setDescription('')
       setSql('')
+      setBuilderState(emptyBuilderState())
+      setBuilderTouched(false)
       setSearchEnabled(false)
       setSearchMode('Exact')
       setTags([])
@@ -1271,6 +1324,9 @@ export function TableDetailPage() {
         setName(t.name)
         setDescription(t.description)
         setSql(t.sql)
+        setMode('sql')
+        setBuilderState(emptyBuilderState())
+        setBuilderTouched(false)
         setTags(t.tags)
         setMetadata(t.metadata)
       })
@@ -1287,8 +1343,13 @@ export function TableDetailPage() {
     }
   }, [table])
 
+  // While the Builder tab is open but untouched, its render is an honest placeholder — never what
+  // should be validated or saved. Only once the user has actually edited the builder does its
+  // render become the thing of record (see `builderTouched`'s doc above).
+  const effectiveSql = mode === 'builder' && builderTouched ? builderStateToSql(builderState) : sql
+
   useEffect(() => {
-    if (!sql.trim()) {
+    if (!effectiveSql.trim()) {
       setDiagnostics(null)
       setPlanSummary(null)
       setOutputSchema([])
@@ -1299,7 +1360,7 @@ export function TableDetailPage() {
     setValidating(true)
     const timer = setTimeout(() => {
       tablesApi
-        .validate({ sql })
+        .validate({ sql: effectiveSql })
         .then((res) => {
           setDiagnostics(res.diagnostics)
           if (res.ok) {
@@ -1324,15 +1385,26 @@ export function TableDetailPage() {
         .finally(() => setValidating(false))
     }, 500)
     return () => clearTimeout(timer)
-  }, [sql])
+  }, [effectiveSql])
+
+  function switchToSql() {
+    // Only write the builder's render back over `sql` if the user actually touched the builder —
+    // otherwise this is the clobber bug: an untouched builder renders "SELECT * FROM <source>" and
+    // would silently overwrite real SQL on every SQL⇄Builder round trip.
+    if (mode === 'builder' && builderTouched) setSql(builderStateToSql(builderState))
+    setMode('sql')
+  }
 
   // Baseline for both "is the editor dirty" and Revert: the persisted copy for an existing table,
   // or '' for a new/unsaved one — no new persisted state, per plan.
   const baselineSql = table?.sql ?? ''
-  const editorDirty = sql !== baselineSql
+  const editorDirty = effectiveSql !== baselineSql
 
   function handleRevert() {
     setSql(baselineSql)
+    setMode('sql')
+    setBuilderState(emptyBuilderState())
+    setBuilderTouched(false)
   }
 
   function handleFormat() {
@@ -1355,7 +1427,7 @@ export function TableDetailPage() {
       const body = {
         name: name.trim(),
         description,
-        sql,
+        sql: effectiveSql,
         searchEnabled,
         searchMode,
         historyEnabled: table?.historyEnabled ?? false,
@@ -1498,21 +1570,59 @@ export function TableDetailPage() {
             readOnly={!canEdit}
           />
 
-          <SqlEditor
-            value={sql}
-            onChange={setSql}
-            diagnostics={diagnostics ?? []}
-            readOnly={!canEdit}
-            sources={editorSources}
-            onFormat={canEdit ? handleFormat : undefined}
-            toolbarEnd={
-              canEdit && (
+          <Tabs
+            value={mode}
+            onValueChange={(v) => {
+              if (v === 'sql') switchToSql()
+              else setMode('builder')
+            }}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <TabsList>
+                <TabsTrigger value="sql">SQL</TabsTrigger>
+                <TabsTrigger value="builder">Builder</TabsTrigger>
+              </TabsList>
+              {canEdit && (
                 <Button type="button" variant="outline" size="sm" onClick={handleRevert} disabled={!editorDirty}>
                   <Undo2 data-icon="inline-start" /> Revert
                 </Button>
-              )
-            }
-          />
+              )}
+            </div>
+            <TabsContent value="sql">
+              <SqlEditor
+                value={sql}
+                onChange={setSql}
+                diagnostics={diagnostics ?? []}
+                readOnly={!canEdit}
+                sources={editorSources}
+                onFormat={canEdit ? handleFormat : undefined}
+              />
+            </TabsContent>
+            <TabsContent value="builder" className="flex flex-col gap-3">
+              {/* The builder is NOT seeded from the loaded SQL — there is no SQL→builder parser — so
+                  say so rather than letting an empty form read as "this table has no clauses". The
+                  same rule the pipeline page states: nothing here is validated or saved until the
+                  builder is actually edited, and until then the SQL tab's text stays the record. */}
+              <Alert>
+                <TriangleAlert />
+                <AlertDescription>
+                  The builder starts empty — it is never populated from the SQL above. Editing it here replaces this table's SQL on
+                  Save; leave it untouched and the SQL tab's text stays what gets validated and saved. It also renders one shared
+                  clause set: table-only clauses (<code className="font-mono">LATEST BY</code>, set operations) have no controls
+                  here, and Window/Emit are pipeline-only — a table using them is rejected by validation. Write either in the SQL
+                  tab.
+                </AlertDescription>
+              </Alert>
+              <PipelineBuilder
+                state={builderState}
+                onChange={(next) => {
+                  setBuilderState(next)
+                  setBuilderTouched(true)
+                }}
+                relations={builderRelations}
+              />
+            </TabsContent>
+          </Tabs>
 
           <Card>
             <CardContent>

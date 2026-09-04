@@ -530,6 +530,17 @@ public sealed class PipelineDefinition
     /// deployable to exactly one place, which is the opposite of the point. The environment is a property
     /// of the import CALL. Config export therefore omits it, and import writes it from the target.</para></summary>
     [Id(17)] public string Environment { get; set; } = "";
+
+    /// <summary>Table-over-pipeline: this pipeline's compiled output schema — the exact counterpart of
+    /// <see cref="TableDefinition.OutputFields"/>, filled from <c>CompileResult.OutputSchema</c> by
+    /// <c>RegistryGrain.ApplyPipelineCompileResult</c> and cleared when the SQL does not compile.
+    ///
+    /// <para>It exists so a TABLE can name this pipeline as a relation: a relation needs a schema at
+    /// compile time, and a pipeline had nowhere to keep one. Derived, never user-editable. Empty on every
+    /// record written before this field existed — <c>EnsureInitializedAsync</c>'s backfill loop
+    /// recompiles those, driven off the data (empty <c>OutputFields</c>) rather than off whether seeding
+    /// just happened, exactly like the <see cref="SourceNames"/> backfill it extends.</para></summary>
+    [Id(18)] public List<FieldDef> OutputFields { get; set; } = [];
 }
 
 /// <summary>One emitted result row. Values are primitives only (string/double/long/bool/null).</summary>
@@ -839,6 +850,25 @@ public sealed class TableDefinition
     /// deployable to exactly one place, which is the opposite of the point. The environment is a property
     /// of the import CALL. Config export therefore omits it, and import writes it from the target.</para></summary>
     [Id(35)] public string Environment { get; set; } = "";
+
+    /// <summary>Table-over-pipeline: PIPELINE names this table reads directly, the third sibling of
+    /// <see cref="StreamInputs"/> (raw sources) and <see cref="TableInputs"/> (upstream tables). Derived
+    /// from the last successful compile, never user-editable; empty until the SQL compiles.
+    ///
+    /// <para>Why a separate list rather than more entries in <c>StreamInputs</c>: the two differ in the
+    /// STREAM they are read from. A source input is subscribed on
+    /// <c>(SourcesNamespace, qualified source name)</c> as <c>EventRecord</c>; a pipeline input is
+    /// subscribed on <c>(OutputNamespace, qualified pipeline ID)</c> as <c>List&lt;ResultEnvelope&gt;</c>.
+    /// The engine, which only ever sees a relation NAME and a schema, cannot tell them apart — the split
+    /// happens here, in the registry, after the compile (see <c>RegistryGrain.ApplyCompileResult</c>),
+    /// keyed off which catalog entity owns the name. That is also why a pipeline name may not collide
+    /// with a source name and vice versa: one relation name must resolve to exactly one thing.</para>
+    ///
+    /// <para>Note the asymmetry with a table input: a pipeline has NO replay ring and no attach protocol,
+    /// so a table attaching late to a pipeline starts empty and sees only rows published from that moment
+    /// on. Same for a pipeline that stops or is deleted underneath a running table — the table stays
+    /// Running and simply receives nothing more. Neither is refused.</para></summary>
+    [Id(36)] public List<string> PipelineInputs { get; set; } = [];
 }
 
 /// <summary>Plan 008: per-table durability policy. State is the materialized snapshot; the question is only

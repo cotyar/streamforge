@@ -2,6 +2,7 @@ using Orleans;
 using Orleans.Runtime;
 using Orleans.Streams;
 using StreamsForge.Abstractions;
+using StreamsForge.AppCore.Environments;
 using StreamsForge.Engine;
 using StreamsForge.Engine.Dataflow;
 using StreamsForge.Engine.Runtime;
@@ -47,6 +48,9 @@ public sealed class ArrangementGrain(
     private bool _rebuilding;
     private StreamSubscriptionHandle<EventRecord>? _streamSub;
     private StreamSubscriptionHandle<List<TableDeltaDto>>? _tableSub;
+    /// <summary>Table-over-pipeline: an arrangeable edge whose external input is a PIPELINE. Third handle
+    /// field for the third payload type, exactly as in TableGrain/TableIngestGrain.</summary>
+    private StreamSubscriptionHandle<List<ResultEnvelope>>? _pipelineSub;
     private IGrainTimer? _flushTimer;
 
     private readonly List<TableDelta> _pending = [];
@@ -176,8 +180,23 @@ public sealed class ArrangementGrain(
         }
         else
         {
-            var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, qualifiedInputName));
-            _streamSub = await stream.SubscribeAsync((evt, _) => OnStreamEventAsync(evt));
+            // Table-over-pipeline: the input may be a PIPELINE rather than a source. It is resolved here,
+            // from this grain's own key, rather than carried on ArrangementAttachRequest: that request type
+            // lives in shared/ and is frozen, and the environment + bare input name recoverable from the key
+            // above are already everything the lookup needs. Null (a source, the common case, or a registry
+            // that would not answer) falls through to the source subscription unchanged.
+            var pipeline = await PipelineInputs.FindAsync(GrainFactory, EnvKeys.EnvOf(qualifiedInputName), _inputName);
+            if (pipeline is not null)
+            {
+                var stream = streamProvider.GetStream<List<ResultEnvelope>>(
+                    StreamId.Create(StreamConstants.OutputNamespace, EnvKeys.Qualify(EnvKeys.EnvOf(qualifiedInputName), pipeline.Id)));
+                _pipelineSub = await stream.SubscribeAsync((batch, _) => OnPipelineBatchAsync(batch));
+            }
+            else
+            {
+                var stream = streamProvider.GetStream<EventRecord>(StreamId.Create(StreamConstants.SourcesNamespace, qualifiedInputName));
+                _streamSub = await stream.SubscribeAsync((evt, _) => OnStreamEventAsync(evt));
+            }
         }
 
         _flushTimer = this.RegisterGrainTimer(OnFlushTickAsync, FlushInterval, FlushInterval);
@@ -193,6 +212,8 @@ public sealed class ArrangementGrain(
 
         if (_streamSub is not null) { try { await _streamSub.UnsubscribeAsync(); } catch { /* best-effort */ } _streamSub = null; }
         if (_tableSub is not null) { try { await _tableSub.UnsubscribeAsync(); } catch { /* best-effort */ } _tableSub = null; }
+        // Table-over-pipeline — symmetric with the two above.
+        if (_pipelineSub is not null) { try { await _pipelineSub.UnsubscribeAsync(); } catch { /* best-effort */ } _pipelineSub = null; }
 
         _pending.Clear();
         _index.Clear();
@@ -206,6 +227,17 @@ public sealed class ArrangementGrain(
         try { await state.WriteStateAsync(); } catch { /* best-effort */ }
 
         this.DelayDeactivation(TimeSpan.Zero);
+    }
+
+    /// <summary>Table-over-pipeline: a pipeline input's batch, fed row by row through the same
+    /// <see cref="OnStreamEventAsync"/> the source path uses — including its partition filter, which is
+    /// what keeps a pipeline-fed arrangement partitioned identically to a source-fed one.</summary>
+    private async Task OnPipelineBatchAsync(List<ResultEnvelope> batch)
+    {
+        foreach (var envelope in batch)
+        {
+            await OnStreamEventAsync(PipelineInputs.ToEventRecord(envelope, _inputName));
+        }
     }
 
     private Task OnStreamEventAsync(EventRecord evt)

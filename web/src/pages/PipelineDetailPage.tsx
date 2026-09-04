@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Check, CircleAlert, Download, Play, Trash2, TriangleAlert, Undo2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -41,7 +41,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import type { BuilderState } from '../builder/types'
+import type { BuilderRelation, BuilderState } from '../builder/types'
 import { emptyBuilderState } from '../builder/types'
 import { builderStateToSql } from '../builder/sqlgen'
 import { formatSql } from '../lib/sqlFormat'
@@ -96,6 +96,14 @@ export function PipelineDetailPage() {
       cancelled = true
     }
   }, [])
+
+  // A PIPELINE reads streams and nothing else — no pipeline-reads-pipeline, no pipeline-reads-table —
+  // so every relation offered to the builder here is kind 'source'. (The table page passes all three
+  // kinds; the builder itself is agnostic and offers exactly what it is handed.)
+  const builderRelations = useMemo<BuilderRelation[]>(
+    () => sources.map((s) => ({ name: s.name, kind: 'source' as const, fields: s.fields })),
+    [sources],
+  )
 
   useEffect(() => {
     if (isNew) {
@@ -325,7 +333,7 @@ export function PipelineDetailPage() {
                   setBuilderState(next)
                   setBuilderTouched(true)
                 }}
-                sources={sources}
+                relations={builderRelations}
               />
             </TabsContent>
           </Tabs>

@@ -127,4 +127,79 @@ public sealed class PipelineLineageBackfillTests
             try { Directory.Delete(dataDir, recursive: true); } catch { /* best-effort cleanup */ }
         }
     }
+
+    /// <summary>Table-over-pipeline: the SAME boot backfill, driven by the other half of its predicate.
+    /// <c>PipelineDefinition.OutputFields</c> is newer than every durably persisted pipeline record, so a
+    /// restored catalog carries it EMPTY — and a pipeline with no output schema offers no relation, which
+    /// would make every table reading it fail to compile at boot. This reproduces that shape on disk
+    /// (SourceNames left INTACT, so only the new disjunct can repair it) and proves the next activation
+    /// fills it back in without re-seeding.</summary>
+    [Fact]
+    public async Task EnsureInitializedAsync_RestoredCatalogWithEmptyOutputFields_RepairsOnNextActivation()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), "sf-lineage-backfill-tests", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dataDir);
+
+        try
+        {
+            string pipelineId;
+
+            {
+                var builder = new TestClusterBuilder(1);
+                builder.ConfigureHostConfiguration(config => config.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["DataDir"] = dataDir,
+                }));
+                builder.AddSiloBuilderConfigurator<BackfillTestSiloConfigurator>();
+                builder.AddClientBuilderConfigurator<BackfillTestClientConfigurator>();
+                var cluster = builder.Build();
+                await cluster.DeployAsync();
+
+                var registry = cluster.GrainFactory.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+                await registry.EnsureInitializedAsync();
+
+                var orderBursts = (await registry.GetPipelinesAsync()).Single(p => p.Name == "Order bursts (session)");
+                Assert.NotEmpty(orderBursts.OutputFields);
+                pipelineId = orderBursts.Id;
+
+                await cluster.DisposeAsync();
+            }
+
+            var stateDir = Path.Combine(dataDir, "state");
+            var catalogFile = Directory.GetFiles(stateDir, "catalog.*.json").Single();
+            var state = JsonSerializer.Deserialize<RegistryState>(File.ReadAllText(catalogFile))!;
+            var toBreak = state.Pipelines.Single(p => p.Id == pipelineId);
+            toBreak.OutputFields = [];
+            Assert.NotEmpty(toBreak.SourceNames); // the OTHER disjunct must NOT be what repairs this
+            await File.WriteAllTextAsync(catalogFile, JsonSerializer.Serialize(state, JsonOptions));
+
+            {
+                var builder = new TestClusterBuilder(1);
+                builder.ConfigureHostConfiguration(config => config.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["DataDir"] = dataDir,
+                }));
+                builder.AddSiloBuilderConfigurator<BackfillTestSiloConfigurator>();
+                builder.AddClientBuilderConfigurator<BackfillTestClientConfigurator>();
+                var cluster = builder.Build();
+                await cluster.DeployAsync();
+
+                var registry = cluster.GrainFactory.GetGrain<IRegistryGrain>(StreamConstants.RegistryKey);
+                await registry.EnsureInitializedAsync();
+
+                var pipelines = await registry.GetPipelinesAsync();
+                Assert.Equal(7, pipelines.Count); // no re-seed happened
+                Assert.NotEmpty(pipelines.Single(p => p.Id == pipelineId).OutputFields);
+
+                var refetched = await registry.GetPipelineAsync(pipelineId);
+                Assert.NotEmpty(refetched!.OutputFields);
+
+                await cluster.DisposeAsync();
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dataDir, recursive: true); } catch { /* best-effort cleanup */ }
+        }
+    }
 }

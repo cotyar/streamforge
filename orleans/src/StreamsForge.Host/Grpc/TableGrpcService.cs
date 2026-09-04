@@ -162,7 +162,9 @@ public sealed class TableGrpcService(IClusterClient client, AccessGuard guard) :
         await GrpcAccess.EnsureAsync(guard, context, Actions.TableWrite, "*");
 
         var registry = Registry;
-        var streamSchemas = await SchemaBuilder.BuildStreamSchemasAsync(registry);
+        // Table-over-pipeline: includePipelines — a TABLE may name a pipeline as a relation, so this RPC
+        // must accept exactly what POST /api/tables/validate accepts.
+        var streamSchemas = await SchemaBuilder.BuildStreamSchemasAsync(registry, includePipelines: true);
         var tableSchemas = await SchemaBuilder.BuildTableSchemasAsync(registry);
         var result = SqlCompiler.CompileTable(request.Sql, streamSchemas, tableSchemas);
         return ProtoMappers.ToProtoValidateTableResponse(result);

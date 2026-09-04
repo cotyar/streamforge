@@ -181,6 +181,21 @@ Three source-stability changes landed on Orleans first and are owed here:
   pipeline that starts after its source already emitted the source's recent rows (a bounded
   in-memory ring, held-and-flushed so nothing is duplicated). `ConnectorActor`/`TableActor` have no
   attach protocol; a table created after a `file`/`url` source's first poll starts empty on Dapr.
+- **Table-over-pipeline inputs.** A table's SQL may name a PIPELINE as a relation on Orleans:
+  `PipelineDefinition.OutputFields` (`[Id(18)]`) publishes the pipeline's compiled output schema,
+  `TableDefinition.PipelineInputs` (`[Id(36)]`) records which of a table's compiled stream relations are
+  pipelines, and `TableGrain`/`TableIngestGrain`/`ArrangementGrain` subscribe those on
+  `(OutputNamespace, pipeline ID)` as `List<ResultEnvelope>` instead of `(SourcesNamespace, source name)`
+  as `EventRecord`. Both fields are on the shared contracts and Dapr persists them, but
+  `CatalogStore.CompileTableSql` (`dapr/src/StreamsForge.Dapr.Host/Catalog/CatalogStore.cs:866`) and
+  `TableActor.TryCompile` (`:~1355`) still build the stream-schema dictionary from sources alone, so on
+  Dapr such a table refuses to compile with an unknown-relation diagnostic and `PipelineInputs` stays
+  empty. **One asymmetry to know about:** `POST /api/tables/validate` lives in shared `TablesEndpoints`
+  and DOES offer pipelines as relations on both flavors, so on Dapr validate is optimistic — it accepts
+  SQL the subsequent create then refuses. Keeping validate sources-only was the alternative, and it makes
+  the Orleans console reject a legal table, which is a wrong answer on the flavor where the feature works.
+  The relation-name uniqueness refusals (a pipeline may not take a source's or a table's name, and vice
+  versa) are Orleans-only for the same reason and are owed here alongside the compile change.
 
 ### Explicitly NOT debt — checked and present on Dapr
 

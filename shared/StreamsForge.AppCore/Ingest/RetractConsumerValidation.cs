@@ -54,6 +54,13 @@ public static class RetractConsumerValidation
             return null; // nothing live is reading this source directly yet — nothing to corrupt
         }
 
+        // Table-over-pipeline, KNOWN AND DELIBERATELY LEFT: this dictionary holds sources only, so a
+        // candidate table that reads BOTH this source and a pipeline fails to compile here and is
+        // therefore reported as a non-LATEST-BY consumer — the retract push is refused. That is the
+        // conservative direction this method already commits to in its own doc comment ("can't prove this
+        // table is safe" != "this table is safe"), so it fails closed rather than silently corrupting.
+        // Fixing it means threading the pipeline list through this signature and both call sites; not done
+        // here because a false refusal is recoverable and a false acceptance is not.
         var streamSchemas = sources.ToDictionary(
             s => s.Name,
             s => new SourceSchema(s.Name, s.Fields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type))));

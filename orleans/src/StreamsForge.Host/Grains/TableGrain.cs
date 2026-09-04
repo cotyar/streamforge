@@ -310,6 +310,11 @@ public sealed class TableGrain(
     private IGrainTimer? _flushTimer;
     private readonly List<StreamSubscriptionHandle<EventRecord>> _streamSubs = [];
     private readonly List<StreamSubscriptionHandle<List<TableDeltaDto>>> _tableSubs = [];
+    /// <summary>Table-over-pipeline: subscriptions to PIPELINE output streams
+    /// (<c>OutputNamespace</c>, <c>List&lt;ResultEnvelope&gt;</c>). A third list rather than a third use of
+    /// <see cref="_streamSubs"/> because <c>StreamSubscriptionHandle&lt;T&gt;</c> is generic in the payload
+    /// type; teardown in <see cref="StopAsync"/> is symmetric with the other two.</summary>
+    private readonly List<StreamSubscriptionHandle<List<ResultEnvelope>>> _pipelineSubs = [];
 
     /// <summary>Wishlist #14 option (a) — upstream table name -> the epoch (TableAttachSnapshot.Epoch)
     /// this table's backfill was taken at, for OnTableDeltaBatchAsync's epoch filter — see
@@ -440,9 +445,12 @@ public sealed class TableGrain(
         // leaves for that later wave to close, not something this line can fix on its own.
         var registry = GrainFactory.RegistryFor(def.Environment);
         var sources = await registry.GetSourcesAsync();
-        var streamSchemas = sources.ToDictionary(
-            s => s.Name,
-            s => new SourceSchema(s.Name, s.Fields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type))));
+        // Table-over-pipeline: sources PLUS every pipeline with a compiled output schema — see
+        // PipelineInputs.BuildStreamSchemas (the single definition every compile site shares, so the plan
+        // this grain builds is the plan the registry validated). GetPipelinesAsync is on RegistryGrain's
+        // [MayInterleave] allowlist (verified), exactly like the two calls around it.
+        var pipelines = await registry.GetPipelinesAsync();
+        var streamSchemas = PipelineInputs.BuildStreamSchemas(sources, pipelines);
 
         var tables = await registry.GetTablesAsync();
         var tableSchemas = tables
@@ -493,6 +501,16 @@ public sealed class TableGrain(
         var streamProvider = this.GetStreamProvider(StreamConstants.ProviderName);
         foreach (var name in compileResult.StreamInputs.Distinct())
         {
+            // Table-over-pipeline: the engine hands back ONE stream-input list; a name that belongs to a
+            // pipeline is read from a different namespace, with a different payload type, keyed by the
+            // pipeline's ID rather than its name — so it is split off here rather than inside the
+            // source-input attach.
+            var pipeline = pipelines.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.Ordinal));
+            if (pipeline is not null)
+            {
+                await SubscribeToPipelineInputAsync(streamProvider, def, name, pipeline);
+                continue;
+            }
             await AttachToStreamInputAsync(streamProvider, def, name, sources);
         }
         // Wishlist #14 option (a) — see AttachToTableInputAsync's own doc comment for the full
@@ -593,6 +611,57 @@ public sealed class TableGrain(
                 try { await connector.EndAttachAsync(); }
                 catch (Exception ex) { logger.LogDebug(ex, "Table '{Table}': releasing the attach hold on source '{Source}' failed; the source's own safety timer covers it.", def.Name, name); }
             }
+        }
+    }
+
+    /// <summary>Table-over-pipeline: the PIPELINE-input twin of <see cref="AttachToStreamInputAsync"/> —
+    /// and deliberately the short one, because there is nothing to attach to.
+    ///
+    /// <para>A pipeline publishes <c>List&lt;ResultEnvelope&gt;</c> on
+    /// <c>(OutputNamespace, qualified pipeline ID)</c>, not <c>EventRecord</c> on
+    /// <c>(SourcesNamespace, qualified source name)</c> — a different namespace, a different payload and a
+    /// different key — which is the entire reason this cannot ride the source path. Each envelope is fed
+    /// through <see cref="OnStreamEventAsync"/>, the SAME handler live source traffic and every backfill
+    /// already use, under the pipeline's NAME (what the table's SQL wrote and what the compiled plan
+    /// matches its relation on), so GROUP BY / JOIN / LATEST BY state is built from these rows rather than
+    /// bypassed.</para>
+    ///
+    /// <para><b>NO LATE-CONSUMER ATTACH, and it is not an omission.</b> The subscribe-then-attach protocol
+    /// above exists because a connector-kind source keeps a replay ring and can be held still for one
+    /// turn while its recent rows are handed over. A pipeline has neither: it holds no materialized
+    /// result, and its bounded <c>_recentResults</c> buffer is a UI convenience with no epoch or fence to
+    /// deduplicate against live traffic — replaying it would double-count with nothing to detect the
+    /// overlap. So a table that attaches to a pipeline starts empty for that input and sees only rows
+    /// published from this moment on. Restarting the PIPELINE (not the table) is the operator move that
+    /// re-drives it, and it is written down in the docs for that reason.</para></summary>
+    private async Task SubscribeToPipelineInputAsync(
+        IStreamProvider streamProvider, TableDefinition def, string name, PipelineDefinition pipeline)
+    {
+        var stream = streamProvider.GetStream<List<ResultEnvelope>>(
+            StreamId.Create(StreamConstants.OutputNamespace, PipelineInputs.OutputStreamKey(def.Environment, pipeline)));
+        var handle = await stream.SubscribeAsync((batch, _) => OnPipelineBatchAsync(name, batch));
+        _pipelineSubs.Add(handle);
+
+        if (pipeline.Status != PipelineStatus.Running)
+        {
+            // Not a refusal — a table over a stopped pipeline is legal and simply receives nothing until
+            // the pipeline runs, exactly as a table over a disabled source does. Logged so "my table is
+            // Running and empty" has an answer that does not require reading the catalog by hand.
+            logger.LogInformation(
+                "Table '{Table}': pipeline input '{Pipeline}' is {Status} — this table will receive rows only once that pipeline runs (pipelines have no replay).",
+                def.Name, name, pipeline.Status);
+        }
+    }
+
+    /// <summary>One published batch from a pipeline input. Fed row by row through the shared
+    /// <see cref="OnStreamEventAsync"/> — unlike an upstream TABLE's delta batch, there is no epoch to
+    /// preserve here (a pipeline emits appended result rows, never retractions), so a batch carries no
+    /// atomicity that splitting it would break.</summary>
+    private async Task OnPipelineBatchAsync(string name, List<ResultEnvelope> batch)
+    {
+        foreach (var envelope in batch)
+        {
+            await OnStreamEventAsync(name, PipelineInputs.ToEventRecord(envelope, name));
         }
     }
 
@@ -833,6 +902,13 @@ public sealed class TableGrain(
             try { await handle.UnsubscribeAsync(); } catch { /* best-effort */ }
         }
         _tableSubs.Clear();
+
+        // Table-over-pipeline — symmetric with the two above.
+        foreach (var handle in _pipelineSubs)
+        {
+            try { await handle.UnsubscribeAsync(); } catch { /* best-effort */ }
+        }
+        _pipelineSubs.Clear();
         _tableInputCutoffEpoch.Clear(); // wishlist #14 option (a) — a restart re-attaches and re-populates this fresh.
 
         // Plan 003 M4: no stream subscription to tear down anymore (see class doc) — just drop the
