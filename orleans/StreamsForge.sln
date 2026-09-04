@@ -51,6 +51,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamsForge.Plugins.Fix", 
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamsForge.Plugins.Crdt", "..\plugins\StreamsForge.Plugins.Crdt\StreamsForge.Plugins.Crdt.csproj", "{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamsForge.Chain.Tests", "tests\StreamsForge.Chain.Tests\StreamsForge.Chain.Tests.csproj", "{93DF4C98-F167-41F8-A003-8F33E4280576}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -313,6 +315,18 @@ Global
 		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Release|x64.Build.0 = Release|Any CPU
 		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Release|x86.ActiveCfg = Release|Any CPU
 		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6}.Release|x86.Build.0 = Release|Any CPU
+		{93DF4C98-F167-41F8-A003-8F33E4280576}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{93DF4C98-F167-41F8-A003-8F33E4280576}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{93DF4C98-F167-41F8-A003-8F33E4280576}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{93DF4C98-F167-41F8-A003-8F33E4280576}.Debug|x64.Build.0 = Debug|Any CPU
+		{93DF4C98-F167-41F8-A003-8F33E4280576}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{93DF4C98-F167-41F8-A003-8F33E4280576}.Debug|x86.Build.0 = Debug|Any CPU
+		{93DF4C98-F167-41F8-A003-8F33E4280576}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{93DF4C98-F167-41F8-A003-8F33E4280576}.Release|Any CPU.Build.0 = Release|Any CPU
+		{93DF4C98-F167-41F8-A003-8F33E4280576}.Release|x64.ActiveCfg = Release|Any CPU
+		{93DF4C98-F167-41F8-A003-8F33E4280576}.Release|x64.Build.0 = Release|Any CPU
+		{93DF4C98-F167-41F8-A003-8F33E4280576}.Release|x86.ActiveCfg = Release|Any CPU
+		{93DF4C98-F167-41F8-A003-8F33E4280576}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -330,5 +344,6 @@ Global
 		{F4D29431-638F-44F9-B573-49E5807419A3} = {08F382F2-8534-4951-913E-69688BB3D7D8}
 		{6F8E620A-F12F-4196-98A9-4EC1F3F1582B} = {08F382F2-8534-4951-913E-69688BB3D7D8}
 		{DBEFA514-DE3D-4AB2-B1D8-7857B95983E6} = {08F382F2-8534-4951-913E-69688BB3D7D8}
+		{93DF4C98-F167-41F8-A003-8F33E4280576} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal

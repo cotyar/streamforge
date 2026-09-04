@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Build order ONLY (ReferenceOutputAssembly="false"): these tests never link against the host,
+         they SPAWN it as a separate OS process out of its own bin/Debug/net10.0 directory and talk to
+         it over REST with HttpClient + System.Text.Json. Referencing the assembly for real would pull
+         Orleans, the plugins and the whole server graph into this test assembly for no benefit, and
+         would make it far too easy to accidentally assert against in-process types instead of the
+         wire. The reference exists so `dotnet build` of the solution always produces the host bin
+         directory this project's fixture runs in place. -->
+    <ProjectReference Include="..\..\src\StreamsForge.Host\StreamsForge.Host.csproj"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>
