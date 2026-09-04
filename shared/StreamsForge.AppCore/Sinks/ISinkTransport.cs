@@ -197,6 +197,15 @@ public sealed class NatsSinkTransport : ISinkTransport
                 Label = "Credentials",
                 Help = "All optional. If more than one is set the server applies: .creds file, then token, then username+password.",
             },
+            new TransportGroup
+            {
+                Key = "tls",
+                Label = "TLS",
+                Optional = true,
+                ObjectKey = "tls",
+                Help = "A tls:// server URL is already enough for a public CA. Set these only for a private CA and/or "
+                     + "mutual TLS.",
+            },
         ],
         Fields =
         [
@@ -213,6 +222,26 @@ public sealed class NatsSinkTransport : ISinkTransport
             {
                 Key = "credentials", Label = ".creds file contents", Type = TransportFieldTypes.Secret, Group = "auth", Mono = true,
                 Placeholder = "Paste the contents of a NATS .creds file",
+            },
+            new TransportField
+            {
+                Key = "caFile", Label = "CA file", Group = "tls", Mono = true, Placeholder = "/etc/streamsforge/nats-ca.pem",
+                Help = "Path on the HOST's filesystem, not file contents — the platform reads it there, not from the catalog.",
+            },
+            new TransportField
+            {
+                Key = "certFile", Label = "Client cert file", Group = "tls", Mono = true, Placeholder = "/etc/streamsforge/nats-client.pem",
+                Help = "Path on the HOST's filesystem. Set together with the key file for mutual TLS.",
+            },
+            new TransportField
+            {
+                Key = "keyFile", Label = "Client key file", Group = "tls", Mono = true, Placeholder = "/etc/streamsforge/nats-client-key.pem",
+                Help = "Path on the HOST's filesystem.",
+            },
+            new TransportField
+            {
+                Key = "insecureSkipVerify", Label = "Skip certificate verification", Type = TransportFieldTypes.Bool, Group = "tls",
+                Help = "DEV ONLY — disables server certificate validation entirely.",
             },
         ],
     };

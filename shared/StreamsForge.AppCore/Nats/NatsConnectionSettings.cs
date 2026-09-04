@@ -25,9 +25,20 @@ public static class NatsConnectionSettings
 {
     /// <summary>Precedence: a .creds file beats a token, which beats user+password. Deliberately an
     /// ordered choice rather than "whichever is set", because a config carrying two credentials is a
-    /// mistake we should resolve the same way every time instead of by field order.</summary>
+    /// mistake we should resolve the same way every time instead of by field order.
+    ///
+    /// <para><b><paramref name="tls"/> is additive, not a replacement for the <c>tls://</c> URL
+    /// scheme.</b> Null (the default) leaves <see cref="NatsOpts.TlsOpts"/> exactly as
+    /// <see cref="NatsOpts.Default"/> sets it — a <c>tls://</c> URL still gets system-trust TLS, a
+    /// plain <c>nats://</c> URL stays plaintext, byte-identical to before this parameter existed.
+    /// Non-null sets only the non-blank paths given and <see cref="NatsTlsOpts.InsecureSkipVerify"/> as
+    /// given; <see cref="NatsTlsOpts.Mode"/> is bumped to <see cref="TlsMode.Require"/> only when at
+    /// least one of those is actually set, so a blank <see cref="Abstractions.NatsTlsConfig"/> (every
+    /// field null/false) behaves exactly like a null one rather than silently forcing TLS on — the
+    /// scheme in <paramref name="url"/> keeps deciding in that case.</para></summary>
     public static NatsOpts Build(
-        string url, string? token, string? username, string? password, string? credentials, string name)
+        string url, string? token, string? username, string? password, string? credentials, string name,
+        NatsTlsConfig? tls = null)
     {
         var resolvedUrl = NamedEndpoints.Resolve(url);
         var opts = NatsOpts.Default with
@@ -35,6 +46,33 @@ public static class NatsConnectionSettings
             Url = string.IsNullOrWhiteSpace(resolvedUrl) ? NatsOpts.Default.Url : resolvedUrl,
             Name = name,
         };
+
+        if (tls is not null)
+        {
+            var hasCaFile = !string.IsNullOrWhiteSpace(tls.CaFile);
+            var hasCertFile = !string.IsNullOrWhiteSpace(tls.CertFile);
+            var hasKeyFile = !string.IsNullOrWhiteSpace(tls.KeyFile);
+            if (hasCaFile || hasCertFile || hasKeyFile || tls.InsecureSkipVerify)
+            {
+                var tlsOpts = opts.TlsOpts with { InsecureSkipVerify = tls.InsecureSkipVerify };
+                if (hasCaFile)
+                {
+                    tlsOpts = tlsOpts with { CaFile = tls.CaFile };
+                }
+
+                if (hasCertFile)
+                {
+                    tlsOpts = tlsOpts with { CertFile = tls.CertFile };
+                }
+
+                if (hasKeyFile)
+                {
+                    tlsOpts = tlsOpts with { KeyFile = tls.KeyFile };
+                }
+
+                opts = opts with { TlsOpts = tlsOpts with { Mode = TlsMode.Require } };
+            }
+        }
 
         if (!string.IsNullOrWhiteSpace(credentials))
         {

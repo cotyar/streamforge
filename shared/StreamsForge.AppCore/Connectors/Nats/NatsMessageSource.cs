@@ -58,7 +58,7 @@ public sealed class NatsClientMessageSource(string clientName) : INatsMessageSou
 
     public async IAsyncEnumerable<NatsInboundMessage> SubscribeAsync(NatsSubConfig config, [EnumeratorCancellation] CancellationToken ct)
     {
-        var opts = NatsConnectionSettings.Build(config.Url, config.Token, config.Username, config.Password, config.Credentials, clientName);
+        var opts = NatsConnectionSettings.Build(config.Url, config.Token, config.Username, config.Password, config.Credentials, clientName, config.Tls);
         var connection = new NatsConnection(opts);
         _connection = connection;
         await connection.ConnectAsync().ConfigureAwait(false);

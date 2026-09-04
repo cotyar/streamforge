@@ -86,4 +86,20 @@ public class ContractFieldNumberTests
         Assert.NotEmpty(ids);
         Assert.Equal(Enumerable.Range(0, ids.Count).ToList(), ids);
     }
+
+    /// <summary>NATS TLS pin: <see cref="NoTwoMembersShareAFieldNumber"/> catches a COLLISION, but not a
+    /// silent renumber that happens to land on an unused id — "field numbers are forever" (CLAUDE.md rule
+    /// 5) means the specific number matters, not just its uniqueness. <c>NatsSubConfig.JetStream</c>
+    /// already occupies <c>[Id(8)]</c>, so <c>Tls</c> is the next free slot at <c>[Id(9)]</c>;
+    /// <c>NatsPubConfig</c>'s highest existing id is <c>Credentials</c> at <c>[Id(5)]</c>, so its
+    /// <c>Tls</c> is <c>[Id(6)]</c>.</summary>
+    [Fact]
+    public void NatsTlsFieldsUseTheNextFreeNumbers()
+    {
+        var subTlsId = typeof(NatsSubConfig).GetProperty(nameof(NatsSubConfig.Tls))!.GetCustomAttribute<IdAttribute>()!.Id;
+        var pubTlsId = typeof(NatsPubConfig).GetProperty(nameof(NatsPubConfig.Tls))!.GetCustomAttribute<IdAttribute>()!.Id;
+
+        Assert.Equal(9, (int)subTlsId);
+        Assert.Equal(6, (int)pubTlsId);
+    }
 }

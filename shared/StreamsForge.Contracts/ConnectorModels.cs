@@ -412,6 +412,36 @@ public sealed class NatsSubConfig
     /// the server. Non-null opts into a JetStream durable consumer, which gets redelivery and acks at
     /// the price of server-side state this platform then owns.</summary>
     [Id(8)] public NatsJetStreamConfig? JetStream { get; set; }
+    /// <summary>Null (default) = today's behaviour unchanged: no <c>TlsOpts</c> is set on the
+    /// connection, so a plain <c>nats://</c> URL stays plaintext and a <c>tls://</c> URL still gets
+    /// system-trust TLS exactly as before this field existed. Non-null opts into client certs and/or a
+    /// private CA — see <see cref="NatsTlsConfig"/>.</summary>
+    [Id(9)] public NatsTlsConfig? Tls { get; set; }
+}
+
+/// <summary>Plan (NATS TLS): client-side TLS material for a NATS connection, layered on top of the
+/// <c>tls://</c> URL scheme rather than replacing it — a <c>tls://</c> URL with system trust needs no
+/// entry here at all, this only exists for a private CA and/or mutual TLS. <see cref="CaFile"/>,
+/// <see cref="CertFile"/> and <see cref="KeyFile"/> are PATHS on the HOST's filesystem, the same
+/// convention <c>FileSinkConfig.Path</c> and <see cref="FixSourceConfig.StorePath"/> already use — not
+/// secrets themselves (a path reveals nothing), so none of the three carries <see cref="SecretAttribute"/>
+/// and none is masked on read. <see cref="InsecureSkipVerify"/> disables server certificate validation
+/// entirely and exists for local/dev brokers with a self-signed cert nobody has trusted yet; it must
+/// never be set against a broker that matters.</summary>
+[GenerateSerializer]
+public sealed class NatsTlsConfig
+{
+    /// <summary>Path to a CA bundle to trust, on the host's filesystem, instead of (or in addition to)
+    /// the system trust store.</summary>
+    [Id(0)] public string? CaFile { get; set; }
+    /// <summary>Path to a client certificate, on the host's filesystem — set together with
+    /// <see cref="KeyFile"/> for mutual TLS.</summary>
+    [Id(1)] public string? CertFile { get; set; }
+    /// <summary>Path to the client certificate's private key, on the host's filesystem.</summary>
+    [Id(2)] public string? KeyFile { get; set; }
+    /// <summary>Skips server certificate validation entirely. DEV-ONLY — never set this against a
+    /// broker that matters.</summary>
+    [Id(3)] public bool InsecureSkipVerify { get; set; }
 }
 
 /// <summary>Plan 009 B1: opt-in JetStream durable consumer. Deliberately not the default — a durable
@@ -600,6 +630,9 @@ public sealed class NatsPubConfig
     [Id(3)] public string? Username { get; set; }
     [Id(4)] [Secret] public string? Password { get; set; }
     [Id(5)] [Secret] public string? Credentials { get; set; }
+    /// <summary>Null (default) = today's behaviour unchanged — see <see cref="NatsSubConfig.Tls"/>'s
+    /// doc comment, which applies identically here.</summary>
+    [Id(6)] public NatsTlsConfig? Tls { get; set; }
 }
 
 /// <summary>Wishlist item 9(a). DELIVERY IS FIRE-AND-FORGET, same honest limit as <see cref="NatsPubConfig"/>

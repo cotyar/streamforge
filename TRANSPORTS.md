@@ -170,6 +170,16 @@ the throttled `onFailure` callback, and drop. Copy
 
 Register in `SinkTransports.Registered`, same as above.
 
+### TLS (`nats` inbound and outbound)
+
+`NatsSubConfig.Tls` / `NatsPubConfig.Tls` (both `NatsTlsConfig?`, null by default) add four optional
+fields — `caFile`, `certFile`, `keyFile` (all paths on the **host's** filesystem, not file contents,
+the same convention `FileSinkConfig.Path` uses) and `insecureSkipVerify` — layered on top of, not
+instead of, the `tls://` URL scheme: a `tls://` server URL with a publicly-trusted cert needs none of
+this. Set the CA/cert/key paths for a private CA and/or mutual TLS. `insecureSkipVerify` disables
+server certificate validation entirely and is **dev-only** — never set it against a broker that
+matters.
+
 ---
 
 ## What environment isolation (plan 021) does to a transport

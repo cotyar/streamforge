@@ -80,7 +80,7 @@ public sealed class NatsSinkClient : ISinkClient
         _onFailure = onFailure;
         var opts = NatsConnectionSettings.Build(
             config.Url, config.Token, config.Username, config.Password, config.Credentials,
-            name: $"streamsforge-sink-{entityKind}-{entityName}");
+            name: $"streamsforge-sink-{entityKind}-{entityName}", tls: config.Tls);
         _connection = new NatsConnection(opts);
         EntityName = entityName;
     }
