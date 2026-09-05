@@ -173,6 +173,9 @@ public static class EntityResume
                 qualifiedName,
                 inputs.StreamInputs.Select(s => EnvKeys.Qualify(table.Environment, s)).ToList(),
                 inputs.TableInputs.Select(t => EnvKeys.Qualify(table.Environment, t)).ToList());
+            // Pipeline inputs are keyed by BARE pipeline id (globally unique) — see
+            // TableEventRouter.RegisterPipelineInputs — so no qualification here.
+            router.RegisterPipelineInputs(qualifiedName, inputs.PipelineInputs ?? []);
             return;
         }
 

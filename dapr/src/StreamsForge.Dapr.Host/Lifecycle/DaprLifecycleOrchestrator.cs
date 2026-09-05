@@ -232,14 +232,14 @@ public sealed partial class DaprLifecycleOrchestrator(
             return LifecycleOutcome.Failure(result.Error ?? "pipeline failed to start");
         }
 
-        // Plan 021 D6: the compiled source names PipelineActor.StartAsync resolved are BARE (compiled
-        // against this pipeline's own environment's catalog — see CatalogStore.BuildStreamSchemas, which
-        // never needs qualification itself because each RegistryActor's state is already one environment's
-        // whole catalog, D1). The ROUTER's index is shared process-wide across every environment's
-        // generators publishing on the same five fixed topics (D6), so its keys — and the envelope.Source
-        // every publisher stamps — have to be qualified here, at the boundary, or two same-named sources
-        // in two environments would collide in one dictionary entry and cross-route each other's events.
-        pipelineRouter.Register(def.Id, (result.Value ?? []).Select(s => EnvKeys.Qualify(def.Environment, s)).ToList());
+        // Plan 025 (PARITY.md D6, late-consumer replay): PipelineActor.StartAsync now registers itself
+        // with PipelineEventRouter INSIDE its own actor turn — between taking every connector source's
+        // attach hold and feeding the replayed rows — for the same subscribe-then-attach reason
+        // TableActor.StartAsync took over its own registration in D2. Registering here again after the
+        // call returned used to be the ONLY registration (with the plan 021 D6 qualification of the bare
+        // compiled names at this boundary, which the actor now does itself); it would be an idempotent
+        // duplicate, so it is gone. The failure-branch Unregister above stays: a failed start must leave
+        // no stale route behind.
         return LifecycleOutcome.Success;
     }
 

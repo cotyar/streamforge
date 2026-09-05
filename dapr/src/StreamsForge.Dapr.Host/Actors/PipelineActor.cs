@@ -240,7 +240,7 @@ public sealed class PipelineActor(
             }
 
             // Phase 2: routable from here on. Idempotent (Register replaces this pipeline's subscription
-            // set), so the orchestrator's own later call and a supervisor sweep's repair are both no-ops.
+            // set), so a supervisor sweep's repair (BootResume.EnsurePipelineRunningAsync) is a no-op.
             pipelineRouter.Register(_def.Id, _sourceNames.Select(s => EnvKeys.Qualify(environment, s)).ToList());
 
             // Phase 3: feed the snapshots through the SAME handler live traffic uses, so windows/joins are

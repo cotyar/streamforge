@@ -66,7 +66,12 @@ public sealed class EntityStreamFanout : ISourceEventsSink, ITableDeltaSink, IPi
 
     public Task<IAsyncDisposable> SubscribePipelineAsync(
         string environment, string pipelineId, Func<IReadOnlyList<ResultEnvelope>, Task> onResults)
-        => Task.FromResult(Add(_pipelines, EnvKeys.Qualify(environment, pipelineId),
+        // Keyed by the BARE pipeline id, not EnvKeys.Qualify(environment, id): PipelineActor publishes
+        // PipelineResultsEnvelope.PipelineId unqualified (a pipeline id is a GUID, already globally
+        // unique — the same reason TableEventRouter.RegisterPipelineInputs keys bare). In the default
+        // environment Qualify("", id) == id, which is why this was invisible live; in any other
+        // environment a qualified key would never match an envelope.
+        => Task.FromResult(Add(_pipelines, pipelineId,
             payload => onResults((IReadOnlyList<ResultEnvelope>)payload)));
 
     public Task<IAsyncDisposable> SubscribeTableAsync(
