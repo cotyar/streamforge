@@ -47,7 +47,7 @@ public class TableDeltaSequencingTests
     [Fact]
     public void ConsecutiveNonEmptyBatches_IncrementSeqStrictlyMonotonically()
     {
-        var (executor, _, _, error) = TableCompilation.TryCompile(Positions(), [Trades()], []);
+        var (executor, _, _, _, error) = TableCompilation.TryCompile(Positions(), [Trades()], []);
         Assert.NotNull(executor);
         Assert.Null(error);
 
@@ -75,7 +75,7 @@ public class TableDeltaSequencingTests
     [Fact]
     public void EmptyBatch_NeverIncrementsSeq()
     {
-        var (executor, _, _, _) = TableCompilation.TryCompile(Positions(), [Trades()], []);
+        var (executor, _, _, _, _) = TableCompilation.TryCompile(Positions(), [Trades()], []);
         Assert.NotNull(executor);
 
         long seq = 0;

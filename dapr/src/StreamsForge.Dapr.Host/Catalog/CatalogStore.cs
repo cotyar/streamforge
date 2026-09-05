@@ -93,9 +93,35 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             dirty = true;
         }
 
+        // Plan 011 Wave A backfill, extended by plan 025 (table-over-pipeline) to OutputFields too — see
+        // RegistryGrain.EnsureInitializedAsync's identical comment for the full rationale. Pipelines are
+        // seeded RAW (unlike tables, below) and Create/Update are the only other writers of SourceNames/
+        // OutputFields (ApplyPipelineCompileResult), so any pipeline that has never been through either —
+        // freshly seeded above, or durably persisted from before one of these two fields existed — still
+        // carries an empty one and draws no lineage edge / offers no relation. Runs for BOTH cases (seed
+        // and restore) since it's driven off the data, not off whether seeding just happened. Must run
+        // after Sources are loaded (above, unconditionally) so BuildStreamSchemas() has something to
+        // compile against, and — this is the plan 025 addition, load-bearing rather than cosmetic — it
+        // MOVED ABOVE the table-seed block below: a seeded table over a seeded pipeline needs the
+        // pipeline's OutputFields populated before it can appear in BuildStreamSchemas() at all. Nothing
+        // in today's SeedCatalog.Tables() reads a pipeline, but a promoted/imported catalog could, and the
+        // ordering has to hold regardless. Draft-friendly like the create/update paths: a pipeline whose
+        // SQL doesn't currently compile is left with an empty SourceNames/OutputFields rather than
+        // throwing or blocking initialization.
+        foreach (var pipeline in state.Pipelines.Where(p => p.SourceNames.Count == 0 || p.OutputFields.Count == 0))
+        {
+            var compileResult = SqlCompiler.Compile(pipeline.Sql, BuildStreamSchemas());
+            if (compileResult.Ok && compileResult.SourceNames.Count > 0)
+            {
+                ApplyPipelineCompileResult(pipeline, compileResult);
+                dirty = true;
+            }
+        }
+
         if (state.Tables.Count == 0)
         {
-            var streamSchemas = BuildStreamSchemas();
+            var streamSchemas = BuildTableStreamSchemas();
+            var pipelineNames = PipelineNameSet();
             var tableSchemas = new Dictionary<string, SourceSchema>();
             var seeds = SeedCatalog.Tables();
             foreach (var t in seeds)
@@ -105,7 +131,11 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
                 if (result.Ok && result.OutputSchema is not null)
                 {
                     t.OutputFields = result.OutputSchema.Fields.Select(kv => new FieldDef(kv.Key, MapFieldType(kv.Value))).ToList();
-                    t.StreamInputs = result.StreamInputs.ToList();
+                    // Table-over-pipeline: split the compiled stream relations by pipeline-name membership
+                    // — mirrors ApplyCompileResult exactly (see that method's doc comment for why the
+                    // split has to be total).
+                    t.StreamInputs = result.StreamInputs.Where(n => !pipelineNames.Contains(n)).ToList();
+                    t.PipelineInputs = result.StreamInputs.Where(pipelineNames.Contains).ToList();
                     t.TableInputs = result.TableInputs.ToList();
                     t.KeyFields = TableKeyFields.Describe(t.Sql, result.Plan);
                     tableSchemas[t.Name] = result.OutputSchema;
@@ -124,25 +154,6 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
             dirty = true;
         }
 
-        // Plan 011 Wave A backfill: pipelines are seeded RAW (unlike tables, above) and Create/Update are
-        // the only other writers of SourceNames (ApplyPipelineCompileResult), so any pipeline that has
-        // never been through either — freshly seeded above, or durably persisted from before this backfill
-        // existed — still carries an empty SourceNames and draws no lineage edge. Runs for BOTH cases
-        // (seed and restore) since it's driven off the data (SourceNames.Count == 0), not off whether
-        // seeding just happened. Must run after Sources are loaded (above, unconditionally) so
-        // BuildStreamSchemas() has something to compile against. Draft-friendly like the create/update
-        // paths: a pipeline whose SQL doesn't currently compile is left with an empty SourceNames rather
-        // than throwing or blocking initialization.
-        foreach (var pipeline in state.Pipelines.Where(p => p.SourceNames.Count == 0))
-        {
-            var compileResult = SqlCompiler.Compile(pipeline.Sql, BuildStreamSchemas());
-            if (compileResult.Ok && compileResult.SourceNames.Count > 0)
-            {
-                ApplyPipelineCompileResult(pipeline, compileResult);
-                dirty = true;
-            }
-        }
-
         return dirty;
     }
 
@@ -156,6 +167,18 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
     public async Task UpsertSourceAsync(SourceDefinition def)
     {
+        // Table-over-pipeline (plan 025) — the mirror of ValidateUniquePipelineName's source check. A
+        // source name is a relation name too, and must not become the second meaning of a name a pipeline
+        // already owns. Checked on every upsert (create AND update), mirroring
+        // RegistryGrain.UpsertSourceAsync exactly: a source cannot be renamed, so an update can only
+        // re-assert its own name, and re-asserting a name that has since collided is exactly the case
+        // worth catching.
+        if (state.Pipelines.Any(p => string.Equals(p.Name, def.Name, StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException(
+                $"Name '{def.Name}' is already used by a pipeline — a table's SQL resolves a relation name to exactly one entity");
+        }
+
         var idx = state.Sources.FindIndex(s => s.Name == def.Name);
         bool schemaChanged;
         if (idx >= 0)
@@ -297,6 +320,17 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         return def;
     }
 
+    /// <summary>Table-over-pipeline (plan 025) — mirrors <c>RegistryGrain.DeletePipelineAsync</c> exactly:
+    /// a table reading this pipeline is NOT refused, and is NOT stopped — exactly what already happens
+    /// when a SOURCE a table reads is deleted (<see cref="DeleteSourceAsync"/> takes no census of
+    /// dependents either). The table stays Running on its already-compiled plan and simply receives
+    /// nothing more from this input; its persisted <c>OutputFields</c> are left alone, because
+    /// <see cref="RefreshTableSchemas"/> skips a table whose SQL no longer compiles, and stale beats
+    /// absent for a published <c>/proto</c> contract. The visible signal is <c>StaleReason</c>, set by
+    /// <see cref="RecomputeStaleReasons"/> below when a table/pipeline carries a pin that named this
+    /// pipeline. <see cref="ThrowIfRunningDependents"/> (the table-over-TABLE refusal) is deliberately NOT
+    /// extended here: it exists because an upstream TABLE's own shard/delta tier is the dependent's
+    /// durable state; a pipeline owns no such state on the dependent's behalf.</summary>
     public async Task<bool> DeletePipelineAsync(string id)
     {
         var existing = state.Pipelines.FirstOrDefault(p => p.Id == id);
@@ -311,6 +345,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         }
 
         state.Pipelines.Remove(existing);
+        RecomputeStaleReasons(); // a deleted pipeline breaks every pin that named it — see doc comment above.
         await orchestrator.PublishLifecycleAsync(id, "deleted", PipelineStatus.Stopped);
         return true;
     }
@@ -485,7 +520,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         if ((sqlChanged || searchChanged || parallelismChanged || persistenceChanged || retentionChanged) && wasRunning)
         {
             await orchestrator.StopTableAsync(def.Name, environment);
-            var outcome = await orchestrator.StartTableAsync(def, state.Sources, state.Tables);
+            var outcome = await orchestrator.StartTableAsync(def, state.Sources, state.Tables, state.Pipelines);
             if (outcome.Ok)
             {
                 def.Status = PipelineStatus.Running;
@@ -543,6 +578,13 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
         if (status == PipelineStatus.Running)
         {
+            // Table-over-pipeline (plan 025): deliberately TableInputs only, never PipelineInputs —
+            // mirrors RegistryGrain.SetTableStatusAsync exactly. A table over a STOPPED (or deleted)
+            // pipeline is legal and starts fine; it simply receives nothing until that pipeline runs,
+            // because a pipeline has no replay ring/snapshot to backfill from (hard rule 6) — the same
+            // reason DeletePipelineAsync above does not refuse a running dependent either. Only a
+            // table-over-table dependency is refused here, because an upstream TABLE's own delta tier is
+            // what a stopped/never-started upstream would leave this table permanently missing.
             var missing = existing.TableInputs
                 .Where(name => state.Tables.FirstOrDefault(t => t.Name == name)?.Status != PipelineStatus.Running)
                 .ToList();
@@ -556,7 +598,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
                 return existing;
             }
 
-            var outcome = await orchestrator.StartTableAsync(existing, state.Sources, state.Tables);
+            var outcome = await orchestrator.StartTableAsync(existing, state.Sources, state.Tables, state.Pipelines);
             if (outcome.Ok)
             {
                 existing.Status = PipelineStatus.Running;
@@ -725,22 +767,49 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         {
             throw new InvalidOperationException($"Name '{name}' is already used by a stream source");
         }
+        // Table-over-pipeline (plan 025) — the third leg of the relation-name uniqueness triangle; see
+        // ValidateUniquePipelineName below for the argument. Mirrors RegistryGrain.ValidateUniqueTableName
+        // exactly.
+        if (state.Pipelines.Any(p => string.Equals(p.Name, name, StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException(
+                $"Name '{name}' is already used by a pipeline — a table's SQL resolves a relation name to exactly one entity");
+        }
         if (state.Tables.Any(t => t.Id != excludeTableId && string.Equals(t.Name, name, StringComparison.Ordinal)))
         {
             throw new InvalidOperationException($"Name '{name}' is already used by another table");
         }
     }
 
-    /// <summary>Plan 016 wave 1-C — pipeline names unique among PIPELINES only (not against sources and
-    /// tables: pipelines are not in the SQL namespace, so a pipeline named <c>trades</c> reading
-    /// <c>FROM trades</c> is legal and stays legal). Ported from
-    /// <c>RegistryGrain.ValidateUniquePipelineName</c> — see that method for the full rationale, including
-    /// why there is no migration and no boot check.</summary>
+    /// <summary>Plan 016 wave 1-C — pipeline names unique among PIPELINES; extended by plan 025
+    /// (table-over-pipeline) to ALSO be unique against sources and tables. Before that plan a pipeline
+    /// named <c>trades</c> reading <c>FROM trades</c> was legal and stayed legal, because pipelines were
+    /// not in the SQL namespace at all. They are now: <see cref="PipelineDefinition.OutputFields"/> lets a
+    /// TABLE name a pipeline as a relation exactly like a source or another table, so a pipeline name must
+    /// be unique against everything else a relation name can resolve to, on the same terms
+    /// <see cref="ValidateUniqueTableName"/> already enforces for tables — without this, <c>FROM foo</c> in
+    /// a table's SQL would name both a source/table and a pipeline, and which one it got would be decided
+    /// by dictionary-insertion order in <see cref="BuildStreamSchemas"/>, an executable catalog whose
+    /// meaning is an implementation detail. Ported from <c>RegistryGrain.ValidateUniquePipelineName</c> —
+    /// see that method for the full rationale, including why there is no migration and no boot check: a
+    /// catalog that already holds such a pair (from before this guard existed) keeps working until one of
+    /// the two is next written.</summary>
     private void ValidateUniquePipelineName(string name, string? excludePipelineId)
     {
         if (state.Pipelines.Any(p => p.Id != excludePipelineId && string.Equals(p.Name, name, StringComparison.Ordinal)))
         {
             throw new InvalidOperationException($"Name '{name}' is already used by another pipeline");
+        }
+
+        if (state.Sources.Any(s => string.Equals(s.Name, name, StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException(
+                $"Name '{name}' is already used by a stream source — a table's SQL resolves a relation name to exactly one entity");
+        }
+        if (state.Tables.Any(t => string.Equals(t.Name, name, StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException(
+                $"Name '{name}' is already used by a table — a table's SQL resolves a relation name to exactly one entity");
         }
     }
 
@@ -865,23 +934,54 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
 
     private TableCompileResult CompileTableSql(string sql, string? excludeTableId)
     {
-        var streamSchemas = BuildStreamSchemas();
+        var streamSchemas = BuildTableStreamSchemas();
         var tableSchemas = BuildTableSchemas(excludeTableId);
         return SqlCompiler.CompileTable(sql, streamSchemas, tableSchemas);
     }
 
     /// <summary>Plan 008 W5: stores SourceNames from a pipeline compile result when it compiles; leaves it
     /// empty otherwise — the pipeline-side counterpart of <see cref="ApplyCompileResult"/> below (tables'
-    /// StreamInputs/TableInputs). Mirrors RegistryGrain's identically-named helper.</summary>
-    private static void ApplyPipelineCompileResult(PipelineDefinition def, CompileResult result) =>
+    /// StreamInputs/PipelineInputs/TableInputs). Mirrors RegistryGrain's identically-named helper.
+    ///
+    /// <para>Table-over-pipeline (plan 025) also fills <see cref="PipelineDefinition.OutputFields"/> here,
+    /// from the same <c>OutputSchema</c>/<see cref="MapFieldType"/> pair the table side has always used —
+    /// a pipeline needs a published schema before a table can name it as a relation, and this is the only
+    /// place a pipeline's compile result is ever stored. Cleared on a failed compile for the same reason
+    /// the table side clears its own: a stale schema for SQL that no longer compiles is worse than none,
+    /// because <see cref="BuildStreamSchemas"/> would keep offering it as a live relation.</para></summary>
+    private static void ApplyPipelineCompileResult(PipelineDefinition def, CompileResult result)
+    {
         def.SourceNames = result.Ok ? result.SourceNames.ToList() : [];
+        def.OutputFields = result.Ok && result.OutputSchema is not null
+            ? result.OutputSchema.Fields.Select(kv => new FieldDef(kv.Key, MapFieldType(kv.Value))).ToList()
+            : [];
+    }
 
-    private static void ApplyCompileResult(TableDefinition def, TableCompileResult result)
+    /// <summary>Every pipeline NAME in this environment's catalog — the key that splits a compiled
+    /// <c>StreamInputs</c> list into source inputs and pipeline inputs (see <see cref="ApplyCompileResult"/>).
+    /// Names are unique across sources, tables and pipelines by construction (see
+    /// <see cref="ValidateUniquePipelineName"/>, <see cref="ValidateUniqueTableName"/> and
+    /// <see cref="UpsertSourceAsync"/>'s guard), so membership here is decisive, not a guess. Mirrors
+    /// RegistryGrain's identically-named helper.</summary>
+    private HashSet<string> PipelineNameSet() => state.Pipelines.Select(p => p.Name).ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>Stores OutputFields/StreamInputs/PipelineInputs/TableInputs from a compile result when it
+    /// compiles; leaves them empty otherwise.
+    ///
+    /// <para>Table-over-pipeline (plan 025): the engine returns ONE list of stream relations, because a
+    /// relation is (name, schema) and it has no reason to care which catalog entity published the schema.
+    /// Splitting that list by "is this name a pipeline?" is this method's job — mirrors
+    /// <c>RegistryGrain.ApplyCompileResult</c> exactly, including why the split must be total: a name in
+    /// neither set cannot occur (the compile would have rejected an unknown relation), and a name in both
+    /// cannot occur (the create/upsert paths above refuse that collision).</para></summary>
+    private void ApplyCompileResult(TableDefinition def, TableCompileResult result)
     {
         if (result.Ok && result.OutputSchema is not null)
         {
+            var pipelineNames = PipelineNameSet();
             def.OutputFields = result.OutputSchema.Fields.Select(kv => new FieldDef(kv.Key, MapFieldType(kv.Value))).ToList();
-            def.StreamInputs = result.StreamInputs.ToList();
+            def.StreamInputs = result.StreamInputs.Where(n => !pipelineNames.Contains(n)).ToList();
+            def.PipelineInputs = result.StreamInputs.Where(pipelineNames.Contains).ToList();
             def.TableInputs = result.TableInputs.ToList();
             def.KeyFields = TableKeyFields.Describe(def.Sql, result.Plan);
         }
@@ -889,6 +989,7 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         {
             def.OutputFields = [];
             def.StreamInputs = [];
+            def.PipelineInputs = [];
             def.TableInputs = [];
             def.KeyFields = null;
         }
@@ -917,8 +1018,48 @@ public sealed class CatalogStore(CatalogState state, ILifecycleOrchestrator orch
         }
     }
 
+    /// <summary>The stream-relation dictionary a PIPELINE compiles against: sources only. A pipeline still
+    /// reads sources only (never another pipeline, and never a table) — that is what keeps the
+    /// source→pipeline→table dependency graph acyclic (AGENTS.md hard rule 6). Mirrors
+    /// <c>RegistryGrain.BuildStreamSchemas</c> exactly, including staying the sources-only helper even
+    /// after table-over-pipeline (plan 025) added <see cref="BuildTableStreamSchemas"/> alongside it for
+    /// TABLE compiles — <see cref="CreatePipelineAsync"/>/<see cref="UpdatePipelineAsync"/>/the pipeline
+    /// backfill loop in <see cref="EnsureInitialized"/> all deliberately keep calling this one, not
+    /// that one.</summary>
     private Dictionary<string, SourceSchema> BuildStreamSchemas() =>
         state.Sources.ToDictionary(s => s.Name, s => new SourceSchema(s.Name, s.Fields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type))));
+
+    /// <summary>The stream-relation dictionary a TABLE compiles against: every source, plus —
+    /// table-over-pipeline (plan 025) — every pipeline that has a compiled output schema. A pipeline with
+    /// empty <c>OutputFields</c> (draft SQL, or a record written before that field existed and not yet
+    /// backfilled — see <see cref="EnsureInitialized"/>) contributes no relation; naming it is then an
+    /// ordinary "unknown relation" diagnostic rather than a compile against a schema that is empty because
+    /// nobody filled it in. Sources win a name collision here purely as a defensive tiebreak — the write
+    /// paths refuse to create one in the first place (<see cref="ValidateUniquePipelineName"/>/
+    /// <see cref="UpsertSourceAsync"/>'s guard), because a relation name that resolves to two different
+    /// streams is not a preference to be expressed, it is a catalog that cannot be executed unambiguously.
+    /// Mirrors Orleans' <c>PipelineInputs.BuildStreamSchemas(sources, pipelines)</c> exactly (this flavor
+    /// has no separate helper class for it — see that type's own doc comment for the full "why the engine
+    /// never learns about this" rationale, which applies verbatim here). <b>Never used for a PIPELINE's own
+    /// compile</b> — see <see cref="BuildStreamSchemas"/>'s doc comment for why a pipeline reading another
+    /// pipeline would break the graph's acyclic guarantee.</summary>
+    private Dictionary<string, SourceSchema> BuildTableStreamSchemas()
+    {
+        var schemas = new Dictionary<string, SourceSchema>(StringComparer.Ordinal);
+
+        foreach (var p in state.Pipelines)
+        {
+            if (p.OutputFields.Count == 0) continue;
+            schemas[p.Name] = new SourceSchema(p.Name, p.OutputFields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type)));
+        }
+
+        foreach (var s in state.Sources)
+        {
+            schemas[s.Name] = new SourceSchema(s.Name, s.Fields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type)));
+        }
+
+        return schemas;
+    }
 
     private Dictionary<string, SourceSchema> BuildTableSchemas(string? excludeTableId) =>
         state.Tables

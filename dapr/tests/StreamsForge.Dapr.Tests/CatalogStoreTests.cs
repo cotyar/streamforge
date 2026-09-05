@@ -344,6 +344,165 @@ public class CatalogStoreTests
         Assert.Contains($"StopPipeline:{created.Id}", orchestrator.Calls);
     }
 
+    // ------------------------------------------------------------------
+    // Table-over-pipeline (plan 025, PARITY.md D6) — a pipeline's compiled output schema
+    // (PipelineDefinition.OutputFields) lets a table name it as a relation exactly like a source or
+    // another table. See Catalog.CatalogStore.BuildTableStreamSchemas/ApplyCompileResult/
+    // ApplyPipelineCompileResult for the implementation this exercises.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public async Task CreatePipelineAsync_CompilesSql_SetsOutputFields()
+    {
+        var (state, store, _) = NewStore();
+        state.Sources.Add(new SourceDefinition { Name = "trades", Fields = [new FieldDef("qty", FieldType.Long)] });
+
+        var created = await store.CreatePipelineAsync(new PipelineDefinition { Name = "p1", Sql = "SELECT qty FROM trades" });
+
+        Assert.NotEmpty(created.OutputFields);
+    }
+
+    [Fact]
+    public async Task UpdatePipelineAsync_RecompilesSql_UpdatesOutputFields()
+    {
+        var (state, store, _) = NewStore();
+        state.Sources.Add(new SourceDefinition
+        {
+            Name = "trades",
+            Fields = [new FieldDef("qty", FieldType.Long), new FieldDef("price", FieldType.Double)],
+        });
+        var created = await store.CreatePipelineAsync(new PipelineDefinition { Name = "p1", Sql = "SELECT qty FROM trades" });
+        Assert.Single(created.OutputFields);
+
+        created.Sql = "SELECT qty, price FROM trades";
+        var updated = await store.UpdatePipelineAsync(created);
+
+        Assert.Equal(2, updated!.OutputFields.Count);
+    }
+
+    [Fact]
+    public void EnsureInitialized_BackfillsPipelineOutputFieldsForPreExistingRecords()
+    {
+        // Mirrors RegistryGrain.EnsureInitializedAsync's backfill: a pipeline persisted before OutputFields
+        // existed (SourceNames already set, OutputFields still empty) gets it filled in from the data,
+        // driven purely by the empty-field predicate — not by whether seeding just happened.
+        var (state, store, _) = NewStore();
+        state.Sources.Add(new SourceDefinition { Name = "trades", Fields = [new FieldDef("qty", FieldType.Long)] });
+        var pipeline = new PipelineDefinition
+        {
+            Id = "p1",
+            Name = "p1",
+            Sql = "SELECT qty FROM trades",
+            SourceNames = ["trades"],
+            OutputFields = [],
+        };
+        state.Pipelines.Add(pipeline);
+
+        var dirty = store.EnsureInitialized();
+
+        Assert.True(dirty);
+        Assert.NotEmpty(pipeline.OutputFields);
+    }
+
+    [Fact]
+    public async Task CreateTableAsync_OverPipeline_ReportsPipelineInputNotStreamInput()
+    {
+        var (state, store, _) = NewStore();
+        state.Sources.Add(new SourceDefinition { Name = "trades", Fields = [new FieldDef("qty", FieldType.Long)] });
+        await store.CreatePipelineAsync(new PipelineDefinition { Name = "vwap", Sql = "SELECT qty FROM trades" });
+
+        var table = await store.CreateTableAsync(new TableDefinition { Name = "t1", Sql = "SELECT qty FROM vwap" });
+
+        Assert.Empty(table.StreamInputs);
+        Assert.Contains("vwap", table.PipelineInputs);
+        Assert.NotEmpty(table.OutputFields);
+    }
+
+    [Fact]
+    public async Task UpsertSourceAsync_NameCollidesWithPipeline_Throws()
+    {
+        var (_, store, _) = NewStore();
+        await store.CreatePipelineAsync(new PipelineDefinition { Name = "p1", Sql = "SELECT 1" });
+
+        var def = new SourceDefinition { Name = "p1", Fields = [new FieldDef("x", FieldType.Long)] };
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => store.UpsertSourceAsync(def));
+        Assert.Contains("already used by a pipeline", ex.Message);
+    }
+
+    [Fact]
+    public async Task CreatePipelineAsync_NameCollidesWithSource_Throws()
+    {
+        var (state, store, _) = NewStore();
+        state.Sources.Add(new SourceDefinition { Name = "trades", Fields = [new FieldDef("x", FieldType.Long)] });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            store.CreatePipelineAsync(new PipelineDefinition { Name = "trades", Sql = "SELECT 1" }));
+        Assert.Contains("already used by a stream source", ex.Message);
+    }
+
+    [Fact]
+    public async Task CreatePipelineAsync_NameCollidesWithTable_Throws()
+    {
+        var (state, store, _) = NewStore();
+        state.Sources.Add(new SourceDefinition { Name = "trades", Fields = [new FieldDef("qty", FieldType.Long)] });
+        await store.CreateTableAsync(new TableDefinition { Name = "positions", Sql = "SELECT qty FROM trades" });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            store.CreatePipelineAsync(new PipelineDefinition { Name = "positions", Sql = "SELECT 1" }));
+        Assert.Contains("already used by a table", ex.Message);
+    }
+
+    [Fact]
+    public async Task CreateTableAsync_DuplicateNameAgainstPipeline_Throws()
+    {
+        var (_, store, _) = NewStore();
+        await store.CreatePipelineAsync(new PipelineDefinition { Name = "p1", Sql = "SELECT 1" });
+
+        var def = new TableDefinition { Name = "p1", Sql = "SELECT 1 AS x" };
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => store.CreateTableAsync(def));
+        Assert.Contains("already used by a pipeline", ex.Message);
+    }
+
+    [Fact]
+    public async Task SetTableStatusAsync_StartOverStoppedPipelineInput_SucceedsWithoutRefusal()
+    {
+        // Mirrors RegistryGrain.SetTableStatusAsync: unlike a table-over-table dependency, a stopped (or
+        // never-started) PIPELINE input is NOT refused at start — the table simply receives nothing until
+        // that pipeline runs (pipelines have no replay/attach, hard rule 6).
+        var (state, store, _) = NewStore();
+        state.Sources.Add(new SourceDefinition { Name = "trades", Fields = [new FieldDef("qty", FieldType.Long)] });
+        await store.CreatePipelineAsync(new PipelineDefinition { Name = "vwap", Sql = "SELECT qty FROM trades" });
+        // The pipeline is created Stopped (CreatePipelineAsync's contract) and never started.
+        var table = await store.CreateTableAsync(new TableDefinition { Name = "t1", Sql = "SELECT qty FROM vwap" });
+
+        var result = await store.SetTableStatusAsync(table.Id, PipelineStatus.Running);
+
+        Assert.Equal(PipelineStatus.Running, result!.Status);
+        Assert.Null(result.Error);
+    }
+
+    [Fact]
+    public async Task DeletePipelineAsync_WithRunningDependentTable_SucceedsWithoutRefusal()
+    {
+        // Mirrors RegistryGrain.DeletePipelineAsync: a table reading this pipeline is NOT refused and NOT
+        // stopped — exactly what already happens when a SOURCE a table reads is deleted. Unlike
+        // DeleteTableAsync's ThrowIfRunningDependents (table-over-table), there is no equivalent guard for
+        // table-over-pipeline: a pipeline owns no durable state on the dependent's behalf.
+        var (state, store, _) = NewStore();
+        state.Sources.Add(new SourceDefinition { Name = "trades", Fields = [new FieldDef("qty", FieldType.Long)] });
+        var pipeline = await store.CreatePipelineAsync(new PipelineDefinition { Name = "vwap", Sql = "SELECT qty FROM trades" });
+        var table = await store.CreateTableAsync(new TableDefinition { Name = "t1", Sql = "SELECT qty FROM vwap" });
+        await store.SetTableStatusAsync(table.Id, PipelineStatus.Running);
+
+        var removed = await store.DeletePipelineAsync(pipeline.Id);
+
+        Assert.True(removed);
+        Assert.DoesNotContain(state.Pipelines, p => p.Id == pipeline.Id);
+        Assert.Equal(PipelineStatus.Running, state.Tables.First(t => t.Id == table.Id).Status);
+    }
+
     [Fact]
     public void EnsureFieldNumbers_AssignsSequentialNumbersAndIsStableAcrossCalls()
     {

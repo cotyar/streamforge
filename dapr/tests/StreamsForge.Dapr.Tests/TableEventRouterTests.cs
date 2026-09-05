@@ -118,6 +118,73 @@ public class TableEventRouterTests
     }
 
     // ------------------------------------------------------------------
+    // Table-over-pipeline (plan 025) — RegisterPipelineInputs/PipelineSubscribersOf/OnPipelineResultsAsync.
+    // A separate routing table from Register's (streams/tables) — see RegisterPipelineInputs' own doc
+    // comment for why it is a SEPARATE public method rather than a wider Register parameter list.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void RegisterPipelineInputs_TracksTableAgainstEachPipelineId()
+    {
+        var router = NewRouter();
+
+        router.RegisterPipelineInputs("vwap_table", ["pipeline-1"]);
+
+        Assert.Contains("vwap_table", router.PipelineSubscribersOf("pipeline-1"));
+        Assert.Empty(router.PipelineSubscribersOf("pipeline-2"));
+    }
+
+    [Fact]
+    public void RegisterPipelineInputs_CalledAgainForSameTable_ReplacesItsPreviousSet()
+    {
+        var router = NewRouter();
+        router.RegisterPipelineInputs("t1", ["pipeline-1"]);
+
+        router.RegisterPipelineInputs("t1", ["pipeline-2"]);
+
+        Assert.DoesNotContain("t1", router.PipelineSubscribersOf("pipeline-1"));
+        Assert.Contains("t1", router.PipelineSubscribersOf("pipeline-2"));
+    }
+
+    [Fact]
+    public void RegisterPipelineInputs_DoesNotDisturbStreamOrTableRegistrations()
+    {
+        // RegisterPipelineInputs must not clobber (or be clobbered by) Register's own streams/tables sets
+        // — the two are independent so TableActor can call Register THEN RegisterPipelineInputs without
+        // one wiping the other. See RegisterPipelineInputs' own doc comment.
+        var router = NewRouter();
+        router.Register("t1", ["trades"], ["positions"]);
+
+        router.RegisterPipelineInputs("t1", ["pipeline-1"]);
+
+        Assert.Contains("t1", router.StreamSubscribersOf("trades"));
+        Assert.Contains("t1", router.TableSubscribersOf("positions"));
+        Assert.Contains("t1", router.PipelineSubscribersOf("pipeline-1"));
+    }
+
+    [Fact]
+    public void Unregister_AlsoRemovesPipelineRegistrations()
+    {
+        var router = NewRouter();
+        router.Register("t1", ["trades"], []);
+        router.RegisterPipelineInputs("t1", ["pipeline-1"]);
+
+        router.Unregister("t1");
+
+        Assert.DoesNotContain("t1", router.StreamSubscribersOf("trades"));
+        Assert.DoesNotContain("t1", router.PipelineSubscribersOf("pipeline-1"));
+    }
+
+    [Fact]
+    public async Task OnPipelineResultsAsync_PipelineWithNoSubscribers_CompletesWithoutError()
+    {
+        var router = NewRouter();
+
+        await router.OnPipelineResultsAsync(new PipelineResultsEnvelope { PipelineId = "unrouted" });
+        // No assertion beyond "didn't throw".
+    }
+
+    // ------------------------------------------------------------------
     // ExcludeSelf — the pure self-filter OnTableDeltaAsync applies before dispatch (see class doc: "a
     // table must never receive its own output deltas"). Tested directly since the dispatch path itself
     // needs a live actor proxy to observe end-to-end.

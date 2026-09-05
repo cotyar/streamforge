@@ -88,14 +88,21 @@ public class CatalogStoreNamePolicyTests
             new PipelineDefinition { Id = created.Id, Name = "new", Sql = created.Sql }));
     }
 
-    /// <summary>Not enforced across kinds — a pipeline named after the source it reads stays legal,
-    /// because pipelines are not in the SQL namespace.</summary>
+    /// <summary>SUPERSEDED by plan 025 (table-over-pipeline) — rewritten in place rather than left to
+    /// silently pass on stale text. A pipeline's compiled <c>OutputFields</c> now let a table name it as
+    /// a relation exactly like a source, so a pipeline name must be unique against sources too (and
+    /// tables), on the same "one relation name resolves to exactly one entity" terms this class's table
+    /// tests already enforce for a table name colliding with a source. See <c>Catalog.CatalogStore.
+    /// ValidateUniquePipelineName</c>'s rewritten doc comment for the full argument.</summary>
     [Fact]
-    public async Task A_pipeline_may_share_its_name_with_a_source()
+    public async Task A_pipeline_may_no_longer_share_its_name_with_a_source()
     {
         var (_, _, store) = NewStore();
-        var created = await store.CreatePipelineAsync(new PipelineDefinition { Name = "trades", Sql = "SELECT * FROM trades" });
-        Assert.Equal("trades", created.Name);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            store.CreatePipelineAsync(new PipelineDefinition { Name = "trades", Sql = "SELECT * FROM trades" }));
+
+        Assert.Contains("already used by a stream source", ex.Message, StringComparison.Ordinal);
     }
 
     // =============================================================================================

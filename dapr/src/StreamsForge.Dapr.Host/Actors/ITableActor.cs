@@ -12,17 +12,31 @@ namespace StreamsForge.Dapr.Host.Actors;
 /// <see cref="Catalog.CatalogStore"/> already has both full lists in hand (<c>state.Sources</c>/
 /// <c>state.Tables</c>) at every call site, so no lookup back through <c>ICatalogFacade</c> is needed
 /// (that would be an actor-proxy call back into <c>RegistryActor</c> from inside its own turn — the exact
-/// reentrancy hazard dapr/ARCHITECTURE.md's reentrancy decision exists to avoid).</summary>
-public sealed record TableStartRequest(TableDefinition Def, List<SourceDefinition> Sources, List<TableDefinition> Tables);
+/// reentrancy hazard dapr/ARCHITECTURE.md's reentrancy decision exists to avoid). <see cref="Pipelines"/>
+/// (plan 025, table-over-pipeline, additive/nullable so every pre-025 3-argument call site — including
+/// this project's own existing tests — keeps compiling unmodified) is every pipeline the catalog currently
+/// knows about, the same "full list, not just this table's own dependencies" shape as
+/// <see cref="Sources"/>/<see cref="Tables"/> and for the identical reason: resolving it via
+/// <c>ICatalogFacade.GetPipelinesAsync()</c> from inside this call would be the same reentrant self-call
+/// back into <c>RegistryActor</c>'s still-in-flight turn. Read it with <c>request.Pipelines ?? []</c>.</summary>
+public sealed record TableStartRequest(TableDefinition Def, List<SourceDefinition> Sources, List<TableDefinition> Tables, List<PipelineDefinition>? Pipelines = null);
 
-/// <summary>The stream source names and upstream table names a table's compiled SQL depends on — returned
-/// by <see cref="ITableActor.StartAsync"/> (kept on the return value for <see cref="ITableActor.
-/// GetInputNamesAsync"/>'s no-recompile reads — see that method's own doc comment — even though, as of
-/// closing PARITY.md debt item D2, <see cref="TableActor"/> itself is what registers <see cref="Streaming.
-/// TableEventRouter"/> with these names now, not <see cref="Lifecycle.DaprLifecycleOrchestrator"/>) and by
-/// <see cref="ITableActor.GetInputNamesAsync"/> (so <see cref="Services.TableSupervisorService"/> can
-/// repair the router for a self-healed actor with no recompile either).</summary>
-public sealed record TableInputNames(List<string> StreamInputs, List<string> TableInputs);
+/// <summary>The stream source names, upstream table names, and (plan 025, table-over-pipeline) upstream
+/// pipeline ids a table's compiled SQL depends on — returned by <see cref="ITableActor.StartAsync"/> (kept
+/// on the return value for <see cref="ITableActor.GetInputNamesAsync"/>'s no-recompile reads — see that
+/// method's own doc comment — even though, as of closing PARITY.md debt item D2, <see cref="TableActor"/>
+/// itself is what registers <see cref="Streaming.TableEventRouter"/> with these names now, not
+/// <see cref="Lifecycle.DaprLifecycleOrchestrator"/>) and by <see cref="ITableActor.GetInputNamesAsync"/>
+/// (so <see cref="Services.TableSupervisorService"/> can repair the router for a self-healed actor with no
+/// recompile either). <see cref="PipelineInputs"/> holds pipeline IDS, not names — bare (pipeline ids are
+/// GUIDs and already globally unique across every environment, unlike a source/table NAME, so — unlike
+/// <see cref="StreamInputs"/>/<see cref="TableInputs"/> — this list needs no <c>EnvKeys.Qualify</c> at the
+/// router boundary; see <see cref="Streaming.TableEventRouter.RegisterPipelineInputs"/>'s own doc comment)
+/// — because that is what <see cref="Streaming.TableEventRouter.RegisterPipelineInputs"/> keys on and what
+/// a live <c>PipelineResultsEnvelope.PipelineId</c> actually carries on the wire
+/// (<see cref="PipelineActor"/> publishes its own bare <c>Id</c>, never qualified — pipeline ids need no
+/// disambiguation the way table/source names do).</summary>
+public sealed record TableInputNames(List<string> StreamInputs, List<string> TableInputs, List<string>? PipelineInputs = null);
 
 /// <summary>PARITY.md debt item D2 — Dapr counterpart of Orleans' <c>TableAttachSnapshot</c>
 /// (orleans/src/StreamsForge.Abstractions/GrainInterfaces.cs), returned by <see cref="ITableActor.
@@ -157,6 +171,38 @@ public interface ITableActor : IActor
     /// OnTableDeltaBatchAsync</c>'s identical filter for the argument this mirrors verbatim.</para>
     /// </summary>
     Task ProcessTableDeltasAsync(TableDeltaEnvelope envelope);
+
+    /// <summary>Table-over-pipeline (plan 025) — Dapr counterpart of <c>TableGrain.OnPipelineBatchAsync</c>
+    /// (mirroring that method's own doc comment: "the PIPELINE-input twin of AttachToStreamInputAsync, and
+    /// deliberately the short one, because there is nothing to attach to"). Routed here by
+    /// <see cref="Streaming.TableEventRouter.OnPipelineResultsAsync"/> — never a direct subscription, same
+    /// as <see cref="ProcessSourceEventsAsync"/>/<see cref="ProcessTableDeltasAsync"/>. A no-op if the
+    /// table isn't currently running, or if <paramref name="envelope"/>'s <c>PipelineId</c> is not (or is
+    /// no longer) one of this table's current pipeline inputs — a stale delivery racing an
+    /// unregister/re-register on a compile change, dropped rather than guessed at.
+    ///
+    /// <para><b>NO backfill, and it is not an omission</b> — mirrors <c>PipelineInputs</c>'s own class doc
+    /// verbatim: a connector-kind source keeps a bounded replay ring and an attach protocol
+    /// (<see cref="IConnectorActor.BeginAttachAsync"/>); an upstream TABLE has
+    /// <see cref="AttachSnapshotAsync"/>. A pipeline has neither — it holds no materialized result to hand
+    /// over, only a bounded UI-convenience results ring with no epoch or fence to deduplicate against live
+    /// traffic, so admitting it here would double-count with nothing to detect the overlap. A table that
+    /// starts after a pipeline input has already emitted therefore starts empty for that input and sees
+    /// only rows published from this moment on — restarting the PIPELINE (not the table) is what re-drives
+    /// it.</para>
+    ///
+    /// <para>Each row in <paramref name="envelope"/> is converted (back-filling <c>_ts</c>/<c>_source</c>
+    /// only when the row does not already carry them — see <c>PipelineResultMapping.ToEventRecord</c>) and
+    /// fed through this table's compiled executor ONE AT A TIME, under the pipeline's relation NAME (what
+    /// the table's SQL wrote and what the compiled plan matches its relation on) — exactly like
+    /// <c>TableGrain.OnPipelineBatchAsync</c>'s own per-row loop, and unlike an upstream TABLE's delta
+    /// batch (<see cref="ProcessTableDeltasAsync"/>): a pipeline emits appended result rows, never
+    /// retractions, so there is no epoch/atomicity a per-row publish could break. Same JsonElement
+    /// re-normalization requirement as every other actor-wire envelope (see
+    /// <see cref="ProcessSourceEventsAsync"/>'s own doc comment) — <paramref name="envelope"/> crosses the
+    /// actor wire too, even though the <c>sf-pipeline-out</c> endpoint already normalized it once.</para>
+    /// </summary>
+    Task ProcessPipelineResultsAsync(PipelineResultsEnvelope envelope);
 
     /// <summary>PARITY.md debt item D2 — Dapr counterpart of <c>ITableGrain.AttachSnapshotAsync</c>. Called
     /// by a DOWNSTREAM table's own <see cref="StartAsync"/> (a different <see cref="ITableActor"/>
