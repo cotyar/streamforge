@@ -20,8 +20,10 @@ namespace StreamsForge.Dapr.Live.Tests;
 /// <para><b>Fixed identity, not configurable ports.</b> Unlike <c>HostProcess</c> (which takes its ports
 /// as constructor arguments because the Chain tests run TWO Orleans silos side by side), every instance
 /// this type creates uses the SAME app-id (<see cref="AppId"/>) and the SAME four ports — app
-/// <c>5799</c>, gRPC <c>5899</c> (reserved, matching the dev host's own 5399/5499 shape — nothing
-/// listens on it yet, see <c>dapr/PARITY.md</c> D1), sidecar HTTP <c>3799</c>, sidecar gRPC
+/// <c>5799</c>, gRPC <c>5899</c> (matching the dev host's own 5399/5499 shape; as of plan 025 G2 this
+/// port is SERVED, by the same six reflection-visible services the Orleans host maps — the sentence
+/// that used to stand here, "reserved … nothing listens on it yet", was retired with
+/// <c>dapr/PARITY.md</c> D1), sidecar HTTP <c>3799</c>, sidecar gRPC
 /// <c>4799</c> — because a Dapr app-id is baked into every actor id and every statestore key at the
 /// component level (<c>dapr/components-test/statestore.yaml</c>'s <c>scopes</c>), not passed as a
 /// per-instance parameter the way an Orleans silo's cluster id is. Running two instances of this type
@@ -90,12 +92,27 @@ namespace StreamsForge.Dapr.Live.Tests;
 /// FIRST (<c>dapr stop --app-id streamsforge-dapr-test</c>, which tears down the sidecar cleanly) and
 /// only then kills whatever OS process tree is left.</para>
 ///
-/// <para><b>TLS.</b> <see cref="TlsCertPath"/> exists for shape parity with <c>HostProcess</c> and a
-/// later wave only — the Dapr host has NO TLS support today (CLAUDE.md's TLS paragraph: "plan 024,
-/// Orleans only — the Dapr host is untouched and still loopback-only"). Setting it currently only flips
-/// this fixture's own idea of the scheme; it does not make the spawned host serve HTTPS, so a test that
-/// sets it today would simply fail to connect. <see cref="EnvVars"/> and <see cref="ExtraArgs"/> exist
-/// for the same forward-compatibility reason.</para>
+/// <para><b>TLS (plan 025 D9, wave 2).</b> <see cref="TlsCertPath"/> is live now — wave 1 gave this
+/// flavor the same TLS surface plan 024 gave Orleans, so the paragraph that used to stand here ("the
+/// Dapr host has NO TLS support today") is no longer true and has been replaced. A TLS instance needs
+/// BOTH halves and the second one has no Orleans equivalent:
+/// <list type="bullet">
+/// <item>the APP arguments — <c>--Tls:Enabled true --Kestrel:Certificates:Default:Path …
+/// --Kestrel:Certificates:Default:KeyPath …</c>, passed through this type's <c>extraArgs</c> (they land
+/// after <c>dapr run</c>'s <c>--</c> separator); <see cref="DevCert.HostArgs"/> returns exactly
+/// them;</item>
+/// <item>the <c>dapr run</c> argument <c>--app-protocol https</c>, passed through
+/// <see cref="DaprRunExtraArgs"/> (it lands BEFORE the separator). The sidecar itself calls the app
+/// port — for actor activation, actor method invocation and every pub/sub topic delivery — and speaks
+/// cleartext <c>http://</c> unless told otherwise, so without this daprd never gets a usable answer
+/// from the app port and <see cref="WaitHealthyAsync"/> simply times out. daprd does not verify the
+/// app's certificate on that channel, so a self-signed development pair needs nothing further.</item>
+/// </list>
+/// Setting <see cref="TlsCertPath"/> flips <see cref="BaseUrl"/>/<see cref="GrpcUrl"/> to
+/// <c>https</c> and makes every client from <see cref="NewClient"/> trust EXACTLY that certificate, by
+/// thumbprint — the same pinning (and the same reasoning) as <c>HostProcess</c>. It does NOT pass any
+/// argument to the host by itself, so a test can also point a trusting client at a deliberately
+/// misconfigured host.</para>
 ///
 /// <para>The same instance can be stopped and started again against the SAME <see cref="DataDir"/> and
 /// the SAME Redis database 1 state — that is what <c>RestartResumeTests</c> does via
@@ -104,6 +121,23 @@ namespace StreamsForge.Dapr.Live.Tests;
 /// <see cref="DisposeAsync"/> deletes <see cref="DataDir"/>, and only an explicit <see cref="ResetAsync"/>
 /// (always called BEFORE the first <see cref="Start"/> of a fresh scenario, never after) flushes
 /// database 1.</para>
+///
+/// <para><b>Every port this project owns, in one place</b> (AGENTS.md's port table is the authority;
+/// this list exists so a reader of the fixture does not have to leave the file):</para>
+/// <list type="bullet">
+/// <item><b>5799 / 5899</b> — this instance's app (REST/SignalR/SPA) and gRPC ports, cleartext or TLS
+/// depending on <see cref="TlsCertPath"/>. Both are also the ports a federated peer dials.</item>
+/// <item><b>3799 / 4799</b> — its sidecar's HTTP and gRPC ports.</item>
+/// <item><b>6150</b> — the dedicated <c>dapr_placement_test</c> container (see
+/// <see cref="PlacementHostAddress"/>).</item>
+/// <item><b>4999 / 5099 / 14999 / 34999</b> — the ORLEANS peer host <see cref="OrleansPeerProcess"/>
+/// spawns for <c>FederationTests</c> (REST / gRPC / silo / silo gateway). Owned by this project even
+/// though the binary is the other flavor's, because nothing else in the repo spawns an Orleans host on
+/// those numbers.</item>
+/// </list>
+/// <para>Never in this project's reach: <c>5199/5299</c> (the Orleans dev server), <c>5399/5499</c> and
+/// its sidecar's <c>3599/4599</c> (the Dapr DEV instance and the shared <c>dapr_placement</c> it uses),
+/// <c>5599</c>, <c>6199</c>, <c>6399</c>.</para>
 /// </summary>
 public sealed class DaprHostProcess : IAsyncDisposable
 {
@@ -157,8 +191,22 @@ public sealed class DaprHostProcess : IAsyncDisposable
     /// deleted only on <see cref="DisposeAsync"/>.</summary>
     public string DataDir { get; }
 
-    /// <summary>See the class doc's TLS paragraph — inert today, shaped for a later wave.</summary>
+    /// <summary>The PEM certificate this instance serves — <c>tools/tls/dev-cert.sh</c>'s
+    /// <c>cert.pem</c>, i.e. <see cref="DevCert.CertPath"/>. Non-null flips
+    /// <see cref="BaseUrl"/>/<see cref="GrpcUrl"/> to <c>https</c> and pins that certificate's
+    /// thumbprint in every client <see cref="NewClient"/> hands out. Passing the host's own
+    /// <c>--Tls:Enabled</c> arguments is the CALLER's job (<see cref="DevCert.HostArgs"/>), and so is
+    /// <c>--app-protocol https</c> (<see cref="DaprRunExtraArgs"/>) — see the class doc's TLS
+    /// paragraph.</summary>
     public string? TlsCertPath { get; init; }
+
+    /// <summary>Extra arguments for the `dapr run` CLI itself, inserted BEFORE the <c>--</c> separator
+    /// (the constructor's <c>extraArgs</c> land after it, on the app's own command line). The one thing
+    /// this is for today is <c>--app-protocol https</c> (<see cref="DevCert.DaprRunArgs"/>): a TLS app
+    /// port is unreachable to the sidecar without it, and "unreachable to the sidecar" looks exactly
+    /// like a host that never boots. Kept as a separate list rather than sniffed from
+    /// <see cref="TlsCertPath"/> so a test can also spawn a MIS-configured pair on purpose.</summary>
+    public IReadOnlyList<string> DaprRunExtraArgs { get; init; } = [];
 
     public bool IsTls => TlsCertPath is not null;
 
@@ -168,6 +216,10 @@ public sealed class DaprHostProcess : IAsyncDisposable
     public IDictionary<string, string> EnvVars { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
 
     public string BaseUrl => $"{(IsTls ? "https" : "http")}://127.0.0.1:{HttpPort}";
+
+    /// <summary>The gRPC endpoint another instance (or grpcurl) is pointed at, in the scheme this
+    /// instance serves. Cleartext is prior-knowledge h2c; under TLS it is ALPN-negotiated h2.</summary>
+    public string GrpcUrl => $"{(IsTls ? "https" : "http")}://127.0.0.1:{GrpcPort}";
 
     /// <summary>The built host directory, run in place. Located from THIS source file's compile-time
     /// path (so it does not depend on the test runner's working directory), with the configuration
@@ -396,6 +448,11 @@ public sealed class DaprHostProcess : IAsyncDisposable
         psi.ArgumentList.Add(ComponentsTestDir());
         psi.ArgumentList.Add("--config");
         psi.ArgumentList.Add(Path.Combine(ComponentsTestDir(), "config.yaml"));
+        // `dapr run`'s own flags — BEFORE the separator. See DaprRunExtraArgs.
+        foreach (var arg in DaprRunExtraArgs)
+        {
+            psi.ArgumentList.Add(arg);
+        }
         psi.ArgumentList.Add("--");
         psi.ArgumentList.Add(Dotnet);
         psi.ArgumentList.Add(Path.Combine(binDir, "StreamsForge.Dapr.Host.dll"));
@@ -583,6 +640,67 @@ public sealed class DaprHostProcess : IAsyncDisposable
         {
             await Task.Delay(200);
         }
+
+        if (ports.Any(p => !PortFree(p)))
+        {
+            await ReapOrphansAsync();
+        }
+    }
+
+    /// <summary>Last-resort teardown for the ONE failure mode the two steps above cannot cover: the
+    /// `dapr run` CLI exiting (or being killed) while the app and `daprd` it launched keep running.
+    /// <see cref="StopAsync"/>'s <c>dapr stop --app-id</c> then has no run-file to act on and
+    /// <c>Kill(entireProcessTree)</c> has no tree left to walk, so the orphans hold this project's four
+    /// ports and EVERY subsequent class in the collection fails its <see cref="Preflight"/> with
+    /// "port 5799 is already in use" — nineteen tests reporting a skip reason that names the wrong cause.
+    /// Observed exactly once during plan 025 wave 2, after a TLS fixture whose app exited early.
+    ///
+    /// <para><b>Why killing by pattern is safe here and is not "killing processes you did not start".</b>
+    /// Both patterns are pinned to this project's own reserved identity — the host DLL launched with
+    /// <c>--Http:Port 5799</c>, and a <c>daprd</c> carrying <c>--app-id streamsforge-dapr-test</c>. Ports
+    /// 5799/5899/3799/4799 and that app-id belong to this fixture and nothing else in the repo (AGENTS.md's
+    /// port table); a process matching either pattern was started by an instance of THIS type, in this run
+    /// or a crashed earlier one. The dev instance (<c>streamsforge-dapr</c> on 5399, sidecar 3599/4599)
+    /// matches neither and is never touched.</para>
+    ///
+    /// <para>Best-effort throughout: <c>pkill</c> exits non-zero when nothing matched, which is the
+    /// ordinary case and not an error.</para></summary>
+    private static async Task ReapOrphansAsync()
+    {
+        foreach (var pattern in new[]
+                 {
+                     $"StreamsForge.Dapr.Host.dll --Http:Port {HttpPort}",
+                     $"daprd.*--app-id {AppId}",
+                 })
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("pkill")
+                {
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                };
+                psi.ArgumentList.Add("-f");
+                psi.ArgumentList.Add(pattern);
+                using var proc = Process.Start(psi);
+                if (proc is not null)
+                {
+                    await proc.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                }
+            }
+            catch
+            {
+                // best-effort — there is nothing further to fall back to
+            }
+        }
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        var ports = new[] { HttpPort, GrpcPort, SidecarHttpPort, SidecarGrpcPort };
+        while (DateTime.UtcNow < deadline && ports.Any(p => !PortFree(p)))
+        {
+            await Task.Delay(200);
+        }
     }
 
     /// <summary>Stops and restarts this SAME instance (same app-id, same <see cref="DataDir"/>, Redis
@@ -602,6 +720,21 @@ public sealed class DaprHostProcess : IAsyncDisposable
         lock (_logLock)
         {
             return string.Join('\n', _logTail);
+        }
+    }
+
+    /// <summary>Drops everything drained so far, so a subsequent <see cref="LogTailText"/> describes only
+    /// what the NEXT process wrote. Added for <c>BootOrderRestartTests</c>: the tail is one list across a
+    /// stop/start pair (this type outlives the OS process), so without clearing it, "the restarted host
+    /// logged its boot-resume line" would also be satisfied by the line the FIRST boot logged — a test
+    /// that could not fail. Call it between <see cref="StopAsync"/> and <see cref="Start"/>; using
+    /// <see cref="RestartAsync"/> instead keeps the pre-restart lines on purpose, which is what every
+    /// other caller wants when a post-restart failure needs the whole story.</summary>
+    public void ClearLogTail()
+    {
+        lock (_logLock)
+        {
+            _logTail.Clear();
         }
     }
 
