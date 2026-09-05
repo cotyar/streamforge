@@ -49,5 +49,6 @@ To run a quick probe, flip `<OutputType>` to `Exe`, add a `Program.cs` iterating
   (the generated wrapper already does this).
 - Two pipelines with identical *derived proto names* would collide in reflection (first wins) —
   not reachable with seeds, avoid punctuation-only name variants.
-- Machinery lives in `orleans/src/StreamsForge.Host/Grpc/Dynamic/` (descriptor factory, wire
-  encoder, proto builder — Orleans-free; slated for `shared/`).
+- Machinery lives in `shared/StreamsForge.Api/Grpc/Dynamic/` (descriptor factory, wire
+  encoder, proto builder — Orleans-free; plan 025 moved the whole gRPC surface here so both
+  flavors serve it — Dapr on `:5499`, Orleans on `:5299`).

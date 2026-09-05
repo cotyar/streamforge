@@ -1,23 +1,47 @@
-# Dapr parity: what is deliberately absent, what is owed, what was never checked
+# Dapr parity: what is deliberately absent, what plan 025 closed, and what's still unverified
 
-**Working rule as of 2026-08-20.** The Orleans flavor is the primary runtime. New plans land there
-first and are verified live there; the Dapr flavor is brought level afterwards, and this file is the
-list that "afterwards" works from. Nothing here says the Dapr flavor is broken — it builds, its suite
-is green, and its host boots. It says which claims about it are *earned* and which are not.
+**Working rule, updated 2026-09-05 (plan 025).** The Orleans flavor is still the primary runtime and
+new plans still land there first. What changed: as of plan 025 the Dapr flavor is no longer a black
+box for live verification — an isolated Dapr test instance exists for the first time, and most of the
+2026-08-20 debt list below (gRPC serving, TLS, late-consumer replay, boot order, the paced relay,
+table-over-pipeline, an honest `crdt` status) is closed in code AND has been run against a real,
+isolated, sidecar'd process. What is NOT closed is smaller than before but not zero — see section 3.
 
-This file has three sections and the split between them is the point:
+This file still has three sections, and the split is still the point:
 
-1. **Permanent descopes** — never coming to Dapr, by decision. Do not file these as debt.
-2. **Debt** — implemented on Orleans, absent or stubbed on Dapr, intended to be closed.
-3. **Unverified** — code exists on both flavors, but nobody has run the Dapr side live. This is the
-   largest section and the least visible one, because unverified code looks exactly like verified
-   code from the outside.
+1. **Permanent descopes** — never coming to Dapr, by decision. Unaffected by plan 025.
+2. **Closed debt** — was owed, plan 025 (or an earlier plan, noted per item) closed it. Kept here
+   rather than deleted so the history of "this used to be missing" survives, with a pointer to the
+   code and to what verified it.
+3. **Unverified** — code exists on both flavors, but nobody has run the Dapr side live, OR it depends
+   on something outside this repo (Docker, `dapr init`) that a given environment may not have. Smaller
+   than the 2026-08-20 version, still not empty.
+
+### Methodology (read this before trusting any "verified live" line in this file)
+
+A claim in this file is "verified live" only when it names either an automated test (a file and a
+method the reader can re-run) or an explicit manual check with what was run and what came back —
+never a bare adjective. Section 3's table is the enforcement mechanism: a plan that writes "verified
+live on Dapr" with no flavor, no test name and no transcript is exactly the failure mode that produced
+this document in 2026-08-20 (see the "window" story below, kept for the record). Two kinds of evidence
+appear below and are labeled accordingly:
+
+- **Automated, re-runnable**: an xunit `[Fact]` in `dapr/tests/StreamsForge.Dapr.Live.Tests/` (process-
+  level, spawns a real `dapr run`-wrapped host) or `dapr/tests/StreamsForge.Dapr.Tests/` (unit-level,
+  no sidecar). Named by class and method.
+- **Manual, dated**: a curl/grpcurl/SDK transcript the orchestrator ran by hand against the isolated
+  instance during plan 025's integration, dated, with what was asked and what came back. These are
+  real but not re-runnable from CI the way a `[Fact]` is — a future regression here would not fail a
+  build, only a future manual re-check. Where plan 025's own outcomes section (`plans/025-dapr-parity.md`)
+  later records the same check under a wave, that is the authoritative transcript; this file summarizes
+  it in-place rather than duplicating it verbatim.
 
 ---
 
 ## 1. Permanent descopes — not debt
 
 `dapr/ARCHITECTURE.md`'s "What's NOT here yet (by design)" section is the authority; this is the index.
+Unaffected by plan 025 — none of these were ever debt.
 
 | Descoped | Where it is refused | Decision |
 |---|---|---|
@@ -30,172 +54,236 @@ This file has three sections and the split between them is the point:
 | `IngestStatus.DownstreamDropped` | always `0` — there is no Dapr equivalent of `PushStreamBus.TotalDropped` to observe | 009 |
 | `--Streams:Transport push\|pull` | an Orleans stream-provider knob; Dapr's transport is Redis pub/sub and has nothing to select | — |
 
-Plan 020's `crdt` source kind is declared Orleans-first (020 D9). It is a **descope with an escape
-hatch**, not a permanent one — see debt item D5 below for what the Dapr side does today and what it is
-missing.
+Plan 020's `crdt` source kind is declared Orleans-first (020 D9) and stays that way — plan 025 only
+made the REFUSAL honest (see D5/D7 below), it did not build a Dapr document runtime. That is a
+**descope with an escape hatch**, not a permanent one: the escape hatch is a `grpc` source subscribing
+to a document an Orleans instance projects.
 
 ---
 
-## 2. Debt — owed to the Dapr flavor
+## 2. Closed debt
 
-### D1 · gRPC serving on `:5499` — the port is reserved and nothing listens
+Everything in this section was owed as of the 2026-08-20 snapshot. Each entry names what closed it,
+when, and what evidence exists — per the methodology above.
 
-`dapr/src/StreamsForge.Dapr.Host/Program.cs` passes `GrpcStaticServices: []` and Kestrel maps only the
-HTTP app port. The Orleans host maps seven gRPC services on `:5299`
-(`orleans/src/StreamsForge.Host/Program.cs`). Called "phase 2" since plan 005, never revisited.
+### D1 · gRPC serving on `:5499` — CLOSED (plan 025 G1/G2)
 
-Three consequences that read as separate bugs if you meet them without this context:
+Was: `Program.cs` passed `GrpcStaticServices: []` and nothing listened on `:5499`; `GET
+/api/meta/instance` reported a Dapr instance gRPC-incapable; it could never be a federation server; the
+four generated clients had no gRPC transport against it.
 
-- **`GET /api/meta/instance` reports a Dapr instance as gRPC-incapable.** `servesGrpc` is derived
-  purely from `GrpcStaticServices.Count > 0`
-  (`shared/StreamsForge.Api/Endpoints/MetaEndpoints.cs`), so the `endpoints.grpc` key is omitted and
-  `"grpc"` never appears in `capabilities`. A peer discovering a Dapr instance cannot federate *from*
-  it. This is correct behaviour — it refuses to advertise a port nothing is listening on — and it is
-  also the visible face of this debt item.
-- **Dapr cannot be a federation server.** It subscribes to any instance (proven live in plan 005 W6,
-  Dapr `:5399` subscribing the Orleans flavor's `positions` table); it never accepts `SubscribeEntity`.
-  ⚠️ The repo labels the *cause* "phase 2" (debt) and the *consequence* "stays Orleans-only"
-  (permanent). Both trace to decision D-F. Whoever picks this up decides which label is true and makes
-  the two agree; today they do not.
-- **The four generated clients lose their gRPC transport against Dapr.** `/proto` downloads work
-  (the descriptor machinery is shared and runtime-agnostic), so codegen succeeds — the generated gRPC
-  client simply has nothing to dial. The TypeScript client's `"auto"` transport falls back to SignalR;
-  gRPC ingest has no Dapr equivalent at all, REST ingest does.
+Now: the seven gRPC services (`Source/Pipeline/Table/Stream/Ingest/DynamicStream/ServerReflection`)
+moved out of the Orleans host into `shared/StreamsForge.Api/Grpc/`, retargeted from
+`IClusterClient`/`IRegistryGrain` onto the environment-scoped `ICatalogFacadeFactory` both hosts
+already registered, plus one new runtime primitive both flavors implement:
+`IEntityStreamFacade` (`shared/StreamsForge.Contracts/EntityStreamFacade.cs`) — subscribe one entity's
+live stream for the life of one server-streaming RPC. Orleans implements it over its stream provider
+(`orleans/src/StreamsForge.Host/Facades/OrleansEntityStreamFacade.cs`); Dapr implements it as an
+in-process per-key fan-out fed by the five fixed pub/sub topics
+(`dapr/src/StreamsForge.Dapr.Host/Streaming/EntityStreamFanout.cs`, which also registers as one more
+`ISourceEventsSink`/`ITableDeltaSink`/`IPipelineResultsSink` — see D6 below for why `sf-pipeline-out`
+had to become a generic sink for this). `dapr/src/StreamsForge.Dapr.Host/Program.cs` now maps a
+second Kestrel listener on `Grpc:Port` (default `5499`, HTTP/2-only) alongside the REST/SignalR/SPA
+port, `GrpcStaticServices: StreamsForgeGrpc.StaticServiceNames` so `/api/meta/instance` advertises
+`grpc` honestly (the list IS the mapping — one definition, `shared/StreamsForge.Api/Grpc/StreamsForgeGrpc.cs`).
 
-### D2 · Table-over-table warm attach — CLOSED in code, unverified live (see section 3's methodology)
+**Evidence**: manual, dated 2026-09-05 (orchestrator, isolated instance) — gRPC ingest returns
+`{"accepted":1}`; all four generated client SDKs (.NET, TypeScript, Python, Kotlin) subscribe a Dapr
+entity's stream over gRPC successfully. Unit-level: `dapr/tests/StreamsForge.Dapr.Tests/
+EntityStreamFanoutTests.cs` proves the per-key fan-out (subscribe/dispatch/unsubscribe, handler-failure
+containment, pipeline-keyed-bare vs source/table-keyed-qualified) without a sidecar. A dedicated
+process-level gRPC live test is one of the items plan 025's wave 2 (agent L, running alongside this
+document's own wave) is adding — see section 3's "landing in the same plan" note; this file does not
+claim that test's result.
 
-Orleans' `TableGrain.AttachToTableInputAsync` does a real atomic `(rows, LastEpoch)` read of the
-upstream table and admits the rows. `Actors/TableActor.cs` on Dapr used to ship option (b) only: a
-loud diagnostic, no back-fill. Both blockers its own doc comment used to name are closed:
+### D2 · Table-over-table warm attach — CLOSED in code (pre-025); still not live-verified
 
-- **`ITableActor.AttachSnapshotAsync`** (Dapr counterpart of `ITableGrain.AttachSnapshotAsync`) now
-  exists — a synchronous (no `await` between the two reads) read of `TableExecutor.Snapshot()` +
-  `TableExecutor.LastEpoch`, same atomicity argument as the Orleans method, resting on the same
-  guarantee (Dapr actors process one invocation at a time per actor id — dapr/ARCHITECTURE.md's
-  reentrancy decision — the direct analogue of Orleans grain non-reentrancy).
-- **Registration moved *inside* the actor.** `TableActor.StartAsync`/`OnActivateAsync`'s self-heal
-  branch now call a new private method, `RegisterRouterAndAttachToTableInputsAsync`, which registers
-  `TableEventRouter` with this table's stream/table inputs **before** reading any upstream snapshot —
-  not `DaprLifecycleOrchestrator.StartTableAsync` after the actor call returns, which is the ordering
-  this entry used to name as the second blocker. Because registering happens while this actor's own
-  `StartAsync`/`OnActivateAsync` turn is still executing, any `ProcessSourceEventsAsync`/
-  `ProcessTableDeltasAsync` call the newly-registered router issues against this SAME actor id is a new
-  invocation that Dapr queues behind the still-in-flight turn rather than dropping (the router didn't
-  know to route here before registration) or interleaving with it — the Dapr-shape version of the
-  subscribe-before-attach argument `TableGrain.AttachToTableInputAsync`'s own doc comment makes. A
-  per-input epoch cutoff (`TableActor._tableInputCutoffEpoch`, filtered by the new pure
-  `TableAttachPolicy.FilterAdmissible`) makes anything the router queued during that window either a
-  correct application (`Epoch > cutoff`) or a correct no-op (`Epoch <= cutoff`, already in the admitted
-  snapshot) once it runs — so nothing is lost and nothing is double-counted. `DaprLifecycleOrchestrator`
-  no longer registers the router on a successful start (only unregisters defensively on failure, and on
-  `StopTableAsync`); `TableEventRouter.cs`'s own doc comment records the new caller.
-- The self-heal reactivation path (`OnActivateAsync`, triggered by Dapr's on-demand actor activation on
-  a host restart, distinct from an explicit `POST /api/tables/{id}/start`) gets the identical treatment,
-  not just the explicit-start path — a self-healed table recompiles a brand-new executor exactly like a
-  fresh start does (see `TableActor`'s "RESTART-RESUME LIMITATION" class-doc paragraph), so it needed
-  the same backfill, and previously got neither the backfill nor even the old warning.
-- An upstream with no snapshot to attach to (not yet created/started, or erroring) is unchanged from
-  before: best-effort, swallowed, this table starts empty for that input and relies on live traffic —
-  same as Orleans' identical `catch` in `AttachToTableInputAsync`.
+Unchanged from the 2026-08-20 snapshot, restated here because plan 025's new isolated instance is the
+first place it COULD be checked and has not been yet: `ITableActor.AttachSnapshotAsync` (a synchronous
+read of `TableExecutor.Snapshot()` + `LastEpoch`) plus `TableActor.StartAsync`/`OnActivateAsync`
+registering `TableEventRouter` from inside their own turn before attaching — both closed in code, both
+covered by `TableAttachPolicyTests` (the epoch-cutoff filter), neither exercised against a live sidecar.
+Distinct from D6's table-OVER-PIPELINE (closed below) — this is table-over-TABLE, the `hot_symbols FROM
+positions` shape, and it is not what the new `Live.Tests` project's `RestartResumeTests` exercises
+(`hot_symbols` seeds `Stopped` and stays that way in that test). A live check — start `hot_symbols`
+after `positions` is already warm and confirm the rows appear immediately — remains open; see
+`dapr/ARCHITECTURE.md`'s D2 section for the reentrancy residual (an actor-activation cycle would hang
+until Dapr's call timeout, not silently answer wrong — documented, not guarded against).
 
-**Unverified claim, stated explicitly (see section 3 below):** this closes the code path — `dotnet
-build`/`dotnet test` on `dapr/StreamsForge.Dapr.sln` are green, including new `TableAttachPolicyTests`
-covering the epoch-cutoff filter — but the register-before-attach ordering argument itself (that a
-concurrent actor invocation genuinely queues rather than drops or interleaves) rests on Dapr's
-documented actor-turn concurrency model, not on a test against a live sidecar: no `TableActor` instance
-can be constructed in this test suite without one (same limitation `TablePersistencePolicyTests`/
-`TableJournalPolicyTests` already work around by testing extracted pure logic instead — there is still
-no actor-level test harness in this repo). A live check — start a table over an already-warm upstream
-table on `:5399` and confirm the rows appear immediately rather than only via subsequent churn — has NOT
-been run, for the same two structural reasons section 3 gives for every other unverified claim (no
-`dapr init` on this machine; no isolated-instance mode to run it on safely). Whoever next runs a live
-Dapr sweep should add this to the list.
+### D3 · `instance.json` in `DataDir` — CLOSED by documentation (plan 025 D10)
 
-**Reviewed by the orchestrator, and one justification corrected.** The implementation extends the attach
-to `OnActivateAsync`'s self-heal branch, which Orleans has no counterpart for (`TableGrain` attaches only
-from `StartAsync` and overrides no activation hook). That makes an outbound `ActorProxy` call from inside
-an activation turn, so a table-input **cycle** would deadlock A.activate → B.attach → B.activate →
-A.attach until Dapr's call timeout. The submitted justification — "the SQL compiler has no recursive-table
-feature to produce one" — is not the real mechanism: a cycle needs no such feature, and `ImportPlanner`
-only *diagnoses* a table dependency cycle before proceeding. Measured instead (Orleans, isolated instance,
-2026-08-20): repointing a table at its own downstream is **accepted at PUT** and **refused at start** —
-`Failed`, `1:15 Unknown source 'cyc_b'`, `tableInputs` empty — so no attach is issued and the chain never
-forms. That is one construction failing, not a proof that every cycle is refused; the residual and the
-Dapr-only exposure are written up in `dapr/ARCHITECTURE.md`. The failure mode would be a loud timeout, not
-a silent wrong answer, which is why it is documented rather than guarded against.
+Was debt: "either move the identity into the statestore or document the directory as load-bearing."
+Plan 025 chose the second option deliberately: the directory stays load-bearing for exactly one file,
+and `reset.sh` does not touch it, because an operator resetting the catalog wants the SAME instance
+identity peers already know, not a reissued one. `dapr/ARCHITECTURE.md`'s "How to run" section and this
+file's own history record the choice; no code changed.
 
-### D3 · `instance.json` lives in a `DataDir` this flavor otherwise does not use
+### D4 · Stale comment — CLOSED (pre-025, unchanged)
 
-Plan 016 wave 5 persists instance identity to a file. Dapr keeps everything else in Redis, so deleting
-that directory silently reissues the instance's identity — on Orleans deleting `data/` *is* the
-documented reseed, on Dapr it is an unrelated directory with one meaningful file in it. Either move
-the identity into the statestore or document the directory as load-bearing on this flavor.
+`Facades/StubFacades.cs`'s `ShardBy`-refusal comment was already corrected before plan 025; the orphaned
+"WHERE KEY SHARDING IS REFUSED ON THIS FLAVOR" explanation stacked on `ValidateParallelism` is left
+exactly where the 2026-08-20 snapshot found it, for the same reason: it is the best explanation of the
+asymmetry in the repo and moving it is a bigger edit than any plan touching it has needed.
 
-### D4 · One stale comment, corrected in place
+### D5 / D7 · `crdt` source status — CLOSED (plan 025, PARITY wave C3)
 
-`Facades/StubFacades.cs` claimed `CatalogStore.CreateTableAsync` "refuses a non-empty `ShardBy` at
-upsert (the same way it refuses Parallelism > 1)". It does not — `ShardBy` is refused at **start**,
-deliberately, so the field round-trips. The behaviour was right and the comment was wrong; the comment
-is fixed as of this document.
+Was: the kind was refused loudly (a log line) but had no status to refuse INTO — a sharded table gets a
+`Failed` status because `TableActor` exists to hold one; a `crdt` source had no actor on this flavor at
+all, so `GET /api/sources/{name}/status` had nothing honest to return.
 
-While fixing it: the long "WHERE KEY SHARDING IS REFUSED ON THIS FLAVOR" explanation in
-`Catalog/CatalogStore.cs` is an **orphan** — it sits as a second stacked `<summary>` on
-`ValidateParallelism`, a method about something else, because there is no `ValidateShardBy` for it to
-document (the refusal lives in `TableActor.StartAsync`). Left as found: it is the best explanation of
-the asymmetry in the repo and moving it is a bigger edit than this document's scope. Anyone reading
-`ValidateParallelism` should know the first paragraph above it is not about `ValidateParallelism`.
+Now: `Facades/DaprFacades.cs`'s `DaprConnectorStatusFacade.GetStatusAsync` recognizes an enabled `crdt`
+source and returns a SYNTHESIZED status (`CrdtSourceStatus.Synthesize`) — `LastStatus = "error"`,
+`LastError` carrying the plan 020 D9 message verbatim, every counter/schedule field zeroed/null — with
+**no connector actor ever activated**. `POST /api/sources/{name}/crdt/replay` still answers 501 via
+`ICrdtFacade.Enabled`, unchanged (020 D9 is Orleans-first; this closes the STATUS honesty gap, not the
+document runtime itself — see section 1 above).
 
-### D5 · The `crdt` source kind is refused, but without a status to refuse into
+**Evidence**: automated, unit-level — `dapr/tests/StreamsForge.Dapr.Tests/CrdtSourceStatusTests.cs`
+(`Synthesize_ReturnsErrorStatus_WithTheOrleansOnlyMessage`,
+`Synthesize_ReportsNotRunning_ViaNullNextRunMs_AndZeroedCounters`, `MessageFor_NamesTheActualSourceAndKind`).
+No sidecar needed for this one — it is a pure function of a `SourceDefinition`.
 
-Plan 020 D9 is Orleans-first, so this is expected — the entry exists because the refusal is currently
-*less* honest than the `ShardBy` precedent it copies. `Lifecycle/DaprLifecycleOrchestrator.cs` logs an
-error when an enabled `crdt` source is seen and does nothing else; the definition is stored so an
-Orleans export imports intact. What is missing is a **Failed status carrying that message**: a sharded
-table gets one because `TableActor` exists to hold it, and a `crdt` source has no actor on this flavor at
-all. Until a document runtime lands here, the intended escape hatch is plan 006's cross-flavour link — a
-Dapr instance subscribing to a document projected by an Orleans one over a `grpc` source.
+**Found, not yet fixed**: `Lifecycle/DaprLifecycleOrchestrator.cs`'s own `Crdt` case comment still says
+"What is still missing... is a Failed status carrying this text" — stale as of this fix, since the
+facade above now provides exactly that. `DaprLifecycleOrchestrator.cs` is not owned by this document's
+wave; flagged here so whoever next touches that file corrects the comment.
 
-The intake endpoint answers **501**, not 404, via `ICrdtFacade.Enabled` — deliberately, so an operator
-can tell "this build cannot do that" from "you typed the wrong source name". Plan 020 wave C's
-`POST /api/sources/{name}/crdt/replay` is behind the same flag and answers 501 the same way; when a Dapr
-document runtime does land, the replay is **not optional extra credit** — it is what refills a table after
-a restart, because the Dapr flavor's table actor resets a resuming table exactly as `TableGrain` does and
-D7 means re-delivering an edge's updates emits nothing. See plan 020's wave C outcomes.
+### D6 · Source relay, boot order, late-consumer replay, table-over-pipeline — CLOSED (plan 025)
 
-### D6 · Source relay, boot order and late-consumer replay (2026-09-04 integrator report) — Orleans-first
+Four related items, all owed as one entry in the 2026-08-20 snapshot, closed together because the
+underlying mechanism (a table/pipeline that starts after its inputs have already emitted must not lose
+rows) is the same story told four ways:
 
-Three source-stability changes landed on Orleans first and are owed here:
+- **Paced source relay.** `Streaming/SourceRateSampler.cs` is now a genuine pacer (mirrors Orleans'
+  `StreamBridgeService` rule exactly): a too-early event WAITS OUT the remainder of its 50ms slot and
+  is then sent, rather than being dropped, up to `MaxPacedStreak` (40) consecutive paced events per key
+  before degrading to the old drop behavior — protecting the relay from an unbounded backlog behind a
+  sustained firehose. `StreamingSourceRateSamplerTests` was rewritten from "exactly one relayed event"
+  to "three for three, in order" (the behavior decision plan 025 D5 records).
+- **Source lifecycle events.** `Lifecycle/DaprLifecycleOrchestrator.cs` now publishes `source-started`/
+  `source-stopped`/`source-deleted` on `sf-lifecycle`, `PipelineId` = the source's qualified name — the
+  Dapr-shape mirror of `RegistryGrain`'s identical publish. `source-*` lifecycle events are ignored by
+  the bridge on this flavor too (no hub message), matching Orleans.
+- **Coordinated boot order.** `Services/BootResume.cs` (`BootResumePlan.Build` — pure, unit-tested in
+  `BootResumePlanTests.cs` — plus `EntityResume` and a process-wide `BootGate.Shared`) runs ONE ordered
+  pass per environment: Running pipelines → Running tables (topo-sorted by `TableInputs`, tolerating a
+  cycle by falling back to catalog order rather than diagnosing one — boot is the wrong place to reject
+  a catalog) → enabled sources, from `CatalogInitializationService`. The four periodic supervisors each
+  await the gate (bounded 60s) before their first sweep via `BootGateWait.AwaitBootPassAsync`, then
+  remain exactly what they were: 15s self-healing, not the resume mechanism. Log line (manual, dated
+  2026-09-05): `boot resume for environment '' — 4 pipeline(s), 3 table(s), 6 source(s).`
+- **Late-consumer replay.** `IConnectorActor.BeginAttachAsync`/`EndAttachAsync` (Dapr's counterpart of
+  `IConnectorGrain.BeginAttachAsync`) plus the shared `SourceReplayBuffer` ring (10,000, in
+  `StreamsForge.AppCore.Connectors`) — hold-and-flush with a 10s safety timer so a consumer that dies
+  mid-attach cannot gate the source forever. Covers ALL source kinds, not just polled ones: the
+  subscriber kinds (grpc/nats/fix/transports), which used to publish straight from a background thread,
+  now marshal rows onto the actor's own turn via one more actor method, `RecordSubscriberRowsAsync`
+  (one proxy call per batch — those callbacks already paid for the bookkeeping call it replaces).
+  Consumer side: `TableActor.RegisterRouterAndAttachToTableInputsAsync` (holds taken BEFORE router
+  registration) and `PipelineActor` (which now registers itself with `PipelineEventRouter` inside its
+  own turn — the orchestrator no longer does it from outside). Residual, stated rather than hidden: a
+  pre-hold in-flight batch already on the topic can duplicate a few replayed rows — the same gap
+  Orleans documents on its own `BeginAttachAsync`; `LATEST BY` tables are unaffected (idempotent by
+  construction). Also: the replay ring is per-ACTIVATION, and Dapr deactivates idle actors more eagerly
+  than Orleans collects grains — a connector with a live timer/subscriber is never idle, but the window
+  during which a freshly-reactivated connector's ring is empty is wider than on Orleans.
+- **Table-over-pipeline.** `PipelineDefinition.OutputFields` is now populated by `CatalogStore`
+  (`ApplyPipelineCompileResult`/`EnsureFieldNumbers`, with an init-time backfill for a catalog that
+  predates this — the seeded VWAP pipeline picked this up automatically) exactly as Orleans populates
+  it, so a table's SQL can name a pipeline as a relation; `TableDefinition.PipelineInputs` records which
+  of a table's compiled relations are pipelines (bare pipeline id — GUIDs are already globally unique,
+  no qualification needed, unlike stream/table inputs); `TableEventRouter.RegisterPipelineInputs` keys
+  the routing table by that bare id and `ITableActor.ProcessPipelineResultsAsync` is the new ingress
+  method `sf-pipeline-out` routes to (which is why `sf-pipeline-out` had to become the generic
+  `IPipelineResultsSink` fan-out plan 025 D2 describes — the bridge, the NATS publisher, this router
+  AND the gRPC fan-out (D1) are all consumers of the same topic now). The three relation-name-collision
+  refusals now match Orleans exactly (`CatalogStore.cs`'s `"Name '{name}' is already used by a
+  pipeline/table/stream source — a table's SQL resolves a relation name to exactly one entity"`); the
+  old doc comment that called `trades FROM trades` legal was rewritten with the reason. **The one
+  asymmetry this closes**: `POST /api/tables/validate` is no longer optimistic on Dapr — it used to
+  offer pipelines as relations (shared endpoint code) while `CatalogStore.CompileTableSql`/
+  `TableActor.TryCompile` refused the same SQL at create time; both now agree.
 
-- **Source lifecycle events + paced relay.** `RegistryGrain` now publishes `source-started`/
-  `source-stopped`/`source-deleted` and `StreamBridgeService` subscribes a new source's tape at once
-  (the 30 s poll is a backstop) and *paces* the ~20 msg/s relay instead of dropping events inside the
-  50 ms slot. `DaprStreamBridge` relays fixed pub/sub topics, so the lifecycle half buys nothing here,
-  but its `SourceRateSampler` still drops — `StreamingDaprStreamBridgeTests` pins "exactly one relayed
-  event" for a same-source batch, so porting the pacing is a behaviour decision, not a refactor.
-- **Consumers before producers at boot, one resume pass.** `RegistryGrain.EnsureInitializedAsync`
-  resumes pipelines/tables before sources and is latched per activation; the supervisor awaits it
-  before pinging. This flavor's resume is four independent supervisor boot sweeps whose relative
-  order is not coordinated, so a `url` source with a dedup key can still poll before its table actor
-  has re-registered after a restart.
-- **Late-consumer replay.** `IConnectorGrain.BeginAttachAsync`/`EndAttachAsync` hand a table or
-  pipeline that starts after its source already emitted the source's recent rows (a bounded
-  in-memory ring, held-and-flushed so nothing is duplicated). `ConnectorActor`/`TableActor` have no
-  attach protocol; a table created after a `file`/`url` source's first poll starts empty on Dapr.
-- **Table-over-pipeline inputs.** A table's SQL may name a PIPELINE as a relation on Orleans:
-  `PipelineDefinition.OutputFields` (`[Id(18)]`) publishes the pipeline's compiled output schema,
-  `TableDefinition.PipelineInputs` (`[Id(36)]`) records which of a table's compiled stream relations are
-  pipelines, and `TableGrain`/`TableIngestGrain`/`ArrangementGrain` subscribe those on
-  `(OutputNamespace, pipeline ID)` as `List<ResultEnvelope>` instead of `(SourcesNamespace, source name)`
-  as `EventRecord`. Both fields are on the shared contracts and Dapr persists them, but
-  `CatalogStore.CompileTableSql` (`dapr/src/StreamsForge.Dapr.Host/Catalog/CatalogStore.cs:866`) and
-  `TableActor.TryCompile` (`:~1355`) still build the stream-schema dictionary from sources alone, so on
-  Dapr such a table refuses to compile with an unknown-relation diagnostic and `PipelineInputs` stays
-  empty. **One asymmetry to know about:** `POST /api/tables/validate` lives in shared `TablesEndpoints`
-  and DOES offer pipelines as relations on both flavors, so on Dapr validate is optimistic — it accepts
-  SQL the subsequent create then refuses. Keeping validate sources-only was the alternative, and it makes
-  the Orleans console reject a legal table, which is a wrong answer on the flavor where the feature works.
-  The relation-name uniqueness refusals (a pipeline may not take a source's or a table's name, and vice
-  versa) are Orleans-only for the same reason and are owed here alongside the compile change.
+**Evidence**: manual, dated 2026-09-05 (orchestrator, isolated instance) — a table with
+`pipelineInputs:["p"]` receives rows from the named pipeline; each of the three relation-name refusals
+returns 409/400 with the Orleans-identical message. Automated: `PipelineResultMappingTests.cs`,
+`TableEventRouterTests.cs`, `BootResumePlanTests.cs`, `ConnectorAttachStateTests.cs`,
+`StreamingDaprStreamBridgeTests.cs`/`StreamingSourceRateSamplerTests.cs` (all in
+`dapr/tests/StreamsForge.Dapr.Tests/`, no sidecar needed for any of them — the actor-level parts of
+late-consumer replay and table-over-pipeline routing rest on the same "no live actor-level harness
+exists" limitation D2 already states). A dedicated process-level live test for late-consumer replay and
+table-over-pipeline is one of the items plan 025's wave 2 (agent L) is adding on the new isolated
+instance — see section 3; this file does not claim that test's result.
+
+### D8 · Isolated Dapr test instance — CLOSED (plan 025 D1/D8)
+
+Was: every Dapr live check had to run against the shared, fixed-port `streamsforge-dapr` dev instance
+(reset via `tools/reset.sh` first), because an arbitrary `--app-id` had no statestore component in
+scope and panicked the 1.18 actor runtime — a much heavier gate than Orleans' arbitrary-port isolated
+instances, and a large part of why Dapr live checks kept being skipped for 164+ commits (see section 3's
+history below).
+
+Now: `dapr/components-test/{statestore,pubsub,config}.yaml` scope a second app-id,
+`streamsforge-dapr-test`, to its own statestore/pubsub, both pinned to Redis **logical database 1**
+(`redisDB: "1"`) — the dev instance and the polyglot processors stay on database 0, untouched. Fixed
+ports (an app-id is baked into actor state at the component level, not a per-instance parameter): app
+`5799`, gRPC `5899` (this harness spawns the SAME `StreamsForge.Dapr.Host` binary the dev instance runs,
+so once D1 landed this port is served here too, not merely reserved — `DaprHostProcess`'s own doc
+comment predates that merge and still calls it reserved; flagged as stale below, not owned by this
+wave), sidecar HTTP `3799` / gRPC `4799`. A THIRD thing had to be
+isolated, found empirically rather than assumed: **actor placement is placement-global by actor TYPE
+NAME, not scoped to app-id** — two app-ids hosting the identically-named actor types (`RegistryActor`,
+`TableActor`, ...) against the SAME placement service produced outright cross-app breakage (measured:
+placement disseminated one shared rebalance round covering both apps' types, an actor call from one app
+timed out trying to reach the other app's host address, and one app's own read-after-write on its own
+catalog came back empty mid-sequence) — not a hypothetical, reproduced live. So this test instance uses
+a DEDICATED `dapr_placement_test` container on host port `6150`, never the shared `dapr_placement`
+`dapr init` created. `docker exec dapr_redis redis-cli -n 1 FLUSHDB` is this instance's `reset.sh`
+equivalent (`DaprHostProcess.ResetAsync`). The harness itself:
+`dapr/tests/StreamsForge.Dapr.Live.Tests/DaprHostProcess.cs` (process-level, spawns a real `dapr
+run`-wrapped host, ported from `orleans/tests/StreamsForge.Chain.Tests/HostProcess.cs`'s pattern), one
+xunit collection (`DaprLiveTestCollection`) so no two instances of this fixed-identity harness ever run
+concurrently.
+
+**Evidence**: this item's own evidence IS the seven tests section 3 lists as passing against it — the
+harness existing and being provably safe to reuse across a test run (isolated Redis DB, isolated
+placement, no interference with the dev instance's 17 `streamsforge-dapr||...` keys) is what the rest
+of section 3 depends on.
+
+### D9 · TLS on the Dapr host — CLOSED (plan 025 G2)
+
+Was: `dapr/PARITY.md`/AGENTS.md both said "Orleans only — the Dapr host is untouched and still
+loopback-only."
+
+Now: mirrors plan 024's Orleans shape exactly — `Tls:Enabled`, the standard
+`Kestrel:Certificates:Default` section, both listeners (REST + gRPC), fail-fast startup with no
+certificate, HSTS (not emitted for loopback), `OutboundTls.Configure` wired for the first time on this
+flavor (previously `Tls:TrustedCaPath`/`Tls:AcceptAnyCertificate` were silently ignored here — a
+federated `grpc` source pointed at a privately-signed peer simply failed with no way to fix it). The
+Dapr-only fact, with no Orleans counterpart: the SIDECAR calls the app port for every actor
+invocation and topic delivery, and daprd speaks plain `http://` unless told otherwise — a TLS app port
+therefore also needs `dapr run … --app-protocol https` (`dapr/tools/run.sh`'s `DAPR_RUN_EXTRA_ARGS`
+carries it, e.g. `DAPR_RUN_EXTRA_ARGS="--app-protocol https" ./tools/run.sh --Tls:Enabled true …`).
+daprd does not verify the app's certificate on that channel, so a self-signed dev pair
+(`tools/tls/dev-cert.sh`) needs nothing further.
+
+**Evidence**: manual, dated 2026-09-05 (orchestrator, isolated instance) — https healthz 200, plain
+http gets an empty reply (not a redirect — Kestrel simply has no cleartext listener), `https://`
+endpoints reported in `/api/meta/instance`, `grpcurl -cacert` streaming over the TLS gRPC port, seeded
+tables continuing to fill over https. A dedicated automated TLS live test on the new isolated instance
+(`DaprHostProcess.TlsCertPath` exists in the harness today but its own doc comment calls it "inert —
+shaped for a later wave", written before this TLS work landed) is one of the items plan 025's wave 2
+(agent L) is adding — see section 3; this file does not claim that test's result, and the harness'
+own doc comment is now stale (flagged, not owned by this wave).
+
+### D10 · RID default — CLOSED (plan 025, found during TLS work)
+
+Not in the original 2026-08-20 list — found while wiring TLS's client fixtures. `dapr/src/
+StreamsForge.Dapr.Host/Publish.props`'s bare `dotnet publish` (no `-r`) fallback defaulted to
+**linux-x64**, exactly the bug plan 024 had already fixed on the Orleans side — a Mac publishing this
+host with no explicit RID got an unrunnable binary. Now defaults to `$(NETCoreSdkRuntimeIdentifier)`
+like the Orleans host; `tools/publish.sh` and `deploy/dapr/Dockerfile.app` are unaffected because they
+already pass `-r` explicitly.
 
 ### Explicitly NOT debt — checked and present on Dapr
 
@@ -208,68 +296,60 @@ Plan 014 database connectors, 015 entitlements/approvals/audit (`AccessPolicyAct
 
 ## 3. Unverified — the honest state of every "verified live on Dapr" claim
 
-### The window: `db01ab1` → `32ea87e`
+### The window: `db01ab1` → `32ea87e` (history, unchanged by plan 025 — kept for the record)
 
 Plan 009's `db01ab1` added two C# **optional parameters** to
 `IConnectorActor.RecordSubscriberBatchAsync`. Dapr's actor-interface validation forbids optional
 parameters outright and threw inside `MapActorsHandlers` during startup, so the host died before
 serving its first request. It was found and fixed in plan 021 wave 1 (`32ea87e`) by making both
-parameters required.
+parameters required. **164 commits sit between those two** — the entire span during which the Dapr
+host could not boot, so any live claim from that window is false regardless of what it says. This
+plan (025) is what finally closes the resulting verification gap; the table below is the up-to-date
+answer, not this history.
 
-**164 commits sit between those two.** For that entire span the Dapr host could not boot. Any claim
-in that window that the Dapr flavor was verified live is therefore false, whatever it says — not
-dishonest, just written by someone who did not run it.
+### What plan 025 actually ran live, by test name
 
-| Plan | Dapr live claim | Reading |
+| Area | Automated test | What it proves |
 |---|---|---|
-| 009 (post-`db01ab1` waves) | gate says "a live check on isolated ports", flavor unspecified | suspect |
-| 010, 011, 012 | none found | fine — nothing claimed |
-| 013 CLI/MCP | claims parity "with nothing but a different base URL" | plausible but untested against Dapr |
-| **014 DB connectors** | **wave L's gate is literally "live sweep on both flavours"** | **impossible in this window; no outcome section records it happening** |
-| 015 entitlements | many "verified live" claims, all Orleans-shaped | the Dapr access/approval/audit actor path is entirely unexercised |
-| 016 identity/discovery | federation verified live "between two instances" — both Orleans | Dapr's peer directory + `@name` wiring unexercised |
-| 017 CDC | live-DB suite is transport-level and flavor-independent | the Dapr polled arm was never driven |
-| **018 FIX** | **self-reports the gap in the plan itself**: no `dapr init` on this machine, the Dapr claim rests on identical wiring plus a green suite | **the pattern every other plan should have followed** |
-| 019 fix-duplex | live check used a real acceptor against an Orleans instance | Dapr's duplex twin is unit-tested only |
-| 021 environments | Verification demands the same script run against both flavors; recorded evidence is Orleans-file-shaped (`catalog.registry_staging.catalog.json` — JSON grain storage, not Redis keys) | Orleans half done, Dapr half open |
+| Boot | `BootSmokeTests.Boot_smoke` | A fresh isolated instance boots, seeds, and answers healthy |
+| Source exact counts | `SourceExactCountTests.File_source_500_rows_land_exactly_then_an_appended_200` | A `file` source delivers exactly the rows it should, twice in a row, no loss/dup |
+| Source exact counts | `SourceExactCountTests.Folder_files_slipping_in_while_the_source_polls_all_land_exactly` | A `folder` source catches files added mid-poll, exactly |
+| Source exact counts | `SourceExactCountTests.Url_json_array_rows_land_exactly_then_a_grown_dataset` | A `url` JSON-array source delivers exactly the rows it should as the dataset grows |
+| Environments | `EnvironmentIsolationTests.Environments_are_separate_redis_keys_and_a_force_deleted_environment_does_not_reseed` | Plan 021's cross-flavor requirement, finally run on Dapr: two same-named tables in two environments are two Redis keys, not one filtered read; force-delete does not silently re-seed |
+| Access/audit | `AccessAuditTests.Access_deny_grant_is_enforced_and_audited` | Plan 015's grant/deny/audit round trip, on Dapr, for the first time |
+| Restart resume | `RestartResumeTests.Restart_resumes_running_tables_and_they_keep_filling` | A killed-and-restarted instance resumes each table at its PRE-restart status (not just "Running") and keeps consuming live deltas (`deltasIn` growth, not `rowCount` — checked, not assumed) |
 
-**Net: no Dapr live verification recorded anywhere in this repo after `db01ab1` can be trusted, and
-none has been recorded since the fix.** The last credible live evidence predates plan 009 — the W5–W9
-sections of `dapr/ARCHITECTURE.md` (the Redis key listing, the `409 Parallelism` response body, the
-cross-runtime federation counters).
+Plus the manual, dated (2026-09-05) checks recorded per-item in section 2 above for D1 (gRPC), D6
+(table-over-pipeline) and D9 (TLS) — real but not re-runnable from CI the way the table above is.
 
-### Why this was not simply fixed by running it
+**Landing in the same plan, not yet claimed here**: plan 025's wave 2 (agent L) is adding process-level
+live tests for late-consumer replay, table-over-pipeline, a boot-order-under-restart scenario, TLS, gRPC,
+and two-direction Orleans↔Dapr federation (an Orleans peer reserved on `4999`/`5099`, silo
+`14999`/`34999` — see AGENTS.md's port table) on this same isolated instance, concurrently with this
+document's own wave. This file names them so a reader knows they are coming, without asserting they
+passed — check `dapr/tests/StreamsForge.Dapr.Live.Tests/` directly, or plan 025's own outcomes section,
+for their actual result.
 
-Two independent obstacles, and the second one is structural:
+### Still unverified after plan 025
 
-1. **This machine has never run `dapr init`.** No `dapr_redis` / `dapr_placement` / `dapr_scheduler`
-   containers exist. Running it pulls images and creates long-lived containers on the user's machine,
-   which is theirs to authorize.
-2. **The Dapr flavor has no isolated-instance mode.** `dapr/components/statestore.yaml` pins
-   `scopes: [streamsforge-dapr]`, so an isolated `--app-id` test instance — the pattern AGENTS.md
-   prescribes for Orleans' 6xxx–9xxx port instances — has no statestore in scope for actors at all and
-   **panics the 1.18 sidecar**. Every Dapr live check must therefore run against the shared fixed-port
-   `streamsforge-dapr` instance on `:5399`, reset via `tools/reset.sh` first. That is a much heavier
-   gate than Orleans', which is a large part of why it kept being skipped.
+| Plan | What | Why it's still open |
+|---|---|---|
+| 014/017 DB connectors + CDC | Live sweep on the Dapr flavor | Docker-gated on BOTH flavors (`DockerGate` skips without a daemon + local images) — plan 025 did not touch this, and it was never Dapr-specific debt |
+| 018/019 FIX / `fix-duplex` | A real FIX session against a Dapr-hosted `ConnectorActor` | Never driven on this flavor; the Orleans live check used a real acceptor, Dapr's twin is unit-tested only |
+| 009 NATS (incl. its `tls` config group) | A real NATS broker against a Dapr-hosted source/sink | Never driven on this flavor |
+| 016 peer-name discovery FROM a Dapr instance | A Dapr instance resolving a peer by NAME (not just subscribing a known peer's gRPC entity, which IS proven — see plan 006 W6/D1 above) | Plan 025's federation addition (agent L, see above) targets exactly this; not yet confirmed |
+| SignalR pacing, live | `SourceRateSampler`'s pacer against a real SignalR client under load | `StreamingSourceRateSamplerTests` proves the pure decision; nobody has watched a browser tape stay in order under a real firehose on Dapr |
+| 015 D9 environment-scoped grants | A grant scoped to one environment | Not built on EITHER flavor yet — not Dapr-specific debt, listed here only because it is the other half of "environments are a namespace, not a security boundary" that plan 025's environment work (D8's `EnvironmentIsolationTests`) does not change |
+| D2 table-over-table warm attach, live | Starting `hot_symbols` after `positions` is already warm | Closed in code (section 2), not yet run against the new isolated instance — distinct from D6's table-over-pipeline, which IS manually verified |
 
-### How to close it
+### Why this took until plan 025
 
-```bash
-dapr init                      # one-time; pulls images, creates the three containers
-cd dapr && ./tools/reset.sh && ./tools/run.sh   # :5399, sidecar 3599/4599
-```
+Two obstacles, both now resolved for good (kept here so the reasoning survives, not as current
+blockers): this machine had never run `dapr init` (now has — runtime 1.18.3, containers
+`dapr_redis`/`dapr_placement`/`dapr_scheduler`), and the flavor had no isolated-instance mode (D8
+above). Running the shared dev instance's own checks — `dapr/tools/reset.sh && dapr/tools/run.sh`,
+:5399 — is still how to verify the SEEDED dev catalog end-to-end; the isolated instance is for tests
+that must not disturb it.
 
-Then, in rough order of how much each buys:
-
-1. **Boot + smoke**: `/healthz`, login, catalog CRUD. Re-establishes a credible baseline for the first
-   time since plan 009.
-2. **Plan 021 environments** — the one open cross-flavor requirement from the most recent plan. Create
-   `staging`, create a same-named table in both environments, confirm two separate Redis keys rather
-   than two filtered reads, force-delete, confirm no re-seed on restart.
-3. **Plan 015 access path** — one grant, one revocation, one approval round trip, one audit read.
-   Entirely unexercised on this flavor.
-4. **Plan 014/017 connectors** — the "live sweep on both flavours" wave L promised.
-5. **Plan 016 federation** — a Dapr instance discovering an Orleans peer by name.
-
-Record what actually ran in each plan's own outcomes section, per flavor and by name. "Verified live"
-without a flavor is the sentence that produced this document.
+Record what actually ran in each plan's own outcomes section, per flavor and by test name. "Verified
+live" without a flavor and a name is the sentence that produced this document.

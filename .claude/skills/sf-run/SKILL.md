@@ -52,8 +52,12 @@ Healthy = seeded tables Running with `error: null`, dashboard rows/s climbing, `
 ## Dapr flavor
 
 Prereqs: `dapr init` already run once (containers `dapr_redis`/`dapr_placement`/`dapr_scheduler`;
-check `docker ps`). Ports: app `5399` (REST/SignalR/SPA), gRPC reserved `5499` (not served — phase 2),
-sidecar HTTP `3599` / gRPC `4599`. Never touches 5199/5299.
+check `docker ps`). Ports: app `5399` (REST/SignalR/SPA), gRPC `5499` (plan 025: all six services +
+reflection now served, not just reserved), sidecar HTTP `3599` / gRPC `4599`. Never touches 5199/5299.
+TLS (plan 025, mirrors the Orleans flavor's `Tls:Enabled` shape): because the sidecar calls the APP
+port, a TLS app port needs `dapr run … --app-protocol https`, e.g.
+`DAPR_RUN_EXTRA_ARGS="--app-protocol https" ./dapr/tools/run.sh --Tls:Enabled true …` — daprd does not
+verify the app certificate, so a self-signed dev pair (`tools/tls/dev-cert.sh`) needs nothing else.
 
 ```bash
 cd /Users/yuriyhabarov/work/crates-foundation

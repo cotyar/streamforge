@@ -424,8 +424,9 @@ public class AuthorizationCoverageTests
         // so it is pinned by reflection instead: IngestGrpcService.Ingest must carry NO [Authorize],
         // because it authorizes PER MESSAGE — request.SourceName travels on every message and an ingest
         // key only ever authorizes one source. Its real gate is IsAuthorizedAsync in
-        // orleans/src/StreamsForge.Host/Grpc/IngestGrpcService.cs, which resolves the same "Editor" policy
-        // through IAuthorizationService, exactly as the REST route does.
+        // shared/StreamsForge.Api/Grpc/IngestGrpcService.cs (plan 025 moved the gRPC services here,
+        // namespace StreamsForge.Host.Grpc unchanged, served on both flavors), which resolves the same
+        // "Editor" policy through IAuthorizationService, exactly as the REST route does.
         var grpc = typeof(StreamsForge.Host.Grpc.IngestGrpcService);
         Assert.Empty(grpc.GetCustomAttributes(typeof(AuthorizeAttribute), inherit: true));
         Assert.Empty(grpc.GetMethod(nameof(StreamsForge.Host.Grpc.IngestGrpcService.Ingest))!

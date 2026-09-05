@@ -2,8 +2,11 @@
 
 Streaming-SQL platform ("StreamsForge") in two runtime flavors: `orleans/` (**primary**, complete —
 Microsoft Orleans 10) and `dapr/` (Dapr, for polyglot processing and runtime comparison — feature-complete
-in code, but behind on live verification: read [`dapr/PARITY.md`](dapr/PARITY.md) before claiming anything
-about it, and land new work on Orleans first). Both
+in code, and as of plan 025 mostly closed on live verification too: gRPC, TLS, boot order, late-consumer
+replay and table-over-pipeline are all now proven live on an isolated Dapr instance. What is still
+unverified there (database connectors/CDC, FIX/fix-duplex, NATS, peer-name federation FROM a Dapr
+instance) is smaller than it used to be but not zero: read [`dapr/PARITY.md`](dapr/PARITY.md) before
+claiming anything about those, and land new work on Orleans first). Both
 flavors share one runtime-agnostic core (`shared/`): Engine, Contracts, AppCore, Api, and the `web/`
 SPA. Execution plans with acceptance criteria: [`plans/`](plans/README.md). Adding an ingress/egress transport
 (NATS + a `file` sink today; the recipe is one class + one registry line): [`TRANSPORTS.md`](TRANSPORTS.md) —
@@ -150,7 +153,7 @@ Full routes and verified live recipes: `orleans/docs/index.html` §§ REST API /
 federation / Configuration import-export; contributor-facing `@name` wiring: `TRANSPORTS.md`'s Named
 external endpoints section.
 
-**TLS** (plan 024, Orleans only — the Dapr host is untouched and still loopback-only): `Tls:Enabled=true`
+**TLS** (plan 024 on Orleans, plan 025 on Dapr — both flavors now): `Tls:Enabled=true`
 plus the standard `Kestrel:Certificates:Default` section (`Path`+`KeyPath` PEM, `Path`+`Password`
 PFX, or `Subject`+`Store`) puts HTTPS on the REST port and TLS (ALPN h2) on the gRPC port; startup
 fails fast when the flag is set with no certificate. It only applies to the two-listener branch of
@@ -177,6 +180,34 @@ SDK. Also found and fixed here: since plan 022 a bare `dotnet publish` (no `-r`)
 and the Dockerfiles pass `-r` explicitly and are unchanged), and the fixtures run the native
 executable when there is no `.dll`. Operator recipes: `orleans/docs/index.html` § TLS; the survey that
 sized this: `plans/024-tls-support.md`.
+
+**Dapr TLS (plan 025) mirrors the above exactly** — same flag, same `Kestrel:Certificates:Default`
+section, same fail-fast, same HSTS, same `OutboundTls`. The one Dapr-only fact: the sidecar itself
+calls the app port for every actor invocation and topic delivery, so a TLS app port also needs
+`dapr run … --app-protocol https` (`dapr/tools/run.sh`'s `DAPR_RUN_EXTRA_ARGS` env var carries it) —
+daprd does not verify the app's certificate on that channel, so a self-signed dev pair needs nothing
+further. Verified live: https healthz 200, plain http gets an empty reply, `https://` endpoints in
+`/api/meta/instance`, `grpcurl -cacert` streaming over the TLS gRPC port, seeded tables still filling
+over https. See `dapr/ARCHITECTURE.md`'s TLS section.
+
+**Dapr parity (plan 025)**: closes most of `dapr/PARITY.md`'s debt list plus the TLS gap plan 024 left.
+The seven gRPC services (Source/Pipeline/Table/Stream/Ingest/DynamicStream/ServerReflection) moved out
+of the Orleans host into `shared/StreamsForge.Api/Grpc/`, retargeted onto the environment-scoped
+`ICatalogFacadeFactory` both hosts already had plus one new runtime primitive,
+`IEntityStreamFacade` (`shared/StreamsForge.Contracts/EntityStreamFacade.cs` — subscribe one entity's
+live stream for the life of one RPC call; Orleans implements it over its stream provider, Dapr over an
+in-process per-key fan-out fed by the fixed pub/sub topics, `Streaming/EntityStreamFanout.cs`) — so the
+Dapr host now serves gRPC on `:5499` too, `/api/meta/instance` reports it, and it can be a federation
+server. Late-consumer replay (`IConnectorActor.BeginAttachAsync`/`EndAttachAsync` + the shared
+`SourceReplayBuffer` ring), coordinated boot order (`Services/BootResume.cs`'s `BootGate`, one ordered
+pass per environment: pipelines → tables topo-sorted → sources), the paced source relay (ported from
+Orleans' 50ms-slot pacer, replacing a drop rule), table-over-pipeline (`PipelineDefinition.OutputFields`
+offered as a table relation, the three name-collision refusals), and an honest `crdt` Failed status
+(no actor activated) all port from Orleans to this flavor. A new isolated Dapr test instance finally
+makes live verification possible — see the port table above and `dapr/PARITY.md` §3 for why this had
+never been done before plan 025 (a 164-commit boot-breaking regression, then no isolated-instance mode).
+Full decision list and what remains unverified (database connectors/CDC, FIX/fix-duplex, NATS on Dapr,
+peer-name discovery FROM a Dapr instance): `dapr/PARITY.md`; the wiring: `dapr/ARCHITECTURE.md`.
 
 **Environment isolation** (plan 021): an environment is the **registry KEY**, not a column — Orleans
 activates a whole separate `RegistryGrain` per environment (Dapr: `RegistryActor`), so two same-named
@@ -217,10 +248,14 @@ the `/sf-env` skill; per-wave outcomes and the found-and-not-fixed list at the e
   it imports or augments — an undeclared transitive dependency that used to be hoisted into reach now
   fails to resolve.
 - **Ports**: Orleans dev server owns `5199` (REST/SignalR/SPA) + `5299` (gRPC h2c) and is often
-  running — never bind or kill it. Dapr flavor: app `5399` (REST/SignalR/SPA), gRPC reserved `5499`
-  (not yet served — phase 2), sidecar HTTP `3599` / gRPC `4599`; run via `dapr/tools/run.sh` (dapr
-  runtime 1.18.x, containers `dapr_redis`/`dapr_placement`/`dapr_scheduler` from `dapr init`), reseed
-  via `dapr/tools/reset.sh` + restart, stop via `dapr stop --app-id streamsforge-dapr`. Test instances:
+  running — never bind or kill it. Dapr flavor: app `5399` (REST/SignalR/SPA), gRPC `5499` (plan 025:
+  all six services + reflection served here now, not just reserved), sidecar HTTP `3599` / gRPC `4599`;
+  run via `dapr/tools/run.sh` (dapr runtime 1.18.x, containers `dapr_redis`/`dapr_placement`/
+  `dapr_scheduler` from `dapr init`), reseed via `dapr/tools/reset.sh` + restart, stop via
+  `dapr stop --app-id streamsforge-dapr`. Dapr live-instance tests (plan 025): app `5799`, gRPC `5899`,
+  sidecar HTTP `3799`, sidecar gRPC `4799`, dedicated placement `6150` (container `dapr_placement_test`);
+  app-id `streamsforge-dapr-test`; Redis logical DB 1 (dev stays on DB 0); Orleans peer for that suite
+  `4999`/`5099`, silo `14999`/`34999`. Test instances:
   pick 6xxx–9xxx via `--Http:Port … --Grpc:Port … --DataDir <temp>` and kill them when done. A
   second host on the same machine also needs its own `--Silo:Port`/`--Silo:GatewayPort` (defaults
   11111/30000). Reserved by tests: 9199/9299 (`clients/dotnet`, python, kotlin), 8199/8299
@@ -253,7 +288,7 @@ pinned to the fork's `parity-yjs-13.6.32` branch, NOT `main`; see that project's
 ~/.dotnet/dotnet build orleans/StreamsForge.sln
 ~/.dotnet/dotnet test  orleans/StreamsForge.sln     # 3746 tests — green except the 6 known pre-existing failures (see plans/022); includes StreamsForge.Chain.Tests, which spawns real hosts on 9399–9899 (skips with a named reason if a port is busy)
 ~/.dotnet/dotnet build dapr/StreamsForge.Dapr.sln
-~/.dotnet/dotnet test  dapr/StreamsForge.Dapr.sln   # 1602 tests — the whole suite must be green
+~/.dotnet/dotnet test  dapr/StreamsForge.Dapr.sln   # ~1640 + the Live project (needs `dapr init`, skips with a named reason otherwise)
 cd clients/typescript && bun test  # 14 contract + conformance/live-table; boots its own engine on 8199/8299
 bun install                       # once, at the REPO ROOT — one workspace, one lockfile
 cd web && bun run build           # prebuild compiles @streamsforge/client + @streamsforge/tanstack-db
@@ -397,8 +432,9 @@ invocations with their own ports for `ts-consumer` (`bun run main.ts`) and `java
    pipeline and table names share ONE namespace and the create paths refuse a collision), while a
    pipeline still reads sources only, which is what keeps the graph acyclic. A table attaching to a
    pipeline gets **no replay** — pipelines have no ring and no snapshot — so start it before the data
-   flows; Dapr does not have this yet (PARITY D6), and `POST /api/tables/validate` is optimistic there.
-   Full list: DESIGN.md §D11.
+   flows; Dapr has this too as of plan 025 (`CatalogStore`/`TableActor` build the same pipeline-relation
+   schema Orleans does, `POST /api/tables/validate` is no longer optimistic there, and the three
+   relation-name-collision refusals match). Full list: DESIGN.md §D11.
 7. **Branding is neutral**: plain "StreamsForge" wordmark only — every trace of the original
    client's name was removed from the pages, the docs and the plans (2026-08-04/09, pre-open-source);
    do not reintroduce any client name, and never reproduce a client logo graphic. Theme via tokens (`sf.theme`, light default); no raw hex outside the
