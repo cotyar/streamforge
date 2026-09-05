@@ -1,0 +1,14 @@
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: streamsforge-dapr-test-config
+spec:
+  tracing:
+    samplingRate: "0"
+  # Actor reentrancy is deliberately NOT enabled here — same rationale as the dev config
+  # (dapr/components/config.yaml): RegistryActor never calls into another actor (or itself) from inside
+  # one of its own turns, so there is no A->B->A cycle for Dapr's default non-reentrant turn-based
+  # concurrency to deadlock on. Keeping this file identical in spirit and letting it diverge only where
+  # isolation demands it (see statestore.yaml/pubsub.yaml's redisDB) keeps the test instance a faithful
+  # model of the real deployment, not a simplified stand-in that could hide a reentrancy bug the dev
+  # instance shares.
