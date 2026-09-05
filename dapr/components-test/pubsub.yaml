@@ -1,0 +1,25 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: pubsub
+spec:
+  type: pubsub.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: localhost:6379
+    - name: redisPassword
+      value: ""
+    # Same redisDB isolation as statestore.yaml, and for the identical reason: the dev pubsub component
+    # (dapr/components/pubsub.yaml) is deliberately UNSCOPED so any polyglot sidecar (the python
+    # enricher, the ts/java consumers) can publish/subscribe alongside the dev host — exactly the
+    # sharing this test instance must NOT have. Putting streams in DB 1 means a stray publish from this
+    # instance's own sf-* topics can never reach, or be reached by, the dev instance's consumers even if
+    # this component were accidentally left unscoped.
+    - name: redisDB
+      value: "1"
+# Scoped to ONLY the test app-id — deliberately the opposite of the dev component's comment. No
+# polyglot processor ever attaches to this instance; the whole point is an instance nothing else on the
+# machine can see or be seen by.
+scopes:
+  - streamsforge-dapr-test
