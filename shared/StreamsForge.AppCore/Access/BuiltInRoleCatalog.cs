@@ -12,7 +12,8 @@ namespace StreamsForge.AppCore.Access;
 /// <c>Admin</c> = <c>RequireRole("Admin")</c>. Every route's requirement is the string it passes to
 /// <c>RequireAuthorization(…)</c> at its map site under <c>shared/StreamsForge.Api/Endpoints/**</c>, and
 /// the gRPC surface says the same thing with <c>[Authorize(Policy = …)]</c> under
-/// <c>orleans/src/StreamsForge.Host/Grpc/**</c>. Those map sites — not anybody's memory of them — are
+/// <c>shared/StreamsForge.Api/Grpc/**</c> (plan 025 moved the seven gRPC services out of the Orleans
+/// host into shared code, served on both flavors). Those map sites — not anybody's memory of them — are
 /// what the legacy-equivalence matrix in the tests enumerates.</para>
 ///
 /// <para><b>Why Viewer's list is the interesting one.</b> "Viewer" today means *any authenticated user*,

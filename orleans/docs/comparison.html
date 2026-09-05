@@ -260,7 +260,7 @@ mark { background: var(--kbd-bg); color: inherit; border-radius: 3px; padding: 0
 <tr><td>latency-critical (single-digit-ms tails matter)</td><td><span class="verdict caution">architecturally favored, NOT what was measured</span> — real <code>tableDelta</code> p50 122&nbsp;ms, ~17&times; <i>slower</i> than Dapr, after fixing a startup-race relay bug found this wave — see <a href="#latency">Measured latency</a></td><td><span class="verdict good">&#10003; measured real, low (p50 2&ndash;7 ms)</span> on both signals</td></tr>
 <tr><td>under a k8s-native ops mandate (sidecars, building blocks, no custom clustering)</td><td><span class="verdict caution">Orleans clustering is its own operational model</span></td><td><span class="verdict good">&#10003; natural fit</span> — actors/pub/sub/state store are k8s-shaped primitives</td></tr>
 <tr><td>needing partitioned scaling of one hot table (2&ndash;16 partitions, frontier-consistent reads)</td><td><span class="verdict good">&#10003; full support</span> — see plan 003</td><td><span class="verdict avoid">descoped by design</span> — rejected with a clear 409; sidecar hops invert the economics at this scale (decision D-F)</td></tr>
-<tr><td>needing typed gRPC streams to external consumers today</td><td><span class="verdict good">&#10003; full</span> — static + dynamic reflection, typed client codegen</td><td><span class="verdict caution">reserved, not yet serving</span> (:5499, phase 2) — REST/SignalR + pub/sub are the Dapr-flavor integration points meanwhile</td></tr>
+<tr><td>needing typed gRPC streams to external consumers today</td><td><span class="verdict good">&#10003; full</span> — static + dynamic reflection, typed client codegen</td><td><span class="verdict good">&#10003; full, as of plan 025</span> (:5499 — the same seven services, moved to shared code and served on both flavors)</td></tr>
 </tbody></table></div>
 </section>
 
@@ -415,7 +415,7 @@ With the transport actually push, Orleans lands at <b>p50 1&nbsp;ms — ahead of
 </ul>
 </div>
 </div>
-<p>Ports, for anyone reproducing this: Orleans owns <code>5199</code> (REST/SignalR/SPA) + <code>5299</code> (gRPC); Dapr owns app <code>5399</code>, gRPC reserved <code>5499</code> (not yet serving), sidecar HTTP <code>3599</code> / gRPC <code>4599</code>. The two flavors never share a port and can run side by side on one machine, which is exactly how this page's benchmark was produced (sequentially, not concurrently, for CPU fairness).</p>
+<p>Ports, for anyone reproducing this: Orleans owns <code>5199</code> (REST/SignalR/SPA) + <code>5299</code> (gRPC); Dapr owns app <code>5399</code>, gRPC <code>5499</code> (served since plan 025 — previously reserved), sidecar HTTP <code>3599</code> / gRPC <code>4599</code>. The two flavors never share a port and can run side by side on one machine, which is exactly how this page's benchmark was produced (sequentially, not concurrently, for CPU fairness).</p>
 </section>
 
 <section id="parity">
@@ -432,7 +432,7 @@ With the transport actually push, Orleans lands at <b>p50 1&nbsp;ms — ahead of
 <tr><td>Tables classic P=1 (Z-sets, search, snapshots)</td><td>full</td><td>full</td></tr>
 <tr><td>Row history</td><td>full</td><td><b>full</b></td></tr>
 <tr><td>Parallelism 2&ndash;16 / frontiers / arrangements</td><td>full</td><td><b>descoped</b> — rejected with clear error; <code>frontierEpoch</code> null; <code>/api/meta/arrangements</code> <code>[]</code></td></tr>
-<tr><td>gRPC static + dynamic reflection + typed streams</td><td>full (:5299)</td><td><b>phase 2</b> (:5499 reserved; <code>/api/meta/grpc</code> shape kept, empty service list)</td></tr>
+<tr><td>gRPC static + dynamic reflection + typed streams</td><td>full (:5299)</td><td><b>full, as of plan 025</b> (:5499 — moved to shared code, served on both flavors, same seven services)</td></tr>
 <tr><td><code>/docs</code></td><td>full</td><td>descoped (links to this Orleans-served page; see below)</td></tr>
 <tr><td>Persistence / reseed</td><td>JSON files / delete <code>data/</code></td><td>Redis / <code>reset.sh</code></td></tr>
 <tr><td>Polyglot pub/sub participation</td><td>&mdash;</td><td><b>the point</b>: <code>sf-sources</code> ingress + <code>sf-source-{name}</code> egress</td></tr>

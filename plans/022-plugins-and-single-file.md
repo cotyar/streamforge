@@ -105,7 +105,8 @@ the target declares `Inputs`/`Outputs` for MSBuild's normal up-to-date check.
 `Publish.props` (both hosts) sets `PublishTrimmed=false` and `PublishAot=false` **explicitly**, not by
 omission, and there is no configuration knob to turn either on.
 
-**Why**: dynamic protobuf descriptor generation (`Host/Grpc/Dynamic/*`), gRPC server reflection,
+**Why**: dynamic protobuf descriptor generation (`shared/StreamsForge.Api/Grpc/Dynamic/*` — plan 025
+moved this out of the Orleans host so both flavors serve gRPC), gRPC server reflection,
 SignalR's runtime type discovery, and `StreamsForgePlugins`' own `Activator.CreateInstance` +
 `AssemblyLoadContext.LoadFromAssemblyPath` plugin loading are all reflection paths a trimmer or AOT
 analyzer cannot see from the static call graph. Every one of them would break **silently** under

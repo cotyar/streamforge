@@ -14,7 +14,8 @@ namespace StreamsForge.AppCore.Tests.Access;
 /// <c>Map{Get,Post,Put,Delete}</c> under <c>shared/StreamsForge.Api/Endpoints/**</c> plus
 /// <c>Chat/ChatEndpoints.cs</c> and the two <c>MapGet</c>/<c>MapScalarApiReference</c> sites in
 /// <c>StreamsForgeApiExtensions.cs</c>, and the <c>[Authorize(Policy = …)]</c> attributes on the gRPC
-/// services under <c>orleans/src/StreamsForge.Host/Grpc/**</c> and on <c>Hubs/StreamHub.cs</c>. Where a
+/// services under <c>shared/StreamsForge.Api/Grpc/**</c> (plan 025 moved these out of the Orleans host;
+/// served on both flavors now) and on <c>Hubs/StreamHub.cs</c>. Where a
 /// route is <c>MapGroup</c>-gated (<c>/api/users</c> is <c>RequireAuthorization("Admin")</c> on the
 /// group) the group's policy is the row's policy.</para>
 ///
@@ -136,7 +137,7 @@ public class LegacyEquivalenceMatrixTests
         // ---- SignalR ---------------------------------------------------------------------------
         new("signalr", "StreamHub /hubs/stream", "Viewer", Actions.CatalogRead, "*"),
 
-        // ---- gRPC (orleans/src/StreamsForge.Host/Grpc/**) ----------------------------------------
+        // ---- gRPC (shared/StreamsForge.Api/Grpc/**, served on both flavors as of plan 025) --------
         new("grpc", "SourceGrpcService.List", "Viewer", Actions.SourceRead, "*"),
         new("grpc", "SourceGrpcService.Get", "Viewer", Actions.SourceRead, "trades"),
         new("grpc", "SourceGrpcService.Create", "Editor", Actions.SourceWrite, "trades"),
