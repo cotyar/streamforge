@@ -36,6 +36,7 @@ public static class StreamingRuntimeSetup
         // endpoints below — no special-cased dispatch path for it there.
         services.AddSingleton<ISourceEventsSink>(sp => sp.GetRequiredService<DaprStreamBridge>());
         services.AddSingleton<ITableDeltaSink>(sp => sp.GetRequiredService<DaprStreamBridge>());
+        services.AddSingleton<IPipelineResultsSink>(sp => sp.GetRequiredService<DaprStreamBridge>());
 
         // Plan 005 W6: PipelineEventRouter registers as a SECOND ISourceEventsSink alongside the bridge
         // above — exactly what Sinks.cs's class doc anticipated ("W6's PipelineActor routes matching
@@ -49,10 +50,12 @@ public static class StreamingRuntimeSetup
         // Plan 009 B2: the NATS sink publisher. Registered as a singleton (so the sf-pipeline-out
         // endpoint below and the ITableDeltaSink fan-out resolve the SAME instance the BackgroundService
         // itself is) and forwarded to ITableDeltaSink, mirroring DaprStreamBridge's own registration
-        // shape immediately above. See NatsSinkPublisherService's class doc for why sf-pipeline-out is
-        // wired differently (direct call, not through a sink interface).
+        // shape immediately above. Plan 025 made sf-pipeline-out a generic IPipelineResultsSink fan-out
+        // (table-over-pipeline routing and the gRPC per-entity streams consume it too), so it is one more
+        // entry there rather than the direct concrete-type call it used to be.
         services.AddSingleton<NatsSinkPublisherService>();
         services.AddSingleton<ITableDeltaSink>(sp => sp.GetRequiredService<NatsSinkPublisherService>());
+        services.AddSingleton<IPipelineResultsSink>(sp => sp.GetRequiredService<NatsSinkPublisherService>());
         services.AddHostedService(sp => sp.GetRequiredService<NatsSinkPublisherService>());
     }
 
@@ -91,10 +94,9 @@ public static class StreamingRuntimeSetup
             return Results.Ok();
         }).WithTopic(PubsubName, TableDeltaTopic);
 
-        // sf-pipeline-out / sf-lifecycle / sf-metrics: nothing in this project ever needs these besides
-        // "relay to SignalR" (see DaprStreamBridge's class doc comment), so these three call the bridge
-        // directly by concrete type instead of through a dedicated sink interface.
-        app.MapPost($"/{PipelineOutTopic}", async (HttpContext ctx, DaprStreamBridge bridge, NatsSinkPublisherService natsSink) =>
+        // sf-pipeline-out: fan out to every registered IPipelineResultsSink (the bridge, the NATS sink
+        // publisher, and since plan 025 the table-over-pipeline router and the gRPC entity fan-out).
+        app.MapPost($"/{PipelineOutTopic}", async (HttpContext ctx, IEnumerable<IPipelineResultsSink> sinks) =>
         {
             var envelope = await TryReadAsync<PipelineResultsEnvelope>(ctx, logger, PipelineOutTopic);
             if (envelope is null)
@@ -103,14 +105,13 @@ public static class StreamingRuntimeSetup
             }
 
             NormalizePipelineResultRows(envelope);
-            await bridge.OnPipelineResultsAsync(envelope);
-            // Plan 009 B2: the NATS sink publisher has no other consumer for this topic (see Sinks.cs's
-            // class doc for why sf-pipeline-out isn't a generic IEnumerable<T> sink interface), so it's
-            // called directly here, right next to the bridge.
-            await natsSink.OnPipelineResultsAsync(envelope);
+            await DispatchPipelineResultsAsync(envelope, sinks);
             return Results.Ok();
         }).WithTopic(PubsubName, PipelineOutTopic);
 
+        // sf-lifecycle / sf-metrics: nothing in this project ever needs these besides "relay to
+        // SignalR" (see DaprStreamBridge's class doc comment), so these two call the bridge directly by
+        // concrete type instead of through a dedicated sink interface.
         app.MapPost($"/{LifecycleTopic}", async (HttpContext ctx, DaprStreamBridge bridge) =>
         {
             var evt = await TryReadAsync<LifecycleEvent>(ctx, logger, LifecycleTopic);
@@ -196,6 +197,16 @@ public static class StreamingRuntimeSetup
         foreach (var sink in sinks)
         {
             await sink.OnTableDeltaAsync(envelope);
+        }
+    }
+
+    /// <summary>Fans <paramref name="envelope"/> out to every sink in <paramref name="sinks"/> —
+    /// pipeline-results counterpart of <see cref="DispatchSourceEventsAsync"/> (plan 025).</summary>
+    public static async Task DispatchPipelineResultsAsync(PipelineResultsEnvelope envelope, IEnumerable<IPipelineResultsSink> sinks)
+    {
+        foreach (var sink in sinks)
+        {
+            await sink.OnPipelineResultsAsync(envelope);
         }
     }
 

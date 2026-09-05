@@ -591,6 +591,17 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
     /// than trusting whatever name string a caller passes.</summary>
     private IConnectorActor SelfProxy() =>
         ActorProxy.Create<IConnectorActor>(new ActorId(Id.GetId()), nameof(ConnectorActor), ActorProxyDefaults.Options);
+
+    // ---- Plan 025 attach protocol (PARITY.md D6 "late-consumer replay") — placeholder ----------------
+    // The orchestrator pinned IConnectorActor.BeginAttachAsync/EndAttachAsync before the wave so the
+    // consumer side (TableActor/PipelineActor) and this producer side could be built in parallel. Wave
+    // 1's connector agent replaces these two bodies with the real ring + hold + pending-flush protocol
+    // (see IConnectorActor's doc comment); until then a late consumer gets an empty snapshot, which is
+    // exactly today's behaviour.
+    public Task<SourceAttachSnapshot> BeginAttachAsync() => Task.FromResult(new SourceAttachSnapshot([], 0));
+
+    public Task EndAttachAsync() => Task.CompletedTask;
+
 }
 
 /// <summary>Persisted shape of a <see cref="ConnectorActor"/>'s state (state name "connector") — see

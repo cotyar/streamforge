@@ -44,7 +44,7 @@ public sealed class NatsSinkPublisherService(
     ICatalogFacadeFactory catalogFactory,
     IEnvironmentFacade environments,
     IHostApplicationLifetime lifetime,
-    ILogger<NatsSinkPublisherService> logger) : BackgroundService, ITableDeltaSink
+    ILogger<NatsSinkPublisherService> logger) : BackgroundService, ITableDeltaSink, IPipelineResultsSink
 {
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(15);
 

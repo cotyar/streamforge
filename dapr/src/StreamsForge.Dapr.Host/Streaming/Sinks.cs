@@ -17,11 +17,15 @@ namespace StreamsForge.Dapr.Host.Streaming;
 //                                          replace this one)
 //   sf-table-delta -> ITableDeltaSink     (W7-B's TableHistoryActor registers one, fed by table
 //                                          deltas to build row history)
+//   sf-pipeline-out -> IPipelineResultsSink (plan 025: table-over-pipeline routing and the gRPC
+//                                          per-entity fan-out both consume pipeline output, so this
+//                                          topic became a generic sink too — it used to call the
+//                                          bridge and the NATS publisher directly by concrete type)
 //
-// DaprStreamBridge (Streaming/DaprStreamBridge.cs) implements BOTH interfaces itself (so it's just
-// another entry in the IEnumerable<T> the endpoint iterates) — it is ALSO invoked directly, by
-// concrete type, for the three topics that have no other consumer in this project
-// (sf-pipeline-out/sf-lifecycle/sf-metrics: nothing except "relay to SignalR" ever needs those).
+// DaprStreamBridge (Streaming/DaprStreamBridge.cs) implements all THREE interfaces itself (so it's
+// just another entry in the IEnumerable<T> the endpoint iterates) — it is ALSO invoked directly, by
+// concrete type, for the two topics that have no other consumer in this project
+// (sf-lifecycle/sf-metrics: nothing except "relay to SignalR" ever needs those).
 // ============================================================================
 
 /// <summary>Registered consumer of topic <c>sf-sources</c> — a batch of raw events published by one
@@ -42,4 +46,13 @@ public interface ISourceEventsSink
 public interface ITableDeltaSink
 {
     Task OnTableDeltaAsync(TableDeltaEnvelope envelope);
+}
+
+/// <summary>Registered consumer of topic <c>sf-pipeline-out</c> — one pipeline's batch of result rows
+/// (<see cref="PipelineResultsEnvelope.PipelineId"/> is the environment-qualified pipeline id). Same
+/// normalization guarantee as the other two sinks: every <c>ResultEnvelope.Row</c> in
+/// <see cref="PipelineResultsEnvelope.Results"/> is normalized before any sink sees it.</summary>
+public interface IPipelineResultsSink
+{
+    Task OnPipelineResultsAsync(PipelineResultsEnvelope envelope);
 }

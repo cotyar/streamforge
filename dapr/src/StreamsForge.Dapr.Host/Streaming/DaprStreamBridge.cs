@@ -31,7 +31,7 @@ namespace StreamsForge.Dapr.Host.Streaming;
 /// bookkeeping to replicate on this side because there is nothing to subscribe TO per-entity in the
 /// first place.</para>
 /// </summary>
-public sealed class DaprStreamBridge(IHubContext<StreamHub> hub) : ISourceEventsSink, ITableDeltaSink
+public sealed class DaprStreamBridge(IHubContext<StreamHub> hub) : ISourceEventsSink, ITableDeltaSink, IPipelineResultsSink
 {
     private readonly SourceRateSampler _sourceSampler = new();
 
