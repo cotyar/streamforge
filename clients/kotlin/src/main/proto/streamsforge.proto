@@ -10,7 +10,7 @@ option csharp_namespace = "StreamsForge.Host.Grpc.V1";
 // (clients/kotlin/src/main/proto/streamsforge.proto) purely for codegen ergonomics -- one
 // top-level class per message instead of everything nested under one outer class. The wire
 // contract itself (services/messages/field numbers) is untouched, copied verbatim from
-// orleans/src/StreamsForge.Host/Protos/streamsforge.proto.
+// shared/StreamsForge.Api/Protos/streamsforge.proto.
 option java_package = "streamsforge.v1";
 option java_multiple_files = true;
 

@@ -12,7 +12,6 @@ using StreamsForge.AppCore.Net;
 using StreamsForge.Connectors.Database;
 using StreamsForge.Host.Facades;
 using StreamsForge.Host.Grpc;
-using StreamsForge.Host.Grpc.Dynamic;
 using StreamsForge.Host.Services;
 using StreamsForge.Host.Storage;
 using StreamsForge.Host.Streaming;
@@ -339,7 +338,13 @@ builder.Services.AddHostedService<StreamBridgeService>();
 // configured. See the service's own doc comment.
 builder.Services.AddHostedService<NatsPublisherService>();
 
-builder.Services.AddGrpc();
+// Plan 025 G1: gRPC services + protos live in shared/StreamsForge.Api now (Grpc/**), so this is
+// AddGrpc() plus the ONE dependency of theirs that is genuinely runtime-specific — the live per-entity
+// subscription primitive the two streaming services need (Orleans streams here, the Dapr topic fan-out
+// there). Everything else they take (ICatalogFacade, ITableReadFacade, IIngressFacade, AccessGuard) is
+// already registered by AddStreamsForgeApi/AddOrleansFacades above.
+builder.Services.AddStreamsForgeGrpc();
+builder.Services.AddSingleton<IEntityStreamFacade, OrleansEntityStreamFacade>();
 
 // Plan 014-I: the out-of-core database connectors' only call site. InboundTransports/PolledTransports
 // both document "before any source starts" as the registration deadline; nothing in this process can
@@ -406,12 +411,17 @@ if (builder.Configuration.GetValue(OutboundTls.AcceptAnyCertificateKey, false))
 // across runtimes (plan 005 W3, decision D-B). Values below reproduce exactly what the pre-W3
 // Program.cs resolved inline.
 var apiOptions = new StreamsForgeApiOptions(
-    ProtosDir: Path.Combine(app.Environment.ContentRootPath, "Protos"),
+    // Plan 025 G1: AppContext.BaseDirectory, not ContentRootPath — the .proto files moved into
+    // shared/StreamsForge.Api, which copies them into every referencing project's OUTPUT directory
+    // (see that csproj's <Content> item). ContentRootPath is this project's SOURCE directory under
+    // `dotnet run`, and there is no Protos/ there any more. The single-file publish path is unchanged:
+    // Publish.props still embeds the same two files and MetaEndpoints still falls back to them.
+    ProtosDir: Path.Combine(AppContext.BaseDirectory, "Protos"),
     GrpcPort: grpcPort,
-    GrpcStaticServices:
-    [
-        "SourceService", "PipelineService", "TableService", "StreamService", "IngestService", "DynamicStreamService", "ServerReflection",
-    ],
+    // Plan 025 G1: the list is no longer written out here — StreamsForgeGrpc.StaticServiceNames is the
+    // one definition, next to the MapStreamsForgeGrpc call that maps exactly those services, so what
+    // /api/meta/instance advertises cannot drift from what is actually mapped.
+    GrpcStaticServices: StreamsForgeGrpc.StaticServiceNames,
     DocsFilePath: Path.GetFullPath(Path.Combine(
         app.Environment.ContentRootPath,
         app.Configuration["Docs:File"] ?? Path.Combine("..", "..", "docs", "index.html"))),
@@ -429,21 +439,12 @@ var apiOptions = new StreamsForgeApiOptions(
 app.MapStreamsForgeApi(apiOptions);
 app.MapPluginEndpoints();
 
-// gRPC control plane + streaming (see Protos/streamsforge.proto) — served on the HTTP/2-only
-// endpoint configured above (Grpc:Port, default 5299); doesn't share the REST/SignalR/SPA port.
-app.MapGrpcService<SourceGrpcService>();
-app.MapGrpcService<PipelineGrpcService>();
-app.MapGrpcService<TableGrpcService>();
-app.MapGrpcService<StreamGrpcService>();
-app.MapGrpcService<IngestGrpcService>();
-
-// Tier 2 — dynamic (runtime-typed) gRPC surface: server reflection over BOTH the static streamsforge.v1
-// descriptors and per-entity descriptors generated on the fly for the current catalog (see
-// Grpc/Dynamic/DynamicReflectionService.cs for why this replaces the built-in
-// Grpc.AspNetCore.Server.Reflection package), plus one generic typed-streaming RPC
-// (Grpc/Dynamic/DynamicStreamService.cs) whose row payloads are encoded against those descriptors.
-app.MapGrpcService<DynamicReflectionService>();
-app.MapGrpcService<DynamicStreamService>();
+// gRPC control plane + streaming (shared/StreamsForge.Api/Protos/streamsforge.proto) — served on the
+// HTTP/2-only endpoint configured above (Grpc:Port, default 5299); doesn't share the REST/SignalR/SPA
+// port. All seven services (tier 1 control plane/streaming/ingest + tier 2 dynamic reflection and the
+// generic typed-streaming RPC) are mapped by the shared extension, whose own doc explains why the list
+// lives there rather than being written out once per host.
+app.MapStreamsForgeGrpc();
 
 app.Lifetime.ApplicationStarted.Register(() => _ = InitializeGrainsAsync(app.Services));
 

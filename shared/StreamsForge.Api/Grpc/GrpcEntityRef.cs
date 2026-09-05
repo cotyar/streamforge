@@ -32,15 +32,20 @@ namespace StreamsForge.Host.Grpc;
 // InternalsVisibleTo and EntityRefRouteTests pins the resolution rule against this class directly.
 // Adding an InternalsVisibleTo to the whole assembly to keep one class internal is the more expensive
 // of the two options.
+//
+// Plan 025 G1: the two resolvers take ICatalogFacade, not IRegistryGrain. IRegistryGrain INHERITS
+// ICatalogFacade (see Facades.cs's decision D-B), so every existing Orleans caller — including
+// EntityRefRouteTests, which hands this an IRegistryGrain — still compiles unchanged, while the Dapr
+// actor-proxy adapter now satisfies the same signature.
 public static class GrpcEntityRef
 {
     /// <summary>Id fast path (an id wins outright, so a hit never fetches the catalog), else exact name.</summary>
-    public static async Task<EntityRefResult<TableDefinition>> TableAsync(IRegistryGrain registry, string idOrName) =>
+    public static async Task<EntityRefResult<TableDefinition>> TableAsync(ICatalogFacade registry, string idOrName) =>
         await registry.GetTableAsync(idOrName) is { } byId
             ? new EntityRefResult<TableDefinition>(EntityRefOutcome.Found, byId, EntityRef.TableKind, idOrName, [])
             : EntityRef.Resolve(await registry.GetTablesAsync(), idOrName);
 
-    public static async Task<EntityRefResult<PipelineDefinition>> PipelineAsync(IRegistryGrain registry, string idOrName) =>
+    public static async Task<EntityRefResult<PipelineDefinition>> PipelineAsync(ICatalogFacade registry, string idOrName) =>
         await registry.GetPipelineAsync(idOrName) is { } byId
             ? new EntityRefResult<PipelineDefinition>(EntityRefOutcome.Found, byId, EntityRef.PipelineKind, idOrName, [])
             : EntityRef.Resolve(await registry.GetPipelinesAsync(), idOrName);

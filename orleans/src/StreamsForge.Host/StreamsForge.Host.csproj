@@ -6,8 +6,9 @@
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Grpc.AspNetCore" Version="2.83.0" />
-    <PackageReference Include="Grpc.Reflection" Version="2.83.0" />
+    <!-- Plan 025 G1: Grpc.AspNetCore / Grpc.Reflection moved to shared/StreamsForge.Api along with
+         Grpc/** and Protos/**, so both flavors serve the identical gRPC surface; this host reaches them
+         transitively through that project reference and adds nothing of its own. -->
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
     <PackageReference Include="Microsoft.Orleans.Server" Version="10.3.0" />
     <PackageReference Include="Microsoft.Orleans.Streaming" Version="10.3.0" />
@@ -44,10 +45,9 @@
   <Target Name="PublishBuiltInPlugins" AfterTargets="Publish" DependsOnTargets="CopyBuiltInPlugins">
     <Copy SourceFiles="@(_BuiltInPluginDlls)" DestinationFolder="$(PublishDir)plugins" SkipUnchangedFiles="true" />
   </Target>
-  <ItemGroup>
-    <Protobuf Include="Protos\streamsforge.proto" GrpcServices="Server" />
-    <Protobuf Include="Protos\streamsforge_dynamic.proto" GrpcServices="Server" />
-  </ItemGroup>
+  <!-- Plan 025 G1: the <Protobuf> items moved to shared/StreamsForge.Api with the .proto files. The
+       generated types keep their csharp_namespace (StreamsForge.Host.Grpc.V1), so nothing that compiles
+       against them — this host, the tests, clients/dotnet — changed. -->
   <!-- Single-file publish settings live next door, so publish knobs never mix with references. -->
   <Import Project="Publish.props" Condition="Exists('Publish.props')" />
 </Project>

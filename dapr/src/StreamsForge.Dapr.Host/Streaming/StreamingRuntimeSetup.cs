@@ -54,6 +54,17 @@ public static class StreamingRuntimeSetup
         services.AddSingleton<NatsSinkPublisherService>();
         services.AddSingleton<ITableDeltaSink>(sp => sp.GetRequiredService<NatsSinkPublisherService>());
         services.AddHostedService(sp => sp.GetRequiredService<NatsSinkPublisherService>());
+
+        // Plan 025 G2: the per-entity index the shared gRPC streaming services subscribe through
+        // (IEntityStreamFacade). Same registration shape as DaprStreamBridge above — ONE singleton, with
+        // the two sink interfaces forwarded to it so sf-sources/sf-table-delta reach it through the
+        // ordinary IEnumerable<T> fan-out. sf-pipeline-out has no sink interface (see Sinks.cs), so
+        // MapTopicEndpoints calls OnPipelineResultsAsync by concrete type, exactly as it already does
+        // for the bridge and the NATS publisher.
+        services.AddSingleton<EntityStreamFanout>();
+        services.AddSingleton<ISourceEventsSink>(sp => sp.GetRequiredService<EntityStreamFanout>());
+        services.AddSingleton<ITableDeltaSink>(sp => sp.GetRequiredService<EntityStreamFanout>());
+        services.AddSingleton<IEntityStreamFacade>(sp => sp.GetRequiredService<EntityStreamFanout>());
     }
 
     public static void MapTopicEndpoints(WebApplication app)
@@ -94,7 +105,7 @@ public static class StreamingRuntimeSetup
         // sf-pipeline-out / sf-lifecycle / sf-metrics: nothing in this project ever needs these besides
         // "relay to SignalR" (see DaprStreamBridge's class doc comment), so these three call the bridge
         // directly by concrete type instead of through a dedicated sink interface.
-        app.MapPost($"/{PipelineOutTopic}", async (HttpContext ctx, DaprStreamBridge bridge, NatsSinkPublisherService natsSink) =>
+        app.MapPost($"/{PipelineOutTopic}", async (HttpContext ctx, DaprStreamBridge bridge, NatsSinkPublisherService natsSink, EntityStreamFanout grpcFanout) =>
         {
             var envelope = await TryReadAsync<PipelineResultsEnvelope>(ctx, logger, PipelineOutTopic);
             if (envelope is null)
@@ -108,6 +119,9 @@ public static class StreamingRuntimeSetup
             // class doc for why sf-pipeline-out isn't a generic IEnumerable<T> sink interface), so it's
             // called directly here, right next to the bridge.
             await natsSink.OnPipelineResultsAsync(envelope);
+            // Plan 025 G2: and the gRPC per-entity fan-out, for the same reason and by the same means —
+            // it feeds StreamService.SubscribePipeline / DynamicStreamService's pipeline case.
+            await grpcFanout.OnPipelineResultsAsync(envelope);
             return Results.Ok();
         }).WithTopic(PubsubName, PipelineOutTopic);
 

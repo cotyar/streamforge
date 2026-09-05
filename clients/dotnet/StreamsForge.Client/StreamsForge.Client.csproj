@@ -28,8 +28,8 @@
     <!-- Single source of truth: the engine's own .proto, compiled here with Grpc.Tools. No
          ProjectReference to StreamsForge.Host/StreamsForge.Contracts: this is the only coupling
          to the server, and it is a build-time codegen input, not a binary/project reference. -->
-    <Protobuf Include="../../../orleans/src/StreamsForge.Host/Protos/streamsforge.proto"
-              ProtoRoot="../../../orleans/src/StreamsForge.Host/Protos"
+    <Protobuf Include="../../../shared/StreamsForge.Api/Protos/streamsforge.proto"
+              ProtoRoot="../../../shared/StreamsForge.Api/Protos"
               GrpcServices="Client" />
   </ItemGroup>
 

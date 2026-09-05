@@ -167,7 +167,7 @@ growing without bound the way a naive producer/consumer queue would under a slow
 
 ## Protobuf stubs
 
-`src/streamsforge/_pb/` is generated from `orleans/src/StreamsForge.Host/Protos/streamsforge.proto`
+`src/streamsforge/_pb/` is generated from `shared/StreamsForge.Api/Protos/streamsforge.proto`
 and **committed**, so installing the package needs no codegen step. Regenerate after a proto
 change:
 

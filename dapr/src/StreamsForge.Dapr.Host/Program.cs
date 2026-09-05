@@ -1,9 +1,12 @@
+using System.Net;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using StreamsForge.Abstractions;
 using StreamsForge.Api;
 using StreamsForge.Api.Plugins;
 using StreamsForge.AppCore.Discovery;
+using StreamsForge.AppCore.Net;
 using StreamsForge.Connectors.Database;
+using StreamsForge.Host.Grpc;
 using StreamsForge.Dapr.Host.Actors;
 using StreamsForge.Dapr.Host.Facades;
 using StreamsForge.Dapr.Host.Ingest;
@@ -13,21 +16,108 @@ using StreamsForge.Dapr.Host.Streaming;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Dapr flavor owns :5399 (REST/SignalR/SPA, HTTP/1.1) — gRPC (:5499) is reserved but not served by this
-// process yet (phase 2, decision D-F); the Dapr sidecar's own HTTP/gRPC ports (3599/4599) are separate
-// processes started by tools/run.sh. ASPNETCORE_URLS (if set) wins and skips the explicit Kestrel
-// endpoint below, exactly like the Orleans host's Program.cs.
+// Dapr flavor owns :5399 (REST/SignalR/SPA, HTTP/1.1) and :5499 (gRPC — HTTP/2 only). Plan 025 G2
+// closed decision D-F's "phase 2": 5499 is SERVED now, by the same seven services the Orleans host maps
+// (shared/StreamsForge.Api/Grpc/**). The Dapr sidecar's own HTTP/gRPC ports (3599/4599) are a separate
+// process started by tools/run.sh and are unrelated to either of these. ASPNETCORE_URLS (if set) wins
+// and takes the single-port branch below, exactly like the Orleans host's Program.cs.
+//
+// Everything about the two branches, TLS included, is deliberately the same shape as
+// orleans/src/StreamsForge.Host/Program.cs — read that file's much longer comments for the full
+// reasoning; only what is specific to this flavor is repeated here.
+var envPort = builder.Configuration.GetValue<int?>("PORT");
+var httpPort = builder.Configuration.GetValue("Http:Port", envPort ?? 5399);
+// Resolved out here rather than inside the branch, because StreamsForgeApiOptions below reports this
+// same number to clients — computing it twice is how the reported port and the bound port drift apart.
+var grpcPort = builder.Configuration.GetValue("Grpc:Port", envPort is { } p ? p + 100 : 5499);
+
+// Outbound TLS trust, configured ONCE for every client this process dials with (url source, http sink,
+// federated grpc source, peer probes, OpenAPI derive). Must run before anything can dial: each of those
+// call sites captures its handler in a static Lazy the first time it is used, and OutboundTls.Configure
+// throws rather than silently apply to only some of them. Until plan 025 this flavor never called it at
+// all, which meant Tls:TrustedCaPath and Tls:AcceptAnyCertificate were silently ignored here — a
+// federated grpc source pointed at a privately-signed peer simply failed with no way to fix it.
+OutboundTls.Configure(
+    builder.Configuration[OutboundTls.TrustedCaPathKey],
+    builder.Configuration.GetValue(OutboundTls.AcceptAnyCertificateKey, false));
+
+var tlsEnabled = builder.Configuration.GetValue("Tls:Enabled", false);
+
 if (string.IsNullOrEmpty(builder.Configuration["urls"]))
 {
-    var httpPort = builder.Configuration.GetValue("Http:Port", 5399);
+    // Fail fast, loudly: booting cleartext with Tls:Enabled=true in the config is a security
+    // misconfiguration that looks exactly like a working server.
+    if (tlsEnabled
+        && string.IsNullOrWhiteSpace(builder.Configuration["Kestrel:Certificates:Default:Path"])
+        && string.IsNullOrWhiteSpace(builder.Configuration["Kestrel:Certificates:Default:Subject"]))
+    {
+        throw new InvalidOperationException(
+            "Tls:Enabled is true but no server certificate is configured. Set either "
+          + "Kestrel:Certificates:Default:Path (+ :KeyPath for a PEM pair, or + :Password for a PFX) "
+          + "or Kestrel:Certificates:Default:Subject (+ :Store) so Kestrel has a certificate to serve. "
+          + "For a development pair: tools/tls/dev-cert.sh <out-dir> [host-or-ip ...], which prints the "
+          + "exact arguments to pass.");
+    }
 
     builder.WebHost.ConfigureKestrel(kestrel =>
     {
-        kestrel.ListenLocalhost(httpPort, o => o.Protocols = HttpProtocols.Http1);
+        // IPAddress.Any, not ListenLocalhost (which is what this host did until plan 025) and NOT
+        // ListenAnyIP. Two separate reasons, both already paid for on the Orleans side:
+        //
+        // - Not loopback: a loopback-only listener is unreachable from outside this process's network
+        //   namespace. That was survivable while this flavor served only REST to a browser on the same
+        //   machine, but it makes a published container port a dead end — and deploy/dapr/compose.yaml
+        //   publishes both of these — and it makes the gRPC port unreachable from any peer, which is
+        //   the entire point of serving it.
+        // - Not ListenAnyIP: it binds the IPv6 wildcard in DUAL-STACK mode, and on this platform an
+        //   IPv4-mapped accept throws out of Kestrel's accept loop UNHANDLED, killing the listener and
+        //   taking the host down with it. See the Orleans Program.cs comment for the measurement. The
+        //   stated cost is the same here: this host does not answer on IPv6.
+        kestrel.Listen(IPAddress.Any, httpPort, o =>
+        {
+            o.Protocols = HttpProtocols.Http1;
+            if (tlsEnabled)
+            {
+                o.UseHttps();
+            }
+        });
+        kestrel.Listen(IPAddress.Any, grpcPort, o =>
+        {
+            // HTTP/2 only. Cleartext that is prior-knowledge h2c; with TLS it is ALPN-negotiated h2,
+            // which is what a gRPC client dialling https:// expects anyway.
+            o.Protocols = HttpProtocols.Http2;
+            if (tlsEnabled)
+            {
+                o.UseHttps();
+            }
+        });
     });
 }
+else
+{
+    // Single-port branch (--urls / PORT), same as the Orleans host: Http1AndHttp2 on the one endpoint.
+    // On a CLEARTEXT endpoint Kestrel falls back to HTTP/1.1 and the gRPC half simply is not served
+    // (dotnet/aspnetcore#56984); with `--urls https://…` plus a Kestrel:Certificates:Default section it
+    // becomes real ALPN multiplexing and both halves work on one port. Read the Orleans Program.cs's
+    // long note in this same branch before changing anything here.
+    builder.WebHost.ConfigureKestrel(kestrel =>
+        kestrel.ConfigureEndpointDefaults(o => o.Protocols = HttpProtocols.Http1AndHttp2));
+}
+
+// IMPORTANT, and it has no Orleans equivalent: with TLS on the app port, the DAPR SIDECAR must be told
+// so. daprd calls back into this app for actor activation/deactivation/method-invocation and for every
+// pub/sub topic delivery, and it speaks plain http:// unless started with `--app-protocol https`. Get
+// this wrong and the host looks healthy over curl while every actor call and every topic delivery fails
+// — see dapr/tools/run.sh, which passes it through DAPR_RUN_EXTRA_ARGS. daprd also does not verify the
+// app's certificate on that channel, so a self-signed development pair needs nothing else.
 
 builder.Services.AddStreamsForgeApi(builder.Configuration);
+// Plan 025 G2: the gRPC surface, shared with the Orleans host (shared/StreamsForge.Api/Grpc/**). This is
+// AddGrpc() plus the ONE dependency of those services that is genuinely runtime-specific — the live
+// per-entity subscription primitive the two streaming services need. On this flavor that is
+// EntityStreamFanout, registered by StreamingRuntimeSetup.AddServices below alongside the other sinks,
+// because it IS one (see that class's doc).
+builder.Services.AddStreamsForgeGrpc();
 
 // Actor state + method-invocation payloads serialize via System.Text.Json with default settings
 // (enums as ints) — this is an internal actor wire (RegistryActor/UserStoreActor's own state, and the
@@ -119,21 +209,33 @@ NamedEndpoints.Configure(
 
 var app = builder.Build();
 
+// Re-emitted through the real logging pipeline (OutboundTls.Configure ran before it existed). A
+// development-only escape hatch that disables outbound certificate validation entirely must be visible
+// in whatever log an operator actually reads.
+if (builder.Configuration.GetValue(OutboundTls.AcceptAnyCertificateKey, false))
+{
+    app.Logger.LogWarning(
+        "{Key} is TRUE: every outbound HTTPS/gRPC connection from this instance accepts ANY server "
+      + "certificate. Development only.",
+        OutboundTls.AcceptAnyCertificateKey);
+}
+
 // Host-specific facts StreamsForgeApiOptions carries so the shared endpoints stay byte-identical across
-// runtimes (plan 005 W3, decision D-B). Per decision D-F (this flavor has no static gRPC serving):
-//   - ProtosDir points at a directory that doesn't exist — /api/meta/protos/static already guards each
-//     file with File.Exists and returns an empty list, so the response SHAPE is unchanged, just empty.
-//   - GrpcStaticServices is empty (gRPC serving is phase 2 here); GrpcPort is still reported (5499,
-//     reserved) so the API Explorer UI can show it as "not yet serving" rather than omitting it. Plan
-//     016 wave 5's GET /api/meta/instance reads GrpcStaticServices being empty as "omit the grpc
-//     endpoint key entirely" for exactly this reason — see MetaEndpoints' comment on servesGrpc.
+// runtimes (plan 005 W3, decision D-B). Plan 025 G2 retired decision D-F's "no gRPC on this flavor":
+//   - ProtosDir is AppContext.BaseDirectory/Protos, the same as the Orleans host — the .proto files live
+//     in shared/StreamsForge.Api now and that project copies them into every referencing project's
+//     output directory, so /api/meta/protos/static answers with the real files here too instead of the
+//     empty list decision D-F left it returning.
+//   - GrpcStaticServices is the shared list, so GET /api/meta/instance advertises `grpc` in its
+//     capabilities and its endpoints — honestly, because MapStreamsForgeGrpc below maps exactly those
+//     services. The list and the mapping are one definition; see StreamsForgeGrpc.
 //   - DocsFilePath serves the SAME flavor-aware docs the Orleans host serves (orleans/docs/ covers both
 //     runtimes since plan 006's docs sync — the original W4 "no /docs here" descope is obsolete), so the
 //     SPA's Documentation link works on :5399 too. Sibling pages (comparison.html) come along for free.
 var apiOptions = new StreamsForgeApiOptions(
-    ProtosDir: Path.Combine(app.Environment.ContentRootPath, "Protos"),
-    GrpcPort: app.Configuration.GetValue("Grpc:Port", 5499),
-    GrpcStaticServices: [],
+    ProtosDir: Path.Combine(AppContext.BaseDirectory, "Protos"),
+    GrpcPort: grpcPort,
+    GrpcStaticServices: StreamsForgeGrpc.StaticServiceNames,
     DocsFilePath: Path.GetFullPath(Path.Combine(
         app.Environment.ContentRootPath,
         app.Configuration["Docs:File"] ?? Path.Combine("..", "..", "..", "orleans", "docs", "index.html"))),
@@ -151,6 +253,11 @@ var apiOptions = new StreamsForgeApiOptions(
 
 app.MapStreamsForgeApi(apiOptions);
 app.MapPluginEndpoints();
+
+// gRPC control plane + streaming + ingest + dynamic reflection — served on the HTTP/2-only endpoint
+// configured above (Grpc:Port, default 5499); doesn't share the REST/SignalR/SPA port. Identical service
+// set to the Orleans host: the mapping lives in shared/StreamsForge.Api so the two cannot diverge.
+app.MapStreamsForgeGrpc();
 
 // Dapr actor HTTP endpoints the sidecar calls for activation/deactivation/method-invocation.
 app.MapActorsHandlers();

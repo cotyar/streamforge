@@ -2,10 +2,7 @@ using Grpc.Core;
 using Grpc.Reflection.V1Alpha;
 using Google.Protobuf.Reflection;
 using Microsoft.AspNetCore.Authorization;
-using Orleans;
 using StreamsForge.Abstractions;
-using StreamsForge.AppCore.Environments;
-using StreamsForge.Host.Facades;
 using StaticV1 = StreamsForge.Host.Grpc.V1;
 using DynamicV1 = StreamsForge.Host.Grpc.Dynamic.V1;
 
@@ -46,12 +43,15 @@ namespace StreamsForge.Host.Grpc.Dynamic;
 /// default. This deliberately diverges from the Viewer policy the rest of the gRPC surface uses.</para>
 /// </summary>
 [AllowAnonymous]
-public sealed class DynamicReflectionService(IClusterClient client) : ServerReflection.ServerReflectionBase
+public sealed class DynamicReflectionService(ICatalogFacade catalog) : ServerReflection.ServerReflectionBase
 {
     private static readonly IReadOnlyList<FileDescriptor> StaticFiles = BuildStaticFiles();
 
-    // Plan 021 D4 — a facade/gRPC service answering one request reads the ambient.
-    private IRegistryGrain Registry => client.RegistryFor(EnvironmentAmbient.Current);
+    // Plan 025 G1 — see SourceGrpcService for why the injected ICatalogFacade is the same
+    // environment-scoped catalog the removed `client.RegistryFor(EnvironmentAmbient.Current)` property
+    // produced: it is registered TRANSIENT with a factory reading the ambient, and a gRPC service class
+    // is constructed per call, after the environment middleware has run.
+    private ICatalogFacade Registry => catalog;
 
     public override async Task ServerReflectionInfo(
         IAsyncStreamReader<ServerReflectionRequest> requestStream,

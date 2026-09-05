@@ -12,10 +12,29 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.11" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
     <PackageReference Include="Scalar.AspNetCore" Version="2.17.2" />
+    <!-- Plan 025 G1: the gRPC surface (Grpc/**, Protos/**) moved here from the Orleans host so both
+         flavors serve the identical services, so these two packages moved with it. Grpc.Reflection is
+         the reference-implementation package that ships the generated ServerReflectionBase our
+         hand-rolled DynamicReflectionService subclasses — see that class's doc for why the built-in
+         Grpc.AspNetCore.Server.Reflection package cannot be used instead. -->
+    <PackageReference Include="Grpc.AspNetCore" Version="2.83.0" />
+    <PackageReference Include="Grpc.Reflection" Version="2.83.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\StreamsForge.Engine\StreamsForge.Engine.csproj" />
     <ProjectReference Include="..\StreamsForge.Contracts\StreamsForge.Contracts.csproj" />
     <ProjectReference Include="..\StreamsForge.AppCore\StreamsForge.AppCore.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Protobuf Include="Protos\streamsforge.proto" GrpcServices="Server" />
+    <Protobuf Include="Protos\streamsforge_dynamic.proto" GrpcServices="Server" />
+    <!-- The SAME two files again, as plain content this time: GET /api/meta/protos/static serves their
+         raw TEXT, so they must exist on disk next to whichever host binary is running. A Content item
+         with CopyToOutputDirectory in a referenced library flows into every referencing project's build
+         AND publish output, which is what gives both hosts a $(OutDir)Protos/ directory without either
+         csproj knowing this folder exists. StreamsForgeApiOptions.ProtosDir points at
+         AppContext.BaseDirectory/Protos on both hosts for exactly that reason (it used to point at the
+         Orleans host's own source directory, which only worked because the files lived there). -->
+    <Content Include="Protos\*.proto" CopyToOutputDirectory="PreserveNewest" Link="Protos\%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

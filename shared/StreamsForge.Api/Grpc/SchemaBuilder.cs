@@ -5,7 +5,10 @@ namespace StreamsForge.Host.Grpc;
 
 /// <summary>Builds the SourceSchema maps SqlCompiler.Compile/CompileTable need from the registry's
 /// current sources/tables — same logic as StreamsForge.Host.Api.PipelinesEndpoints/TablesEndpoints,
-/// shared here so the gRPC Validate RPCs match REST exactly.</summary>
+/// shared here so the gRPC Validate RPCs match REST exactly.
+///
+/// <para>Plan 025 G1: takes <see cref="ICatalogFacade"/> rather than the Orleans-only
+/// <c>IRegistryGrain</c> that inherits it, so the same builder serves both flavors' gRPC hosts.</para></summary>
 internal static class SchemaBuilder
 {
     /// <param name="includePipelines">Table-over-pipeline: true for a TABLE compile, where a pipeline
@@ -14,7 +17,7 @@ internal static class SchemaBuilder
     /// and the two must not drift — and it defaults to false so the pipeline Validate RPC that already
     /// calls this is unchanged.</param>
     public static async Task<Dictionary<string, SourceSchema>> BuildStreamSchemasAsync(
-        IRegistryGrain registry, bool includePipelines = false)
+        ICatalogFacade registry, bool includePipelines = false)
     {
         var schemas = new Dictionary<string, SourceSchema>();
 
@@ -37,7 +40,7 @@ internal static class SchemaBuilder
         return schemas;
     }
 
-    public static async Task<Dictionary<string, SourceSchema>> BuildTableSchemasAsync(IRegistryGrain registry)
+    public static async Task<Dictionary<string, SourceSchema>> BuildTableSchemasAsync(ICatalogFacade registry)
     {
         var tables = await registry.GetTablesAsync();
         var schemas = new Dictionary<string, SourceSchema>();
