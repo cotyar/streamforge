@@ -33,19 +33,39 @@ namespace StreamsForge.Dapr.Host.Streaming;
 /// </summary>
 public sealed class DaprStreamBridge(IHubContext<StreamHub> hub) : ISourceEventsSink, ITableDeltaSink, IPipelineResultsSink
 {
-    private readonly SourceRateSampler _sourceSampler = new();
+    private readonly SourceRateSampler _sourcePacer = new();
 
     /// <summary>Mirrors StreamBridgeService.SubscribeToSourceAsync's per-event handler: group
     /// <c>source:{name}</c>, event <c>sourceEvent</c>, args <c>(name, eventDict)</c> — one SignalR send
-    /// per surviving event, not one send per batch (see SourceRateSampler's design note for why sampling
-    /// is applied per-event even though the envelope arrives as a batch).</summary>
+    /// per surviving event, not one send per batch (see SourceRateSampler's design note for why pacing
+    /// is applied per-event even though the envelope arrives as a batch).
+    ///
+    /// <para><b>PACED, NOT SAMPLED (plan 025 D5/D6, porting Orleans' plan 023 decision).</b> This used to
+    /// DROP any event arriving less than <see cref="SourceRateSampler.MinIntervalMs"/> after the last
+    /// relayed one for the same source, which meant a burst — the normal shape of a polled source, one
+    /// poll cycle emitting every row of a file in a tight loop — reached the console as one or two rows
+    /// with the rest simply never appearing. <see cref="SourceRateSampler.Evaluate"/> now WAITS OUT the
+    /// remainder of a too-early event's slot instead, so a burst relays in full, in order, merely spread
+    /// over time; only a SUSTAINED firehose past <see cref="SourceRateSampler.MaxPacedStreak"/> degrades
+    /// to the old drop behavior. Awaiting the delay HERE, inside the per-event loop, is what makes this
+    /// safe: this method runs on the one HTTP delivery the Dapr sidecar makes for this pub/sub message
+    /// (<c>sf-sources</c>), so a <c>Task.Delay</c> here holds THAT delivery — the same back-pressure
+    /// Orleans accepts inside its own stream subscription callback (see StreamBridgeService's
+    /// SubscribeToSourceAsync doc comment) — rather than racing ahead and reordering what reaches the
+    /// hub.</para></summary>
     public async Task OnSourceEventsAsync(SourceEventsEnvelope envelope)
     {
         foreach (var evt in envelope.Events)
         {
-            if (!_sourceSampler.ShouldRelay(envelope.Source))
+            var plan = _sourcePacer.Evaluate(envelope.Source);
+            if (plan.Decision == RelayDecision.Drop)
             {
                 continue;
+            }
+
+            if (plan.Decision == RelayDecision.SendAfterDelay)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(plan.DelayMs));
             }
 
             // Plan 021 wave 2 — GROUP name qualified, PAYLOAD name bare. The group has to match
@@ -81,16 +101,36 @@ public sealed class DaprStreamBridge(IHubContext<StreamHub> hub) : ISourceEvents
             .SendAsync("pipelineResult", EnvKeys.Split(envelope.PipelineId).Key, envelope.Results);
     }
 
-    /// <summary>Mirrors StreamBridgeService.OnLifecycleEventAsync/OnTableLifecycleEventAsync: table
-    /// lifecycle events reuse the same envelope type — <see cref="LifecycleEvent.Kind"/> prefixed
-    /// "table-" disambiguates, and <see cref="LifecycleEvent.PipelineId"/> holds the table's Name (its
-    /// actor id) in that case, exactly like the Orleans stream item's doc comment says. Pipeline case:
-    /// group <c>pipeline:{id}</c>, event <c>pipelineStatus</c>, args <c>(id, status)</c>. Table case:
-    /// group <c>table:{name}</c>, event <c>tableStatus</c>, args <c>(name, status)</c>.
+    /// <summary>Mirrors StreamBridgeService.OnLifecycleEventAsync/OnTableLifecycleEventAsync/
+    /// OnSourceLifecycleEventAsync: all three entity kinds share one envelope type —
+    /// <see cref="LifecycleEvent.Kind"/>'s PREFIX disambiguates which, per the doc comment on
+    /// <see cref="LifecycleEvent.Kind"/> itself (shared/StreamsForge.Contracts/Models.cs): "table-"
+    /// prefixed kinds are tables (<see cref="LifecycleEvent.PipelineId"/> holds the table's Name, its
+    /// actor id), "source-" prefixed kinds are sources (<see cref="LifecycleEvent.PipelineId"/> holds the
+    /// source's Name), and everything else is one of the six bare pipeline kinds ("created" | "updated" |
+    /// "deleted" | "started" | "stopped" | "failed" — see every <c>PublishLifecycleAsync</c> call site in
+    /// <c>Catalog/CatalogStore.cs</c>: pipeline kinds are the only ones published with NO hyphen at all).
+    /// Table case: group <c>table:{name}</c>, event <c>tableStatus</c>, args <c>(name, status)</c>.
+    /// Pipeline case: group <c>pipeline:{id}</c>, event <c>pipelineStatus</c>, args <c>(id, status)</c>.
     ///
-    /// <para>Deliberately NOT mirrored: Orleans' side-effecting subscribe/unsubscribe-on-"started"/
-    /// "stopped" branch inside this same handler — see this class's own doc comment for why there is no
-    /// per-entity subscription to start/stop on the Dapr flavor.</para></summary>
+    /// <para><b>Source case sends NO hub message</b> — mirroring Orleans' <c>OnSourceLifecycleEventAsync</c>,
+    /// whose own doc comment explains why: <c>StreamHub</c>'s clients listen for
+    /// <c>pipelineStatus</c>/<c>tableStatus</c> and there is no <c>sourceStatus</c> counterpart to invent;
+    /// the console learns a source's state from the REST catalog it already re-reads. Orleans' handler
+    /// still takes an ACTION on "source-started"/"source-stopped"/"source-deleted" (subscribing/
+    /// unsubscribing its per-entity stream handle) — this flavor has no per-entity subscription to
+    /// start or stop in the first place (see this class's own doc comment on FIXED topics), so a
+    /// "source-*" kind here is inert other than clearing this bridge's OWN per-source pacing state on
+    /// a delete, which costs nothing and mirrors Orleans' <c>UnsubscribeFromSourceAsync</c> clearing its
+    /// pacing dictionaries so a source deleted and recreated under the same qualified name does not
+    /// inherit stale "last sent at"/streak state — see <see cref="SourceRateSampler.Forget"/>.</para>
+    ///
+    /// <para><b>Any OTHER prefixed kind is ignored too</b> (never falls through to the pipeline branch) —
+    /// this is the "subscriber that does not recognise a prefix must ignore the event" rule
+    /// <see cref="LifecycleEvent.Kind"/>'s own doc comment states explicitly, so this list can grow
+    /// additively without a stale build here silently misrouting a kind it has never heard of into the
+    /// pipeline group. Detected the same way the three known categories are told apart from pipelines:
+    /// containing a hyphen at all, since every current bare pipeline kind is a single word.</para></summary>
     public async Task OnLifecycleEventAsync(LifecycleEvent evt)
     {
         if (evt.Kind.StartsWith("table-", StringComparison.Ordinal))
@@ -99,6 +139,23 @@ public sealed class DaprStreamBridge(IHubContext<StreamHub> hub) : ISourceEvents
             var tableName = evt.PipelineId;
             await hub.Clients.Group($"table:{tableName}")
                 .SendAsync("tableStatus", EnvKeys.Split(tableName).Key, evt.Status);
+            return;
+        }
+
+        if (evt.Kind.StartsWith("source-", StringComparison.Ordinal))
+        {
+            if (evt.Kind == "source-deleted")
+            {
+                _sourcePacer.Forget(evt.PipelineId);
+            }
+
+            return;
+        }
+
+        if (evt.Kind.Contains('-'))
+        {
+            // Unrecognised prefix — not a kind this build knows about. Ignore per Models.cs' own rule
+            // rather than guess it belongs to the pipeline branch below.
             return;
         }
 
