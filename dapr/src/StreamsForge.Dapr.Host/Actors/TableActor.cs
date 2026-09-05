@@ -4,6 +4,7 @@ using Dapr.Actors.Runtime;
 using Dapr.Client;
 using StreamsForge.Abstractions;
 using StreamsForge.Abstractions.Streaming;
+using StreamsForge.AppCore.Connectors;
 using StreamsForge.AppCore.Environments;
 using StreamsForge.AppCore.Json;
 using StreamsForge.Dapr.Host.Streaming;
@@ -160,6 +161,14 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
     private TableDefinition? _def;
     private List<SourceDefinition> _sources = [];
     private List<TableDefinition> _tables = [];
+
+    /// <summary>Table-over-pipeline (plan 025) — every pipeline the catalog knew about at the last
+    /// StartAsync/self-heal, the same "full list, not just this table's own dependencies" shape as
+    /// <see cref="_sources"/>/<see cref="_tables"/> (see <see cref="TableStartRequest.Pipelines"/>'s own
+    /// doc comment). Persisted (<see cref="TableActorState.Pipelines"/>) for the identical self-heal
+    /// reason <see cref="_sources"/>/<see cref="_tables"/> are.</summary>
+    private List<PipelineDefinition> _pipelines = [];
+
     private bool _running;
     private bool _timerArmed;
 
@@ -167,6 +176,22 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
     private TableSearchIndex? _searchIndex;
     private List<string> _streamInputs = [];
     private List<string> _tableInputs = [];
+
+    /// <summary>Table-over-pipeline (plan 025) — the pipeline relation NAMES this compile resolved (a
+    /// subset of <c>TableCompileResult.StreamInputs</c>, split off by pipeline-name membership exactly
+    /// like <c>Catalog.CatalogStore.ApplyCompileResult</c> does for the persisted
+    /// <see cref="TableDefinition.PipelineInputs"/> field). Used to build <see cref="_pipelineNameById"/>
+    /// in <see cref="RegisterRouterAndAttachToTableInputsAsync"/>.</summary>
+    private List<string> _pipelineInputs = [];
+
+    /// <summary>Table-over-pipeline (plan 025) — pipeline id (bare GUID, what a live
+    /// <c>PipelineResultsEnvelope.PipelineId</c> actually carries — see <see cref="TableInputNames.
+    /// PipelineInputs"/>'s own doc comment) → the LOCAL relation NAME this table's SQL used for it, so
+    /// <see cref="ProcessPipelineResultsAsync"/> knows which compiled relation an incoming envelope
+    /// belongs to. Rebuilt from scratch by <see cref="RegisterRouterAndAttachToTableInputsAsync"/> on
+    /// every StartAsync/self-heal, exactly like <see cref="_tableInputCutoffEpoch"/>.</summary>
+    private readonly Dictionary<string, string> _pipelineNameById = new(StringComparer.Ordinal);
+
     private string? _lastCompileError;
 
     /// <summary>PARITY.md debt item D2 — Dapr counterpart of <c>TableGrain</c>'s identical field: BARE
@@ -259,6 +284,7 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
             _def = existing.Value.Def;
             _sources = existing.Value.Sources;
             _tables = existing.Value.Tables;
+            _pipelines = existing.Value.Pipelines;
             _running = existing.Value.Running;
             _flushed = existing.Value.Snapshot;
             _seq = existing.Value.Seq;
@@ -318,6 +344,7 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
         _def = request.Def;
         _sources = request.Sources;
         _tables = request.Tables;
+        _pipelines = request.Pipelines ?? [];
 
         // Defensive-only: Catalog.CatalogStore.ValidateParallelism already rejects Parallelism != 1 at
         // CRUD time (decision D-F) — partitioned execution never legitimately reaches this actor. Assert
@@ -367,7 +394,7 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
         await SaveControlStateAsync();
         await ArmTimerAsync(ResolveFlushPeriod());
 
-        return ActorResult<TableInputNames>.Success(new TableInputNames(_streamInputs.ToList(), _tableInputs.ToList()));
+        return ActorResult<TableInputNames>.Success(new TableInputNames(_streamInputs.ToList(), _tableInputs.ToList(), _pipelineNameById.Keys.ToList()));
     }
 
     /// <summary>
@@ -414,6 +441,33 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
     /// rather than silently dropped, and driven by the SAME atomic <see cref="ITableActor.AttachSnapshotAsync"/>
     /// read the backfill itself uses (the old best-effort <see cref="ITableActor.GetRowCountAsync"/> probe,
     /// which could itself race the routing it described, is gone).</para>
+    ///
+    /// <para><b>Plan 025 extends this same argument to STREAM inputs (B3):</b> BEFORE the
+    /// <see cref="Streaming.TableEventRouter.Register"/> call below, this method now also opens an attach
+    /// hold (<see cref="IConnectorActor.BeginAttachAsync"/>) on every stream input whose source classifies
+    /// as <see cref="SourceKindDispatch.ActorKind.Connector"/> — Dapr's counterpart of <c>TableGrain.
+    /// AttachToStreamInputAsync</c>. Because registration happens inside THIS SAME actor turn, a live batch
+    /// the router routes here while the hold is open queues behind this invocation exactly like a
+    /// table-input delta does (see the paragraph above) — but a connector-kind source publishes NOTHING
+    /// while its own hold is open (<see cref="IConnectorActor.BeginAttachAsync"/>'s own doc comment: "while
+    /// at least one attach hold is open this actor publishes NOTHING"), so the only thing that CAN arrive
+    /// queued here is a batch from BEFORE the hold that was already in flight on the topic when this call
+    /// started — and that batch MAY duplicate rows the snapshot itself already replayed, because a source's
+    /// replay ring carries no per-input epoch the way <see cref="_tableInputCutoffEpoch"/> fences a table
+    /// input. Stated honestly rather than hidden: this is the SAME measured gap Orleans documents on
+    /// <c>IConnectorGrain.BeginAttachAsync</c> — an ordinary table over an ordinary stream source can, in
+    /// the narrow window between this call's registration and its own return, double-count a handful of
+    /// rows that were already in flight when the attach began. <c>LATEST BY</c> tables are unaffected
+    /// (re-admitting the same key/value under that semantics is idempotent). A hold that fails to open
+    /// (<see cref="IConnectorActor.BeginAttachAsync"/> itself threw, or the source isn't a Connector kind
+    /// at all) degrades to plain registration with no replay — losing the backfill is bad, refusing to
+    /// start is worse, the identical rule <c>TableGrain.AttachToStreamInputAsync</c>'s own doc comment
+    /// states.</para>
+    ///
+    /// <para><b>Plan 025 also registers this table's PIPELINE inputs</b> in this same call
+    /// (<see cref="Streaming.TableEventRouter.RegisterPipelineInputs"/>, by resolved pipeline ID) —
+    /// there is nothing to attach to for a pipeline input (see <see cref="ProcessPipelineResultsAsync"/>'s
+    /// own doc comment: a pipeline holds no replay ring, so this is registration only).</para>
     /// </summary>
     private async Task RegisterRouterAndAttachToTableInputsAsync()
     {
@@ -423,23 +477,121 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
         // deltas here either, but this keeps the invariant "this dictionary's keys are exactly this table's
         // CURRENT table inputs" true by construction rather than by coincidence).
         _tableInputCutoffEpoch.Clear();
+        _pipelineNameById.Clear();
 
-        // Register EVERY input (stream AND table) this compile resolved BEFORE reading any upstream
-        // snapshot below — see this method's own doc comment for why that ordering is what makes the whole
-        // handshake race-free. Idempotent (Streaming.TableEventRouter.Register replaces this table's prior
-        // subscription set), so a restart-after-edit registers the new set cleanly.
-        //
-        // Plan 021 D6: _streamInputs/_tableInputs are BARE (compiled against this table's own environment's
-        // catalog); the router is shared process-wide, so both the router's own key (this table's qualified
-        // name) and every input it fans in from must be qualified with THIS table's own environment — same
-        // reasoning DaprLifecycleOrchestrator.StartTableAsync used to apply after the fact.
-        tableRouter.Register(
-            EnvKeys.Qualify(_def!.Environment, _def.Name),
-            _streamInputs.Select(s => EnvKeys.Qualify(_def!.Environment, s)).ToList(),
-            _tableInputs.Select(t => EnvKeys.Qualify(_def!.Environment, t)).ToList());
-
-        foreach (var upstreamName in _tableInputs.Distinct())
+        // Plan 025 (B3): open an attach hold on every STREAM input that is a Connector-kind source, BEFORE
+        // this table registers with the router below — see this method's own doc comment for the full
+        // race-free argument and the honest residual it states. Best-effort per source: a Begin failure (or
+        // a non-Connector-kind source, which has no BeginAttachAsync to call at all) just means this input
+        // gets a plain registration with no replay, exactly like TableGrain.AttachToStreamInputAsync's own
+        // one-directional best-effort gate.
+        var connectorHolds = new List<(string SourceName, IConnectorActor Proxy, SourceAttachSnapshot Snapshot)>();
+        foreach (var sourceName in _streamInputs.Distinct())
         {
+            var sourceDef = _sources.FirstOrDefault(s => s.Name == sourceName);
+            if (sourceDef is null || SourceKindDispatch.Classify(sourceDef.Kind) != SourceKindDispatch.ActorKind.Connector)
+            {
+                continue;
+            }
+
+            var proxy = ActorProxy.Create<IConnectorActor>(new ActorId(EnvKeys.Qualify(_def!.Environment, sourceName)), nameof(ConnectorActor), ActorProxyDefaults.Options);
+            try
+            {
+                var snapshot = await proxy.BeginAttachAsync();
+                connectorHolds.Add((sourceName, proxy, snapshot));
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "TableActor[{Name}]: could not attach to stream input '{Source}' for replay — registering without it.", _def!.Name, sourceName);
+            }
+        }
+
+        try
+        {
+            // Register EVERY input (stream AND table) this compile resolved BEFORE reading any upstream
+            // snapshot below — see this method's own doc comment for why that ordering is what makes the whole
+            // handshake race-free. Idempotent (Streaming.TableEventRouter.Register replaces this table's prior
+            // subscription set), so a restart-after-edit registers the new set cleanly.
+            //
+            // Plan 021 D6: _streamInputs/_tableInputs are BARE (compiled against this table's own environment's
+            // catalog); the router is shared process-wide, so both the router's own key (this table's qualified
+            // name) and every input it fans in from must be qualified with THIS table's own environment — same
+            // reasoning DaprLifecycleOrchestrator.StartTableAsync used to apply after the fact.
+            tableRouter.Register(
+                EnvKeys.Qualify(_def!.Environment, _def.Name),
+                _streamInputs.Select(s => EnvKeys.Qualify(_def!.Environment, s)).ToList(),
+                _tableInputs.Select(t => EnvKeys.Qualify(_def!.Environment, t)).ToList());
+
+            // Plan 025 (table-over-pipeline): register this table's pipeline inputs too, keyed by resolved
+            // pipeline ID — see TableEventRouter.RegisterPipelineInputs's own doc comment for why this is a
+            // SEPARATE call rather than a wider Register parameter list, and TableInputNames.PipelineInputs's
+            // doc comment for why a pipeline id needs no EnvKeys.Qualify the way a source/table NAME does.
+            var pipelineIds = new List<string>();
+            foreach (var pipelineName in _pipelineInputs)
+            {
+                var pipeline = _pipelines.FirstOrDefault(p => p.Name == pipelineName);
+                if (pipeline is null)
+                {
+                    // Should not happen (BuildTableStreamSchemas only ever offers a pipeline relation when
+                    // the pipeline is present with a non-empty OutputFields — Catalog.CatalogStore's
+                    // BuildTableStreamSchemas), but a missing entry here must not throw: starting empty for
+                    // this input is the same "losing the extra is bad, refusing to start is worse" rule
+                    // every other lookup on this path follows.
+                    logger.LogDebug(
+                        "TableActor[{Name}]: pipeline input '{Pipeline}' was not found in the pipelines list passed to StartAsync — this input will receive nothing.",
+                        _def!.Name, pipelineName);
+                    continue;
+                }
+
+                pipelineIds.Add(pipeline.Id);
+                _pipelineNameById[pipeline.Id] = pipelineName;
+
+                if (pipeline.Status != PipelineStatus.Running)
+                {
+                    // Not a refusal — mirrors TableGrain.SubscribeToPipelineInputAsync's identical log: a
+                    // table over a stopped pipeline is legal and simply receives nothing until that
+                    // pipeline runs (see ProcessPipelineResultsAsync's own doc comment: pipelines have no
+                    // replay).
+                    logger.LogInformation(
+                        "TableActor[{Name}]: pipeline input '{Pipeline}' is {Status} — this table will receive rows only once that pipeline runs (pipelines have no replay).",
+                        _def!.Name, pipelineName, pipeline.Status);
+                }
+            }
+            tableRouter.RegisterPipelineInputs(EnvKeys.Qualify(_def!.Environment, _def.Name), pipelineIds);
+
+            // Plan 025 (B3): feed each held connector's replay snapshot through the SAME source-event path
+            // live traffic uses (ProcessSourceEventsAsync's own JsonValueNormalizer.NormalizeInPlace +
+            // TableExecutor.OnStreamEvent), now that the registration above makes this actor id routable —
+            // see this method's own doc comment for the race-free argument this extends to stream inputs.
+            foreach (var (sourceName, _, snapshot) in connectorHolds)
+            {
+                if (snapshot.TotalSeen > snapshot.Rows.Count)
+                {
+                    // Same wording as Orleans' TableGrain.AttachToStreamInputAsync — each placeholder name
+                    // appears exactly once (see the table-input warning below for why that matters).
+                    logger.LogWarning(
+                        "Table '{Table}': late attach to source '{Source}' replayed {Replayed} of {TotalSeen} row(s); " +
+                        "earlier rows are not recoverable (the source's replay ring holds the most recent {Capacity}).",
+                        _def!.Name, sourceName, snapshot.Rows.Count, snapshot.TotalSeen, SourceReplayBuffer.Capacity);
+                }
+
+                foreach (var row in snapshot.Rows)
+                {
+                    JsonValueNormalizer.NormalizeInPlace(row);
+                    _deltasIn++;
+                    _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    _rebuilding = false;
+
+                    var deltas = _executor!.OnStreamEvent(sourceName, row);
+                    if (deltas.Count > 0)
+                    {
+                        await ApplyAndPublishAsync(deltas);
+                    }
+                }
+            }
+
+            foreach (var upstreamName in _tableInputs.Distinct())
+            {
             // A table cannot legitimately depend on itself (the SQL compiler has no recursive-table feature
             // to produce one) — skip defensively rather than ever calling back into this same actor id's
             // not-yet-finished StartAsync/OnActivateAsync turn, which would deadlock.
@@ -494,6 +646,25 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
                     await ApplyAndPublishAsync(outAll);
                 }
             }
+            }
+        }
+        finally
+        {
+            // Plan 025 (B3): release every attach hold this call opened, regardless of how the try block
+            // above exited — mirrors TableGrain.AttachToStreamInputAsync's identical guarded finally. A
+            // release failure is logged and swallowed: the source's own 10s safety timer force-releases a
+            // hold nobody ends, so a stray failure here cannot gate that source forever.
+            foreach (var (sourceName, proxy, _) in connectorHolds)
+            {
+                try
+                {
+                    await proxy.EndAttachAsync();
+                }
+                catch (Exception ex)
+                {
+                    logger.LogDebug(ex, "TableActor[{Name}]: releasing the attach hold on source '{Source}' failed; the source's own safety timer covers it.", _def!.Name, sourceName);
+                }
+            }
         }
     }
 
@@ -510,6 +681,7 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
         _searchIndex = null;
         _running = false;
         _tableInputCutoffEpoch.Clear(); // PARITY.md D2 — a restart re-attaches and re-populates this fresh.
+        _pipelineNameById.Clear(); // plan 025 — same reasoning, re-populated fresh by the next start.
         await SaveControlStateAsync();
     }
 
@@ -532,7 +704,9 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
     public Task<bool> IsRunningAsync() => Task.FromResult(_running);
 
     public Task<TableInputNames> GetInputNamesAsync() => Task.FromResult(
-        _running ? new TableInputNames(_streamInputs.ToList(), _tableInputs.ToList()) : new TableInputNames([], []));
+        _running
+            ? new TableInputNames(_streamInputs.ToList(), _tableInputs.ToList(), _pipelineNameById.Keys.ToList())
+            : new TableInputNames([], [], []));
 
     public async Task ProcessSourceEventsAsync(SourceEventsEnvelope envelope)
     {
@@ -633,6 +807,48 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
         }
     }
 
+    /// <summary>Table-over-pipeline (plan 025) — see <see cref="ITableActor.ProcessPipelineResultsAsync"/>'s
+    /// doc comment for the full contract this implements (routed here by <see cref="Streaming.
+    /// TableEventRouter.OnPipelineResultsAsync"/>, no backfill, per-row publish). A no-op if the table isn't
+    /// currently running, or if <paramref name="envelope"/>'s <c>PipelineId</c> is not (or is no longer, a
+    /// stale delivery racing an unregister/re-register on a compile change) one of this table's current
+    /// pipeline inputs.</summary>
+    public async Task ProcessPipelineResultsAsync(PipelineResultsEnvelope envelope)
+    {
+        if (_executor is null || !_running)
+        {
+            return;
+        }
+
+        if (!_pipelineNameById.TryGetValue(envelope.PipelineId, out var relationName))
+        {
+            return;
+        }
+
+        foreach (var result in envelope.Results)
+        {
+            // Same actor-wire re-normalization requirement as ProcessSourceEventsAsync/
+            // ProcessTableDeltasAsync — this envelope crosses the Dapr actor-invocation wire, which
+            // re-boxes every Dictionary<string, object?> value as a JsonElement regardless of whether the
+            // sf-pipeline-out endpoint already normalized this exact envelope once.
+            JsonValueNormalizer.NormalizeInPlace(result.Row);
+
+            var evt = PipelineResultMapping.ToEventRecord(result, relationName);
+            _deltasIn++;
+            _lastUpdateMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _rebuilding = false; // live traffic observed since resume (or this is a first-ever start — already false)
+
+            // ONE ROW AT A TIME — mirrors TableGrain.OnPipelineBatchAsync exactly: a pipeline emits
+            // appended result rows, never retractions, so (unlike ProcessTableDeltasAsync's upstream-TABLE
+            // batch) there is no epoch/atomicity a per-row publish could break.
+            var deltas = _executor.OnStreamEvent(relationName, evt);
+            if (deltas.Count > 0)
+            {
+                await ApplyAndPublishAsync(deltas);
+            }
+        }
+    }
+
     public Task<List<TableRowDto>> GetRowsAsync(int limit, int offset)
     {
         var rows = _flushed.Values
@@ -714,7 +930,7 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
     /// <see cref="_lastCompileError"/> on failure; callers check <see cref="_executor"/>.</summary>
     private void ActivateExecutor()
     {
-        var (executor, streamInputs, tableInputs, error) = TableCompilation.TryCompile(_def!, _sources, _tables);
+        var (executor, streamInputs, tableInputs, pipelineInputs, error) = TableCompilation.TryCompile(_def!, _sources, _tables, _pipelines);
         if (executor is null)
         {
             _executor = null;
@@ -725,6 +941,7 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
         _executor = executor;
         _streamInputs = streamInputs;
         _tableInputs = tableInputs;
+        _pipelineInputs = pipelineInputs;
         _lastCompileError = null;
 
         ApplyRetentionPolicy();
@@ -1060,6 +1277,7 @@ public sealed class TableActor(ActorHost host, DaprClient daprClient, TableEvent
         Def = _def,
         Sources = _sources,
         Tables = _tables,
+        Pipelines = _pipelines,
         Running = _running,
         Snapshot = _flushed,
         Seq = _seq,
@@ -1187,6 +1405,10 @@ public sealed class TableActorState
     public List<SourceDefinition> Sources { get; set; } = [];
 
     public List<TableDefinition> Tables { get; set; } = [];
+
+    /// <summary>Table-over-pipeline (plan 025) — every pipeline the catalog knew about at the last
+    /// StartAsync/self-heal, same self-heal rationale as <see cref="Sources"/>/<see cref="Tables"/>.</summary>
+    public List<PipelineDefinition> Pipelines { get; set; } = [];
 
     public bool Running { get; set; }
 
@@ -1336,15 +1558,33 @@ public static class TableJournalPolicy
 /// own extraction rationale) — see dapr/tests/StreamsForge.Dapr.Tests/TableCompilationTests.cs. Builds the
 /// same stream/table schema dictionaries + <see cref="SqlCompiler.CompileTable"/> call
 /// <c>TableGrain.StartClassicAsync</c> makes.
+///
+/// <para><b>Table-over-pipeline (plan 025):</b> <paramref name="pipelines"/> — additive, nullable, defaults
+/// to none so every pre-025 3-argument call site (including this project's own existing tests) keeps
+/// compiling and behaving unmodified — widens the stream-relation dictionary with every pipeline that has a
+/// compiled output schema, mirroring <c>Catalog.CatalogStore.BuildTableStreamSchemas</c> exactly (sources
+/// win a name collision, same defensive tiebreak). <see cref="TryCompile"/>'s result then splits the
+/// compiled <c>StreamInputs</c> by pipeline-name membership, returning the pipeline names separately as
+/// <c>PipelineInputs</c> — mirrors <c>Catalog.CatalogStore.ApplyCompileResult</c>'s identical split for the
+/// persisted <see cref="TableDefinition.PipelineInputs"/> field.</para>
 /// </summary>
 public static class TableCompilation
 {
-    public static (TableExecutor? Executor, List<string> StreamInputs, List<string> TableInputs, string? Error) TryCompile(
-        TableDefinition def, IReadOnlyList<SourceDefinition> sources, IReadOnlyList<TableDefinition> tables)
+    public static (TableExecutor? Executor, List<string> StreamInputs, List<string> TableInputs, List<string> PipelineInputs, string? Error) TryCompile(
+        TableDefinition def, IReadOnlyList<SourceDefinition> sources, IReadOnlyList<TableDefinition> tables, IReadOnlyList<PipelineDefinition>? pipelines = null)
     {
-        var streamSchemas = sources.ToDictionary(
-            s => s.Name,
-            s => new SourceSchema(s.Name, s.Fields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type))));
+        pipelines ??= [];
+
+        var streamSchemas = new Dictionary<string, SourceSchema>(StringComparer.Ordinal);
+        foreach (var p in pipelines)
+        {
+            if (p.OutputFields.Count == 0) continue;
+            streamSchemas[p.Name] = new SourceSchema(p.Name, p.OutputFields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type)));
+        }
+        foreach (var s in sources)
+        {
+            streamSchemas[s.Name] = new SourceSchema(s.Name, s.Fields.ToDictionary(f => f.Name, f => MapFieldKind(f.Type)));
+        }
 
         var tableSchemas = tables
             .Where(t => t.OutputFields.Count > 0)
@@ -1356,13 +1596,17 @@ public static class TableCompilation
         if (!compileResult.Ok || compileResult.Plan is null)
         {
             var message = string.Join("; ", compileResult.Diagnostics.Select(d => $"{d.Line}:{d.Column} {d.Message}"));
-            return (null, [], [], message);
+            return (null, [], [], [], message);
         }
+
+        var pipelineNames = pipelines.Select(p => p.Name).ToHashSet(StringComparer.Ordinal);
+        var allStreamInputs = compileResult.StreamInputs.Distinct().ToList();
 
         return (
             compileResult.Plan.CreateExecutor(),
-            compileResult.StreamInputs.Distinct().ToList(),
+            allStreamInputs.Where(n => !pipelineNames.Contains(n)).ToList(),
             compileResult.TableInputs.Distinct().ToList(),
+            allStreamInputs.Where(pipelineNames.Contains).ToList(),
             null);
     }
 
@@ -1376,6 +1620,33 @@ public static class TableCompilation
         FieldType.Json => FieldKind.Json,
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown field type"),
     };
+}
+
+/// <summary>Table-over-pipeline (plan 025) — converts one pipeline's emitted result row into the
+/// <see cref="EventRecord"/> shape <see cref="TableExecutor.OnStreamEvent"/> expects, the Dapr counterpart
+/// of Orleans' <c>PipelineInputs.ToEventRecord</c> (orleans/src/StreamsForge.Host/Grains/PipelineInputs.cs).
+/// Back-fills <c>_ts</c>/<c>_source</c> from the envelope only when the row does not already carry them — a
+/// projection that selected them explicitly has already said what they should be, and overwriting a value
+/// the query asked for would be a silent rewrite of the user's own output. Pulled out to its own static
+/// class, rather than inlined in <see cref="TableActor.ProcessPipelineResultsAsync"/>, for the same
+/// unit-testability reason as <see cref="TableAttachPolicy"/>/<see cref="TablePersistencePolicy"/>: a
+/// <see cref="TableActor"/> instance needs a live Dapr sidecar to construct at all — see dapr/tests/
+/// StreamsForge.Dapr.Tests/PipelineResultMappingTests.cs.</summary>
+public static class PipelineResultMapping
+{
+    public static EventRecord ToEventRecord(ResultEnvelope envelope, string pipelineName)
+    {
+        var record = new EventRecord(envelope.Row);
+        if (!record.ContainsKey(EventRecord.TimestampField))
+        {
+            record[EventRecord.TimestampField] = envelope.TimestampMs;
+        }
+        if (!record.ContainsKey(EventRecord.SourceField))
+        {
+            record[EventRecord.SourceField] = pipelineName;
+        }
+        return record;
+    }
 }
 
 /// <summary>PARITY.md debt item D2 — the pure epoch-cutoff decision <see cref="TableActor.

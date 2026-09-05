@@ -174,6 +174,22 @@ public sealed partial class DaprLifecycleOrchestrator(
 
                 break;
         }
+
+        // Plan 025 (Dapr parity, PARITY.md D6 "source lifecycle events") — mirrors
+        // RegistryGrain.UpsertSourceAsync's identical publish exactly: PipelineId carries the source's
+        // qualified NAME, the same convention the "table-" kinds already use for a table's qualified name
+        // (see CatalogStore.CreateTableAsync/etc.'s EnvKeys.Qualify(environment, def.Name) calls) — sources
+        // have no id at all. Deliberately unconditional across every SourceKindDispatch.ActorKind (the
+        // switch above dispatches the START/STOP side per-kind; this publish is the SAME event regardless
+        // of kind, exactly like Orleans' single publish after its own per-kind dispatch). Deliberately
+        // AFTER the dispatch above, not inside a try: if starting/stopping the actor above threw, this
+        // upsert did not take effect the way the caller asked, and announcing "source-started" for it
+        // would tell a subscriber (StreamBridgeService, on the console/bridge side — plan 025's agent C) to
+        // relay a stream nothing is producing on.
+        await PublishLifecycleAsync(
+            EnvKeys.Qualify(def.Environment, def.Name),
+            def.Enabled ? "source-started" : "source-stopped",
+            def.Enabled ? PipelineStatus.Running : PipelineStatus.Stopped);
     }
 
     public async Task NotifySourceRemovedAsync(string name, string environment)
@@ -181,6 +197,10 @@ public sealed partial class DaprLifecycleOrchestrator(
         await GeneratorActorProxy(environment, name).StopAsync();
         await ConnectorActorProxy(environment, name).StopAsync();
         ingressRegistry.Remove(EnvKeys.Qualify(environment, name));
+        // Plan 025 — see NotifySourceChangedAsync's identical publish for the convention (PipelineId = the
+        // source's qualified NAME). This is the event that lets a source-lifecycle subscriber drop its
+        // relay for a deleted source instead of outliving it.
+        await PublishLifecycleAsync(EnvKeys.Qualify(environment, name), "source-deleted", PipelineStatus.Stopped);
     }
 
     /// <summary>Plan 021 D3: every name-keyed actor id in this class goes through
@@ -251,11 +271,11 @@ public sealed partial class DaprLifecycleOrchestrator(
     /// into a <see cref="LifecycleOutcome.Failure"/> for <c>CatalogStore</c> to record as
     /// <c>Status=Failed</c>/<c>Error</c>, mirroring <see cref="StartPipelineAsync"/>'s identical
     /// exception-free actor-boundary contract.</summary>
-    public async Task<LifecycleOutcome> StartTableAsync(TableDefinition def, IReadOnlyList<SourceDefinition> sources, IReadOnlyList<TableDefinition> tables)
+    public async Task<LifecycleOutcome> StartTableAsync(TableDefinition def, IReadOnlyList<SourceDefinition> sources, IReadOnlyList<TableDefinition> tables, IReadOnlyList<PipelineDefinition>? pipelines = null)
     {
         var actor = TableActorProxy(def.Environment, def.Name);
         var qualifiedName = EnvKeys.Qualify(def.Environment, def.Name);
-        var result = await actor.StartAsync(new TableStartRequest(def, sources.ToList(), tables.ToList()));
+        var result = await actor.StartAsync(new TableStartRequest(def, sources.ToList(), tables.ToList(), (pipelines ?? []).ToList()));
         if (!result.Ok)
         {
             tableRouter.Unregister(qualifiedName);

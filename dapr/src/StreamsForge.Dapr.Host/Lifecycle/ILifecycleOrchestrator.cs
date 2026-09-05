@@ -83,8 +83,16 @@ public interface ILifecycleOrchestrator
     /// <c>CatalogStore</c>) is still in-flight: the exact reentrancy deadlock this plan's reentrancy
     /// decision exists to prevent (same rationale as <see cref="StartPipelineAsync"/>'s earlier W6
     /// signature change). <c>CatalogStore</c> already holds <c>state.Sources</c>/<c>state.Tables</c> in
-    /// full at every call site, so passing them through needs no such call.</para></summary>
-    Task<LifecycleOutcome> StartTableAsync(TableDefinition def, IReadOnlyList<SourceDefinition> sources, IReadOnlyList<TableDefinition> tables);
+    /// full at every call site, so passing them through needs no such call.</para>
+    ///
+    /// <para><b>Plan 025 (table-over-pipeline) signature change</b> — added <paramref name="pipelines"/>,
+    /// additive and defaulted to <see langword="null"/> (read as empty by
+    /// <see cref="Actors.TableActor"/>) so every pre-025 3-argument call site, including this project's own
+    /// test doubles, keeps compiling unmodified. Same rationale as the two additions above: a table's SQL
+    /// may now name a pipeline as a relation, so <c>DaprLifecycleOrchestrator.StartTableAsync</c> needs
+    /// every known pipeline's compiled output schema to compile against, and <c>CatalogStore</c> already
+    /// holds <c>state.Pipelines</c> in full at every call site.</para></summary>
+    Task<LifecycleOutcome> StartTableAsync(TableDefinition def, IReadOnlyList<SourceDefinition> sources, IReadOnlyList<TableDefinition> tables, IReadOnlyList<PipelineDefinition>? pipelines = null);
 
     /// <summary>Plan 021 signature change (added <paramref name="environment"/>) — same reason as
     /// <see cref="NotifySourceRemovedAsync"/>: every call site here passes a bare table NAME with no

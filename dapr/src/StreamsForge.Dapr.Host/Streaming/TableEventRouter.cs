@@ -49,8 +49,17 @@ namespace StreamsForge.Dapr.Host.Streaming;
 /// <para><b>Fan-out, not a direct subscription</b> — same rationale as <see cref="PipelineEventRouter"/>'s
 /// own doc comment: Dapr's fixed topics (decision D-D) mean this router is what makes them behave like a
 /// per-source/per-upstream-table subscription from a <see cref="TableActor"/>'s point of view.</para>
+///
+/// <para><b>Table-over-pipeline (plan 025) added a THIRD routing table,</b> <c>_byPipeline</c>, and this
+/// class now also implements <see cref="IPipelineResultsSink"/> (registered in
+/// <c>Actors/TableRuntimeSetup.cs</c>'s <c>AddServices</c>, alongside the other two, per that wave's
+/// PARITY.md D6 "table-over-pipeline inputs" entry). It is registered/unregistered through a SEPARATE
+/// public method, <see cref="RegisterPipelineInputs"/> — not a wider <see cref="Register"/> parameter list
+/// — specifically so <c>Services/TableSupervisorService.cs</c>'s existing 3-argument
+/// <see cref="Register"/> call site needs no change; see that method's own doc comment for the full
+/// reasoning.</para>
 /// </summary>
-public sealed class TableEventRouter(ILogger<TableEventRouter> logger) : ISourceEventsSink, ITableDeltaSink
+public sealed class TableEventRouter(ILogger<TableEventRouter> logger) : ISourceEventsSink, ITableDeltaSink, IPipelineResultsSink
 {
     private readonly object _gate = new();
 
@@ -64,6 +73,23 @@ public sealed class TableEventRouter(ILogger<TableEventRouter> logger) : ISource
     /// <see cref="Unregister"/> is O(subscriptions for this table) instead of a full scan of both maps
     /// above.</summary>
     private readonly Dictionary<string, (HashSet<string> Streams, HashSet<string> Tables)> _byTable = new(StringComparer.Ordinal);
+
+    /// <summary>Table-over-pipeline (plan 025): pipeline id (BARE — pipeline ids are GUIDs and already
+    /// globally unique, so unlike <see cref="_byStreamSource"/>/<see cref="_byUpstreamTable"/>'s
+    /// environment-qualified NAME keys, no <c>EnvKeys.Qualify</c> is needed here; see
+    /// <see cref="RegisterPipelineInputs"/>'s own doc comment) → set of (downstream) table names consuming
+    /// its published output directly.</summary>
+    private readonly Dictionary<string, HashSet<string>> _byPipeline = new(StringComparer.Ordinal);
+
+    /// <summary>Table name → the pipeline ids it is currently registered against — the reverse index
+    /// <see cref="RegisterPipelineInputs"/>/<see cref="UnregisterLocked"/> use to clean up
+    /// <see cref="_byPipeline"/> in O(this table's own pipeline inputs). Deliberately a SEPARATE reverse
+    /// index from <see cref="_byTable"/> (which tracks stream/table inputs only) rather than a wider
+    /// tuple there — see <see cref="RegisterPipelineInputs"/>'s own doc comment for why that separation is
+    /// what lets <c>TableActor</c> call <see cref="Register"/> and <see cref="RegisterPipelineInputs"/>
+    /// independently, each replacing only its own half of a table's subscription set, without one
+    /// clobbering the other.</summary>
+    private readonly Dictionary<string, HashSet<string>> _pipelinesByTable = new(StringComparer.Ordinal);
 
     /// <summary>Replaces (or creates) <paramref name="tableName"/>'s subscription sets with exactly
     /// <paramref name="streamInputs"/>/<paramref name="tableInputs"/> — idempotent; safe to call repeatedly
@@ -105,8 +131,8 @@ public sealed class TableEventRouter(ILogger<TableEventRouter> logger) : ISource
         }
     }
 
-    /// <summary>Removes every subscription for <paramref name="tableName"/>. Idempotent — a no-op if it
-    /// wasn't registered.</summary>
+    /// <summary>Removes every subscription for <paramref name="tableName"/> — stream, table, AND (plan
+    /// 025) pipeline inputs alike. Idempotent — a no-op if it wasn't registered.</summary>
     public void Unregister(string tableName)
     {
         lock (_gate)
@@ -117,6 +143,8 @@ public sealed class TableEventRouter(ILogger<TableEventRouter> logger) : ISource
 
     private void UnregisterLocked(string tableName)
     {
+        UnregisterPipelinesLocked(tableName);
+
         if (!_byTable.Remove(tableName, out var prev))
         {
             return;
@@ -147,6 +175,72 @@ public sealed class TableEventRouter(ILogger<TableEventRouter> logger) : ISource
         }
     }
 
+    /// <summary>Table-over-pipeline (plan 025): replaces (or creates) <paramref name="tableName"/>'s
+    /// pipeline-input subscription set with exactly <paramref name="pipelineIds"/> — idempotent, same
+    /// "replace whole set" contract as <see cref="Register"/>, but for the pipeline half only.
+    ///
+    /// <para><b>Why a separate method, alongside <see cref="Register"/>, rather than a wider parameter
+    /// list on it:</b> <see cref="Services.TableSupervisorService"/> (a concurrent file this router does
+    /// not own the caller side of) already calls the existing 3-argument <see cref="Register"/> and must
+    /// keep compiling and meaning exactly what it means today. <c>TableActor.
+    /// RegisterRouterAndAttachToTableInputsAsync</c> calls <see cref="Register"/> for stream/table inputs
+    /// FIRST (as it always has — see that method's own doc comment for the D2 registration-ordering
+    /// argument, which this does not change) and THEN this method for pipeline inputs — the two calls are
+    /// independent because this method never touches <see cref="_byTable"/>/<see cref="_byStreamSource"/>/
+    /// <see cref="_byUpstreamTable"/>, only its own <see cref="_pipelinesByTable"/>/<see cref="_byPipeline"/>
+    /// pair.</para>
+    ///
+    /// <para>Pipeline ids need no <c>EnvKeys.Qualify</c> — unlike a source/table NAME (only unique within
+    /// one environment's catalog, hence qualified at the router boundary so two environments' same-named
+    /// entities don't collide in this one shared process-wide router), a pipeline id is a GUID assigned
+    /// once at <c>CreatePipelineAsync</c> and is already globally unique. Pass <c>TableStartRequest.
+    /// Pipelines</c>' ids straight through.</para></summary>
+    public void RegisterPipelineInputs(string tableName, IReadOnlyList<string> pipelineIds)
+    {
+        lock (_gate)
+        {
+            UnregisterPipelinesLocked(tableName);
+
+            if (pipelineIds.Count == 0)
+            {
+                return;
+            }
+
+            var pipelines = new HashSet<string>(pipelineIds, StringComparer.Ordinal);
+            _pipelinesByTable[tableName] = pipelines;
+
+            foreach (var pipelineId in pipelines)
+            {
+                if (!_byPipeline.TryGetValue(pipelineId, out var consumers))
+                {
+                    consumers = new HashSet<string>(StringComparer.Ordinal);
+                    _byPipeline[pipelineId] = consumers;
+                }
+                consumers.Add(tableName);
+            }
+        }
+    }
+
+    private void UnregisterPipelinesLocked(string tableName)
+    {
+        if (!_pipelinesByTable.Remove(tableName, out var prev))
+        {
+            return;
+        }
+
+        foreach (var pipelineId in prev)
+        {
+            if (_byPipeline.TryGetValue(pipelineId, out var consumers))
+            {
+                consumers.Remove(tableName);
+                if (consumers.Count == 0)
+                {
+                    _byPipeline.Remove(pipelineId);
+                }
+            }
+        }
+    }
+
     /// <summary>Point-in-time snapshot of the table names subscribed to stream source
     /// <paramref name="sourceName"/> — exposed for tests (see dapr/tests/StreamsForge.Dapr.Tests/
     /// TableEventRouterTests.cs); the dispatch path below takes its own lock-protected snapshot inline
@@ -167,6 +261,17 @@ public sealed class TableEventRouter(ILogger<TableEventRouter> logger) : ISource
         lock (_gate)
         {
             return _byUpstreamTable.TryGetValue(upstreamTableName, out var consumers) ? consumers.ToList() : [];
+        }
+    }
+
+    /// <summary>Point-in-time snapshot of the table names subscribed to pipeline <paramref name="pipelineId"/>
+    /// (BARE — see <see cref="RegisterPipelineInputs"/>'s own doc comment) — exposed for tests, same
+    /// rationale as <see cref="StreamSubscribersOf"/>/<see cref="TableSubscribersOf"/>.</summary>
+    public IReadOnlyCollection<string> PipelineSubscribersOf(string pipelineId)
+    {
+        lock (_gate)
+        {
+            return _byPipeline.TryGetValue(pipelineId, out var consumers) ? consumers.ToList() : [];
         }
     }
 
@@ -227,6 +332,44 @@ public sealed class TableEventRouter(ILogger<TableEventRouter> logger) : ISource
                     ex,
                     "TableEventRouter: failed to forward {Count} delta(s) from table '{Upstream}' to table '{Table}'.",
                     envelope.Deltas.Count, envelope.Table, tableName);
+            }
+        }
+    }
+
+    /// <summary>Table-over-pipeline (plan 025): fans a <c>sf-pipeline-out</c> envelope out to every table
+    /// subscribed to <see cref="PipelineResultsEnvelope.PipelineId"/> (BARE — see
+    /// <see cref="RegisterPipelineInputs"/>'s own doc comment). No self-filter is needed here the way
+    /// <see cref="OnTableDeltaAsync"/> needs <see cref="ExcludeSelf"/> — a TABLE can never be its own
+    /// pipeline input (the two id spaces, GUID pipeline ids and table names, never collide), so there is
+    /// no self-reference to guard against by construction.</summary>
+    public async Task OnPipelineResultsAsync(PipelineResultsEnvelope envelope)
+    {
+        List<string> tableNames;
+        lock (_gate)
+        {
+            if (!_byPipeline.TryGetValue(envelope.PipelineId, out var consumers) || consumers.Count == 0)
+            {
+                return;
+            }
+            tableNames = consumers.ToList();
+        }
+
+        foreach (var tableName in tableNames)
+        {
+            try
+            {
+                var actor = ActorProxy.Create<ITableActor>(new ActorId(tableName), nameof(TableActor), ActorProxyDefaults.Options);
+                await actor.ProcessPipelineResultsAsync(envelope);
+            }
+            catch (Exception ex)
+            {
+                // Best-effort per table, mirroring OnSourceEventsAsync/OnTableDeltaAsync's own per-
+                // subscriber try/catch — one misbehaving/unreachable table actor must never stop this
+                // batch from reaching the rest, nor tear down the router.
+                logger.LogWarning(
+                    ex,
+                    "TableEventRouter: failed to forward {Count} pipeline result row(s) from pipeline '{Pipeline}' to table '{Table}'.",
+                    envelope.Results.Count, envelope.PipelineId, tableName);
             }
         }
     }

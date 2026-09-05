@@ -11,11 +11,12 @@ namespace StreamsForge.Dapr.Host.Actors;
 /// <see cref="RegisterActors"/> registers <see cref="TableActor"/> with the Dapr actor runtime;
 /// <see cref="AddServices"/> registers:
 /// <list type="bullet">
-/// <item><see cref="TableEventRouter"/> as a singleton, forwarded to BOTH
-/// <see cref="ISourceEventsSink"/> and <see cref="ITableDeltaSink"/> — see that class's own doc comment
-/// for why registration lives here rather than in <c>Streaming/StreamingRuntimeSetup.cs</c> (this wave's
-/// own owned-file boundary; <c>IEnumerable&lt;T&gt;</c> DI resolution picks up singletons regardless of
-/// which file calls <c>AddSingleton</c>, and Program.cs already calls this method AFTER
+/// <item><see cref="TableEventRouter"/> as a singleton, forwarded to <see cref="ISourceEventsSink"/>,
+/// <see cref="ITableDeltaSink"/> AND (plan 025, table-over-pipeline) <see cref="IPipelineResultsSink"/> —
+/// see that class's own doc comment for why registration lives here rather than in
+/// <c>Streaming/StreamingRuntimeSetup.cs</c> (this wave's own owned-file boundary;
+/// <c>IEnumerable&lt;T&gt;</c> DI resolution picks up singletons regardless of which file calls
+/// <c>AddSingleton</c>, and Program.cs already calls this method AFTER
 /// <c>StreamingRuntimeSetup.AddServices</c>).</item>
 /// <item>The real <see cref="ITableReadFacade"/> (<see cref="DaprTableReadFacade"/>) — registered here,
 /// AFTER <c>Facades.DaprFacadesExtensions.AddDaprFacades</c>'s stub registration (Program.cs calls this
@@ -38,6 +39,10 @@ public static class TableRuntimeSetup
         services.AddSingleton<TableEventRouter>();
         services.AddSingleton<ISourceEventsSink>(sp => sp.GetRequiredService<TableEventRouter>());
         services.AddSingleton<ITableDeltaSink>(sp => sp.GetRequiredService<TableEventRouter>());
+        // Plan 025 (table-over-pipeline, PARITY.md D6): TableEventRouter also fans out sf-pipeline-out —
+        // see that class's own doc comment for why a third routing table lives on the same singleton
+        // rather than a separate router type.
+        services.AddSingleton<IPipelineResultsSink>(sp => sp.GetRequiredService<TableEventRouter>());
 
         services.AddSingleton<ITableReadFacade, DaprTableReadFacade>();
 
