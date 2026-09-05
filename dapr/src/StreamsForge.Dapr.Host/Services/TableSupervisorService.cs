@@ -34,21 +34,26 @@ namespace StreamsForge.Dapr.Host.Services;
 /// read cheaply via <see cref="ITableActor.GetInputNamesAsync"/> with no recompile.</item>
 /// </list></para>
 ///
-/// <para><b>Topo-order for table-over-table chains — the simpler choice, documented:</b> Orleans'
-/// <c>RegistryGrain</c>/<c>CatalogStore</c> resume tables in dependency order on boot so a table that reads
-/// another table never starts before its upstream does. This sweep does NOT compute a topological order —
-/// it simply iterates every catalog-Running table each pass and lets <c>Catalog.CatalogStore.
-/// SetTableStatusAsync</c>'s own existing dependency guard (<c>"table input(s) not running: ..."</c> →
-/// <c>Status=Failed</c>) do its job: a table whose upstream hasn't started yet fails THIS sweep's attempt,
-/// then simply gets retried on the NEXT ~15s sweep — by which point an earlier iteration of the same (or a
-/// prior) sweep has very likely already started its upstream. This converges to "every startable table is
-/// Running" over a few sweep periods without any explicit graph analysis here, at the cost of a few extra
-/// ~15s retries for a deep chain on cold start — an acceptable tradeoff for a periodic self-healing sweep
-/// (not a one-shot boot gate) whose job description already includes "retry next tick" as the normal case
-/// (see the catch block below). The current seed catalog (<c>SeedCatalog.Tables</c>) has no Running table
-/// that itself depends on another Running table — "hot_symbols" (the one table-over-table demo) is seeded
-/// Stopped precisely so starting it after "positions" is a deliberate user action, not an implicit boot
-/// race — so this codepath is exercised by USER-created chains, not by the shipped seed.</para>
+/// <para><b>Topo-order for table-over-table chains — moved to the boot pass in plan 025, not computed
+/// here.</b> This paragraph used to say the flavor computed NO topological order anywhere, and leaned on
+/// <c>Catalog.CatalogStore.SetTableStatusAsync</c>'s dependency guard
+/// (<c>"table input(s) not running: ..."</c> → <c>Status=Failed</c>) plus a retry on the next ~15 s sweep to
+/// converge. That is still exactly what happens HERE, and it is still the right trade for a periodic
+/// self-healing sweep whose job description already includes "retry next tick" as the normal case (see the
+/// catch block below). What changed is that cold start no longer relies on it:
+/// <see cref="CatalogInitializationService"/>'s one-shot boot pass resumes tables in dependency order via
+/// <see cref="BootResumePlan.TopoSortByTableInputs"/> — a straight port of the Orleans original — and this
+/// sweep waits for that pass (<see cref="BootGate"/>) before its first tick, so a deep chain comes up in
+/// one pass instead of over several sweep periods. A cycle is tolerated rather than diagnosed there; see
+/// that method's own doc comment.</para>
+///
+/// <para><b>Plan 025 (PARITY.md D6 bullet 2), the rest of it:</b> both branches of this sweep's
+/// per-table decision moved verbatim into <see cref="EntityResume.EnsureTableRunningAsync"/>, shared with
+/// the boot pass so the "repair, never restart" discipline cannot drift between the two callers. The seed
+/// catalog observation still holds: <c>SeedCatalog.Tables</c> has no Running table that itself depends on
+/// another Running table — "hot_symbols" (the one table-over-table demo) is seeded Stopped precisely so
+/// starting it after "positions" is a deliberate user action — so the chain path is exercised by
+/// USER-created chains, not by the shipped seed.</para>
 /// </summary>
 public sealed class TableSupervisorService(
     ICatalogFacadeFactory catalogFactory,
@@ -62,6 +67,7 @@ public sealed class TableSupervisorService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await WaitForApplicationStartedAsync(stoppingToken);
+        await BootGateWait.AwaitBootPassAsync(logger, nameof(TableSupervisorService), stoppingToken);
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
         do
@@ -76,7 +82,7 @@ public sealed class TableSupervisorService(
                     {
                         try
                         {
-                            await EnsureRunningAsync(catalog, table);
+                            await EntityResume.EnsureTableRunningAsync(catalog, router, table);
                         }
                         catch (Exception ex)
                         {
@@ -97,32 +103,6 @@ public sealed class TableSupervisorService(
                     "TableSupervisorService: sweep failed (Dapr sidecar likely not ready yet) — will retry next tick.");
             }
         } while (await timer.WaitForNextTickAsync(stoppingToken));
-    }
-
-    private async Task EnsureRunningAsync(ICatalogFacade catalog, TableDefinition table)
-    {
-        var qualifiedName = EnvKeys.Qualify(table.Environment, table.Name);
-        var actor = ActorProxy.Create<ITableActor>(new ActorId(qualifiedName), nameof(TableActor), ActorProxyDefaults.Options);
-
-        if (await actor.IsRunningAsync())
-        {
-            // Already self-healed (or continuously running) — repair the router only, never restart.
-            // Plan 021 D6: GetInputNamesAsync returns BARE names — qualify with this table's own
-            // environment before they go in the process-wide router index (same reasoning as
-            // DaprLifecycleOrchestrator.StartTableAsync).
-            var inputs = await actor.GetInputNamesAsync();
-            router.Register(
-                qualifiedName,
-                inputs.StreamInputs.Select(s => EnvKeys.Qualify(table.Environment, s)).ToList(),
-                inputs.TableInputs.Select(t => EnvKeys.Qualify(table.Environment, t)).ToList());
-            return;
-        }
-
-        // Never started (fresh Redis state, a transient earlier failure, or an unmet table-over-table
-        // dependency — see class doc's topo-order paragraph) — go through the full, user-equivalent start
-        // path (compiles, starts the actor, registers the router, persists Failed/Running/Error on the
-        // outcome).
-        await catalog.SetTableStatusAsync(table.Id, PipelineStatus.Running);
     }
 
     /// <summary>Small inline equivalent of the Orleans host's internal <c>StartupSignal</c> helper — see

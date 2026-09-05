@@ -1,7 +1,10 @@
+using Dapr.Actors;
+using Dapr.Actors.Client;
 using Dapr.Actors.Runtime;
 using Dapr.Client;
 using StreamsForge.Abstractions;
 using StreamsForge.Abstractions.Streaming;
+using StreamsForge.AppCore.Connectors;
 using StreamsForge.AppCore.Environments;
 using StreamsForge.AppCore.Json;
 using StreamsForge.Dapr.Host.Streaming;
@@ -42,8 +45,20 @@ namespace StreamsForge.Dapr.Host.Actors;
 /// (a read cache, not the ledger of truth; losing it on reactivation is an accepted consequence of Dapr
 /// actors idle-deactivating, same tradeoff <see cref="GeneratorActor"/> already accepts for its own
 /// transient fields).</para>
+///
+/// <para><b>Plan 025 (PARITY.md D6 "late-consumer replay") — this actor now registers its OWN router
+/// subscription and attaches to its connector-kind sources, inside its own turn.</b> Before this plan
+/// <c>Lifecycle.DaprLifecycleOrchestrator.StartPipelineAsync</c> registered
+/// <see cref="Streaming.PipelineEventRouter"/> AFTER <see cref="StartAsync"/> returned, and a pipeline
+/// written after its source had already polled simply started empty — the Dapr half of the gap
+/// <c>PipelineGrain.AttachToSourceAsync</c> closes on Orleans. Registration moves inside for the same
+/// reason it moved inside <see cref="TableActor"/> for PARITY.md D2, and
+/// <see cref="RegisterRouterAndAttachToSourcesAsync"/>'s own doc comment carries the ordering argument.
+/// The orchestrator's later <c>Register</c> call is left in place: it is idempotent (it replaces this
+/// pipeline's subscription set with the identical set) and harmless.</para>
 /// </summary>
-public sealed class PipelineActor(ActorHost host, DaprClient daprClient, ILogger<PipelineActor> logger)
+public sealed class PipelineActor(
+    ActorHost host, DaprClient daprClient, PipelineEventRouter pipelineRouter, ILogger<PipelineActor> logger)
     : Actor(host), IPipelineActor
 {
     private const string StateName = "pipeline";
@@ -93,6 +108,15 @@ public sealed class PipelineActor(ActorHost host, DaprClient daprClient, ILogger
                 _executor = executor;
                 _sourceNames = sourceNames;
                 _lastMetricsTickAt = DateTimeOffset.UtcNow;
+
+                // Plan 025: the self-heal path needs the attach just as much as StartAsync does — more so,
+                // in fact. A reactivation recompiles a BRAND NEW executor (see this class's own doc comment)
+                // and nothing else in this process registers the router for it until
+                // Services.PipelineSupervisorService's next ~15s sweep, so without this a self-healed
+                // pipeline is both unrouted and empty for up to a sweep period. Mirrors what TableActor's
+                // OnActivateAsync branch does for PARITY.md D2.
+                await RegisterRouterAndAttachToSourcesAsync();
+
                 await ArmTimerAsync();
             }
             else
@@ -129,9 +153,140 @@ public sealed class PipelineActor(ActorHost host, DaprClient daprClient, ILogger
         await SaveAsync();
 
         _lastMetricsTickAt = DateTimeOffset.UtcNow;
+
+        // Plan 025: after _running/_executor are set (ProcessEventsAsync below is a no-op otherwise) and
+        // before the watermark timer is armed — a replayed row must reach the executor before the first
+        // AdvanceWatermark closes a window over rows it has not seen yet.
+        await RegisterRouterAndAttachToSourcesAsync();
+
         await ArmTimerAsync();
 
         return ActorResult<List<string>>.Success(sourceNames);
+    }
+
+    /// <summary>
+    /// Plan 025 (PARITY.md D6 "late-consumer replay"), consumer half — the Dapr counterpart of
+    /// <c>PipelineGrain.AttachToSourceAsync</c>. Registers this pipeline with
+    /// <see cref="Streaming.PipelineEventRouter"/> and back-fills, exactly once, whatever its
+    /// connector-kind sources already published before it existed.
+    ///
+    /// <para><b>The order below is BeginAttach-first, then register, then feed — NOT register-first.</b>
+    /// <see cref="TableActor.RegisterRouterAndAttachToTableInputsAsync"/> registers before it reads any
+    /// upstream snapshot and is still correct, because a table delta carries an <c>Epoch</c> and
+    /// <see cref="TableAttachPolicy.FilterAdmissible"/> discards anything the snapshot already contained.
+    /// A source event carries no such marker. So the exclusion has to come from the SOURCE side instead:
+    /// <see cref="IConnectorActor.BeginAttachAsync"/> stops that source publishing before the router can
+    /// route anything here, the snapshot is read under that hold, and
+    /// <see cref="IConnectorActor.EndAttachAsync"/> releases it — everything produced meanwhile is flushed
+    /// then, and reaches this pipeline through the router, once. Nothing falls in the gap and nothing is
+    /// delivered twice. Holding EVERY connector source before registering (rather than looping
+    /// Begin→register→feed→End per source) is what keeps that true when a pipeline joins two of them.</para>
+    ///
+    /// <para><b>Why registering mid-turn is safe:</b> Dapr actors process at most one invocation at a time
+    /// per actor id (dapr/ARCHITECTURE.md's reentrancy decision — the analogue of Orleans grain
+    /// non-reentrancy). This method runs INSIDE the caller's own <see cref="StartAsync"/>/
+    /// <see cref="OnActivateAsync"/> turn on THIS actor id, so anything
+    /// <see cref="Streaming.PipelineEventRouter.OnSourceEventsAsync"/> routes here from the moment
+    /// registration lands is a NEW invocation, which Dapr QUEUES behind this still-in-flight turn rather
+    /// than dropping it (the router did not know to route here before) or interleaving with it. The
+    /// snapshot rows are therefore guaranteed to reach <see cref="_executor"/> ahead of any live row that
+    /// raced them — the ordering the replay depends on. Same argument
+    /// <see cref="ITableActor.StartAsync"/>'s doc comment makes for tables.</para>
+    ///
+    /// <para><b>Outbound proxy calls from inside <see cref="OnActivateAsync"/>.</b> Same shape as
+    /// <see cref="TableActor"/>'s D2 attach, and without that one's cycle hazard: the graph here is
+    /// pipeline → source, and no source ever calls a pipeline actor, so this can never form the
+    /// A.activate → B.attach → B.activate → A.attach chain dapr/ARCHITECTURE.md documents for
+    /// table-over-table.</para>
+    ///
+    /// <para>Generator, Ingest and Crdt kinds are skipped — only
+    /// <see cref="SourceKindDispatch.ActorKind.Connector"/> sources have the driver that owns a replay
+    /// ring. A <see cref="IConnectorActor.BeginAttachAsync"/> that fails (a source never started, an actor
+    /// error) is logged at Debug and the pipeline registers and runs without the replay, exactly as it did
+    /// before this plan.</para>
+    /// </summary>
+    private async Task RegisterRouterAndAttachToSourcesAsync()
+    {
+        var environment = _def!.Environment;
+
+        // Phase 1: take every hold BEFORE the router can route anything here. Held in a local list so the
+        // finally below releases exactly the ones actually taken, in the presence of a partial failure.
+        var held = new List<(string Name, string Qualified, IConnectorActor Actor, SourceAttachSnapshot Snapshot)>();
+        try
+        {
+            foreach (var sourceName in _sourceNames.Distinct())
+            {
+                var sourceDef = _sources.FirstOrDefault(s => s.Name == sourceName);
+                if (sourceDef is null || SourceKindDispatch.Classify(sourceDef.Kind) != SourceKindDispatch.ActorKind.Connector)
+                {
+                    continue;
+                }
+
+                // Plan 021 D6: _sourceNames are BARE (compiled against this pipeline's own environment's
+                // catalog); connector actors are keyed by the QUALIFIED name — the exact key
+                // DaprLifecycleOrchestrator.ConnectorActorProxy uses.
+                var qualified = EnvKeys.Qualify(environment, sourceName);
+                var connector = ActorProxy.Create<IConnectorActor>(new ActorId(qualified), nameof(ConnectorActor), ActorProxyDefaults.Options);
+                try
+                {
+                    held.Add((sourceName, qualified, connector, await connector.BeginAttachAsync()));
+                }
+                catch (Exception ex)
+                {
+                    logger.LogDebug(ex,
+                        "PipelineActor[{Id}]: could not attach to source '{Source}' for replay — subscribing without it.",
+                        _def.Id, sourceName);
+                }
+            }
+
+            // Phase 2: routable from here on. Idempotent (Register replaces this pipeline's subscription
+            // set), so the orchestrator's own later call and a supervisor sweep's repair are both no-ops.
+            pipelineRouter.Register(_def.Id, _sourceNames.Select(s => EnvKeys.Qualify(environment, s)).ToList());
+
+            // Phase 3: feed the snapshots through the SAME handler live traffic uses, so windows/joins are
+            // built up from them rather than bypassed — and so the JsonElement re-normalization
+            // ProcessEventsAsync does (these rows crossed the actor wire too) happens exactly once, there.
+            foreach (var (name, qualified, _, snapshot) in held)
+            {
+                if (snapshot.Rows.Count == 0)
+                {
+                    continue;
+                }
+
+                if (snapshot.TotalSeen > snapshot.Rows.Count)
+                {
+                    logger.LogWarning(
+                        "Pipeline '{Pipeline}': late attach to source '{Source}' replayed {Replayed} of {TotalSeen} row(s); " +
+                        "earlier rows are not recoverable (the source's replay ring holds the most recent {Capacity}).",
+                        _def.Name, name, snapshot.Rows.Count, snapshot.TotalSeen, SourceReplayBuffer.Capacity);
+                }
+
+                await ProcessEventsAsync(new SourceEventsEnvelope
+                {
+                    // The QUALIFIED name, because ProcessEventsAsync strips the environment off it exactly
+                    // like it does for a live envelope — feeding the bare name would strip nothing and, in
+                    // a non-default environment, hand the Engine a relation name it never compiled.
+                    Source = qualified,
+                    Events = snapshot.Rows.Select(r => new Dictionary<string, object?>(r)).ToList(),
+                });
+            }
+        }
+        finally
+        {
+            foreach (var (name, _, connector, _) in held)
+            {
+                try
+                {
+                    await connector.EndAttachAsync();
+                }
+                catch (Exception ex)
+                {
+                    logger.LogDebug(ex,
+                        "PipelineActor[{Id}]: releasing the attach hold on source '{Source}' failed; the source's own safety timer covers it.",
+                        _def.Id, name);
+                }
+            }
+        }
     }
 
     public async Task StopAsync()

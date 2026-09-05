@@ -58,6 +58,13 @@ public sealed class TableHistorySupervisorService(
     {
         await WaitForApplicationStartedAsync(stoppingToken);
 
+        // Plan 025: gated like the other three, even though this sweep starts no producer and so cannot
+        // itself cause the consumers-before-producers race. Two reasons it waits anyway: it activates
+        // TableHistoryActors, and every actor activation during the boot window is work competing with the
+        // ordered pass for the same sidecar; and "all four supervisors wait for the boot pass" is a rule an
+        // operator can hold in their head, where "three of the four" is a footnote nobody remembers.
+        await BootGateWait.AwaitBootPassAsync(logger, nameof(TableHistorySupervisorService), stoppingToken);
+
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
         do
         {
