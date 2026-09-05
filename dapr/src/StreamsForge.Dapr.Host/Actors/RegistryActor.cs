@@ -68,10 +68,18 @@ public sealed class RegistryActor(ActorHost host, ILifecycleOrchestrator orchest
 
     public Task<SourceDefinition?> GetSourceAsync(string name) => Task.FromResult(_store.GetSource(name));
 
-    public async Task UpsertSourceAsync(SourceDefinition def)
+    public async Task<ActorResult<bool>> UpsertSourceAsync(SourceDefinition def)
     {
-        await _store.UpsertSourceAsync(def);
-        await SaveAsync();
+        try
+        {
+            await _store.UpsertSourceAsync(def);
+            await SaveAsync();
+            return ActorResult<bool>.Success(true);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return ActorResult<bool>.Failure(ex.Message);
+        }
     }
 
     public async Task<bool> DeleteSourceAsync(string name)
@@ -88,21 +96,35 @@ public sealed class RegistryActor(ActorHost host, ILifecycleOrchestrator orchest
 
     public Task<PipelineDefinition?> GetPipelineAsync(string id) => Task.FromResult(_store.GetPipeline(id));
 
-    public async Task<PipelineDefinition> CreatePipelineAsync(PipelineDefinition def)
+    public async Task<ActorResult<PipelineDefinition>> CreatePipelineAsync(PipelineDefinition def)
     {
-        var created = await _store.CreatePipelineAsync(def);
-        await SaveAsync();
-        return created;
+        try
+        {
+            var created = await _store.CreatePipelineAsync(def);
+            await SaveAsync();
+            return ActorResult<PipelineDefinition>.Success(created);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return ActorResult<PipelineDefinition>.Failure(ex.Message);
+        }
     }
 
-    public async Task<PipelineDefinition?> UpdatePipelineAsync(PipelineDefinition def)
+    public async Task<ActorResult<PipelineDefinition?>> UpdatePipelineAsync(PipelineDefinition def)
     {
-        var updated = await _store.UpdatePipelineAsync(def);
-        if (updated is not null)
+        try
         {
-            await SaveAsync();
+            var updated = await _store.UpdatePipelineAsync(def);
+            if (updated is not null)
+            {
+                await SaveAsync();
+            }
+            return ActorResult<PipelineDefinition?>.Success(updated);
         }
-        return updated;
+        catch (InvalidOperationException ex)
+        {
+            return ActorResult<PipelineDefinition?>.Failure(ex.Message);
+        }
     }
 
     public async Task<bool> DeletePipelineAsync(string id)

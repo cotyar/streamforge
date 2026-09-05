@@ -32,13 +32,20 @@ public interface IRegistryActor : IActor
 
     Task<List<SourceDefinition>> GetSourcesAsync();
     Task<SourceDefinition?> GetSourceAsync(string name);
-    Task UpsertSourceAsync(SourceDefinition def);
+    /// <summary>Plan 025: wrapped in <see cref="ActorResult{T}"/> for the same reason
+    /// <see cref="CreateTableAsync"/> is — a <c>CatalogStore</c> refusal (name collision, a `.` in the
+    /// name, an unknown kind) is an <see cref="InvalidOperationException"/> that the shared endpoints turn
+    /// into a 409, but across the Dapr actor wire it arrives as <c>ActorMethodInvocationException</c> and
+    /// surfaced as a bare 500 with an empty body (found live: the new source-vs-pipeline name refusal).</summary>
+    Task<ActorResult<bool>> UpsertSourceAsync(SourceDefinition def);
     Task<bool> DeleteSourceAsync(string name);
 
     Task<List<PipelineDefinition>> GetPipelinesAsync();
     Task<PipelineDefinition?> GetPipelineAsync(string id);
-    Task<PipelineDefinition> CreatePipelineAsync(PipelineDefinition def);
-    Task<PipelineDefinition?> UpdatePipelineAsync(PipelineDefinition def);
+    /// <summary>Plan 025: result-wrapped like <see cref="CreateTableAsync"/> — see <see cref="UpsertSourceAsync"/>.</summary>
+    Task<ActorResult<PipelineDefinition>> CreatePipelineAsync(PipelineDefinition def);
+    /// <summary>Plan 025: result-wrapped like <see cref="UpdateTableAsync"/> — see <see cref="UpsertSourceAsync"/>.</summary>
+    Task<ActorResult<PipelineDefinition?>> UpdatePipelineAsync(PipelineDefinition def);
     Task<bool> DeletePipelineAsync(string id);
     Task<PipelineDefinition?> SetPipelineStatusAsync(SetStatusRequest request);
 

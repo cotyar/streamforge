@@ -108,7 +108,14 @@ internal sealed class DaprCatalogFacade(string environment) : ICatalogFacade
         return await generator.RunAsync(request);
     }
 
-    public Task UpsertSourceAsync(SourceDefinition def) => _actor.UpsertSourceAsync(def);
+    public async Task UpsertSourceAsync(SourceDefinition def)
+    {
+        var result = await _actor.UpsertSourceAsync(def);
+        if (!result.Ok)
+        {
+            throw new InvalidOperationException(result.Error);
+        }
+    }
 
     public Task<bool> DeleteSourceAsync(string name) => _actor.DeleteSourceAsync(name);
 
@@ -116,9 +123,17 @@ internal sealed class DaprCatalogFacade(string environment) : ICatalogFacade
 
     public Task<PipelineDefinition?> GetPipelineAsync(string id) => _actor.GetPipelineAsync(id);
 
-    public Task<PipelineDefinition> CreatePipelineAsync(PipelineDefinition def) => _actor.CreatePipelineAsync(def);
+    public async Task<PipelineDefinition> CreatePipelineAsync(PipelineDefinition def)
+    {
+        var result = await _actor.CreatePipelineAsync(def);
+        return result.Ok ? result.Value! : throw new InvalidOperationException(result.Error);
+    }
 
-    public Task<PipelineDefinition?> UpdatePipelineAsync(PipelineDefinition def) => _actor.UpdatePipelineAsync(def);
+    public async Task<PipelineDefinition?> UpdatePipelineAsync(PipelineDefinition def)
+    {
+        var result = await _actor.UpdatePipelineAsync(def);
+        return result.Ok ? result.Value : throw new InvalidOperationException(result.Error);
+    }
 
     public Task<bool> DeletePipelineAsync(string id) => _actor.DeletePipelineAsync(id);
 
