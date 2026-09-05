@@ -28,8 +28,19 @@ namespace StreamsForge.Dapr.Host.Services;
 /// created below) fail until the Dapr sidecar is up. Rather than a bespoke retry-with-backoff loop, this
 /// mirrors <c>CatalogInitializationService</c>'s own best-effort philosophy (try, log on failure, don't
 /// crash the host) — the natural ~15s sweep period already IS the backoff: a sweep that fails because the
-/// sidecar isn't ready yet simply tries again next tick, with no separate startup gate required beyond
-/// waiting for <see cref="IHostApplicationLifetime.ApplicationStarted"/> before the first sweep.</para>
+/// sidecar isn't ready yet simply tries again next tick.</para>
+///
+/// <para><b>Plan 025 (PARITY.md D6 bullet 2) — this sweep is no longer part of the boot resume, and it
+/// waits for the one that is.</b> Its first pass used to be a boot resume in its own right, racing the
+/// other three sweeps: nothing coordinated "start the consumers before the producers", so this sweep could
+/// start a `url` source whose table had not re-registered its router yet, and with a dedup key configured
+/// those rows never came round again. <see cref="CatalogInitializationService"/> now owns one ordered pass
+/// and this loop awaits <see cref="BootGate"/> before its FIRST tick — the Dapr shape of Orleans'
+/// <c>GeneratorSupervisorService</c> awaiting <c>RegistryGrain.EnsureInitializedAsync</c>. The wait is
+/// bounded (see <see cref="BootGate.DefaultWaitTimeout"/>): a boot pass that wedges must degrade this back
+/// to its old uncoordinated behaviour, never disable self-healing outright. Everything from the second
+/// tick on is unchanged — this is still the safety net for a source enabled after boot, or one whose actor
+/// was evicted, which is what its "Why this is still needed" paragraph above describes.</para>
 ///
 /// <para><b>Plan 006 (ingestion connectors) W3-B addendum — connector-kind sources join the same sweep,
 /// but with a not-running GUARD the generator branch doesn't need.</b> <see cref="IGeneratorActor.StartAsync"/>
@@ -59,6 +70,7 @@ public sealed class GeneratorSupervisorService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await WaitForApplicationStartedAsync(stoppingToken);
+        await BootGateWait.AwaitBootPassAsync(logger, nameof(GeneratorSupervisorService), stoppingToken);
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
         do
@@ -71,39 +83,23 @@ public sealed class GeneratorSupervisorService(
                     var catalog = catalogFactory.For(environment);
                     var sources = await catalog.GetSourcesAsync();
 
-                    foreach (var src in sources.Where(s => s.Enabled && SourceKindDispatch.Classify(s.Kind) == SourceKindDispatch.ActorKind.Generator))
+                    // Plan 025: both branches go through EntityResume.EnsureSourceRunningAsync — the SAME
+                    // call CatalogInitializationService's boot pass makes — rather than two copies of the
+                    // generator/connector dispatch. It carries the "generators unconditionally, connectors
+                    // only when not already running" rule this class's own doc paragraph describes.
+                    foreach (var src in sources.Where(s => s.Enabled && SourceKindDispatch.Classify(s.Kind) == SourceKindDispatch.ActorKind.Generator)
+                                 .Concat(ConnectorSourceSweep.SelectConnectorSources(sources)))
                     {
                         try
                         {
-                            var actor = ActorProxy.Create<IGeneratorActor>(
-                                new ActorId(EnvKeys.Qualify(src.Environment, src.Name)), nameof(GeneratorActor), ActorProxyDefaults.Options);
-                            await actor.StartAsync(src);
+                            await EntityResume.EnsureSourceRunningAsync(src);
                         }
                         catch (Exception ex)
                         {
                             // Best-effort per source, mirroring the Orleans supervisor's per-grain try/catch —
-                            // one misbehaving generator must never stop the sweep from reaching the rest.
+                            // one misbehaving source must never stop the sweep from reaching the rest.
                             logger.LogDebug(ex,
-                                "GeneratorSupervisorService: failed to (re)start generator for source '{Source}' in environment '{Environment}' — will retry next sweep.",
-                                src.Name, environment);
-                        }
-                    }
-
-                    foreach (var src in ConnectorSourceSweep.SelectConnectorSources(sources))
-                    {
-                        try
-                        {
-                            var actor = ActorProxy.Create<IConnectorActor>(
-                                new ActorId(EnvKeys.Qualify(src.Environment, src.Name)), nameof(ConnectorActor), ActorProxyDefaults.Options);
-                            if (!await actor.IsRunningAsync())
-                            {
-                                await actor.StartAsync(src);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            logger.LogDebug(ex,
-                                "GeneratorSupervisorService: failed to (re)start connector for source '{Source}' in environment '{Environment}' — will retry next sweep.",
+                                "GeneratorSupervisorService: failed to (re)start source '{Source}' in environment '{Environment}' — will retry next sweep.",
                                 src.Name, environment);
                         }
                     }

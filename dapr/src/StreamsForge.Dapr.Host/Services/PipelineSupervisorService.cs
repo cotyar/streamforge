@@ -37,6 +37,15 @@ namespace StreamsForge.Dapr.Host.Services;
 /// needs repair (it does NOT survive a host restart the way the actor's persisted Dapr state does), read
 /// cheaply via <see cref="IPipelineActor.GetSourceNamesAsync"/> with no recompile.</item>
 /// </list></para>
+///
+/// <para><b>Plan 025 (PARITY.md D6 bullet 2): this sweep is no longer the boot resume — it waits for the
+/// one that is.</b> The paragraph above still describes what this class does from its SECOND tick onward;
+/// what changed is the first. <see cref="CatalogInitializationService"/> now runs one ordered pass
+/// (pipelines → tables in dependency order → sources) across every environment, and this loop awaits
+/// <see cref="BootGate"/> before sweeping, so it can no longer race the table or source sweep into starting
+/// a producer before its consumers are routable. The two branches themselves moved verbatim into
+/// <see cref="EntityResume.EnsurePipelineRunningAsync"/>, shared with that boot pass so the "repair, never
+/// restart" discipline cannot drift between the two callers.</para>
 /// </summary>
 public sealed class PipelineSupervisorService(
     ICatalogFacadeFactory catalogFactory,
@@ -50,6 +59,7 @@ public sealed class PipelineSupervisorService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await WaitForApplicationStartedAsync(stoppingToken);
+        await BootGateWait.AwaitBootPassAsync(logger, nameof(PipelineSupervisorService), stoppingToken);
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
         do
@@ -64,7 +74,7 @@ public sealed class PipelineSupervisorService(
                     {
                         try
                         {
-                            await EnsureRunningAsync(catalog, pipeline);
+                            await EntityResume.EnsurePipelineRunningAsync(catalog, router, pipeline);
                         }
                         catch (Exception ex)
                         {
@@ -84,27 +94,6 @@ public sealed class PipelineSupervisorService(
                     "PipelineSupervisorService: sweep failed (Dapr sidecar likely not ready yet) — will retry next tick.");
             }
         } while (await timer.WaitForNextTickAsync(stoppingToken));
-    }
-
-    private async Task EnsureRunningAsync(ICatalogFacade catalog, PipelineDefinition pipeline)
-    {
-        var actor = ActorProxy.Create<IPipelineActor>(new ActorId(pipeline.Id), nameof(PipelineActor), ActorProxyDefaults.Options);
-
-        if (await actor.IsRunningAsync())
-        {
-            // Already self-healed (or continuously running) — repair the router only, never restart.
-            // Plan 021 D6: GetSourceNamesAsync returns BARE names (this pipeline's own compile) — qualify
-            // with its own environment before they go in the process-wide router index (same reasoning as
-            // DaprLifecycleOrchestrator.StartPipelineAsync).
-            var sourceNames = await actor.GetSourceNamesAsync();
-            router.Register(pipeline.Id, sourceNames.Select(s => EnvKeys.Qualify(pipeline.Environment, s)).ToList());
-            return;
-        }
-
-        // Never started (fresh Redis state, or a transient earlier failure) — go through the full,
-        // user-equivalent start path (compiles, starts the actor, registers the router, persists
-        // Failed/Running/Error on the outcome).
-        await catalog.SetPipelineStatusAsync(pipeline.Id, PipelineStatus.Running);
     }
 
     /// <summary>Small inline equivalent of the Orleans host's internal <c>StartupSignal</c> helper — see

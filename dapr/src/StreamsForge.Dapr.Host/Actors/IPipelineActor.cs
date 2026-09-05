@@ -47,7 +47,21 @@ public interface IPipelineActor : IActor
     /// register <c>PipelineEventRouter</c>'s routing table without a second, redundant compile. On compile
     /// failure, returns a Failure result (mirroring the actor-boundary "result types, not thrown
     /// exceptions" convention — see <see cref="ActorResult{T}"/>'s class doc) instead of letting an
-    /// exception cross the Dapr actor-invocation wire; the pipeline is left/kept stopped.</summary>
+    /// exception cross the Dapr actor-invocation wire; the pipeline is left/kept stopped.
+    ///
+    /// <para><b>Plan 025 (PARITY.md D6): this method now also registers
+    /// <c>Streaming.PipelineEventRouter</c> and replays its connector-kind sources' recent rows, from
+    /// inside its own turn</b> — see <c>PipelineActor.RegisterRouterAndAttachToSourcesAsync</c> for the
+    /// protocol. The ordering argument is the same one <see cref="ITableActor.StartAsync"/>'s doc comment
+    /// makes: Dapr actors process at most one invocation at a time per actor id (dapr/ARCHITECTURE.md's
+    /// reentrancy decision), so anything the freshly-registered router routes to THIS actor id while this
+    /// call is still executing is a NEW invocation that Dapr queues behind it — never dropped, never
+    /// interleaved with it. That is what lets the replayed rows be guaranteed to reach the executor ahead
+    /// of any live row that raced them. <c>Lifecycle.DaprLifecycleOrchestrator.StartPipelineAsync</c> still
+    /// registers the router after this returns; that call is now an idempotent duplicate, kept because it
+    /// costs nothing and still covers a caller that somehow reaches the router without reaching this
+    /// method.</para>
+    /// <para>The returned source names are unchanged and still BARE (this pipeline's own compile).</para></summary>
     Task<ActorResult<List<string>>> StartAsync(PipelineStartRequest request);
 
     /// <summary>Stops the pipeline (unregisters the watermark timer, drops the compiled executor).

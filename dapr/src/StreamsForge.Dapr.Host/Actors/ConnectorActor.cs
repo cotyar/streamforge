@@ -7,6 +7,8 @@ using StreamsForge.Abstractions;
 using StreamsForge.Abstractions.Streaming;
 using StreamsForge.AppCore.Connectors;
 using StreamsForge.AppCore.Connectors.Grpc;
+using StreamsForge.AppCore.Json;
+using StreamsForge.Engine;
 using StreamsForge.AppCore.Discovery;
 using StreamsForge.AppCore.Transports;
 using StreamsForge.AppCore.Connectors.Polling;
@@ -60,11 +62,23 @@ namespace StreamsForge.Dapr.Host.Actors;
 /// resolves <see cref="ICatalogFacade"/>, an <c>IRegistryActor</c> proxy, or any other actor from inside
 /// one of its own turns. The ONE exception — and it is not a cycle — is the grpc kind's background
 /// subscriber task calling back into THIS SAME actor type via a fresh <see cref="IConnectorActor"/>
-/// proxy (<see cref="RecordSubscriberBatchAsync"/>): that call happens on an independent background
-/// thread, not from inside an in-flight actor turn, so from the Dapr runtime's perspective it is an
-/// ordinary new inbound invocation — no different from any other client calling this actor — not a
-/// reentrant self-call. <see cref="IConnectorActor.RecordSubscriberBatchAsync"/>'s doc comment covers the
-/// same point from the interface side.</para>
+/// proxy (<see cref="RecordSubscriberBatchAsync"/>/<see cref="RecordSubscriberRowsAsync"/>): that call
+/// happens on an independent background thread, not from inside an in-flight actor turn, so from the Dapr
+/// runtime's perspective it is an ordinary new inbound invocation — no different from any other client
+/// calling this actor — not a reentrant self-call.
+/// <see cref="IConnectorActor.RecordSubscriberBatchAsync"/>'s doc comment covers the same point from the
+/// interface side.</para>
+///
+/// <para><b>Plan 025 (PARITY.md D6) — ONE publish door, and the subscriber kinds now go through it too.</b>
+/// Every row this actor emits leaves through <see cref="PublishAsync"/>, which honours the late-consumer
+/// attach gate (<see cref="ConnectorAttachState"/>) before touching the sidecar. That is only total if the
+/// grpc/nats subscriber callbacks stop publishing straight from their background thread, which they did
+/// until this plan — so they now marshal their ROWS onto an actor turn
+/// (<see cref="RecordSubscriberRowsAsync"/>) rather than only their bookkeeping. The cost is nothing: those
+/// callbacks already paid for one proxy call per batch, and now that one call does both jobs. No kind is
+/// excluded — a duplex kind's inbound half arrives through the same <c>SubscriberCore</c> callback as any
+/// other <see cref="IInboundTransport"/>, and its OUTBOUND half never passes through this actor at all
+/// (see the plan 019 paragraph above: the sink finds the session via <c>DuplexSessions</c>).</para>
 ///
 /// <para><b>URL fetch:</b> a single shared static <see cref="HttpClient"/> (30s timeout), request
 /// headers applied verbatim from <see cref="UrlPollConfig.Headers"/> (already secrets-lite masked/
@@ -126,6 +140,23 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
     private CancellationTokenSource? _grpcCts;
     private CancellationTokenSource? _transportCts;
 
+    /// <summary>Plan 025 (PARITY.md D6 "late-consumer replay"): the hold/pending/ring decision, extracted
+    /// whole into a pure class so it is unit-testable without a live sidecar (no <see cref="ConnectorActor"/>
+    /// instance can be constructed in this repo's test suite — the same limitation
+    /// <see cref="TableAttachPolicy"/>/<see cref="ConnectorBookkeeping"/> already work around). Per
+    /// ACTIVATION, never persisted — see <see cref="ConnectorAttachState"/>'s own class doc for why a
+    /// restart deliberately empties it.</summary>
+    private readonly ConnectorAttachState _attach = new();
+
+    /// <summary>Force-release timer for a consumer that took a hold and never came back (it crashed, its
+    /// host went away, its StartAsync threw between the two calls). Without it one dead attacher would gate
+    /// this source's publishing for the life of the activation — a far worse failure than the
+    /// duplicate-free replay the hold buys. Same 10 s window and same "release EVERY hold" semantics as the
+    /// Orleans twin's <c>AttachSafetyRelease</c>.</summary>
+    private static readonly TimeSpan AttachSafetyRelease = TimeSpan.FromSeconds(10);
+    private const string AttachTimerName = "connector-attach-release";
+    private bool _attachTimerArmed;
+
     protected override async Task OnActivateAsync()
     {
         var existing = await StateManager.TryGetStateAsync<ConnectorActorState>(StateName);
@@ -153,6 +184,12 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
 
     public async Task StartAsync(SourceDefinition def)
     {
+        // Plan 025: rows already produced are rows already owed — flush anything an attach hold is sitting
+        // on BEFORE this method disowns the run that produced them. Dropping them here would reintroduce,
+        // on the restart/config-edit path, exactly the loss the gate exists to prevent. Same first
+        // statement, same reasoning, as the Orleans twin's ConnectorGrain.StartAsync.
+        await ReleaseAttachHoldsAndFlushAsync();
+
         await DisarmTimerIfArmedAsync();
         StopGrpcSubscriberIfRunning();
         StopTransportSubscriberIfRunning();
@@ -202,6 +239,10 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
 
     public async Task StopAsync()
     {
+        // Same reasoning as StartAsync's identical first call: a stop must not eat rows this source had
+        // already produced and merely deferred on a consumer's behalf.
+        await ReleaseAttachHoldsAndFlushAsync();
+
         await DisarmTimerIfArmedAsync();
         StopGrpcSubscriberIfRunning();
         StopTransportSubscriberIfRunning();
@@ -224,6 +265,44 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         // some source kinds and silently zero for others is worse than no counter.
         _state.CoercionFailuresTotal += Math.Max(0, coercionFailures);
         await SaveAsync();
+    }
+
+    /// <summary>Plan 025: the ROWS-carrying sibling of <see cref="RecordSubscriberBatchAsync"/> — see
+    /// <see cref="IConnectorActor.RecordSubscriberRowsAsync"/> for why the subscriber kinds now marshal
+    /// their rows onto this actor's turn instead of publishing them straight from the background thread.
+    /// Applies the identical bookkeeping, then publishes through the one door
+    /// (<see cref="PublishAsync"/>), so a subscriber batch honours an open attach hold exactly like a poll
+    /// cycle's batch does.
+    ///
+    /// <para><b>Bookkeeping is applied and persisted BEFORE the publish, not after.</b> Before this plan
+    /// the callbacks published first and recorded second, so a throwing publish skipped the bookkeeping
+    /// entirely and surfaced in the subscriber core as a failed attempt. Routing through
+    /// <see cref="PublishAsync"/> makes a publish failure a logged warning instead (that method swallows —
+    /// it must, or a sidecar hiccup would tear down the poll timer), so recording first is what keeps
+    /// "the source received this batch" observable at all. The rows themselves are still lost on a failed
+    /// publish, which is the at-least-once behaviour the polled path has always had.</para>
+    ///
+    /// <para><b>Rows are normalized on arrival.</b> They crossed the actor wire as System.Text.Json, so
+    /// every cell is a <see cref="System.Text.Json.JsonElement"/> here (see
+    /// <see cref="IPipelineActor.ProcessEventsAsync"/>'s doc for the same effect one hop later). Normalizing
+    /// before they reach the replay ring means a late consumer is handed plain CLR values rather than a
+    /// second layer of boxed JSON to unwrap.</para></summary>
+    public async Task RecordSubscriberRowsAsync(
+        List<Dictionary<string, object?>> rows, string status, string? error, List<string>? dedupKeys, int coercionFailures)
+    {
+        foreach (var row in rows)
+        {
+            JsonValueNormalizer.NormalizeInPlace(row);
+        }
+
+        ConnectorBookkeeping.ApplySubscriberBatch(_state, rows.Count, status, error, dedupKeys);
+        _state.CoercionFailuresTotal += Math.Max(0, coercionFailures);
+        await SaveAsync();
+
+        if (rows.Count > 0)
+        {
+            await PublishAsync(_state.Def?.Name ?? Id.GetId(), rows);
+        }
     }
 
     /// <summary>Named "SaveAsync", not "SaveStateAsync" — same rationale as
@@ -351,8 +430,41 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
         await ArmTimerAsync(ConnectorBookkeeping.DueFrom(next, DateTimeOffset.UtcNow));
     }
 
+    /// <summary>THE single door every row leaves this actor through — the poll cycle's
+    /// <see cref="TickAsync"/> and the subscriber kinds' <see cref="RecordSubscriberRowsAsync"/> both call
+    /// it, and a third publish site must too. While an attach hold is outstanding the rows are DEFERRED
+    /// rather than published; otherwise they go to both topics and are then remembered in the replay ring
+    /// for whoever attaches next. Dapr counterpart of <c>ConnectorGrain.PublishAsync</c> — read that
+    /// method's doc comment alongside this one.
+    ///
+    /// <para><b>The ring is appended AFTER the publish, deliberately</b> (and only when the publish
+    /// succeeded): a row that failed to publish is not a row a late consumer should be told it missed. The
+    /// cycle's own error path owns that failure and the next cycle re-reads and re-emits it.</para></summary>
     private async Task PublishAsync(string sourceName, List<Dictionary<string, object?>> rows)
     {
+        // Plan 025: the gate. A turn is the unit of atomicity here — nothing interleaves between this
+        // check and the append (Dapr actors process one invocation at a time per actor id, dapr/
+        // ARCHITECTURE.md's reentrancy decision), so no lock is needed and none would help.
+        if (_attach.TryDefer(rows))
+        {
+            return;
+        }
+
+        await PublishDirectAsync(sourceName, rows);
+    }
+
+    /// <summary>The publish half of <see cref="PublishAsync"/> with the gate bypassed — used by the door
+    /// itself and by <see cref="FlushPendingAsync"/>. A hold taken WHILE a flush is awaiting must not
+    /// re-queue rows that are already on their way out and re-order them behind newer ones, which is
+    /// exactly why the flush does not go back through the door (same reasoning as
+    /// <c>ConnectorGrain.FlushPendingAsync</c>).</summary>
+    private async Task PublishDirectAsync(string sourceName, List<Dictionary<string, object?>> rows)
+    {
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
         // Plan 021 D6: Id.GetId() is this actor's own qualified name (EnvKeys.Qualify(def.Environment,
         // def.Name) — see DaprLifecycleOrchestrator's ConnectorActorProxy) — used for routing/egress
         // instead of the bare `sourceName` parameter, which is kept only because callers already had it
@@ -372,7 +484,101 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
             // semantics: the rows were fetched and deduped successfully, only the publish hop failed) and
             // let the next scheduled tick try again.
             logger.LogWarning(ex, "ConnectorActor[{Source}]: failed to publish a batch of {Count} row(s) — will retry next poll.", sourceName, rows.Count);
+            return;
         }
+
+        _attach.RecordPublished(rows);
+    }
+
+    // ------------------------------------------------------------------
+    // Plan 025 (PARITY.md D6 "late-consumer replay") — the attach gate. See IConnectorActor.
+    // BeginAttachAsync's doc comment for the protocol and ConnectorAttachState for the pure decision
+    // logic; everything below is the actor-flavoured plumbing (a one-shot Dapr timer, publishing).
+    // ------------------------------------------------------------------
+
+    /// <summary>See <see cref="IConnectorActor.BeginAttachAsync"/>.
+    ///
+    /// <para><b>The safety timer is armed BEFORE the hold is taken, and that ordering is load-bearing.</b>
+    /// If arming throws (a sidecar hiccup — timer registration is a call out to it), the natural-looking
+    /// order would leave a hold standing with nothing to force-release it, and this source would stop
+    /// publishing for the life of the activation. Arming first means a failure here propagates with NO hold
+    /// taken: the consumer's own <c>catch</c> registers plainly and starts without the replay, which is
+    /// exactly the pre-plan-025 behaviour and a far smaller loss than a gated source.</para>
+    ///
+    /// <para>Awaiting between the arm and the snapshot read costs nothing: unlike an Orleans grain, a Dapr
+    /// actor does not admit another invocation at an <c>await</c> — the turn is held for the whole method
+    /// (dapr/ARCHITECTURE.md's reentrancy decision), so no poll tick or subscriber marshal call can slip a
+    /// publish in between.</para></summary>
+    public async Task<SourceAttachSnapshot> BeginAttachAsync()
+    {
+        // One shared safety timer, RE-ARMED on every Begin: the deadline that matters is "10 s since the
+        // most recent attach started", so several overlapping consumers each get their own full window and
+        // a single abandoned hold still cannot outlive it. Registering the same timer name again replaces
+        // the previous registration in the sidecar, which is exactly the re-arm we want.
+        await RegisterTimerAsync(AttachTimerName, nameof(ForceReleaseAttachAsync), null, AttachSafetyRelease, Timeout.InfiniteTimeSpan);
+        _attachTimerArmed = true;
+
+        var (rows, totalSeen) = _attach.BeginAttach();
+        return new SourceAttachSnapshot(rows.Select(r => new EventRecord(r)).ToList(), totalSeen);
+    }
+
+    /// <summary>See <see cref="IConnectorActor.EndAttachAsync"/>. At zero holds everything deferred
+    /// meanwhile is published, oldest first, and the safety timer is unregistered.
+    ///
+    /// <para>The flush happens BEFORE the disarm for the same reason the arm happens before the hold in
+    /// <see cref="BeginAttachAsync"/>: the rows are already out of
+    /// <see cref="ConnectorAttachState"/>'s hands by then (it clears its deferral list as it hands them
+    /// over, so a failed flush cannot be replayed twice), and a throwing <c>UnregisterTimerAsync</c> in
+    /// between would drop them on the floor. A timer left armed after a successful flush is harmless — it
+    /// fires once, force-releases zero holds and flushes nothing.</para></summary>
+    public async Task EndAttachAsync()
+    {
+        await FlushPendingAsync(_attach.Release());
+
+        if (_attach.Holds == 0)
+        {
+            await DisarmAttachTimerIfArmedAsync();
+        }
+    }
+
+    /// <summary>The safety timer's target. Releases EVERY hold, not one: the only situation this fires in
+    /// is "somebody is not coming back", and there is no way to tell which holder that was. Private, like
+    /// <see cref="TickAsync"/> — Dapr resolves a timer callback by name off the actor type, so it needs no
+    /// wider accessibility than the actor itself.</summary>
+    private Task ForceReleaseAttachAsync()
+    {
+        // This fire consumed the one-shot registration — same bookkeeping TickAsync does for its own timer,
+        // so the disarm below does not try to unregister a timer the sidecar has already dropped.
+        _attachTimerArmed = false;
+        return ReleaseAttachHoldsAndFlushAsync();
+    }
+
+    private async Task ReleaseAttachHoldsAndFlushAsync()
+    {
+        await FlushPendingAsync(_attach.ForceRelease());
+        await DisarmAttachTimerIfArmedAsync();
+    }
+
+    /// <summary>Publishes everything deferred while the gate was closed, oldest first, as ONE envelope.
+    /// Batch boundaries are not preserved across the gate (the deferral list is flat) and nothing
+    /// downstream depends on them — the router fans out per row, and the two topics carry whatever batch
+    /// shape the producer happened to emit. Order is preserved, which is the property that matters.
+    /// <see cref="ConnectorAttachState"/> has already cleared its deferral list by the time these rows get
+    /// here, so a failed flush cannot be replayed twice by a later one.</summary>
+    private Task FlushPendingAsync(List<Dictionary<string, object?>> pending) =>
+        pending.Count == 0
+            ? Task.CompletedTask
+            : PublishDirectAsync(_state.Def?.Name ?? Id.GetId(), pending);
+
+    private async Task DisarmAttachTimerIfArmedAsync()
+    {
+        if (!_attachTimerArmed)
+        {
+            return;
+        }
+
+        await UnregisterTimerAsync(AttachTimerName);
+        _attachTimerArmed = false;
     }
 
     // ------------------------------------------------------------------
@@ -480,12 +686,12 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
                     stamped.Add(row);
                 }
 
-                var envelope = new SourceEventsEnvelope { Source = Id.GetId(), Events = stamped };
-                await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, StreamingRuntimeSetup.SourcesTopic, envelope);
-                await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + Id.GetId(), envelope);
-
-                await SelfProxy().RecordSubscriberBatchAsync(
-                    stamped.Count, "ok",
+                // Plan 025: the rows go to the actor turn INSTEAD of straight to the sidecar — see
+                // IConnectorActor.RecordSubscriberRowsAsync. This callback already paid for one proxy
+                // call per batch (the bookkeeping marshal below used to be a second call after two
+                // publishes); it now pays for exactly one, which does both.
+                await SelfProxy().RecordSubscriberRowsAsync(
+                    stamped, "ok",
                     coercion.FailureCount > 0
                         ? $"{coercion.FailureCount} field coercion failure(s) this batch; policy={def.OnCoercionFailure}"
                         : null,
@@ -529,12 +735,9 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
             {
                 // SubscriberCore already ran these rows through ConnectorPollCycle.Emit (parse/extract/
                 // coerce/dedup/"_source"/"_ts" stamping) — unlike gRPC above, nothing left to do here but
-                // publish and persist the dedup snapshot.
-                var envelope = new SourceEventsEnvelope { Source = Id.GetId(), Events = rows.ToList() };
-                await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, StreamingRuntimeSetup.SourcesTopic, envelope);
-                await daprClient.PublishEventAsync(StreamingRuntimeSetup.PubsubName, EgressTopicPrefix + Id.GetId(), envelope);
-
-                await SelfProxy().RecordSubscriberBatchAsync(rows.Count, "ok", null, dedup.ToPersistable(), 0);
+                // hand them to the actor turn, which publishes them through the attach door and persists
+                // the dedup snapshot in the same invocation (plan 025 — see RecordSubscriberRowsAsync).
+                await SelfProxy().RecordSubscriberRowsAsync(rows.ToList(), "ok", null, dedup.ToPersistable(), 0);
             },
             onStatus: (status, error) =>
             {
@@ -591,17 +794,121 @@ public sealed class ConnectorActor(ActorHost host, DaprClient daprClient, ILogge
     /// than trusting whatever name string a caller passes.</summary>
     private IConnectorActor SelfProxy() =>
         ActorProxy.Create<IConnectorActor>(new ActorId(Id.GetId()), nameof(ConnectorActor), ActorProxyDefaults.Options);
+}
 
-    // ---- Plan 025 attach protocol (PARITY.md D6 "late-consumer replay") — placeholder ----------------
-    // The orchestrator pinned IConnectorActor.BeginAttachAsync/EndAttachAsync before the wave so the
-    // consumer side (TableActor/PipelineActor) and this producer side could be built in parallel. Wave
-    // 1's connector agent replaces these two bodies with the real ring + hold + pending-flush protocol
-    // (see IConnectorActor's doc comment); until then a late consumer gets an empty snapshot, which is
-    // exactly today's behaviour.
-    public Task<SourceAttachSnapshot> BeginAttachAsync() => Task.FromResult(new SourceAttachSnapshot([], 0));
+/// <summary>
+/// Plan 025 (PARITY.md D6 "late-consumer replay"): the pure hold / pending / replay-ring decision behind
+/// <see cref="ConnectorActor"/>'s attach gate, extracted for exactly the reason
+/// <see cref="ConnectorBookkeeping"/> and <see cref="TableAttachPolicy"/> were — a
+/// <see cref="ConnectorActor"/> instance cannot be constructed without a live Dapr sidecar, so anything
+/// only testable through the actor is effectively untested. Everything here is synchronous and
+/// allocation-plain; the actor keeps the I/O (publishing, the safety timer).
+///
+/// <para><b>Not thread-safe, and it does not need to be.</b> It is owned by one actor activation, whose
+/// turns are serialized by Dapr (one invocation at a time per actor id — dapr/ARCHITECTURE.md's reentrancy
+/// decision). The same ownership rule <see cref="SourceReplayBuffer"/>, <c>DedupTracker</c> and
+/// <c>FileLedger</c> already rely on. The one caller that is NOT on a turn — the grpc/nats background
+/// subscriber task — never touches this object: it marshals its rows onto a turn first
+/// (<see cref="IConnectorActor.RecordSubscriberRowsAsync"/>), which is a large part of why that method
+/// exists at all.</para>
+///
+/// <para><b>Per activation, never persisted</b> — same deliberate choice as the Orleans twin's own
+/// <see cref="SourceReplayBuffer"/> field. A restart empties the ring; a restart's replay window is a
+/// different problem, solved by boot ordering (<see cref="Services.BootResumePlan"/>), not by this.</para>
+/// </summary>
+public sealed class ConnectorAttachState
+{
+    private readonly SourceReplayBuffer _replay = new();
 
-    public Task EndAttachAsync() => Task.CompletedTask;
+    /// <summary>Rows deferred while at least one hold is open, oldest first. FLAT, not a list of batches:
+    /// nothing downstream depends on the batch boundaries a producer happened to emit (the router fans out
+    /// per row), and order — which a flat list preserves exactly — is the property that matters.</summary>
+    private readonly List<Dictionary<string, object?>> _pending = [];
 
+    /// <summary>Outstanding <see cref="BeginAttach"/> holds. While &gt; 0 every row is deferred.</summary>
+    public int Holds { get; private set; }
+
+    /// <summary>Rows currently deferred — for tests and diagnostics; the actor never reads it (it acts on
+    /// what <see cref="Release"/>/<see cref="ForceRelease"/> hand back).</summary>
+    public int PendingCount => _pending.Count;
+
+    /// <summary>Everything this activation has ever published, including rows the ring has since evicted.
+    /// See <see cref="SourceReplayBuffer.TotalSeen"/>.</summary>
+    public long TotalSeen => _replay.TotalSeen;
+
+    /// <summary>Defers <paramref name="rows"/> and answers true when a hold is open — i.e. "I took these,
+    /// do not publish them". False means the caller owns them and must publish, then call
+    /// <see cref="RecordPublished"/>. Split in two (rather than one method that publishes) because the
+    /// publish itself is async I/O that must stay in the actor.</summary>
+    public bool TryDefer(IEnumerable<Dictionary<string, object?>> rows)
+    {
+        if (Holds == 0)
+        {
+            return false;
+        }
+
+        _pending.AddRange(rows);
+        return true;
+    }
+
+    /// <summary>Remembers rows that were ACTUALLY published, so a consumer attaching next gets them. Never
+    /// called for a publish that threw — a row that failed to publish is not a row a late consumer should
+    /// be told it missed (see <c>ConnectorActor.PublishDirectAsync</c>).</summary>
+    public void RecordPublished(IEnumerable<Dictionary<string, object?>> rows)
+    {
+        foreach (var row in rows)
+        {
+            // Copied in, exactly as the Orleans twin does: the caller published this dictionary and may
+            // still mutate it (the poll cycle reuses nothing today, but the ring outlives every caller).
+            _replay.Append(new Dictionary<string, object?>(row));
+        }
+    }
+
+    /// <summary>Takes one hold and returns the ring's current contents. The COPY is
+    /// <see cref="SourceReplayBuffer.Snapshot"/>'s (both the list and every row dictionary), so a consumer
+    /// is free to mutate what it is handed.</summary>
+    public (List<Dictionary<string, object?>> Rows, long TotalSeen) BeginAttach()
+    {
+        Holds++;
+        return _replay.Snapshot();
+    }
+
+    /// <summary>Releases ONE hold and returns the rows to flush — empty unless this was the last one.
+    /// Never goes below zero: a stray extra <see cref="IConnectorActor.EndAttachAsync"/> (a retried proxy
+    /// call, a consumer's over-eager <c>finally</c>) must be a no-op, not a negative hold count that would
+    /// let the NEXT attach's rows escape the gate.</summary>
+    public List<Dictionary<string, object?>> Release()
+    {
+        if (Holds > 0)
+        {
+            Holds--;
+        }
+
+        return Holds == 0 ? Drain() : [];
+    }
+
+    /// <summary>Drops EVERY hold and returns the rows to flush — the safety timer's semantics, and
+    /// StartAsync/StopAsync's. Not "release one": the only situation either fires in is "somebody is not
+    /// coming back", and there is no way to tell which holder that was.</summary>
+    public List<Dictionary<string, object?>> ForceRelease()
+    {
+        Holds = 0;
+        return Drain();
+    }
+
+    /// <summary>Hands the deferral list out and CLEARS it in the same step, so a flush that fails partway
+    /// cannot be replayed twice by a later one — the caller owns those rows from here.</summary>
+    private List<Dictionary<string, object?>> Drain()
+    {
+        if (_pending.Count == 0)
+        {
+            return [];
+        }
+
+        var drained = _pending.ToList();
+        _pending.Clear();
+        return drained;
+    }
 }
 
 /// <summary>Persisted shape of a <see cref="ConnectorActor"/>'s state (state name "connector") — see

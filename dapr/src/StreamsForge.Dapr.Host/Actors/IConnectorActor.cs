@@ -62,6 +62,28 @@ public interface IConnectorActor : IActor
     Task RecordSubscriberBatchAsync(
         int rowCount, string status, string? error, List<string>? dedupKeys, int coercionFailures);
 
+    /// <summary>Plan 025: the ROWS-carrying sibling of <see cref="RecordSubscriberBatchAsync"/>, and the
+    /// reason the attach gate below is TOTAL rather than best-effort.
+    ///
+    /// <para><b>Why it exists.</b> The grpc/nats/transport kinds' <c>onRows</c> callbacks run OFF the actor
+    /// turn, on a background thread, and until this plan they published their batch straight to the sidecar
+    /// and then marshalled only the bookkeeping back through
+    /// <see cref="RecordSubscriberBatchAsync"/>. A publish that does not go through the actor turn cannot
+    /// see <see cref="BeginAttachAsync"/>'s hold — so a consumer attaching to a live subscriber source
+    /// would receive a snapshot row AND the same row on the live topic. Marshalling the rows themselves
+    /// moves that publish onto the turn, where the gate is. It costs nothing extra: those callbacks already
+    /// made exactly one proxy call per batch, and this one call now carries both the rows and the
+    /// bookkeeping <see cref="RecordSubscriberBatchAsync"/> applied. That method stays, for the
+    /// status-only updates (<c>onStatus</c>, a coercion-rejected batch, a bare coercion-failure count)
+    /// that carry no rows.</para>
+    ///
+    /// <para>Parameters carry exactly the meanings <see cref="RecordSubscriberBatchAsync"/> documents, with
+    /// <paramref name="rows"/> replacing its <c>rowCount</c> (the count is <c>rows.Count</c>). All five are
+    /// REQUIRED — see that method's "no optional parameters" paragraph; a C# default here does not degrade
+    /// one call, it stops the whole host from booting.</para></summary>
+    Task RecordSubscriberRowsAsync(
+        List<Dictionary<string, object?>> rows, string status, string? error, List<string>? dedupKeys, int coercionFailures);
+
     /// <summary>Plan 025 (Dapr parity, PARITY.md D6 "late-consumer replay") — the source-side half of the
     /// subscribe-then-attach protocol for STREAM inputs, the Dapr counterpart of
     /// <c>IConnectorGrain.BeginAttachAsync</c>. A table or pipeline that starts after this source already
