@@ -212,7 +212,25 @@ internal sealed class DaprConnectorStatusFacade(ICatalogFacadeFactory catalogFac
     {
         var catalog = catalogFactory.For(EnvironmentAmbient.Current);
         var def = await catalog.GetSourceAsync(sourceName);
-        if (def is null || SourceKindDispatch.Classify(def.Kind) != SourceKindDispatch.ActorKind.Connector)
+        if (def is null)
+        {
+            return null;
+        }
+
+        var kind = SourceKindDispatch.Classify(def.Kind);
+
+        // PARITY.md D5: a `crdt` source has no actor on this flavor at all (plan 020 D9 is
+        // Orleans-first) — resolving one would just activate an empty ConnectorActor that never runs the
+        // kind, which is worse than the ShardBy precedent it copies (a sharded table at least gets a real
+        // Failed status because TableActor exists to hold it). Gated on Enabled to match
+        // DaprLifecycleOrchestrator's own gate on logging the refusal (Lifecycle/DaprLifecycleOrchestrator.cs)
+        // — a disabled crdt source is not "refused", it is simply not running, same as every other kind.
+        if (kind == SourceKindDispatch.ActorKind.Crdt && def.Enabled)
+        {
+            return CrdtSourceStatus.Synthesize(def);
+        }
+
+        if (kind != SourceKindDispatch.ActorKind.Connector)
         {
             return null;
         }
@@ -220,6 +238,41 @@ internal sealed class DaprConnectorStatusFacade(ICatalogFacadeFactory catalogFac
         var actor = ActorProxy.Create<IConnectorActor>(new ActorId(EnvKeys.Qualify(def.Environment, sourceName)), nameof(ConnectorActor), ActorProxyDefaults.Options);
         return await actor.GetStatusAsync();
     }
+}
+
+/// <summary>Pure decision behind <see cref="DaprConnectorStatusFacade"/>'s crdt-kind branch (PARITY.md D5),
+/// pulled out of that class so it is unit-testable with a bare <see cref="SourceDefinition"/> — no
+/// <see cref="ICatalogFacadeFactory"/>, no actor proxy, no Dapr sidecar required. See
+/// <see cref="DaprConnectorStatusFacade.GetStatusAsync"/> for the gating (Crdt kind, Enabled) that decides
+/// WHETHER to call this; this class only decides WHAT the synthesized status looks like once that gate has
+/// already passed.</summary>
+internal static class CrdtSourceStatus
+{
+    /// <summary>Verbatim copy of the message <see cref="StreamsForge.Dapr.Host.Lifecycle.DaprLifecycleOrchestrator"/> already logs
+    /// for the same condition (enabled crdt source, plan 020 D9) — PARITY.md D5's whole point is that this
+    /// text should also be visible to whoever calls <c>GET /api/sources/{name}/status</c>, not only to
+    /// whoever reads the host's own logs.</summary>
+    public static string MessageFor(SourceDefinition def) =>
+        $"Source '{def.Name}' has kind '{def.Kind}', which is Orleans-only (plan 020 D9) — this flavor " +
+        "stores the definition but will never run it, so this source emits nothing. Run it on an Orleans " +
+        "instance and subscribe to it here with a 'grpc' source.";
+
+    /// <summary>Builds the synthesized status: <c>LastStatus = "error"</c>, <see cref="MessageFor"/> as
+    /// <c>LastError</c>, and every counter/cursor/schedule field left at its zero/null default — there is
+    /// no actor, so there is nothing to report a real value for. <c>NextRunMs = null</c> in particular is
+    /// this status's stand-in for "not running": every real connector kind sets it to its next scheduled
+    /// poll, and a crdt source on this flavor has no poll loop to schedule one for.</summary>
+    public static ConnectorRuntimeStatus Synthesize(SourceDefinition def) => new()
+    {
+        SourceName = def.Name,
+        LastStatus = "error",
+        LastError = MessageFor(def),
+        NextRunMs = null,
+        LastRunMs = null,
+        ConsecutiveFailures = 0,
+        EventsEmittedTotal = 0,
+        LastBatchCount = 0,
+    };
 }
 
 internal sealed class DaprUserStoreFacade : IUserStoreFacade

@@ -91,13 +91,18 @@ public class StreamingDaprStreamBridgeTests
     }
 
     [Fact]
-    public async Task OnSourceEventsAsync_BatchOfEventsForSameSource_SamplesPerEventNotPerBatch()
+    public async Task OnSourceEventsAsync_BatchOfEventsForSameSource_PacesRatherThanDrops_AllThreeRelayedInOrder()
     {
-        // A tight synchronous loop over N events for the SAME source executes in sub-millisecond wall
-        // time — far under SourceRateSampler's 50ms window — so only the FIRST event in the batch should
-        // survive sampling. This demonstrates per-event (not per-batch) sampling deterministically
-        // without needing an injected clock: if sampling were applied once per BATCH instead, either all
-        // 3 events would be sent, or none would — never exactly 1.
+        // Plan 025 D5/D6 (porting Orleans decision D5, plan 023): this used to assert exactly ONE relayed
+        // event for a tight batch of 3 — the OLD sampler DROPPED anything arriving under 50ms after the
+        // last relay. That read as data loss to an operator watching a source's live tape (a burst is the
+        // NORMAL shape of a polled source's tick, not an anomaly), so the sampler now PACES instead: a
+        // too-early event waits out the rest of its slot and is still relayed. This test therefore incurs
+        // ~150ms of REAL wall time (0 + 50 + 100ms, per SourceRateSampler.MinIntervalMs) — DaprStreamBridge
+        // constructs its pacer with the real wall clock (no clock-injection seam on the bridge itself; the
+        // pacer's own decision logic is covered clock-free in StreamingSourceRateSamplerTests), so exercising
+        // the bridge's actual `await Task.Delay` here is a small, deliberate, one-time real-time cost rather
+        // than a flake risk — it has no deadline to race, it always finishes waiting.
         var (bridge, hub) = NewBridge();
         var events = new List<Dictionary<string, object?>>
         {
@@ -110,8 +115,10 @@ public class StreamingDaprStreamBridgeTests
         await bridge.OnSourceEventsAsync(envelope);
 
         var proxy = hub.ClientsImpl.GroupProxies["source:trades"];
-        var sent = Assert.Single(proxy.Sent);
-        Assert.Same(events[0], sent.Args[1]);
+        Assert.Equal(3, proxy.Sent.Count);
+        Assert.Same(events[0], proxy.Sent[0].Args[1]);
+        Assert.Same(events[1], proxy.Sent[1].Args[1]);
+        Assert.Same(events[2], proxy.Sent[2].Args[1]);
     }
 
     [Fact]
@@ -206,6 +213,79 @@ public class StreamingDaprStreamBridgeTests
         Assert.Equal("tableStatus", sent.Method);
         Assert.Equal(["positions", PipelineStatus.Running], sent.Args);
         Assert.DoesNotContain("pipeline:positions", hub.ClientsImpl.GroupProxies);
+    }
+
+    [Fact]
+    public async Task OnLifecycleEventAsync_SourceStartedKind_SendsNothingToAnyGroup()
+    {
+        // Plan 025 D6: mirrors Orleans' OnSourceLifecycleEventAsync, whose own doc comment explains why —
+        // StreamHub's clients listen for pipelineStatus/tableStatus and there is no sourceStatus
+        // counterpart to invent; the console learns a source's state from the REST catalog it already
+        // re-reads. Unlike Orleans (which still acts on this event to subscribe/unsubscribe its own
+        // per-entity stream handle), this bridge has no per-entity subscription to start or stop in the
+        // first place (fixed topics — see the class doc comment), so "source-started"/"source-stopped"
+        // are pure no-ops here.
+        var (bridge, hub) = NewBridge();
+        var evt = new LifecycleEvent { PipelineId = "trades", Kind = "source-started", Status = PipelineStatus.Running };
+
+        await bridge.OnLifecycleEventAsync(evt);
+
+        Assert.Empty(hub.ClientsImpl.GroupProxies);
+    }
+
+    [Fact]
+    public async Task OnLifecycleEventAsync_SourceStoppedKind_SendsNothingToAnyGroup()
+    {
+        var (bridge, hub) = NewBridge();
+        var evt = new LifecycleEvent { PipelineId = "trades", Kind = "source-stopped", Status = PipelineStatus.Stopped };
+
+        await bridge.OnLifecycleEventAsync(evt);
+
+        Assert.Empty(hub.ClientsImpl.GroupProxies);
+    }
+
+    [Fact]
+    public async Task OnLifecycleEventAsync_UnrecognisedPrefixedKind_IsIgnored_NeverFallsThroughToPipelineBranch()
+    {
+        // Models.cs' own doc comment on LifecycleEvent.Kind states the rule explicitly: "a subscriber
+        // that does not recognise a prefix must ignore the event, never fall through to the pipeline
+        // branch: this list grows additively." A future entity kind sharing this stream (say "widget-")
+        // must not be misrouted into the pipeline group just because it isn't "table-"/"source-".
+        var (bridge, hub) = NewBridge();
+        var evt = new LifecycleEvent { PipelineId = "w1", Kind = "widget-started", Status = PipelineStatus.Running };
+
+        await bridge.OnLifecycleEventAsync(evt);
+
+        Assert.Empty(hub.ClientsImpl.GroupProxies);
+    }
+
+    [Fact]
+    public async Task OnLifecycleEventAsync_SourceDeleted_ForgetsThisBridgesOwnPacingState()
+    {
+        // The bridge's per-source pacing state (SourceRateSampler) is keyed by the SAME qualified name a
+        // "source-deleted" LifecycleEvent carries in PipelineId (see OnSourceEventsAsync's own comment:
+        // envelope.Source is already the qualified key). Mirrors Orleans' UnsubscribeFromSourceAsync
+        // clearing _lastSourceSend/_sourcePacedStreak on delete: a source deleted and recreated under the
+        // same name must not inherit the deleted one's pacing delay. Proven behaviorally, not by
+        // inspecting private state: a second immediate event for "trades" normally owes a real ~50ms
+        // delay (SourceRateSampler.MinIntervalMs) before relaying — after a "source-deleted" event clears
+        // that state, the NEXT event for the same name relays with no such delay.
+        var (bridge, hub) = NewBridge();
+        await bridge.OnSourceEventsAsync(new SourceEventsEnvelope { Source = "trades", Events = [new() { ["i"] = 1L }] });
+
+        await bridge.OnLifecycleEventAsync(new LifecycleEvent { PipelineId = "trades", Kind = "source-deleted", Status = PipelineStatus.Stopped });
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        await bridge.OnSourceEventsAsync(new SourceEventsEnvelope { Source = "trades", Events = [new() { ["i"] = 2L }] });
+        stopwatch.Stop();
+
+        // Comfortably under the 50ms slot a paced (non-forgotten) call would have to wait out — this is
+        // a real-time assertion, but it has no shared deadline to lose a race against: it only has to
+        // beat half of a 50ms floor, which an un-paced call clears near-instantly.
+        Assert.True(stopwatch.ElapsedMilliseconds < 25, $"expected a forgotten source to relay immediately, took {stopwatch.ElapsedMilliseconds}ms");
+
+        var proxy = hub.ClientsImpl.GroupProxies["source:trades"];
+        Assert.Equal(2, proxy.Sent.Count);
     }
 
     [Fact]
