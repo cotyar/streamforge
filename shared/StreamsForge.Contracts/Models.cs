@@ -564,6 +564,11 @@ public sealed class PipelineMetrics
     [Id(5)] public long TotalRowsOut { get; set; }
     [Id(6)] public long WindowsClosed { get; set; }
     [Id(7)] public long LastEventTsMs { get; set; }
+    /// <summary>Plan 025: events the Engine discarded because their <c>_ts</c> was already behind the
+    /// pipeline's watermark (1000 ms allowed lateness) — <c>PipelineExecutor.LateEvents</c>. This was
+    /// invisible until a Dapr-side relay delay made a whole 50-row batch late and nothing anywhere said
+    /// so; a growing count with <c>TotalRowsOut</c> flat is the signature.</summary>
+    [Id(8)] public long LateEvents { get; set; }
 }
 
 /// <summary>Published on the lifecycle stream when a pipeline changes state.</summary>

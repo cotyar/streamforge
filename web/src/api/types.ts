@@ -404,6 +404,8 @@ export interface PipelineMetrics {
   totalRowsOut: number
   windowsClosed: number
   lastEventTsMs: number
+  /** Plan 025: events the Engine discarded as late (behind the watermark). Optional: older hosts omit it. */
+  lateEvents?: number
 }
 
 export interface SqlDiagnostic {

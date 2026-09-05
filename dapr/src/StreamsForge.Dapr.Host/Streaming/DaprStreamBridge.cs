@@ -1,3 +1,4 @@
+using System.Threading.Channels;
 using Microsoft.AspNetCore.SignalR;
 using StreamsForge.Abstractions;
 using StreamsForge.Abstractions.Streaming;
@@ -31,9 +32,35 @@ namespace StreamsForge.Dapr.Host.Streaming;
 /// bookkeeping to replicate on this side because there is nothing to subscribe TO per-entity in the
 /// first place.</para>
 /// </summary>
-public sealed class DaprStreamBridge(IHubContext<StreamHub> hub) : ISourceEventsSink, ITableDeltaSink, IPipelineResultsSink
+public sealed class DaprStreamBridge : ISourceEventsSink, ITableDeltaSink, IPipelineResultsSink
 {
+    /// <summary>How many not-yet-relayed source events the bridge holds before it starts dropping the
+    /// NEWEST ones (counted in <see cref="SourceRelayDropped"/>). At the pacer's ~20 msg/s ceiling this is
+    /// ~8 minutes of backlog per host, far past the point where the streak cap has already switched the
+    /// relay to sampling — it exists so a runaway producer cannot grow this process without bound, not
+    /// as a tuning knob.</summary>
+    public const int SourceRelayQueueCapacity = 10_000;
+
+    private readonly IHubContext<StreamHub> hub;
     private readonly SourceRateSampler _sourcePacer = new();
+    private readonly Channel<(string Source, Dictionary<string, object?> Event)> _sourceRelay =
+        Channel.CreateBounded<(string, Dictionary<string, object?>)>(new BoundedChannelOptions(SourceRelayQueueCapacity)
+        {
+            SingleReader = true,
+            FullMode = BoundedChannelFullMode.DropWrite,
+        });
+    private int _sourceRelayPending;
+    private long _sourceRelayDropped;
+
+    public DaprStreamBridge(IHubContext<StreamHub> hub)
+    {
+        this.hub = hub;
+        _ = Task.Run(RelaySourceEventsAsync);
+    }
+
+    /// <summary>Source events the bridge had to drop because <see cref="SourceRelayQueueCapacity"/> was
+    /// reached — a diagnostic counter, never a cap on the data path.</summary>
+    public long SourceRelayDropped => Interlocked.Read(ref _sourceRelayDropped);
 
     /// <summary>Mirrors StreamBridgeService.SubscribeToSourceAsync's per-event handler: group
     /// <c>source:{name}</c>, event <c>sourceEvent</c>, args <c>(name, eventDict)</c> — one SignalR send
@@ -47,35 +74,82 @@ public sealed class DaprStreamBridge(IHubContext<StreamHub> hub) : ISourceEvents
     /// with the rest simply never appearing. <see cref="SourceRateSampler.Evaluate"/> now WAITS OUT the
     /// remainder of a too-early event's slot instead, so a burst relays in full, in order, merely spread
     /// over time; only a SUSTAINED firehose past <see cref="SourceRateSampler.MaxPacedStreak"/> degrades
-    /// to the old drop behavior. Awaiting the delay HERE, inside the per-event loop, is what makes this
-    /// safe: this method runs on the one HTTP delivery the Dapr sidecar makes for this pub/sub message
-    /// (<c>sf-sources</c>), so a <c>Task.Delay</c> here holds THAT delivery — the same back-pressure
-    /// Orleans accepts inside its own stream subscription callback (see StreamBridgeService's
-    /// SubscribeToSourceAsync doc comment) — rather than racing ahead and reordering what reaches the
-    /// hub.</para></summary>
-    public async Task OnSourceEventsAsync(SourceEventsEnvelope envelope)
+    /// to the old drop behavior.</para>
+    ///
+    /// <para><b>OFF the data path — this method only enqueues (plan 025, found live by the wave-2 live
+    /// tests).</b> The first port of the pacing awaited the <c>Task.Delay</c> HERE, inside the per-event
+    /// loop, reasoning that holding the sidecar's one HTTP delivery of the <c>sf-sources</c> message was
+    /// the same back-pressure Orleans accepts inside its stream callback. It is not the same: on Orleans
+    /// the bridge is an independent stream subscriber, while here the <c>sf-sources</c> endpoint dispatches
+    /// its sinks SEQUENTIALLY (<see cref="StreamingRuntimeSetup.DispatchSourceEventsAsync"/>) and this
+    /// bridge is registered FIRST — so a 50 ms wait per event delayed the PipelineEventRouter/
+    /// TableEventRouter sinks behind it by 50 ms × N, every row of a 50-row file batch reached the
+    /// pipeline ~2.5 s after its <c>_ts</c> was stamped, and <c>PipelineExecutor.OnEventCore</c> discarded
+    /// the whole batch as late (1000 ms allowed lateness): <c>totalEventsIn 50, totalRowsOut 0</c>, no
+    /// log line. A console nicety was silently deleting pipeline data. Now the events go into a bounded
+    /// channel and <see cref="RelaySourceEventsAsync"/> paces and sends them on its own task, exactly the
+    /// independent-subscriber shape Orleans has; ordering per source is preserved because there is one
+    /// reader. Tests wait for <see cref="IdleAsync"/> before inspecting the hub.</para></summary>
+    public Task OnSourceEventsAsync(SourceEventsEnvelope envelope)
     {
         foreach (var evt in envelope.Events)
         {
-            var plan = _sourcePacer.Evaluate(envelope.Source);
-            if (plan.Decision == RelayDecision.Drop)
+            Interlocked.Increment(ref _sourceRelayPending);
+            if (!_sourceRelay.Writer.TryWrite((envelope.Source, evt)))
             {
-                continue;
+                Interlocked.Decrement(ref _sourceRelayPending);
+                Interlocked.Increment(ref _sourceRelayDropped);
             }
+        }
 
-            if (plan.Decision == RelayDecision.SendAfterDelay)
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Completes once every source event enqueued so far has been relayed or dropped by the
+    /// pacer. For tests (and for anyone who needs "what I published is on the hub now"); production code
+    /// never waits on the relay, that is the whole point of the queue.</summary>
+    public async Task IdleAsync()
+    {
+        while (Volatile.Read(ref _sourceRelayPending) > 0)
+        {
+            await Task.Delay(5);
+        }
+    }
+
+    private async Task RelaySourceEventsAsync()
+    {
+        await foreach (var (source, evt) in _sourceRelay.Reader.ReadAllAsync())
+        {
+            try
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(plan.DelayMs));
-            }
+                var plan = _sourcePacer.Evaluate(source);
+                if (plan.Decision == RelayDecision.Drop)
+                {
+                    continue;
+                }
 
-            // Plan 021 wave 2 — GROUP name qualified, PAYLOAD name bare. The group has to match
-            // StreamHub's subscribe half, which composes $"source:{EnvKeys.Qualify(env, name)}"; the
-            // argument the browser receives has to be the name the browser asked for, because the SPA
-            // keys its own state on it and never sees a qualified name anywhere else. envelope.Source is
-            // already the qualified key (the actor's own id — see GeneratorActor/ConnectorActor), so the
-            // group is right as-is and only the payload needs stripping.
-            await hub.Clients.Group($"source:{envelope.Source}")
-                .SendAsync("sourceEvent", EnvKeys.Split(envelope.Source).Key, evt);
+                if (plan.Decision == RelayDecision.SendAfterDelay)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(plan.DelayMs));
+                }
+
+                // Plan 021 wave 2 — GROUP name qualified, PAYLOAD name bare. The group has to match
+                // StreamHub's subscribe half, which composes $"source:{EnvKeys.Qualify(env, name)}"; the
+                // argument the browser receives has to be the name the browser asked for, because the SPA
+                // keys its own state on it and never sees a qualified name anywhere else. The source key is
+                // already the qualified one (the actor's own id — see GeneratorActor/ConnectorActor), so the
+                // group is right as-is and only the payload needs stripping.
+                await hub.Clients.Group($"source:{source}")
+                    .SendAsync("sourceEvent", EnvKeys.Split(source).Key, evt);
+            }
+            catch (Exception)
+            {
+                // A hub send failing for one event must not end the relay loop for every source.
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _sourceRelayPending);
+            }
         }
     }
 

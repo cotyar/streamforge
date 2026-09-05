@@ -203,7 +203,16 @@ server. Late-consumer replay (`IConnectorActor.BeginAttachAsync`/`EndAttachAsync
 pass per environment: pipelines → tables topo-sorted → sources), the paced source relay (ported from
 Orleans' 50ms-slot pacer, replacing a drop rule), table-over-pipeline (`PipelineDefinition.OutputFields`
 offered as a table relation, the three name-collision refusals), and an honest `crdt` Failed status
-(no actor activated) all port from Orleans to this flavor. A new isolated Dapr test instance finally
+(no actor activated) all port from Orleans to this flavor. **Two Dapr-only facts found by the live
+tests, both about the data path racing the pipeline watermark**: the SignalR bridge must never sit ON
+the data path (the first pacing port awaited its 50 ms slot inside the `sf-sources` endpoint, whose
+sinks run sequentially with the bridge first — a 50-row batch reached the pipeline 2.5 s late and
+was dropped whole; `DaprStreamBridge` now enqueues and paces on its own task), and the Engine's 1 s
+lateness allowance is sized for Orleans' in-process hop, not Dapr's sidecar hops under CPU pressure —
+`PipelineActor`'s wall-clock watermark tick runs `Pipelines:TransportLagAllowanceMs` (default 4000)
+behind, so windows close 4 s later on Dapr and the loss is visible either way as
+`PipelineMetrics.LateEvents` (`lateEvents` on `GET /api/pipelines/{id}/metrics`, both flavors — a
+growing count with `totalRowsOut` flat is the signature). A new isolated Dapr test instance finally
 makes live verification possible — see the port table above and `dapr/PARITY.md` §3 for why this had
 never been done before plan 025 (a 164-commit boot-breaking regression, then no isolated-instance mode).
 Full decision list and what remains unverified (database connectors/CDC, FIX/fix-duplex, NATS on Dapr,

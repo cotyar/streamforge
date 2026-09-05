@@ -24,16 +24,16 @@ namespace StreamsForge.Dapr.Live.Tests;
 /// so a table stood up after its pipeline has already emitted starts empty and stays empty. The table is
 /// therefore created and STARTED while its pipeline is still <c>Stopped</c> (which compiles fine — a
 /// pipeline is a relation by virtue of its <c>outputFields</c>, not by being Running).</item>
-/// <item><b>The rows must reach the pipeline through the ATTACH/replay path, not the live one.</b> This
-/// is not a design constraint; it is a workaround for the Dapr-flavor defect
-/// <see cref="A_single_large_live_batch_into_a_pipeline_is_silently_dropped_KNOWN_BUG"/> documents and
-/// measures — a live source batch bigger than roughly ten rows takes longer than the Engine's
-/// 1000 ms allowed lateness to cross Dapr's pub/sub + actor hop and is discarded wholesale by
-/// <c>PipelineExecutor.OnEventCore</c>. So the source is enabled FIRST and allowed to emit all its rows
-/// with nothing listening; starting the pipeline last makes it take the plan-025 D3 attach path, whose
-/// snapshot is fed into a brand-new executor whose watermark has not advanced yet. Read that fact's doc
-/// comment before "simplifying" this ordering — the obvious version (start everything, then enable the
-/// source) is what the first draft of this class did, and it produced a table stuck at 0 of 100.</item>
+/// <item><b>The rows reach the pipeline through the ATTACH/replay path, not the live one — kept as
+/// the second shape this class exercises, not as a workaround any more.</b> When this class was
+/// written, a live batch above ~10 rows was dropped whole by the Dapr flavor (see
+/// <see cref="A_single_large_live_batch_into_a_pipeline_lands_in_full"/>'s doc comment for the two
+/// causes plan 025 then found and fixed: the SignalR relay's pacing delay sitting on the data path, and
+/// a 1 s lateness allowance sized for Orleans' in-process hop rather than Dapr's sidecar hops). The
+/// source is still enabled FIRST and allowed to emit with nothing listening, and the pipeline started
+/// last, because that is the plan-025 D3 attach path — a pipeline created after its source already
+/// polled must get every row — and this is the one live test that proves it for a pipeline feeding a
+/// table.</item>
 /// </list>
 ///
 /// <para><b>The refusals are asserted by STATUS CODE AND MESSAGE, and the two status codes differ.</b> A
@@ -223,33 +223,37 @@ public sealed class TableOverPipelineTests(TableOverPipelineFixture fixture) : I
     /// <item>batch 50 → <b>0</b> rows out, age 2668 ms</item>
     /// <item>batch 100 → <b>0</b> rows out, age 2389 ms</item>
     /// </list>
-    /// <para>Delivery latency scales with batch size at roughly 25 ms per row, so the cliff sits exactly
-    /// where the 1000 ms allowance runs out.</para>
+    /// <para>Delivery latency scaled with batch size at roughly 25–50 ms per row, so the cliff sat exactly
+    /// where the 1000 ms allowance ran out.</para>
     ///
-    /// <para><b>It is a PARITY gap, not a shared-Engine design limit.</b> The identical scenario was run
+    /// <para><b>It was a PARITY gap, not a shared-Engine design limit.</b> The identical scenario was run
     /// against a real Orleans host (same file, same SQL, same ordering, spawned on 4999/5099 from
     /// <c>orleans/src/StreamsForge.Host/bin/Debug/net10.0</c>): <c>totalEventsIn 100, totalRowsOut
     /// 100</c>. Orleans' in-process memory-stream hop is ~1 ms, so it never approaches the allowance.
-    /// Only the Dapr transport does.</para>
+    /// Only the Dapr transport did.</para>
+    ///
+    /// <para><b>Diagnosed and fixed by the orchestrator in the same plan, two causes:</b> (1) the
+    /// per-row cost was the SignalR relay's new pacing delay (plan 025 D5, 50 ms per event) awaited INSIDE
+    /// the <c>sf-sources</c> endpoint, which dispatches its sinks sequentially with the bridge first — so
+    /// every row waited 50 ms × N before the pipeline/table routers even saw the envelope;
+    /// <c>DaprStreamBridge</c> now enqueues and paces on its own task (the independent-subscriber shape
+    /// Orleans has). (2) Even without that, Dapr's pub/sub + sidecar actor hops exceed one second under
+    /// CPU pressure (the seeded generator pipelines were discarding 15–25 % of their input as late while
+    /// whole-solution builds ran), so <c>PipelineActor</c>'s wall-clock watermark tick now runs
+    /// <c>Pipelines:TransportLagAllowanceMs</c> (default 4000) behind — a window closes 4 s later than on
+    /// Orleans, an event up to 5 s old is still admitted. And the loss is visible now:
+    /// <c>PipelineMetrics.LateEvents</c> (both flavors). This fact went from <c>[Fact(Skip)]</c> to green
+    /// on that change; a regression in either cause makes it red again.</para>
     ///
     /// <para><b>Scope.</b> PIPELINES only. Tables are unaffected — <c>TableActor</c>'s executor applies
     /// no lateness rule, which is why <c>SourceExactCountTests</c> pushes 500- and 700-row batches
-    /// straight into a table and passes. And the plan-025 D3 ATTACH path is unaffected, because the
-    /// snapshot is fed into a freshly constructed executor whose watermark has not advanced yet — which
-    /// is why <see cref="LateConsumerTests"/>' 300-row pipeline fact passes while this one cannot.</para>
-    ///
-    /// <para><b>Not diagnosed here:</b> whether the right fix is a larger/configurable allowance, a
-    /// watermark that is driven by event time rather than wall clock on this flavor, chunking the
-    /// connector's publish into small batches, or reporting <c>LateEvents</c> so the loss is at least
-    /// visible. That is a design decision, not a test's to make.</para>
+    /// straight into a table and passes. And the plan-025 D3 ATTACH path was unaffected even before the
+    /// fix, because the snapshot is fed into a freshly constructed executor whose watermark has not
+    /// advanced yet — which is why <see cref="LateConsumerTests"/>' 300-row pipeline fact passed while
+    /// this one could not.</para>
     /// </summary>
-    [Fact(Skip = "Known Dapr-flavor defect found by plan 025 wave 2 and not fixed by this agent (tests-only "
-               + "ownership): a live source batch above ~10 rows takes longer than the Engine's 1000 ms "
-               + "AllowedLatenessMs to cross pub/sub + the actor hop and is dropped whole by "
-               + "PipelineExecutor.OnEventCore, with no log line and no metric. Orleans passes the identical "
-               + "scenario 100/100. See this method's doc comment for the measurements and the mechanism; "
-               + "remove this Skip to verify a fix.")]
-    public async Task A_single_large_live_batch_into_a_pipeline_is_silently_dropped_KNOWN_BUG()
+    [Fact]
+    public async Task A_single_large_live_batch_into_a_pipeline_lands_in_full()
     {
         Assert.True(_skipReason is null, $"skipped: {_skipReason}");
         var host = _host!;

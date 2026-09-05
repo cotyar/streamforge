@@ -187,6 +187,7 @@ public sealed class PipelineGrain(ILogger<PipelineGrain> logger) : Grain, IPipel
         TotalRowsOut = _totalRowsOut,
         WindowsClosed = 0,
         LastEventTsMs = _lastEventTsMs,
+        LateEvents = _executor?.LateEvents ?? 0,
     });
 
     private async Task OnSourceEventAsync(string sourceName, EventRecord evt)

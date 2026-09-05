@@ -1,7 +1,8 @@
 # 025 — Dapr parity: close every owed item in `dapr/PARITY.md`, and make "verified live on Dapr" true
 
-Status: **IN PROGRESS** (2026-09-05). Outcomes are appended per wave at the bottom; until the status
-line says DONE, read the outcomes section, not this line, for what actually landed.
+Status: **DONE** (2026-09-05, two waves, 5 + 2 agents plus orchestrator fixes). Everything in
+`dapr/PARITY.md` § 2 is closed in code and the Live suite verifies it on a real sidecar; what is still
+NOT verified live is listed by name in that file's § 3.
 
 ## Why
 
@@ -105,3 +106,84 @@ Found on the way, not fixed here:
 - Three of five wave-1 worktrees branched from `2df93dc` instead of `a7c5092` (see memory note);
   agents A and B noticed and fast-forwarded themselves, G rebuilt the missing seam by concrete-type
   calls (reconciled at merge), D was fast-forwarded by the orchestrator before it started.
+
+### Wave 2 (agents L and W, merged; orchestrator fixes)
+
+- **Live tests (agent L, `dapr/tests/StreamsForge.Dapr.Live.Tests`)**: 24 facts now — wave 1's seven
+  plus `LateConsumerTests` (300 → exactly 300, +200 → exactly 500; a pipeline created late gets ≥ 300
+  because `PipelineActor` re-delivers its replay on every (re)start and its `_totalRowsOut` counter is
+  not reset — at-least-once by construction, exactness recovered downstream by a `LATEST BY` table),
+  `TableOverPipelineTests` (100 rows through pipeline → table, the three refusals with codes AND bodies,
+  pipeline deleted under a running table), `BootOrderRestartTests` (url source + dedup key survives a
+  restart; the boot-pass log line is present with a non-zero source count and no supervisor timed out
+  waiting), `TlsHostTests` (five facts, `--app-protocol https`, `grpcurl -cacert`), `GrpcServingTests`,
+  `FederationTests` — **both directions, 150/150 exact**: Orleans file source → Dapr `grpc` source →
+  Dapr table, and Dapr file source → Orleans `grpc` source over `:5899` → Orleans table, a direction
+  that did not exist before this plan. Agent L's own gate: 23 passed / 1 skipped, twice in a row
+  (5 m 44 s / 5 m 26 s). One structural fix: xunit builds a test class per fact, so wave 1's
+  `IAsyncLifetime`-on-the-class shape boots one Dapr instance per fact; L's classes use an
+  `IClassFixture` (`LiveHostFixture`), and `DaprHostProcess.StopAsync` now reaps an orphaned app when the
+  `dapr run` CLI exits without it.
+- **The one skip was a real Dapr-only data-loss bug, found by L and fixed by the orchestrator.** A live
+  source batch above ~10 rows into a Running pipeline produced `totalEventsIn N, totalRowsOut 0` with
+  nothing logged (Orleans: 100/100 on the identical scenario). Reproduced on `:5399` with timing: 50
+  rows with one `_ts`, visible to the table 2.9 s later, pipeline 50 in / 0 out. Two causes:
+  1. The paced SignalR relay (D5) awaited its 50 ms slot INSIDE the `sf-sources` endpoint, whose sinks
+     run sequentially with the bridge first — so every row waited 50 ms × N before the pipeline/table
+     routers saw the envelope. On Orleans the bridge is an independent stream subscriber; the Dapr port
+     had put a console nicety on the data path. `DaprStreamBridge` now enqueues into a bounded channel
+     and paces on its own task (`IdleAsync()` for tests).
+  2. Even off the bridge, Dapr's pub/sub + two sidecar hops exceed the Engine's 1 s lateness allowance
+     under CPU pressure: with whole-solution builds running alongside, the SEEDED generator pipelines
+     were discarding 15–25 % of their input as late, and a 100-row batch arrived 24 s late once.
+     `PipelineActor`'s wall-clock watermark tick now runs `Pipelines:TransportLagAllowanceMs` (default
+     4000) behind; `0` restores Orleans-identical timing. Verified: the same 100-row batch at load 173,
+     delivered 2.3 s after its stamp → 100 in / 100 out / 0 late.
+  And the loss is visible now on both flavors: `PipelineMetrics.LateEvents` (`[Id(8)]`, additive;
+  `lateEvents` on `GET /api/pipelines/{id}/metrics`). L's `[Fact(Skip)]` became
+  `A_single_large_live_batch_into_a_pipeline_lands_in_full`.
+- **Found by the orchestrator's own gate, not a product bug**: the first Live run after the fix lost its
+  five TLS facts to the orchestrator's `pkill -f <dll path>` aimed at the `:5399` dev instance — the
+  pattern also matched the test fixture's app. Kill by port, not by binary path, when two instances run
+  the same DLL.
+- **Docs (agent W)**: `dapr/PARITY.md` rewritten — § 2 is closed debt with pointers, § 3 an honest
+  by-test-name table of what is verified live and what still is not (database connectors/CDC on Dapr
+  are Docker-gated, FIX/fix-duplex, NATS incl. its TLS group, peer-name discovery FROM a Dapr instance,
+  SignalR pacing live, D2 table-over-table live); `dapr/ARCHITECTURE.md` § "Dapr parity (plan 025)";
+  `AGENTS.md` (ports, TLS both flavors, hard rule 6 no longer says validate is optimistic on Dapr);
+  `orleans/docs/index.html` + `comparison.html`; the `orleans/src/StreamsForge.Host/Grpc/**` path
+  references; the `sf-run`/`sf-verify`/`sf-client-gen` skills. `landing/public/docs/*` is a published
+  snapshot from the rebrand commit and was deliberately not re-synced.
+- **Gates on merged master** (this machine at load 80–300 throughout, agents building alongside):
+  Dapr solution 1636 → after wave 2: unit 502 (`Dapr.Tests`) + 560 + 373/52 skipped + 122 + 52 + 20,
+  all green. Orleans whole solution: `Engine` 994, `AppCore` 560, `Chain` 11/11, `Host.Tests` 1578
+  passed / 20 failed in 31 m 56 s — 6 are the known `CodecNotFoundException` set (plans/022), the other
+  14 were re-run in isolation: 15/16 passed, the one failure being `RepeatedKeylessRowsReads_
+  DoNotWakeIdleShards`, i.e. one of the known six. A second filtered Orleans run after the `LateEvents`
+  change lost `TableOverPipelineClusterTests.A_table_reads_a_pipeline_by_name…` and
+  `TlsChainTests.Every_row_crosses_a_TLS_gRPC_hop…` once each; both passed in isolation (6/6, 2/2).
+  TypeScript client: 56/60 whole (2 `LiveSmoke` facts need the demo container on `:6199`; the two
+  `signalr:ws|sse no delta lost` facts are 10 s deadlines that passed 4/4 alone at load 140).
+- **Final Live run on the fixed build** (`dotnet test dapr/StreamsForge.Dapr.sln --filter Live`,
+  orchestrator, load ~150): **24 passed / 0 failed / 0 skipped in 4 m 51 s.**
+
+## Found and not fixed
+
+- `PipelineActor` re-delivers its attach replay on every (re)start and does not reset `_totalRowsOut`,
+  so a pipeline's out-counter is at-least-once across a supervisor-driven restart; a downstream
+  `LATEST BY` table stays exact. Cosmetic on the counter, real on a non-keyed consumer of
+  `GET /api/pipelines/{id}/results` — the Orleans grain has the same shape.
+- Federation Dapr → Orleans lost one row once (149/150) with a 1 s cushion after the subscriber's
+  `lastStatus: "ok"`, none with 3 s: the producer's first publish can beat the subscriber's registration
+  into `EntityStreamFanout`. The test waits 3 s; the product-side fix would be a subscribe-then-ack
+  handshake in the gRPC `SubscribeEntity` path, same on both flavors.
+- The replay ring is per-activation and Dapr deactivates idle actors on its own schedule (wave 1 note).
+- The seeded generator pipelines on Dapr still discard input as late whenever the sidecar hop exceeds
+  5 s (the new allowance) — measured once at load ~150 with builds running; `lateEvents` is the number
+  to watch. A larger default is a deployment decision, not a code one.
+- Still unverified live on Dapr (by test name, `dapr/PARITY.md` § 3): database connectors and CDC
+  (Docker-gated on both flavors), FIX / `fix-duplex`, NATS including its `tls` group, peer-name discovery
+  initiated FROM a Dapr instance, SignalR pacing against a real browser, D2 table-over-table warm attach.
+- `landing/public/docs/*` is a snapshot from the rebrand commit and still describes gRPC on Dapr as
+  "phase 2"; it is not synced from `orleans/docs/` by anything.
+

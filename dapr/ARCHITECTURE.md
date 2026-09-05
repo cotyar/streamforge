@@ -860,6 +860,32 @@ below) — one topic, four sinks, the same pattern `sf-sources`/`sf-table-delta`
 
 Evidence, and what's still open: `dapr/PARITY.md` D1.
 
+### The pipeline watermark versus the sidecar hop (found by the wave-2 live tests)
+
+Two facts about this flavor that Orleans never had to learn, both surfacing as "a live batch above ~10
+rows into a Running pipeline produced `totalEventsIn N, totalRowsOut 0`" with nothing logged:
+
+- **The SignalR bridge must never sit ON the data path.** The first port of the paced relay (D5) awaited
+  its 50 ms slot inside `DaprStreamBridge.OnSourceEventsAsync`, reasoning that holding the sidecar's one
+  HTTP delivery of the `sf-sources` message was the same back-pressure Orleans accepts inside its stream
+  callback. It is not: the `sf-sources` endpoint dispatches its sinks SEQUENTIALLY and the bridge is
+  registered first, so every row waited 50 ms × N before `PipelineEventRouter`/`TableEventRouter` even
+  saw the envelope — a 50-row file batch reached the pipeline ~2.5 s after its `_ts` and
+  `PipelineExecutor.OnEventCore` discarded it as late. The bridge now enqueues into a bounded channel
+  (`SourceRelayQueueCapacity` 10,000, newest dropped past that, counted in `SourceRelayDropped`) and paces
+  on its own task — the independent-subscriber shape Orleans has. Tests `await bridge.IdleAsync()`.
+- **The Engine's 1 s lateness allowance is sized for an in-process hop.** Even with the bridge off the
+  path, a row here crosses Redis pub/sub, the sidecar's HTTP delivery and one more sidecar hop for the
+  actor invocation; under CPU pressure (whole-solution builds running alongside) the seeded generator
+  pipelines were discarding 15–25 % of their input as late. `PipelineActor.OnTimerTickAsync` therefore
+  advances the wall-clock watermark `Pipelines:TransportLagAllowanceMs` (default 4000) behind `now` —
+  the Engine subtracts its own 1000 ms after that — so a window closes 4 s later than on Orleans and an
+  event up to 5 s old is still admitted; event-time advancement (a newer event's own `_ts − 1 s`) is
+  untouched, so out-of-order batches keep Orleans' semantics. `0` restores Orleans-identical timing.
+  Either way the loss is now visible: `PipelineMetrics.LateEvents` (`lateEvents` on
+  `GET /api/pipelines/{id}/metrics`, populated on BOTH flavors) — a growing count with `totalRowsOut`
+  flat is the signature. `TableActor` applies no lateness rule, so tables were never affected.
+
 ### Boot order (D4) and the attach protocol (D3)
 
 Boot: `Services/BootResume.cs` — `BootResumePlan.Build` (pure; `BootResumePlanTests.cs`) decides WHAT

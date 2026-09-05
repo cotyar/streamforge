@@ -79,6 +79,8 @@ public class StreamingDaprStreamBridgeTests
 
         await bridge.OnSourceEventsAsync(envelope);
 
+        await bridge.IdleAsync();
+
         var proxy = Assert.Contains("source:trades", hub.ClientsImpl.GroupProxies);
         var sent = Assert.Single(proxy.Sent);
         Assert.Equal("sourceEvent", sent.Method);
@@ -114,6 +116,8 @@ public class StreamingDaprStreamBridgeTests
 
         await bridge.OnSourceEventsAsync(envelope);
 
+        await bridge.IdleAsync();
+
         var proxy = hub.ClientsImpl.GroupProxies["source:trades"];
         Assert.Equal(3, proxy.Sent.Count);
         Assert.Same(events[0], proxy.Sent[0].Args[1]);
@@ -126,7 +130,9 @@ public class StreamingDaprStreamBridgeTests
     {
         var (bridge, hub) = NewBridge();
         await bridge.OnSourceEventsAsync(new SourceEventsEnvelope { Source = "trades", Events = [new() { ["i"] = 1L }] });
+        await bridge.IdleAsync();
         await bridge.OnSourceEventsAsync(new SourceEventsEnvelope { Source = "quotes", Events = [new() { ["i"] = 1L }] });
+        await bridge.IdleAsync();
 
         Assert.Single(hub.ClientsImpl.GroupProxies["source:trades"].Sent);
         Assert.Single(hub.ClientsImpl.GroupProxies["source:quotes"].Sent);
@@ -272,11 +278,13 @@ public class StreamingDaprStreamBridgeTests
         // that state, the NEXT event for the same name relays with no such delay.
         var (bridge, hub) = NewBridge();
         await bridge.OnSourceEventsAsync(new SourceEventsEnvelope { Source = "trades", Events = [new() { ["i"] = 1L }] });
+        await bridge.IdleAsync();
 
         await bridge.OnLifecycleEventAsync(new LifecycleEvent { PipelineId = "trades", Kind = "source-deleted", Status = PipelineStatus.Stopped });
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         await bridge.OnSourceEventsAsync(new SourceEventsEnvelope { Source = "trades", Events = [new() { ["i"] = 2L }] });
+        await bridge.IdleAsync();
         stopwatch.Stop();
 
         // Comfortably under the 50ms slot a paced (non-forgotten) call would have to wait out — this is

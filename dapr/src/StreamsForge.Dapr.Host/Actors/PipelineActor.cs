@@ -58,9 +58,37 @@ namespace StreamsForge.Dapr.Host.Actors;
 /// pipeline's subscription set with the identical set) and harmless.</para>
 /// </summary>
 public sealed class PipelineActor(
-    ActorHost host, DaprClient daprClient, PipelineEventRouter pipelineRouter, ILogger<PipelineActor> logger)
+    ActorHost host, DaprClient daprClient, PipelineEventRouter pipelineRouter, IConfiguration configuration,
+    ILogger<PipelineActor> logger)
     : Actor(host), IPipelineActor
 {
+    /// <summary>Configuration key for <see cref="TransportLagAllowanceMs"/>.</summary>
+    public const string TransportLagAllowanceKey = "Pipelines:TransportLagAllowanceMs";
+
+    /// <summary>Default for <see cref="TransportLagAllowanceMs"/>: 4 s on top of the Engine's own 1 s.</summary>
+    public const int DefaultTransportLagAllowanceMs = 4000;
+
+    /// <summary>Plan 025 — how far behind wall-clock the watermark tick may run on THIS flavor.
+    ///
+    /// <para>The Engine discards an event whose <c>_ts</c> is already behind the watermark, and
+    /// <see cref="OnTimerTickAsync"/> advances that watermark to <c>now − 1000 ms</c> every 500 ms —
+    /// identical to <c>PipelineGrain</c>. On Orleans an event reaches the grain a few ms after its
+    /// <c>_ts</c> was stamped, so 1 s of allowed lateness is generous. On Dapr the same row crosses
+    /// Redis pub/sub, the sidecar's HTTP delivery and one more sidecar hop for the actor invocation,
+    /// and under CPU pressure that path takes more than a second: measured live during plan 025
+    /// (whole-solution builds running alongside) the seeded generator pipelines were discarding 15–25 %
+    /// of their input as late, and a 50–100-row file batch arrived whole seconds after its stamp and was
+    /// dropped entire — <c>totalEventsIn 100, totalRowsOut 0</c> — with nothing saying so until
+    /// <c>PipelineMetrics.LateEvents</c> existed. The cause is transport latency, not the Engine, so the
+    /// fix is a transport-shaped allowance: the tick advances the watermark to <c>now − allowance</c>
+    /// (the Engine then subtracts its own 1000 ms), i.e. a window closes <c>allowance</c> later than it
+    /// would on Orleans and events up to <c>allowance + 1 s</c> old are still admitted. Event-time
+    /// advancement (a newer event's own <c>_ts − 1 s</c>) is untouched, so out-of-order batches keep
+    /// Orleans' semantics. Configurable because the right value is a property of the deployment's
+    /// sidecar latency; 0 restores the Orleans-identical behaviour.</para></summary>
+    private readonly long _transportLagAllowanceMs =
+        Math.Max(0, configuration.GetValue(TransportLagAllowanceKey, DefaultTransportLagAllowanceMs));
+
     private const string StateName = "pipeline";
     private const string TimerName = "pipeline-watermark";
     private const int RecentResultsCapacity = 100;
@@ -347,6 +375,7 @@ public sealed class PipelineActor(
         TotalRowsOut = _totalRowsOut,
         WindowsClosed = 0,
         LastEventTsMs = _lastEventTsMs,
+        LateEvents = _executor?.LateEvents ?? 0,
     });
 
     private async Task OnTimerTickAsync()
@@ -356,7 +385,8 @@ public sealed class PipelineActor(
             return;
         }
 
-        var rows = _executor.AdvanceWatermark(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        // See _transportLagAllowanceMs: wall-clock minus the transport allowance, never bare wall-clock.
+        var rows = _executor.AdvanceWatermark(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _transportLagAllowanceMs);
         if (rows.Count > 0)
         {
             await PublishRowsAsync(rows);
