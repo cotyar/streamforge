@@ -1,10 +1,7 @@
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
 using Microsoft.AspNetCore.Authorization;
-using Orleans;
 using StreamsForge.Abstractions;
-using StreamsForge.AppCore.Environments;
-using StreamsForge.Host.Facades;
 using StreamsForge.Api.Auth;
 using StreamsForge.Engine;
 using V1 = StreamsForge.Host.Grpc.V1;
@@ -25,10 +22,15 @@ namespace StreamsForge.Host.Grpc;
 /// <see cref="GrpcAccess"/> uses the same code for a <see cref="AccessDecision.RequiresApproval"/>
 /// refusal. They are told apart by the status detail, which is the reason string in both cases and says
 /// which one happened. Inventing a private status code for one of them would be worse.</para></summary>
-public sealed class TableGrpcService(IClusterClient client, AccessGuard guard) : V1.TableService.TableServiceBase
+public sealed class TableGrpcService(ICatalogFacade catalog, ITableReadFacade rows, AccessGuard guard) : V1.TableService.TableServiceBase
 {
-    // Plan 021 D4 — a facade/gRPC service answering one request reads the ambient.
-    private IRegistryGrain Registry => client.RegistryFor(EnvironmentAmbient.Current);
+    // Plan 025 G1 — see SourceGrpcService for why the injected ICatalogFacade is the same environment-
+    // scoped catalog the removed `client.RegistryFor(EnvironmentAmbient.Current)` property produced.
+    // Rows/Search additionally take ITableReadFacade, the runtime-neutral keyed read surface the shared
+    // REST TablesEndpoints already uses for exactly these three grain calls — it qualifies the table
+    // name with EnvironmentAmbient.Current itself, which is the same environment the definition below
+    // was resolved from (the catalog IS the ambient environment's registry), so no key changes hands.
+    private ICatalogFacade Registry => catalog;
 
     [Authorize(Policy = "Viewer")]
     public override async Task<V1.ListTablesResponse> List(Empty request, ServerCallContext context)
@@ -179,14 +181,13 @@ public sealed class TableGrpcService(IClusterClient client, AccessGuard guard) :
 
         await GrpcAccess.EnsureAsync(guard, context, Actions.TableRead, def.Name, def.Tags);
 
-        var grain = client.GetGrain<ITableGrain>(EnvKeys.Qualify(def.Environment, def.Name));
         var limit = request.Limit > 0 ? request.Limit : 100;
-        var rows = await grain.GetRowsAsync(limit, request.Offset);
-        var total = await grain.GetRowCountAsync();
-        var seq = await grain.GetSeqAsync();
+        var page = await rows.GetRowsAsync(def.Name, limit, request.Offset);
+        var total = await rows.GetRowCountAsync(def.Name);
+        var seq = await rows.GetSeqAsync(def.Name);
 
         var response = new V1.TableRowsResponse { TotalRows = total, Seq = seq };
-        response.Rows.AddRange(rows.Select(ProtoMappers.ToProto));
+        response.Rows.AddRange(page.Select(ProtoMappers.ToProto));
         return response;
     }
 
@@ -208,17 +209,17 @@ public sealed class TableGrpcService(IClusterClient client, AccessGuard guard) :
         }
 
         var limit = request.Limit > 0 ? request.Limit : 100;
-        List<TableRowDto> rows = string.IsNullOrWhiteSpace(request.Query)
+        List<TableRowDto> hits = string.IsNullOrWhiteSpace(request.Query)
             ? []
-            : await client.GetGrain<ITableGrain>(EnvKeys.Qualify(def.Environment, def.Name)).SearchAsync(request.Query, limit);
+            : await rows.SearchAsync(def.Name, request.Query, limit);
 
         var response = new V1.SearchTableResponse
         {
             Mode = ProtoMappers.ToProto(def.SearchMode),
             Enabled = def.SearchEnabled,
-            Total = rows.Count,
+            Total = hits.Count,
         };
-        response.Rows.AddRange(rows.Select(ProtoMappers.ToProto));
+        response.Rows.AddRange(hits.Select(ProtoMappers.ToProto));
         return response;
     }
 

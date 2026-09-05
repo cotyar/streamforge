@@ -45,6 +45,12 @@ spec:
         - name: app
           image: ${APP_IMAGE}
           ports:
+            # Cloud Run routes external traffic to exactly ONE container port, so only 8080 is declared
+            # here. The host also binds 8081 for gRPC (plan 025 G2, see deploy/dapr/entrypoint.sh) and
+            # that listener is simply unreachable from outside a Cloud Run instance — the same situation
+            # the Orleans service.yaml is in. Reaching gRPC on Cloud Run means the single-port path
+            # instead: TLS + ALPN on the one routed port (`--urls https://…` plus a certificate), or
+            # Cloud Run's own HTTP/2 end-to-end mode. Neither is wired here.
             - name: http1
               containerPort: 8080
           env:

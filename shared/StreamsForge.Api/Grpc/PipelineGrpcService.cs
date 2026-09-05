@@ -1,10 +1,7 @@
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
 using Microsoft.AspNetCore.Authorization;
-using Orleans;
 using StreamsForge.Abstractions;
-using StreamsForge.AppCore.Environments;
-using StreamsForge.Host.Facades;
 using StreamsForge.Api.Auth;
 using StreamsForge.Engine;
 using V1 = StreamsForge.Host.Grpc.V1;
@@ -18,10 +15,11 @@ namespace StreamsForge.Host.Grpc;
 /// floor; each method additionally asks <see cref="AccessGuard"/> for the same action its REST twin asks
 /// for, at the pipeline it operates on and with that pipeline's <c>Tags</c>. See
 /// <see cref="SourceGrpcService"/>'s class doc for why the entity is read before the check.</para></summary>
-public sealed class PipelineGrpcService(IClusterClient client, AccessGuard guard) : V1.PipelineService.PipelineServiceBase
+public sealed class PipelineGrpcService(ICatalogFacade catalog, AccessGuard guard) : V1.PipelineService.PipelineServiceBase
 {
-    // Plan 021 D4 — a facade/gRPC service answering one request reads the ambient.
-    private IRegistryGrain Registry => client.RegistryFor(EnvironmentAmbient.Current);
+    // Plan 025 G1 — see SourceGrpcService for why an injected ICatalogFacade is the same environment-
+    // scoped catalog the removed `client.RegistryFor(EnvironmentAmbient.Current)` property produced.
+    private ICatalogFacade Registry => catalog;
 
     [Authorize(Policy = "Viewer")]
     public override async Task<V1.ListPipelinesResponse> List(Empty request, ServerCallContext context)

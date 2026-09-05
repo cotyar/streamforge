@@ -8,9 +8,15 @@
 #   docker compose -f deploy/dapr/compose.yaml logs -f daprd
 #   docker compose -f deploy/dapr/compose.yaml down -v
 #
-# Host port: ONLY the app container publishes one (6399 — never 5199/5299/5399, the local dev ports;
-# see AGENTS.md). redis/placement/daprd are unreachable from the host directly, same as Cloud Run
-# sidecars — reach them only through the app's published port or `docker compose exec`.
+# Host ports: ONLY the app container publishes any (6399 REST + 6499 gRPC — never 5199/5299/5399, the
+# local dev ports; see AGENTS.md). redis/placement/daprd are unreachable from the host directly, same as
+# Cloud Run sidecars — reach them only through the app's published port or `docker compose exec`.
+#
+# The gRPC port is a SECOND container port (8081), not a second protocol on 8080, and it has to be:
+# Kestrel cannot serve HTTP/1.1 and h2c on one CLEARTEXT endpoint (see the Orleans Program.cs's long
+# note in its --urls branch). deploy/dapr/entrypoint.sh therefore launches the host on the two-listener
+# branch — `--Http:Port 8080 --Grpc:Port 8081`, both on 0.0.0.0 — rather than the single `--urls` it used
+# while this flavor served no gRPC.
 #
 # Redis here is ephemeral (no volume) — see README.md's "ephemeral Redis" note: every `up` is a cold
 # start that reseeds the demo catalog, same as deleting orleans' data/ dir. This is intentional (mirrors
@@ -24,10 +30,28 @@ services:
       dockerfile: deploy/dapr/Dockerfile.app
     ports:
       - "6399:8080"
+      - "6499:8081"
     environment:
       DAPR_HTTP_PORT: "3500"
       DAPR_GRPC_PORT: "50001"
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # --- TLS (optional, off by default) ------------------------------------------------------
+      # Two halves, and BOTH are required — see dapr/tools/run.sh's header for the failure mode when
+      # only the first is done:
+      #   1. The app: uncomment the three keys below AND mount a certificate (the volume below). This
+      #      image runs the two-listener branch (entrypoint.sh passes --Http:Port/--Grpc:Port, not
+      #      --urls), so Tls__Enabled is what switches BOTH listeners to TLS here — unlike the Orleans
+      #      compose file, where the --urls scheme is what does it.
+      #   2. The SIDECAR: daprd calls back into the app for every actor invocation and topic delivery
+      #      and speaks http:// unless told otherwise, so the daprd service's `--app-protocol` argument
+      #      below must be changed from "http" to "https" at the same time. daprd does not verify the
+      #      app's certificate on that channel, so a self-signed pair needs nothing more.
+      # `tools/tls/dev-cert.sh ./certs` mints cert.pem/key.pem for the volume below.
+      # Tls__Enabled: "true"
+      # Kestrel__Certificates__Default__Path: /certs/cert.pem
+      # Kestrel__Certificates__Default__KeyPath: /certs/key.pem
+    # volumes:
+    #   - ./certs:/certs:ro
     # HEALTHCHECK is baked into the image (Dockerfile.app) — no curl/wget in this Ubuntu-based aspnet
     # runtime image, so it uses bash's /dev/tcp (deploy/dapr/healthcheck.sh). Declared here too only to
     # document the dependency contract; the effective check comes from the image.
@@ -71,6 +95,7 @@ services:
       - "streamsforge-dapr"
       - "--app-port"
       - "8080"
+      # "https" when the app half of the TLS block above is uncommented — see that block.
       - "--app-protocol"
       - "http"
       - "--dapr-http-port"

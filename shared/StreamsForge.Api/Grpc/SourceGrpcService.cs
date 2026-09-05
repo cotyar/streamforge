@@ -1,10 +1,7 @@
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
 using Microsoft.AspNetCore.Authorization;
-using Orleans;
 using StreamsForge.Abstractions;
-using StreamsForge.AppCore.Environments;
-using StreamsForge.Host.Facades;
 using StreamsForge.Api.Auth;
 using V1 = StreamsForge.Host.Grpc.V1;
 
@@ -25,10 +22,16 @@ namespace StreamsForge.Host.Grpc;
 /// Editor floor learns whether a name exists (NotFound before PermissionDenied). That is the deliberate
 /// trade: existence of a name, to a caller who is already authenticated into the cluster, against
 /// tag-scoped entitlements working at all.</para></summary>
-public sealed class SourceGrpcService(IClusterClient client, AccessGuard guard) : V1.SourceService.SourceServiceBase
+public sealed class SourceGrpcService(ICatalogFacade catalog, AccessGuard guard) : V1.SourceService.SourceServiceBase
 {
-    // Plan 021 D4 — a facade/gRPC service answering one request reads the ambient.
-    private IRegistryGrain Registry => client.RegistryFor(EnvironmentAmbient.Current);
+    // Plan 025 G1 — was `client.RegistryFor(EnvironmentAmbient.Current)` on a host-only IClusterClient.
+    // ICatalogFacade is registered TRANSIENT on both flavors with a factory that reads
+    // EnvironmentAmbient.Current at resolution time (OrleansFacades.AddOrleansFacades /
+    // DaprFacades.AddDaprFacades), and a gRPC service class is instantiated per-call by the ASP.NET Core
+    // gRPC framework — after EnvironmentSelectionMiddleware has already set the ambient for that request.
+    // So constructor injection resolves the same environment-scoped catalog the property used to compute
+    // per access, which is exactly the reasoning OrleansFacades already records for IngestGrpcService.
+    private ICatalogFacade Registry => catalog;
 
     [Authorize(Policy = "Viewer")]
     public override async Task<V1.ListSourcesResponse> List(Empty request, ServerCallContext context)

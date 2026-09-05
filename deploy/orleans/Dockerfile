@@ -77,7 +77,7 @@ COPY orleans/docs ./docs
 # Cheap (a handful of small text files) — no separate publishing pipeline built for it. Pull with
 # `docker cp <container>:/app/protos - | tar -x`, or `docker run --rm --entrypoint cat <image>
 # /app/protos/streamsforge.proto`.
-COPY orleans/src/StreamsForge.Host/Protos ./protos
+COPY shared/StreamsForge.Api/Protos ./protos
 
 # Absolute paths so StreamsForgeApiOptions resolves them regardless of ContentRootPath — see
 # Program.cs (Web:Dist was already configurable; Docs:File is the additive key this wave added,

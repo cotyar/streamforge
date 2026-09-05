@@ -1,22 +1,18 @@
 using Grpc.Core;
 using Microsoft.AspNetCore.Authorization;
-using Orleans;
-using Orleans.Runtime;
-using Orleans.Streams;
 using StreamsForge.Abstractions;
 using StreamsForge.AppCore.Environments;
-using StreamsForge.Host.Facades;
 using StreamsForge.Api.Auth;
 using StreamsForge.AppCore;
-using StreamsForge.Engine;
 using V1 = StreamsForge.Host.Grpc.V1;
 
 namespace StreamsForge.Host.Grpc;
 
 /// <summary>gRPC server-streaming mirror of the SignalR StreamHub/StreamBridgeService relays: raw
-/// source events, pipeline results, and table deltas. Subscribes directly to the same Orleans
-/// streams StreamBridgeService relays to SignalR groups, for the lifetime of the gRPC call —
-/// client disconnect cancels ServerCallContext.CancellationToken, which unsubscribes.
+/// source events, pipeline results, and table deltas. Subscribes at the same seam the SignalR bridge
+/// relays from — <see cref="IEntityStreamFacade"/>, which is Orleans streams on one flavor and the Dapr
+/// topic fan-out on the other (plan 025 G1) — for the lifetime of the gRPC call; client disconnect
+/// cancels ServerCallContext.CancellationToken, which unsubscribes.
 ///
 /// <para>Plan 015 wave 3-B: each subscription keeps its <c>[Authorize(Policy = "Viewer")]</c> floor and
 /// additionally asks <see cref="AccessGuard"/> for the READ action on the entity being subscribed to —
@@ -33,10 +29,12 @@ namespace StreamsForge.Host.Grpc;
 /// <para><b>Revocation does not reach a live subscription.</b> The check happens at subscribe time and
 /// nothing re-checks per frame — see the identical note on <c>StreamHub</c>, which states the ceiling and
 /// the upgrade path once for both transports.</para></summary>
-public sealed class StreamGrpcService(IClusterClient client, AccessGuard guard) : V1.StreamService.StreamServiceBase
+public sealed class StreamGrpcService(ICatalogFacade catalog, IEntityStreamFacade streams, AccessGuard guard)
+    : V1.StreamService.StreamServiceBase
 {
-    // Plan 021 D4 — a facade/gRPC service answering one request reads the ambient.
-    private IRegistryGrain Registry => client.RegistryFor(EnvironmentAmbient.Current);
+    // Plan 025 G1 — see SourceGrpcService for why the injected ICatalogFacade is the same environment-
+    // scoped catalog the removed `client.RegistryFor(EnvironmentAmbient.Current)` property produced.
+    private ICatalogFacade Registry => catalog;
 
     [Authorize(Policy = "Viewer")]
     public override async Task SubscribeSource(
@@ -48,22 +46,19 @@ public sealed class StreamGrpcService(IClusterClient client, AccessGuard guard) 
             guard, context, Actions.SourceRead, request.Name,
             (await Registry.GetSourceAsync(request.Name))?.Tags);
 
-        var streamProvider = client.GetStreamProvider(StreamConstants.ProviderName);
-        var stream = streamProvider.GetStream<EventRecord>(
-            StreamId.Create(StreamConstants.SourcesNamespace, EnvKeys.Qualify(EnvironmentAmbient.Current, request.Name)));
-
         long seq = 0;
-        var handle = await stream.SubscribeAsync(async (evt, _) =>
-        {
-            seq++;
-            await responseStream.WriteAsync(new V1.SourceEvent
+        var handle = await streams.SubscribeSourceAsync(
+            EnvironmentAmbient.Current, request.Name, async (row, tsMs) =>
             {
-                SourceName = request.Name,
-                Seq = seq,
-                TimestampMs = evt.Timestamp,
-                Row = GrpcValueConverter.ToStruct(evt),
+                seq++;
+                await responseStream.WriteAsync(new V1.SourceEvent
+                {
+                    SourceName = request.Name,
+                    Seq = seq,
+                    TimestampMs = tsMs,
+                    Row = GrpcValueConverter.ToStruct(row),
+                });
             });
-        });
 
         await WaitForCancellationThenUnsubscribeAsync(handle, context.CancellationToken);
     }
@@ -94,23 +89,20 @@ public sealed class StreamGrpcService(IClusterClient client, AccessGuard guard) 
         // The output stream is keyed by pipeline ID, so a name-addressed subscription resolves to one.
         var pipelineId = subscribed?.Id ?? request.Id;
 
-        var streamProvider = client.GetStreamProvider(StreamConstants.ProviderName);
-        var stream = streamProvider.GetStream<List<ResultEnvelope>>(
-            StreamId.Create(StreamConstants.OutputNamespace, EnvKeys.Qualify(subscribed?.Environment ?? EnvironmentAmbient.Current, pipelineId)));
-
-        var handle = await stream.SubscribeAsync(async (rows, _) =>
-        {
-            foreach (var row in rows)
+        var handle = await streams.SubscribePipelineAsync(
+            subscribed?.Environment ?? EnvironmentAmbient.Current, pipelineId, async rows =>
             {
-                await responseStream.WriteAsync(new V1.ResultEnvelope
+                foreach (var row in rows)
                 {
-                    PipelineId = row.PipelineId,
-                    Seq = row.Seq,
-                    TimestampMs = row.TimestampMs,
-                    Row = GrpcValueConverter.ToStruct(row.Row),
-                });
-            }
-        });
+                    await responseStream.WriteAsync(new V1.ResultEnvelope
+                    {
+                        PipelineId = row.PipelineId,
+                        Seq = row.Seq,
+                        TimestampMs = row.TimestampMs,
+                        Row = GrpcValueConverter.ToStruct(row.Row),
+                    });
+                }
+            });
 
         await WaitForCancellationThenUnsubscribeAsync(handle, context.CancellationToken);
     }
@@ -137,32 +129,32 @@ public sealed class StreamGrpcService(IClusterClient client, AccessGuard guard) 
             throw new RpcException(new Status(StatusCode.FailedPrecondition, hit.Message));
         }
 
-        var streamProvider = client.GetStreamProvider(StreamConstants.ProviderName);
-        var stream = streamProvider.GetStream<List<TableDeltaDto>>(
-            StreamId.Create(StreamConstants.TableDeltaNamespace, EnvKeys.Qualify(table?.Environment ?? EnvironmentAmbient.Current, tableName)));
-
         long seq = 0;
-        var handle = await stream.SubscribeAsync(async (deltas, _) =>
-        {
-            seq++;
-            var batch = new V1.TableDeltaBatch { TableName = tableName, Seq = seq };
-            batch.Deltas.AddRange(deltas.Select(d => new V1.TableDelta
+        var handle = await streams.SubscribeTableAsync(
+            table?.Environment ?? EnvironmentAmbient.Current, tableName, async deltas =>
             {
-                Row = GrpcValueConverter.ToStruct(d.Row),
-                Weight = d.Weight,
-            }));
-            await responseStream.WriteAsync(batch);
-        });
+                seq++;
+                var batch = new V1.TableDeltaBatch { TableName = tableName, Seq = seq };
+                batch.Deltas.AddRange(deltas.Select(d => new V1.TableDelta
+                {
+                    Row = GrpcValueConverter.ToStruct(d.Row),
+                    Weight = d.Weight,
+                }));
+                await responseStream.WriteAsync(batch);
+            });
 
         await WaitForCancellationThenUnsubscribeAsync(handle, context.CancellationToken);
     }
 
     /// <summary>Keeps the RPC alive until the client disconnects/cancels (context.CancellationToken),
-    /// then unsubscribes the Orleans stream handle — mirrors StreamBridgeService's
-    /// subscribe-once-per-name lifecycle, but scoped to a single gRPC call instead of the whole
-    /// process.</summary>
-    private static async Task WaitForCancellationThenUnsubscribeAsync<T>(
-        StreamSubscriptionHandle<T> handle, CancellationToken cancellationToken)
+    /// then disposes the subscription handle — mirrors StreamBridgeService's subscribe-once-per-name
+    /// lifecycle, but scoped to a single gRPC call instead of the whole process. Plan 025 G1: the handle
+    /// is <see cref="IAsyncDisposable"/> rather than an Orleans <c>StreamSubscriptionHandle</c>, which is
+    /// the only thing that changed here — the swallow-everything-on-unsubscribe rule is unchanged, and is
+    /// what keeps a torn-down subscription from turning a normal client disconnect into a logged
+    /// error.</summary>
+    internal static async Task WaitForCancellationThenUnsubscribeAsync(
+        IAsyncDisposable handle, CancellationToken cancellationToken)
     {
         try
         {
@@ -176,7 +168,7 @@ public sealed class StreamGrpcService(IClusterClient client, AccessGuard guard) 
         {
             try
             {
-                await handle.UnsubscribeAsync();
+                await handle.DisposeAsync();
             }
             catch
             {

@@ -57,6 +57,18 @@ public static class StreamingRuntimeSetup
         services.AddSingleton<ITableDeltaSink>(sp => sp.GetRequiredService<NatsSinkPublisherService>());
         services.AddSingleton<IPipelineResultsSink>(sp => sp.GetRequiredService<NatsSinkPublisherService>());
         services.AddHostedService(sp => sp.GetRequiredService<NatsSinkPublisherService>());
+
+        // Plan 025 G2: the per-entity index the shared gRPC streaming services subscribe through
+        // (IEntityStreamFacade). Same registration shape as DaprStreamBridge above — ONE singleton, with
+        // the two sink interfaces forwarded to it so sf-sources/sf-table-delta reach it through the
+        // ordinary IEnumerable<T> fan-out. sf-pipeline-out has no sink interface (see Sinks.cs), so
+        // MapTopicEndpoints calls OnPipelineResultsAsync by concrete type, exactly as it already does
+        // for the bridge and the NATS publisher.
+        services.AddSingleton<EntityStreamFanout>();
+        services.AddSingleton<ISourceEventsSink>(sp => sp.GetRequiredService<EntityStreamFanout>());
+        services.AddSingleton<ITableDeltaSink>(sp => sp.GetRequiredService<EntityStreamFanout>());
+        services.AddSingleton<IPipelineResultsSink>(sp => sp.GetRequiredService<EntityStreamFanout>());
+        services.AddSingleton<IEntityStreamFacade>(sp => sp.GetRequiredService<EntityStreamFanout>());
     }
 
     public static void MapTopicEndpoints(WebApplication app)

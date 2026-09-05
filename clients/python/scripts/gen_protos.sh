@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROTO_DIR="$ROOT/../../orleans/src/StreamsForge.Host/Protos"
+PROTO_DIR="$ROOT/../../shared/StreamsForge.Api/Protos"
 OUT_DIR="$ROOT/src/streamsforge/_pb"
 
 if [[ ! -f "$PROTO_DIR/streamsforge.proto" ]]; then

@@ -31,6 +31,13 @@ set -uo pipefail
 
 dapr_http_port="${DAPR_HTTP_PORT:-3500}"
 port="${PORT:-8080}"
+# Plan 025 G2: this flavor serves gRPC now, and Kestrel cannot put HTTP/1.1 and h2c on ONE cleartext
+# endpoint (see the Orleans Program.cs's --urls branch note). So the app is launched on the host's
+# two-listener branch — one port per protocol, both on 0.0.0.0 — instead of the single --urls it used
+# while there was no gRPC to serve. Both are container ports published by compose.yaml / declared in
+# service.yaml; Cloud Run routes only the first, which is fine (the gRPC listener is simply unreachable
+# there, exactly as it was before).
+grpc_port="${GRPC_PORT:-8081}"
 timeout_s="${DAPR_WAIT_TIMEOUT_S:-100}"
 
 check_dapr_ready() {
@@ -61,7 +68,7 @@ launch_app() {
   # linux-x64 at both restore and publish time) — /app has StreamsForge.Dapr.Host, a native
   # executable, not a StreamsForge.Dapr.Host.dll for `dotnet` to load. WORKDIR is /app and this
   # script never cd's, so the relative path resolves at both call sites below.
-  ./StreamsForge.Dapr.Host --urls "http://0.0.0.0:${port}" &
+  ./StreamsForge.Dapr.Host --Http:Port "${port}" --Grpc:Port "${grpc_port}" &
   app_pid=$!
 }
 
@@ -95,7 +102,7 @@ if [[ "$daprd_ready" == true ]]; then
   kill -TERM "$app_pid" 2>/dev/null
   wait "$app_pid" 2>/dev/null
   trap - TERM INT
-  exec ./StreamsForge.Dapr.Host --urls "http://0.0.0.0:${port}"
+  exec ./StreamsForge.Dapr.Host --Http:Port "${port}" --Grpc:Port "${grpc_port}"
 fi
 
 wait "$app_pid"

@@ -4,7 +4,7 @@
 that keeps one table's Z-set current, ad-hoc SQL, and ingest. Targets `net10.0`.
 
 It has **no ProjectReference to the engine**. The only coupling is build-time codegen: `Grpc.Tools`
-compiles the engine's own `orleans/src/StreamsForge.Host/Protos/streamsforge.proto` into this
+compiles the engine's own `shared/StreamsForge.Api/Protos/streamsforge.proto` into this
 assembly, so the wire contract cannot drift from the server's, while the client stays shippable on
 its own. See `clients/python/README.md` and `clients/typescript/README.md` for the shared design all
 StreamsForge clients implement; this file covers what is .NET-specific.

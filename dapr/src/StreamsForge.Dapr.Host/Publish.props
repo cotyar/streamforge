@@ -7,11 +7,14 @@
     global property `dotnet publish` sets before evaluation starts — a plain `dotnet build`/`dotnet run`
     is unaffected.
 
-    RID: left for the command line; tools/publish.sh defaults to linux-x64. The fallback below only
-    fires for a bare `dotnet publish` with no -r.
+    RID: left for the command line; tools/publish.sh defaults to linux-x64 and the Dockerfiles pass -r
+    explicitly. The fallback below only fires for a bare `dotnet publish` with no -r, and it is the
+    SDK's OWN RID — plan 024 found that hardcoding linux-x64 here silently published an unrunnable host
+    on a Mac (the Orleans Publish.props was fixed then; this one was missed because nothing published
+    this host without -r yet).
   -->
   <PropertyGroup Condition="'$(_IsPublishing)' == 'true'">
-    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">linux-x64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
@@ -29,9 +32,12 @@
     <PublishAot>false</PublishAot>
 
     <!-- Same embedded-fallback shape as the Orleans host (see EmbeddedPublishContent in
-         shared/StreamsForge.Api/StreamsForgeApiExtensions.cs) — web/dist/** and docs/index.html only.
-         This host has no Protos/ directory of its own (decision D-F: no static gRPC serving here, see
-         Program.cs's apiOptions comment), so there is nothing to embed under a "protos" root. -->
+         shared/StreamsForge.Api/StreamsForgeApiExtensions.cs) — web/dist/**, docs/index.html AND, since
+         plan 025 G2 made this flavor serve gRPC, the two static .proto files GET /api/meta/protos/static
+         returns raw. They are embedded from shared/StreamsForge.Api/Protos, the one place they live now
+         (the Orleans host's Publish.props embeds the same path). The on-disk copy that
+         shared/StreamsForge.Api's <Content> item puts in $(PublishDir)Protos stays authoritative; this
+         is only consulted when the publish output was copied somewhere without it. -->
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
   </PropertyGroup>
 
@@ -52,6 +58,11 @@
          docs sync), so it embeds from the same source. Manifest root "docs". -->
     <EmbeddedResource Include="../../../orleans/docs/index.html" Condition="Exists('../../../orleans/docs/index.html')">
       <Link>docs/index.html</Link>
+    </EmbeddedResource>
+
+    <!-- Manifest root "protos" — see the property-group comment above. -->
+    <EmbeddedResource Include="../../../shared/StreamsForge.Api/Protos/*.proto">
+      <Link>protos/%(Filename)%(Extension)</Link>
     </EmbeddedResource>
   </ItemGroup>
 </Project>

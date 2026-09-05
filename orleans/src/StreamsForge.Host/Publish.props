@@ -24,7 +24,7 @@
 
     <!-- Explicitly NOT trimmed, and NOT NativeAOT (no PublishAot). Both run whole-program reachability
          analysis that this host cannot survive: dynamic protobuf descriptor generation
-         (Host/Grpc/Dynamic/*), gRPC server reflection, SignalR's runtime type discovery, and
+         (shared/StreamsForge.Api/Grpc/Dynamic/*), gRPC server reflection, SignalR's runtime type discovery, and
          StreamsForgePlugins' Activator/AssemblyLoadContext-based plugin loading all reach types purely
          through reflection that a trimmer/AOT analyzer cannot see from the static call graph — trimming
          breaks these SILENTLY (a missing member at runtime, not a build error) rather than loudly, so
@@ -68,9 +68,11 @@
     </EmbeddedResource>
 
     <!-- The two static .proto files GET /api/meta/protos/static serves raw — manifest root "protos".
-         Separate item TYPE from the <Protobuf Include="Protos\*.proto" .../> items above (which drive
-         Grpc.Tools codegen); embedding the same files as plain resources too is orthogonal. -->
-    <EmbeddedResource Include="Protos/*.proto">
+         Separate item TYPE from the <Protobuf .../> items that drive Grpc.Tools codegen (which live in
+         shared/StreamsForge.Api's csproj since plan 025 G1, along with the files themselves); embedding
+         the same files as plain resources too is orthogonal. The path is the shared project's, and the
+         Dapr host's Publish.props embeds the identical one. -->
+    <EmbeddedResource Include="../../../shared/StreamsForge.Api/Protos/*.proto">
       <Link>protos/%(Filename)%(Extension)</Link>
     </EmbeddedResource>
   </ItemGroup>

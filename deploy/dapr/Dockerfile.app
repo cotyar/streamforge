@@ -65,7 +65,10 @@ ENV Docs__File=/app/docs/index.html
 ENV DAPR_HTTP_PORT=3500
 ENV DAPR_GRPC_PORT=50001
 
-EXPOSE 8080
+# 8080 REST/SignalR/SPA, 8081 gRPC (HTTP/2 only). Two ports rather than one because a CLEARTEXT Kestrel
+# endpoint cannot carry both protocols — see entrypoint.sh, which launches the host's two-listener
+# branch, and the Orleans Program.cs note it points at.
+EXPOSE 8080 8081
 
 # No curl/wget in this image (Ubuntu-based mcr.microsoft.com/dotnet/aspnet:10.0 ships neither) — bash's
 # /dev/tcp is used instead (healthcheck.sh). start-period is generous: entrypoint.sh starts `dotnet`
